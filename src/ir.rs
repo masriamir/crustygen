@@ -114,6 +114,12 @@ pub enum IrError {
         /// The unresolvable identifier.
         id: String,
     },
+    /// The document declares a grid size that is zero or negative.
+    #[error("grid must be positive, got {grid}")]
+    InvalidGrid {
+        /// The rejected grid size.
+        grid: i32,
+    },
     /// A coordinate is not a multiple of the grid.
     #[error("room `{room}` has an off-grid coordinate ({x}, {y}); grid is {grid}")]
     OffGrid {
@@ -138,6 +144,12 @@ impl Ir {
     /// that is not a multiple of `grid`.
     pub fn from_json(s: &str) -> Result<Self, IrError> {
         let ir: Self = serde_json::from_str(s)?;
+
+        // Before anything divides by it: `x % 0` panics in Rust, and this is
+        // the untrusted-input boundary, so it must return an error instead.
+        if ir.grid <= 0 {
+            return Err(IrError::InvalidGrid { grid: ir.grid });
+        }
 
         let mut seen = HashSet::new();
         for room in &ir.rooms {
@@ -229,5 +241,25 @@ mod tests {
     fn rejects_off_grid_coordinates() {
         let off = TWO_ROOM.replace("[0,256]", "[0,250]");
         assert!(matches!(Ir::from_json(&off), Err(IrError::OffGrid { .. })));
+    }
+
+    #[test]
+    fn rejects_a_non_positive_grid_instead_of_panicking() {
+        // `x % 0` panics in Rust, so this must be caught before the room walk.
+        let zero = TWO_ROOM.replace("\"grid\": 64", "\"grid\": 0");
+        assert!(matches!(
+            Ir::from_json(&zero),
+            Err(IrError::InvalidGrid { grid: 0 })
+        ));
+        let negative = TWO_ROOM.replace("\"grid\": 64", "\"grid\": -64");
+        assert!(matches!(
+            Ir::from_json(&negative),
+            Err(IrError::InvalidGrid { grid: -64 })
+        ));
+    }
+
+    #[test]
+    fn rejects_malformed_json() {
+        assert!(matches!(Ir::from_json("{ not json"), Err(IrError::Json(_))));
     }
 }
