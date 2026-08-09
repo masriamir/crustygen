@@ -2,6 +2,7 @@
 
 pub mod portals;
 pub mod sectors;
+pub mod tags;
 
 use crate::geom::Pt;
 
@@ -143,5 +144,13 @@ pub enum CompileError {
         x: i32,
         /// Midpoint Y.
         y: i32,
+    },
+    /// A linedef carries a special but no tag.
+    #[error("linedef {index} has special {special} at tag 0, which matches every untagged sector")]
+    ActionAtTagZero {
+        /// Index of the offending linedef.
+        index: usize,
+        /// The special it carries.
+        special: u16,
     },
 }
