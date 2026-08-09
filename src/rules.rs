@@ -243,7 +243,7 @@ mod tests {
                    "floor":0, "ceiling":128, "light":{light},
                    "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
                    "things":[{{ "kind":"player1_start", "at":[128,128], "angle":90 }}] }},
-                {{ "id":"b", "footprint":[[256,0],[256,256],[512,256],[512,0]],
+                {{ "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
                    "floor":{floor_b}, "ceiling":{}, "light":{light},
                    "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }}
               ],
@@ -264,7 +264,7 @@ mod tests {
                    "floor":0, "ceiling":{ceiling_a}, "light":160,
                    "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
                    "things":[{{ "kind":"player1_start", "at":[128,128], "angle":90 }}] }},
-                {{ "id":"b", "footprint":[[256,0],[256,256],[512,256],[512,0]],
+                {{ "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
                    "floor":0, "ceiling":{ceiling_b}, "light":160,
                    "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }}
               ],
@@ -289,7 +289,7 @@ mod tests {
                    "floor":0, "ceiling":128, "light":160,
                    "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
                    "things":[{{ "kind":"player1_start", "at":[128,128], "angle":90 }}] }},
-                {{ "id":"b", "footprint":[[256,0],[256,256],[512,256],[512,0]],
+                {{ "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
                    "floor":{floor_b}, "ceiling":{ceiling_b}, "light":160,
                    "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }}
               ],
@@ -481,7 +481,7 @@ mod tests {
                 { "kind":"player1_start", "at":[128,128], "angle":90 },
                 { "kind":"blue_card", "at":[64,64], "angle":0 }
               ] },
-            { "id":"b", "footprint":[[256,0],[256,256],[512,256],[512,0]],
+            { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
               "floor":0, "ceiling":128, "light":160,
               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
           ],

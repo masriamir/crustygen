@@ -27,13 +27,12 @@ pub struct ThingOut {
 /// room, in `ir.rooms` order, so a room's index doubles as its sector index
 /// — verified directly against that module rather than assumed. Every
 /// linedef whose front or back sidedef names that sector is a real wall the
-/// player can collide with in the *emitted* geometry, which is what matters
-/// near a door: a door portal carves a `DOOR_DEPTH`-deep recess out of room
-/// `b`'s side of the shared wall (see `compile::doors`), so the true nearest
-/// wall there sits closer than the room's IR-declared footprint suggests.
-/// Gathering from `data` rather than `room.footprint` picks that recess up
-/// automatically — and would pick up any other reshaping a later pass
-/// performs, without this function needing to know what changed.
+/// player can collide with in the *emitted* geometry. Rooms are authored
+/// apart and neither room's own footprint is ever reshaped by portal or door
+/// construction, so this ordinarily agrees exactly with `room.footprint`;
+/// gathering from `data` instead keeps that guarantee automatic rather than
+/// assumed, and would still pick up any future pass that *does* reshape a
+/// room's own boundary, without this function needing to know what changed.
 ///
 /// Returns `None` when the sector has no bordering linedef at all. An
 /// unbounded room cannot be measured, and folding to `f64::INFINITY` instead
@@ -61,9 +60,10 @@ fn emitted_clearance(data: &MapData, room_idx: usize, p: Pt) -> Option<f64> {
 /// case instead, since a wall-hugging point has at most zero real clearance.
 ///
 /// Clearance and headroom are checked against the *emitted* geometry in
-/// `data`, not the declared footprint: a door portal's recess (see
-/// `compile::doors`) makes room `b`'s real playable area near a doorway
-/// smaller than its footprint, and only the emitted linedefs reflect that.
+/// `data`, not the declared footprint — see `emitted_clearance`'s doc
+/// comment for why the two ordinarily agree exactly now that rooms are
+/// authored apart, and why measuring the emitted geometry is still the
+/// principled choice rather than an incidental one.
 ///
 /// # Errors
 /// Returns [`CompileError::UnknownThing`] for an unresolvable name,
@@ -382,16 +382,18 @@ mod tests {
     }
 
     #[test]
-    fn clearance_is_measured_against_the_emitted_geometry_not_the_declared_footprint() {
-        // Mirrors `compile::doors::DOOR_DEPTH`, which is private to that
-        // module. See its doc comment there for why 16 is a compiler
-        // construction constant rather than an engine-sourced one — this
-        // test only needs its value to derive the recessed wall's position,
-        // not to re-litigate where it comes from.
-        const DOOR_DEPTH: i32 = 16;
-
+    fn clearance_near_a_door_matches_room_bs_own_declared_wall_now() {
+        // Rooms are authored apart, so a door's own sector fills the wall
+        // gap without touching either room's declared footprint — unlike
+        // the old carve-into-`b` design, where a door recess pushed the
+        // *emitted* wall out past the footprint and the two silently
+        // disagreed. This pins that they now agree exactly: a thing at
+        // exactly the player's radius from room b's own wall (x = 320, a
+        // legal 64-unit gap from room a's wall at x = 256) fits; one unit
+        // closer does not.
         let tables = Tables::load().expect("tables");
         let r = tables.player().radius;
+        let wall = 320;
 
         let ir_json = |x: i32| -> String {
             format!(
@@ -400,7 +402,7 @@ mod tests {
                     {{ "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
                        "floor":0, "ceiling":128, "light":160,
                        "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }},
-                    {{ "id":"b", "footprint":[[256,0],[256,256],[512,256],[512,0]],
+                    {{ "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
                        "floor":0, "ceiling":128, "light":160,
                        "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W",
                        "things":[{{ "kind":"player1_start", "at":[{x},128], "angle":90 }}] }}
@@ -409,21 +411,14 @@ mod tests {
             )
         };
 
-        // The recess pushes room b's real wall from x = 256 (the declared
-        // footprint edge) out to x = 256 + DOOR_DEPTH = 272 across the door
-        // span (see `compile::doors`'s worked example for this exact
-        // fixture). Exactly `r` past that recessed face fits; one unit
-        // closer does not.
-        let far_face = 256 + DOOR_DEPTH;
-
-        let ok = Ir::from_json(&ir_json(far_face + r)).expect("ir");
+        let ok = Ir::from_json(&ir_json(wall + r)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
             place_things(&ok, &tables, &data_ok).is_ok(),
-            "exactly the radius from the recessed far face fits"
+            "exactly the radius from room b's own wall fits"
         );
 
-        let bad = Ir::from_json(&ir_json(far_face + r - 1)).expect("ir");
+        let bad = Ir::from_json(&ir_json(wall + r - 1)).expect("ir");
         let data_bad = compiled_data(&bad, &tables);
         assert!(
             matches!(
@@ -433,20 +428,22 @@ mod tests {
             "one unit closer than the radius does not fit"
         );
 
-        // Prove this is the defect the deviation guards against: the stale,
-        // IR-declared footprint alone reports the rejected point as
-        // comfortably clear, because it knows nothing about the recess.
-        let stale = clearance(
+        // The emitted-geometry clearance and the declared-footprint
+        // clearance now agree exactly at the rejected point — there is no
+        // remaining divergence for a door portal to hide, unlike the old
+        // carve-into-b design this replaces (which this same test used to
+        // pin the *opposite* of).
+        let footprint_clearance = clearance(
             &bad.rooms[1].footprint,
             Pt {
-                x: far_face + r - 1,
+                x: wall + r - 1,
                 y: 128,
             },
         );
         assert!(
-            stale > f64::from(r),
-            "footprint-only clearance ({stale}) looks safe even though the point is rejected \
-             against the emitted geometry — that gap is exactly what data-based clearance closes"
+            footprint_clearance < f64::from(r),
+            "footprint-only clearance ({footprint_clearance}) must report the same violation \
+             the emitted geometry does, now that neither is stale relative to the other"
         );
     }
 

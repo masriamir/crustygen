@@ -26,19 +26,21 @@
 //!   *must* be two-sided and non-blocking, which rules out placing it flush
 //!   on the room's true perimeter: a passable line straight on the boundary
 //!   would open the room to the undefined void beyond it. So a walkover exit
-//!   carves a small dead-end alcove out of the host room's own wall — the
-//!   same recess construction [`crate::compile::doors`] uses to carve room
-//!   `b`, but with no second room on the other side: the alcove's far and
-//!   side walls are solid, closing it off, and only the near threshold
+//!   carves a small dead-end alcove out of the host room's own wall — one
+//!   real threshold plus three solid one-sided walls closing off the
+//!   remaining three sides, the same shape
+//!   `crate::compile::portals::emit_gap_sector` builds for a two-room gap
+//!   sector, just with one side (the far wall) solid instead of a second
+//!   threshold, since there is no second room here. Only the near threshold
 //!   (front bound to the host room, back to the alcove) carries the walkover
 //!   special. The player steps into the alcove, crosses the threshold, and
 //!   the level ends.
 //!
 //! Both kinds resolve their span with `resolve_exit` and carve the host wall
 //! with `portals::split_wall_for_opening` before emitting anything — the
-//! same "resolve and validate everything, then emit" discipline
-//! `cut_portals` and `doors::plan_doors` already follow, so a rejected exit
-//! leaves no partially-cut geometry behind.
+//! same "resolve and validate everything, then emit" discipline `cut_portals`
+//! and `doors::emit_doors` already follow, so a rejected exit leaves no
+//! partially-cut geometry behind.
 //!
 //! Every exit is tagged from the shared [`TagAllocator`], even though
 //! `G_ExitLevel`/`G_SecretExitLevel` read no tag at all. This mirrors
@@ -48,13 +50,10 @@
 //! stays a single, exception-free invariant and the tag manifest records
 //! every action a run took, not just the ones that mechanically need one.
 
-use crate::compile::portals::{
-    Axis, Cut, SharedSpan, emit_opening, on_diagonal_wall, split_wall_for_opening, wall_edges,
-};
-use crate::compile::sectors::vertex_index;
+use crate::compile::portals::{Cut, emit_opening, emit_side_wall, split_wall_for_opening};
 use crate::compile::tags::TagAllocator;
-use crate::compile::{CompileError, LinedefOut, MapData, SectorOut, SidedefOut};
-use crate::geom::Pt;
+use crate::compile::{CompileError, MapData, SectorOut};
+use crate::geom::{Axis, on_diagonal_wall, outward_sign, wall_edges};
 use crate::ir::{Exit, ExitTrigger, Ir};
 use crate::tables::Tables;
 
@@ -93,7 +92,8 @@ struct ExitPlan {
     /// The high end of the exit's span.
     open_hi: i32,
     /// Whether the host wall's own edge direction runs in the increasing-
-    /// along direction — [`SharedSpan::a_forward`]'s single-room analogue.
+    /// along direction — [`crate::geom::FacingSpan::a_forward`]'s
+    /// single-room analogue.
     forward: bool,
 }
 
@@ -175,31 +175,6 @@ fn exit_special(tables: &Tables, exit: &Exit) -> u16 {
         (ExitTrigger::Walkover, false) => tables.exit_walkover_special(),
         (ExitTrigger::Walkover, true) => tables.secret_exit_walkover_special(),
     }
-}
-
-/// Emits one alcove-only, one-sided wall from `p1` to `p2`, front bound to
-/// `sector`.
-fn emit_alcove_wall(data: &mut MapData, p1: Pt, p2: Pt, sector: usize, wall_tex: &str) {
-    let v1 = vertex_index(&mut data.vertices, p1);
-    let v2 = vertex_index(&mut data.vertices, p2);
-    let front = data.sidedefs.len();
-    data.sidedefs.push(SidedefOut {
-        sector,
-        upper: String::new(),
-        middle: wall_tex.to_owned(),
-        lower: String::new(),
-    });
-    data.linedefs.push(LinedefOut {
-        v1,
-        v2,
-        front,
-        back: None,
-        blocking: true,
-        special: 0,
-        tag: 0,
-        lower_unpegged: false,
-        upper_unpegged: false,
-    });
 }
 
 /// Carves every exit into its host room's wall.
@@ -286,26 +261,9 @@ fn emit_switch_exit(
     } else {
         (cut.pt(cut.open_hi), cut.pt(cut.open_lo))
     };
-    let v1 = vertex_index(&mut data.vertices, p1);
-    let v2 = vertex_index(&mut data.vertices, p2);
-    let front = data.sidedefs.len();
-    data.sidedefs.push(SidedefOut {
-        sector: plan.room_idx,
-        upper: String::new(),
-        middle: switch_tex.to_owned(),
-        lower: String::new(),
-    });
-    data.linedefs.push(LinedefOut {
-        v1,
-        v2,
-        front,
-        back: None,
-        blocking: true,
-        special,
-        tag,
-        lower_unpegged: false,
-        upper_unpegged: false,
-    });
+    let line = emit_side_wall(data, p1, p2, plan.room_idx, switch_tex);
+    data.linedefs[line].special = special;
+    data.linedefs[line].tag = tag;
 }
 
 /// Emits a walkover exit's construction: a new closed alcove sector behind
@@ -329,17 +287,10 @@ fn emit_walkover_exit(
 ) -> Result<(), CompileError> {
     let room = &ir.rooms[plan.room_idx];
 
-    // The recess's outward direction is exactly the "toward b" direction a
-    // two-room portal would have — there is simply no room `b` for it to be
-    // measuring toward.
-    let span = SharedSpan {
-        axis: plan.axis,
-        fixed: plan.fixed,
-        lo: plan.open_lo,
-        hi: plan.open_hi,
-        a_forward: plan.forward,
-    };
-    let sign = span.across_sign_toward_b();
+    // The alcove's outward direction is exactly the direction a facing
+    // room's wall would occupy in a two-room portal's gap — there is simply
+    // no room on the other side of it.
+    let sign = outward_sign(plan.axis, plan.forward);
     let far = plan.fixed + sign * EXIT_ALCOVE_DEPTH;
     let far_cut = Cut {
         axis: plan.axis,
@@ -381,21 +332,21 @@ fn emit_walkover_exit(
     } else {
         (plan.open_lo, plan.open_hi)
     };
-    emit_alcove_wall(
+    emit_side_wall(
         data,
         cut.pt(near_end),
         far_cut.pt(near_end),
         alcove,
         &room.wall_tex,
     );
-    emit_alcove_wall(
+    emit_side_wall(
         data,
         far_cut.pt(near_end),
         far_cut.pt(near_start),
         alcove,
         &room.wall_tex,
     );
-    emit_alcove_wall(
+    emit_side_wall(
         data,
         far_cut.pt(near_start),
         cut.pt(near_start),

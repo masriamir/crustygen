@@ -1,51 +1,41 @@
-//! Opens portals in shared walls and pairs the resulting two-sided linedefs.
+//! Cuts openings into two rooms' own facing walls and fills the void between
+//! them.
+//!
+//! Rooms are authored apart, never flush (see [`crate::ir::Portal`]'s doc
+//! comment and [`crate::ir::Ir::MIN_PORTAL_GAP`]), so a portal's two rooms
+//! never share a single coincident wall the way the pre-gap-model compiler
+//! assumed. Instead, room `a`'s wall and room `b`'s wall face each other
+//! across a real void, and a portal fills it: an opening is cut into *each*
+//! room's own wall, and a new sector spans the gap between the two openings.
+//! For a [`crate::ir::PortalKind::Plain`] portal that new sector is an open,
+//! walkable passage; [`crate::compile::doors`] builds the same shape for a
+//! door, just with a closed sector and a special on its threshold lines
+//! instead of an open one with neither.
 
 use crate::compile::sectors::vertex_index;
-use crate::compile::{CompileError, LinedefOut, MapData, SidedefOut};
-use crate::geom::{Pt, edges};
+use crate::compile::{CompileError, LinedefOut, MapData, SectorOut, SidedefOut};
+use crate::geom::{Axis, FacingSpan, Pt, facing_spans, find_facing_span, on_diagonal_wall};
 use crate::ir::{Ir, Portal, PortalKind};
 
-/// The axis a shared wall runs along.
-///
-/// `pub(crate)` so `doors` can re-derive a portal's shared-wall geometry via
-/// [`resolve_portal`] to carve its own recessed sector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Axis {
-    /// The wall is vertical; X is constant.
-    Vertical,
-    /// The wall is horizontal; Y is constant.
-    Horizontal,
-}
-
-impl Axis {
-    /// Splits a point into `(along, across)` for this axis: the coordinate
-    /// that varies along the wall, and the one held constant across it.
-    ///
-    /// `pub(crate)` so `exits` can test an exit's `at` against a candidate
-    /// wall edge the same way [`resolve_portal`] does.
-    pub(crate) fn split(self, p: Pt) -> (i32, i32) {
-        match self {
-            Self::Vertical => (p.y, p.x),
-            Self::Horizontal => (p.x, p.y),
-        }
-    }
-}
-
-/// Opens every portal in the shared wall of its two rooms.
+/// Opens every portal into the facing walls of its two rooms and fills the
+/// gap between them.
 ///
 /// Every portal is resolved and cross-checked before anything is emitted, so
 /// a rejected map leaves no partially-cut geometry behind. Each room's solid
 /// wall is then split at the opening's two ends — the pieces outside the
-/// opening survive with their own endpoints and textures intact — and a
-/// single two-sided linedef carries the opening with its front and back
-/// sidedefs bound to the two rooms' sectors.
+/// opening survive with their own endpoints and textures intact. For a
+/// [`PortalKind::Plain`] portal this also fills the gap with an open passage
+/// sector (see `emit_gap_sector`); a door portal's gap is instead filled by
+/// [`crate::compile::doors::emit_doors`], which runs afterward and expects to
+/// find both rooms' flanking walls already cut but the gap itself still
+/// empty.
 ///
 /// # Errors
 /// Returns [`CompileError::PortalOnDiagonalWall`] when the opening sits on a
 /// diagonal wall, which v1 does not support hosting a portal on,
-/// [`CompileError::NotAdjacent`] when the rooms share no (axis-aligned) wall,
-/// [`CompileError::PortalOffWall`] when the midpoint is not on a shared wall,
-/// [`CompileError::PortalTooWide`] when the opening exceeds the shared span,
+/// [`CompileError::NotAdjacent`] when the rooms share no facing wall,
+/// [`CompileError::PortalOffWall`] when the midpoint is not on a facing wall,
+/// [`CompileError::PortalTooWide`] when the opening exceeds the facing span,
 /// [`CompileError::OverlappingPortals`] when two openings overlap on the same
 /// wall line, and [`CompileError::OpeningNotInAWall`] when no single solid
 /// wall of a room spans the opening.
@@ -59,7 +49,7 @@ pub fn cut_portals(ir: &Ir, data: &mut MapData) -> Result<(), CompileError> {
     check_no_overlapping_openings(&resolved)?;
 
     for (portal, geometry) in &resolved {
-        cut_one(data, portal, geometry)?;
+        cut_one(ir, data, portal, geometry)?;
     }
     Ok(())
 }
@@ -69,18 +59,29 @@ pub fn cut_portals(ir: &Ir, data: &mut MapData) -> Result<(), CompileError> {
 /// Splitting a wall consumes the piece that spans the opening, so a second
 /// opening overlapping the first would find no intact wall to split. Catching
 /// it here names both portals instead of surfacing the downstream
-/// [`CompileError::OpeningNotInAWall`], and mirrors the pairwise
-/// `rects_overlap` guard `doors::plan_doors` already applies to door
-/// recesses. Keying on `(axis, fixed)` rather than on the room pair covers
-/// the collinear case too: two portals into *different* rooms can still share
-/// one wall line.
+/// [`CompileError::OpeningNotInAWall`]. Every portal contributes *two*
+/// wall-line cuts now — room `a`'s own wall and room `b`'s own wall, which
+/// (rooms being authored apart) are never the same coordinate — so both are
+/// checked against every other portal's own two. Keying on `(axis, fixed)`
+/// rather than on the room pair covers the collinear case too: two portals
+/// into *different* rooms can still share one wall line.
 fn check_no_overlapping_openings(
     resolved: &[(&Portal, PortalGeometry)],
 ) -> Result<(), CompileError> {
-    for (i, (first, fg)) in resolved.iter().enumerate() {
-        for (second, sg) in &resolved[i + 1..] {
-            let collinear = fg.span.axis == sg.span.axis && fg.span.fixed == sg.span.fixed;
-            let overlaps = fg.open_lo < sg.open_hi && sg.open_lo < fg.open_hi;
+    let cuts: Vec<(&Portal, Axis, i32, i32, i32)> = resolved
+        .iter()
+        .flat_map(|(portal, g)| {
+            [
+                (*portal, g.span.axis, g.span.near, g.open_lo, g.open_hi),
+                (*portal, g.span.axis, g.span.far, g.open_lo, g.open_hi),
+            ]
+        })
+        .collect();
+
+    for (i, (first, axis1, fixed1, lo1, hi1)) in cuts.iter().enumerate() {
+        for (second, axis2, fixed2, lo2, hi2) in &cuts[i + 1..] {
+            let collinear = axis1 == axis2 && fixed1 == fixed2;
+            let overlaps = lo1 < hi2 && lo2 < hi1;
             if collinear && overlaps {
                 return Err(CompileError::OverlappingPortals {
                     first: format!("{} <-> {}", first.a, first.b),
@@ -93,48 +94,71 @@ fn check_no_overlapping_openings(
 }
 
 fn cut_one(
+    ir: &Ir,
     data: &mut MapData,
     portal: &Portal,
     geometry: &PortalGeometry,
 ) -> Result<(), CompileError> {
-    let cut = Cut {
+    let near_cut = Cut {
         axis: geometry.span.axis,
-        fixed: geometry.span.fixed,
+        fixed: geometry.span.near,
+        open_lo: geometry.open_lo,
+        open_hi: geometry.open_hi,
+    };
+    let far_cut = Cut {
+        axis: geometry.span.axis,
+        fixed: geometry.span.far,
         open_lo: geometry.open_lo,
         open_hi: geometry.open_hi,
     };
 
-    // Split each room's own solid wall at the opening. Splitting rather than
+    // Split each room's own solid wall at the opening — room `a`'s at its
+    // own wall coordinate, room `b`'s at its own. Splitting rather than
     // dropping-and-recreating is what makes a portal between rooms whose
-    // walls are not flush work at all: the shared span is only the part of
-    // each wall the two rooms have in common, so the surviving pieces must
-    // run out to each wall's *own* endpoints, not to the shared span's.
-    split_wall_for_opening(data, &cut, geometry.ia, &portal.a)?;
-    split_wall_for_opening(data, &cut, geometry.ib, &portal.b)?;
+    // walls do not run the same full length work at all: the facing span is
+    // only the part of each wall the two rooms have in common, so the
+    // surviving pieces must run out to each wall's *own* endpoints, not to
+    // the facing span's.
+    split_wall_for_opening(data, &near_cut, geometry.ia, &portal.a)?;
+    split_wall_for_opening(data, &far_cut, geometry.ib, &portal.b)?;
 
-    // A plain portal's opening is the two-sided line straight across the
-    // shared wall. A door portal instead gets a carved-out sector of its own
-    // — see `doors::emit_doors`, which runs after `cut_portals` and expects
-    // to find flanking walls in place but no opening line yet.
+    // A plain portal fills the gap with an open passage sector immediately.
+    // A door portal instead gets a closed sector of its own — see
+    // `doors::emit_doors`, which runs after `cut_portals` and expects to
+    // find both flanking walls already cut but the gap itself still empty.
     if portal.kind == PortalKind::Plain {
-        emit_opening(
+        let room_a = &ir.rooms[geometry.ia];
+        let room_b = &ir.rooms[geometry.ib];
+        let sector_out = SectorOut {
+            floor: room_a.floor.max(room_b.floor),
+            ceiling: room_a.ceiling.min(room_b.ceiling),
+            light: room_a.light,
+            floor_tex: room_a.floor_tex.clone(),
+            ceil_tex: room_a.ceil_tex.clone(),
+            special: 0,
+            tag: 0,
+        };
+        emit_gap_sector(
             data,
-            &cut,
+            &geometry.span,
+            geometry.open_lo,
+            geometry.open_hi,
             geometry.ia,
             geometry.ib,
-            geometry.span.a_forward,
+            sector_out,
+            &room_a.wall_tex,
         );
     }
 
     Ok(())
 }
 
-/// The span geometry of one portal's cut: which axis and fixed coordinate the
+/// The span geometry of one wall's cut: which axis and fixed coordinate the
 /// wall runs along, and the two along-axis ends of the opening.
 ///
-/// `pub(crate)` (including every field) so `doors` can build a second `Cut`
-/// at a recessed `fixed` coordinate for a door sector's far face, reusing
-/// this same struct and [`emit_opening`] rather than duplicating them.
+/// `pub(crate)` (including every field) so `exits` can build one directly
+/// from a single room's own wall, without going through [`emit_gap_sector`]'s
+/// two-room construction.
 pub(crate) struct Cut {
     /// The axis the wall runs along.
     pub(crate) axis: Axis,
@@ -262,19 +286,18 @@ pub(crate) fn split_wall_for_opening(
 /// Emits a two-sided line along `cut`'s `fixed` coordinate, front bound to
 /// `sector_a`, back to `sector_b`. Returns the new linedef's index.
 ///
-/// For a plain portal this is the opening itself, front on room A, back on
-/// room B. `doors::emit_doors` also calls this twice per door portal — once
-/// with the door sector standing in for `sector_b` at the original wall
-/// coordinate, once with it standing in for `sector_a` at the recessed far
-/// coordinate — reusing the exact same orientation rule rather than
-/// duplicating it.
+/// [`emit_gap_sector`] calls this twice per gap sector — once for the near
+/// threshold (the real room named by `sector_a`, at that room's own wall
+/// coordinate) and once for the far threshold (with the two sector
+/// parameters and the direction both reversed) — reusing the exact same
+/// orientation rule rather than duplicating it.
 ///
-/// `a_forward` (see `shared_span`) picks the `v1`-to-`v2` direction so
-/// `sector_a`'s front sidedef lands on the geometric right regardless of
-/// which side of the wall it sits on — the same rule `emit_flanking_walls`
-/// applies, so front/back here name the correct bordering sector even after
-/// later stages give differing floor or ceiling heights, or write
-/// upper/lower textures onto these sidedefs (e.g. door tracks).
+/// `a_forward` (see [`FacingSpan::a_forward`]) picks the `v1`-to-`v2`
+/// direction so `sector_a`'s front sidedef lands on the geometric right
+/// regardless of which side of the wall it sits on, so front/back here name
+/// the correct bordering sector even after later stages give differing floor
+/// or ceiling heights, or write upper/lower textures onto these sidedefs
+/// (e.g. door tracks).
 pub(crate) fn emit_opening(
     data: &mut MapData,
     cut: &Cut,
@@ -317,195 +340,37 @@ pub(crate) fn emit_opening(
     data.linedefs.len() - 1
 }
 
-/// One stretch of wall two rooms genuinely share: a run of real, coincident,
-/// collinear boundary that both footprints have an edge along.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct SharedSpan {
-    /// The axis the shared wall runs along.
-    pub(crate) axis: Axis,
-    /// The coordinate held constant across the wall.
-    pub(crate) fixed: i32,
-    /// The low end of the shared run.
-    pub(crate) lo: i32,
-    /// The high end of the shared run.
-    pub(crate) hi: i32,
-    /// Whether room `a`'s own boundary edge along this wall runs in the
-    /// increasing-`along` direction.
-    ///
-    /// Footprints wind clockwise, so a room's interior is always on the right
-    /// of its own edge direction. That makes this single bit the whole
-    /// orientation story: emitting a line in room `a`'s edge direction puts
-    /// room `a` on the front, and reversing it puts room `b` there.
-    pub(crate) a_forward: bool,
-}
-
-impl SharedSpan {
-    /// The sign, along the across-axis, of the direction that leads from the
-    /// wall into room `b`.
-    ///
-    /// Room `a`'s interior lies to the right of its own edge direction.
-    /// Rotating a `+along` direction vector by -90 degrees gives `+across`
-    /// for a vertical wall (`along` = Y, `across` = X) but `-across` for a
-    /// horizontal wall (`along` = X, `across` = Y) — the two axes are not
-    /// mirror images — so the two cases are derived separately. Room `b` is
-    /// always on the opposite side from room `a`.
-    pub(crate) fn across_sign_toward_b(self) -> i32 {
-        match self.axis {
-            Axis::Vertical => {
-                if self.a_forward {
-                    -1
-                } else {
-                    1
-                }
-            }
-            Axis::Horizontal => {
-                if self.a_forward {
-                    1
-                } else {
-                    -1
-                }
-            }
-        }
-    }
-}
-
-/// Every axis-aligned edge of a footprint, as `(axis, fixed, lo, hi,
-/// forward)` where `forward` records whether the edge runs in the increasing
-/// `along` direction.
-///
-/// Edges at 45 degrees are skipped: a diagonal wall cannot host a portal in
-/// v1, since the opening's endpoints, the flanking wall pieces, and a door
-/// recess would all have to land on non-integer coordinates to stay flush
-/// with it. Two rooms meeting only along a diagonal therefore report as not
-/// adjacent rather than silently receiving a mis-shaped opening.
-///
-/// `pub(crate)` so `exits::emit_exits` can find which single-room wall an
-/// exit's `at` lands on, the same way [`shared_spans`] finds a two-room one.
-pub(crate) fn wall_edges(poly: &[Pt]) -> impl Iterator<Item = (Axis, i32, i32, i32, bool)> + '_ {
-    edges(poly).filter_map(|(p, q)| {
-        let axis = if p.x == q.x && p.y != q.y {
-            Axis::Vertical
-        } else if p.y == q.y && p.x != q.x {
-            Axis::Horizontal
-        } else {
-            return None;
-        };
-        let (along_p, fixed) = axis.split(p);
-        let (along_q, _) = axis.split(q);
-        Some((
-            axis,
-            fixed,
-            along_p.min(along_q),
-            along_p.max(along_q),
-            along_q > along_p,
-        ))
-    })
-}
-
-/// Every stretch of wall rooms `ia` and `ib` actually share.
-///
-/// Adjacency is matched between real coincident collinear *edges* of the two
-/// footprints, not between their bounding boxes. A bounding box says only
-/// that a room reaches some coordinate, not that it has a wall there: an
-/// L-shaped room whose east edge exists for only part of its box was
-/// previously reported as adjacent along the whole box side, so a portal cut
-/// there emitted sidedefs naming a sector nowhere near the line — the exact
-/// invariant the compiler exists to guarantee. The spec admits L-shaped and
-/// octagonal footprints, so this is a real shape, not a hypothetical one.
-///
-/// Rooms may share more than one run of wall (an L wrapped around a
-/// rectangle shares two), so every one is returned; [`resolve_portal`] picks
-/// the run the portal's midpoint actually lies on. Ordering follows room
-/// `ia`'s footprint edges, then room `ib`'s, so the result is deterministic.
-///
-/// `pub(crate)` so `doors::emit_doors` can re-derive the same shared-wall
-/// geometry `cut_portals` already validated, without duplicating this logic.
-pub(crate) fn shared_spans(ir: &Ir, ia: usize, ib: usize) -> Vec<SharedSpan> {
-    let mut spans = Vec::new();
-    for (axis_a, fixed_a, lo_a, hi_a, a_forward) in wall_edges(&ir.rooms[ia].footprint) {
-        for (axis_b, fixed_b, lo_b, hi_b, _) in wall_edges(&ir.rooms[ib].footprint) {
-            if axis_a != axis_b || fixed_a != fixed_b {
-                continue;
-            }
-            let (lo, hi) = (lo_a.max(lo_b), hi_a.min(hi_b));
-            // Strict: edges that meet at a single point share no wall.
-            if lo < hi {
-                spans.push(SharedSpan {
-                    axis: axis_a,
-                    fixed: fixed_a,
-                    lo,
-                    hi,
-                    a_forward,
-                });
-            }
-        }
-    }
-    spans
-}
-
 /// Everything a pass needs to know about one portal's placement, resolved and
 /// validated once.
 ///
-/// Both `cut_portals` and `doors::plan_doors` read from this rather than each
+/// Both `cut_portals` and `doors::emit_doors` read from this rather than each
 /// re-deriving the opening's ends: computed twice, the two were free to
-/// diverge, and a door's carved recess must sit at exactly the span its
-/// flanking walls were cut for.
+/// diverge, and a door's own sector must sit at exactly the span its flanking
+/// walls were cut for.
 pub(crate) struct PortalGeometry {
     /// Index of room `a` in `ir.rooms`, which is also its sector index.
     pub(crate) ia: usize,
     /// Index of room `b` in `ir.rooms`, which is also its sector index.
     pub(crate) ib: usize,
-    /// The shared wall run the portal sits in.
-    pub(crate) span: SharedSpan,
+    /// The facing wall pair the portal sits in.
+    pub(crate) span: FacingSpan,
     /// The low end of the opening.
     pub(crate) open_lo: i32,
     /// The high end of the opening.
     pub(crate) open_hi: i32,
 }
 
-/// Whether an edge is diagonal (exactly 45 degrees) rather than axis-aligned.
-///
-/// [`crate::geom::is_axis_or_diagonal`] admits both; this distinguishes the
-/// two, since [`on_diagonal_wall`] only cares about the one [`wall_edges`]
-/// drops.
-fn is_diagonal_edge(a: Pt, b: Pt) -> bool {
-    let dx = (i64::from(b.x) - i64::from(a.x)).abs();
-    let dy = (i64::from(b.y) - i64::from(a.y)).abs();
-    dx == dy && dx != 0
-}
-
-/// Whether `p` lies on (not just inside) a diagonal edge of `poly`.
-///
-/// `pub(crate)` so `exits::resolve_exit` can give the same specific,
-/// honest error `resolve_portal` does below when an exit's `at` sits on a
-/// diagonal wall, rather than `ExitOffWall`'s "not on any wall" for a point
-/// that demonstrably is on one.
-pub(crate) fn on_diagonal_wall(poly: &[Pt], p: Pt) -> bool {
-    edges(poly).any(|(a, b)| {
-        if !is_diagonal_edge(a, b) {
-            return false;
-        }
-        let cross = (i64::from(p.y) - i64::from(a.y)) * (i64::from(b.x) - i64::from(a.x))
-            - (i64::from(p.x) - i64::from(a.x)) * (i64::from(b.y) - i64::from(a.y));
-        cross == 0
-            && p.x >= a.x.min(b.x)
-            && p.x <= a.x.max(b.x)
-            && p.y >= a.y.min(b.y)
-            && p.y <= a.y.max(b.y)
-    })
-}
-
-/// Resolves one portal against the rooms' real shared walls.
+/// Resolves one portal against the rooms' real facing walls.
 ///
 /// # Errors
 /// Returns [`CompileError::PortalOnDiagonalWall`] when `portal.at` sits on a
-/// diagonal edge of either room — a real wall, just not one [`wall_edges`]
-/// (and so [`shared_spans`]) considers, since v1 cannot cut a portal into
-/// one; checked before the two errors below so a diagonal wall is never
-/// misreported as "no wall" or "off the wall" when it demonstrably is a
-/// wall. Returns [`CompileError::NotAdjacent`] when the rooms share no
-/// axis-aligned wall at all, [`CompileError::PortalOffWall`] when the
-/// midpoint lies on none of the axis-aligned walls they do share, and
+/// diagonal edge of either room — a real wall, just not one
+/// [`crate::geom::wall_edges`] (and so [`facing_spans`]) considers, since v1
+/// cannot cut a portal into one; checked before the two errors below so a
+/// diagonal wall is never misreported as "no wall" or "off the wall" when it
+/// demonstrably is a wall. Returns [`CompileError::NotAdjacent`] when the
+/// rooms share no facing wall at all, [`CompileError::PortalOffWall`] when
+/// the midpoint lies on none of the facing walls they do share, and
 /// [`CompileError::PortalTooWide`] when the opening would run past the ends
 /// of that wall.
 ///
@@ -524,23 +389,18 @@ pub(crate) fn resolve_portal(ir: &Ir, portal: &Portal) -> Result<PortalGeometry,
         .position(|r| r.id == portal.b)
         .expect("validated in Ir::from_json");
 
-    let spans = shared_spans(ir, ia, ib);
-    let matched = spans.iter().find(|span| {
-        let (on_axis, across) = span.axis.split(portal.at);
-        across == span.fixed && on_axis > span.lo && on_axis < span.hi
-    });
+    let spans = facing_spans(&ir.rooms[ia].footprint, &ir.rooms[ib].footprint);
+    let matched = find_facing_span(&spans, portal.at);
 
-    let span = if let Some(span) = matched {
-        *span
-    } else {
+    let Some(span) = matched else {
         // Before reporting the less specific errors below, check whether
         // the requested opening actually sits on a diagonal wall of either
         // room: that is a real wall v1 simply cannot cut a portal into (see
-        // `wall_edges`'s doc comment), which deserves an honest, specific
-        // message rather than `NotAdjacent`'s "the rooms share no wall" for
-        // a wall that is demonstrably there, or `PortalOffWall`'s "not on
-        // the shared wall" for a point that is exactly on *a* wall, just
-        // not one this pass considers.
+        // `crate::geom::wall_edges`'s doc comment), which deserves an
+        // honest, specific message rather than `NotAdjacent`'s "the rooms
+        // face no wall of each other" for a wall that is demonstrably there,
+        // or `PortalOffWall`'s "not on a facing wall" for a point that is
+        // exactly on *a* wall, just not one this pass considers.
         if on_diagonal_wall(&ir.rooms[ia].footprint, portal.at)
             || on_diagonal_wall(&ir.rooms[ib].footprint, portal.at)
         {
@@ -588,6 +448,146 @@ pub(crate) fn resolve_portal(ir: &Ir, portal: &Portal) -> Result<PortalGeometry,
     })
 }
 
+/// Everything about one newly emitted gap sector: its own index, and the
+/// near/far threshold linedef indices bordering rooms `sector_a`/`sector_b`
+/// respectively, so the caller can attach a special, tag, or texture to them
+/// — only the caller knows whether this is an open passage or a door.
+pub(crate) struct GapSector {
+    /// Index of the new sector spanning the gap.
+    pub(crate) sector: usize,
+    /// Index of the threshold linedef bordering `sector_a`.
+    pub(crate) near_line: usize,
+    /// Index of the threshold linedef bordering `sector_b`.
+    pub(crate) far_line: usize,
+    /// Indices of the two one-sided jamb linedefs closing the sector's long
+    /// sides — exposed alongside the thresholds so a door can mark them
+    /// lower-unpegged too (P11), which a plain passage has no reason to.
+    pub(crate) jamb_lines: [usize; 2],
+}
+
+/// Emits a sector spanning the void between `span.near` (room `sector_a`'s
+/// own wall) and `span.far` (room `sector_b`'s own wall): a near threshold
+/// (`sector_a` <-> the new sector), a far threshold (the new sector <->
+/// `sector_b`), and two one-sided jambs closing its long sides, front bound
+/// to the new sector with solid rock behind.
+///
+/// Both `cut_portals` (for a [`PortalKind::Plain`] passage) and
+/// `doors::emit_doors` (for a door's own sector) call this: the two share the
+/// identical boundary shape and differ only in the sector's own properties
+/// (floor, ceiling, texture, special) and whether the threshold lines carry a
+/// linedef special — which only the caller knows, so it supplies the
+/// finished [`SectorOut`] and reads the two threshold indices back out of the
+/// returned [`GapSector`] to fill in afterward.
+///
+/// Both threshold lines put the *real room* on the front and the new sector
+/// on the back — `span.a_forward` for the near one, its opposite for the far
+/// one, mirroring [`emit_opening`]'s own orientation rule — which is what
+/// lets a door's threshold carry a special that only triggers from a line's
+/// front side (`P_UseSpecialLine`).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each parameter names an independent piece of the gap sector's geometry or its \
+              caller-supplied properties; bundling them would just move the same count into a \
+              throwaway struct"
+)]
+pub(crate) fn emit_gap_sector(
+    data: &mut MapData,
+    span: &FacingSpan,
+    open_lo: i32,
+    open_hi: i32,
+    sector_a: usize,
+    sector_b: usize,
+    sector_out: SectorOut,
+    jamb_tex: &str,
+) -> GapSector {
+    let sector = data.sectors.len();
+    data.sectors.push(sector_out);
+
+    let near_cut = Cut {
+        axis: span.axis,
+        fixed: span.near,
+        open_lo,
+        open_hi,
+    };
+    let far_cut = Cut {
+        axis: span.axis,
+        fixed: span.far,
+        open_lo,
+        open_hi,
+    };
+
+    let near_line = emit_opening(data, &near_cut, sector_a, sector, span.a_forward);
+    let far_line = emit_opening(data, &far_cut, sector_b, sector, !span.a_forward);
+
+    // The two jambs closing the gap sector's long sides — the same pattern
+    // `exits::emit_walkover_exit` uses for its alcove's side walls, since a
+    // gap sector's own two side walls are exactly that: a passage with no
+    // far wall (its far side is the far threshold instead), so only the two
+    // sides are solid.
+    let (near_start, near_end) = if span.a_forward {
+        (open_hi, open_lo)
+    } else {
+        (open_lo, open_hi)
+    };
+    let jamb_end = emit_side_wall(
+        data,
+        near_cut.pt(near_end),
+        far_cut.pt(near_end),
+        sector,
+        jamb_tex,
+    );
+    let jamb_start = emit_side_wall(
+        data,
+        far_cut.pt(near_start),
+        near_cut.pt(near_start),
+        sector,
+        jamb_tex,
+    );
+
+    GapSector {
+        sector,
+        near_line,
+        far_line,
+        jamb_lines: [jamb_end, jamb_start],
+    }
+}
+
+/// Emits a one-sided wall from `p1` to `p2`, front bound to `sector`, with
+/// solid rock behind. Returns the new linedef's index.
+///
+/// The construction [`emit_gap_sector`]'s two jambs, [`crate::compile::exits`]'s
+/// walkover alcove, and a switch exit's own line (which needs the returned
+/// index to attach its special and tag afterward) all need this.
+pub(crate) fn emit_side_wall(
+    data: &mut MapData,
+    p1: Pt,
+    p2: Pt,
+    sector: usize,
+    texture: &str,
+) -> usize {
+    let v1 = vertex_index(&mut data.vertices, p1);
+    let v2 = vertex_index(&mut data.vertices, p2);
+    let front = data.sidedefs.len();
+    data.sidedefs.push(SidedefOut {
+        sector,
+        upper: String::new(),
+        middle: texture.to_owned(),
+        lower: String::new(),
+    });
+    data.linedefs.push(LinedefOut {
+        v1,
+        v2,
+        front,
+        back: None,
+        blocking: true,
+        special: 0,
+        tag: 0,
+        lower_unpegged: false,
+        upper_unpegged: false,
+    });
+    data.linedefs.len() - 1
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -598,62 +598,173 @@ mod tests {
     use crate::geom::{Pt, contains};
     use crate::ir::Ir;
 
-    fn ir_with_portal(width: i32, at: (i32, i32), b_origin: i32) -> String {
+    /// Room `a` is the fixed 256-unit square at the origin; room `b` is a
+    /// same-size square whose west wall sits at `b_near`, which must be at
+    /// least `256 + Ir::MIN_PORTAL_GAP` for the two to face each other with a
+    /// legal gap. `at` is room `a`'s own reference point, per
+    /// [`crate::ir::Portal::at`]'s doc comment — unaffected by `b_near`.
+    fn ir_with_portal(width: i32, at: (i32, i32), b_near: i32) -> String {
         format!(
             r#"{{ "seed":1, "grid":64, "theme":"tech_base",
               "rooms":[
                 {{ "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
                    "floor":0, "ceiling":128, "light":160,
                    "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }},
-                {{ "id":"b", "footprint":[[{b_origin},0],[{b_origin},256],[{},256],[{},0]],
+                {{ "id":"b", "footprint":[[{b_near},0],[{b_near},256],[{},256],[{},0]],
                    "floor":0, "ceiling":128, "light":160,
                    "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
               ],
               "portals":[{{ "a":"a", "b":"b", "kind":"plain", "width":{width}, "at":[{},{}] }}] }}"#,
-            b_origin + 256,
-            b_origin + 256,
+            b_near + 256,
+            b_near + 256,
             at.0,
             at.1
         )
     }
 
     #[test]
-    fn a_portal_becomes_one_two_sided_linedef_pairing_both_sectors() {
-        let ir = Ir::from_json(&ir_with_portal(128, (256, 128), 256)).expect("ir");
+    fn a_portal_becomes_a_passage_with_two_thresholds_and_a_new_sector() {
+        let ir = Ir::from_json(&ir_with_portal(128, (256, 128), 320)).expect("ir");
         let mut data = emit_sectors(&ir).expect("sectors");
         cut_portals(&ir, &mut data).expect("portals cut");
 
+        assert_eq!(data.sectors.len(), 3, "room a, room b, and the passage");
         let two_sided: Vec<_> = data.linedefs.iter().filter(|l| l.back.is_some()).collect();
-        assert_eq!(two_sided.len(), 1, "exactly one two-sided line");
+        assert_eq!(two_sided.len(), 2, "a near threshold and a far threshold");
 
-        let l = two_sided[0];
-        let front_sector = data.sidedefs[l.front].sector;
-        let back_sector = data.sidedefs[l.back.expect("back")].sector;
-        assert_ne!(
-            front_sector, back_sector,
-            "front and back name different sectors"
+        let passage = 2;
+        let mut touches_passage = 0;
+        for l in &two_sided {
+            let front_sector = data.sidedefs[l.front].sector;
+            let back_sector = data.sidedefs[l.back.expect("back")].sector;
+            assert_ne!(
+                front_sector, back_sector,
+                "front and back name different sectors"
+            );
+            assert!(!l.blocking, "a threshold does not block movement");
+            if front_sector == passage || back_sector == passage {
+                touches_passage += 1;
+            }
+        }
+        assert_eq!(
+            touches_passage, 2,
+            "both thresholds border the passage sector"
         );
-        assert!(!l.blocking, "a portal does not block movement");
+    }
+
+    #[test]
+    fn the_passage_sectors_jambs_are_one_sided_with_solid_rock_behind() {
+        let (_, data) = assert_well_formed(&ir_with_portal(128, (256, 128), 320));
+        let passage = 2;
+        let jambs: Vec<_> = data
+            .linedefs
+            .iter()
+            .filter(|l| l.back.is_none() && data.sidedefs[l.front].sector == passage)
+            .collect();
+        assert_eq!(
+            jambs.len(),
+            2,
+            "the passage has exactly two one-sided jambs"
+        );
+        assert!(
+            jambs.iter().all(|l| l.blocking),
+            "a jamb is solid, like any other one-sided wall"
+        );
+        assert!(
+            jambs
+                .iter()
+                .all(|l| !data.sidedefs[l.front].middle.is_empty()),
+            "a jamb carries a real wall texture rather than rendering as a hole"
+        );
+    }
+
+    #[test]
+    fn the_passage_sector_takes_room_as_own_textures_light_and_floor_ceiling() {
+        // Room a and room b differ in every texture/light field, and — load
+        // bearing for pinning `max`/`min` rather than merely restating them —
+        // in floor and ceiling too: room a is [0,128], room b is [16,112], so
+        // `max(0,16)=16` and `min(128,112)=112` are each distinguishable from
+        // either room's own value alone (a fixture with matching floors/
+        // ceilings on both rooms cannot tell `min` and `max` apart at all,
+        // since both formulas agree there).
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"FA", "ceil_tex":"CA", "wall_tex":"WA" },
+            { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+               "floor":16, "ceiling":112, "light":40,
+               "floor_tex":"FB", "ceil_tex":"CB", "wall_tex":"WB" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }] }"#;
+        let (ir, data) = assert_well_formed(json);
+        let passage = &data.sectors[2];
+        assert_eq!(
+            passage.floor,
+            ir.rooms[0].floor.max(ir.rooms[1].floor),
+            "the passage floor never sits below either room's own floor"
+        );
+        assert_eq!(
+            passage.ceiling,
+            ir.rooms[0].ceiling.min(ir.rooms[1].ceiling),
+            "the passage ceiling never rises above either room's own ceiling"
+        );
+        assert_eq!(
+            passage.light, ir.rooms[0].light,
+            "passage light matches room a's"
+        );
+        assert_eq!(
+            passage.floor_tex, ir.rooms[0].floor_tex,
+            "passage floor texture matches room a's"
+        );
+        assert_eq!(
+            passage.ceil_tex, ir.rooms[0].ceil_tex,
+            "passage ceiling texture matches room a's"
+        );
+
+        let jamb = data
+            .linedefs
+            .iter()
+            .find(|l| l.back.is_none() && data.sidedefs[l.front].sector == 2)
+            .expect("a jamb exists");
+        assert_eq!(
+            data.sidedefs[jamb.front].middle, ir.rooms[0].wall_tex,
+            "a jamb carries room a's own wall texture, not room b's"
+        );
     }
 
     #[test]
     fn cutting_leaves_each_room_watertight() {
-        let ir = Ir::from_json(&ir_with_portal(128, (256, 128), 256)).expect("ir");
+        let ir = Ir::from_json(&ir_with_portal(128, (256, 128), 320)).expect("ir");
         let mut data = emit_sectors(&ir).expect("sectors");
         let before = data.linedefs.len();
         cut_portals(&ir, &mut data).expect("portals cut");
-        // Each side's wall splits into two flanking one-sided pieces plus the
-        // shared two-sided opening: 8 - 2 + 4 + 1 = 11.
+        // Each side's wall splits into two flanking one-sided pieces (4
+        // total); the passage sector between them adds two thresholds and
+        // two jambs (4 more): 8 - 2 + 4 + 4 = 14.
         assert_eq!(
             data.linedefs.len(),
-            before - 2 + 5,
-            "wall split accounted for"
+            before - 2 + 8,
+            "wall split and passage sector accounted for"
         );
     }
 
     #[test]
     fn rejects_a_portal_between_rooms_that_share_no_wall() {
-        let ir = Ir::from_json(&ir_with_portal(128, (256, 128), 512)).expect("ir");
+        // Room b sits far away in both X and Y — a genuine gap in X exists,
+        // but the two rooms' Y ranges never overlap, so no wall of either
+        // faces a wall of the other at all.
+        let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+            { "id":"b", "footprint":[[320,512],[320,768],[576,768],[576,512]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }] }"#;
+        let ir = Ir::from_json(ir_json).expect("ir");
         let mut data = emit_sectors(&ir).expect("sectors");
         assert!(matches!(
             cut_portals(&ir, &mut data),
@@ -662,8 +773,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_opening_wider_than_the_shared_wall() {
-        let ir = Ir::from_json(&ir_with_portal(512, (256, 128), 256)).expect("ir");
+    fn rejects_an_opening_wider_than_the_facing_wall() {
+        let ir = Ir::from_json(&ir_with_portal(512, (256, 128), 320)).expect("ir");
         let mut data = emit_sectors(&ir).expect("sectors");
         assert!(matches!(
             cut_portals(&ir, &mut data),
@@ -672,8 +783,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_opening_that_is_not_on_the_shared_wall() {
-        let ir = Ir::from_json(&ir_with_portal(128, (128, 128), 256)).expect("ir");
+    fn rejects_an_opening_that_is_not_on_the_facing_wall() {
+        let ir = Ir::from_json(&ir_with_portal(128, (128, 128), 320)).expect("ir");
         let mut data = emit_sectors(&ir).expect("sectors");
         assert!(matches!(
             cut_portals(&ir, &mut data),
@@ -681,27 +792,97 @@ mod tests {
         ));
     }
 
+    /// The point used to decide which side of `p -> q` is "the right":
+    /// offset one unit from the segment's midpoint, in the direction
+    /// obtained by rotating `p -> q` -90 degrees (reduced to a one-unit step
+    /// via `.signum()`, since every segment under test is axis-aligned).
+    fn probe(p: Pt, q: Pt) -> Pt {
+        let (dx, dy) = (q.x - p.x, q.y - p.y);
+        Pt {
+            x: i32::midpoint(p.x, q.x) + dy.signum(),
+            y: i32::midpoint(p.y, q.y) - dx.signum(),
+        }
+    }
+
     /// Whether room `room_idx`'s original footprint has its interior on the
     /// right of travel from `p` to `q`.
     ///
     /// This is computed independently of `cut_portals`'s own `Cut`/`a_forward`
-    /// bookkeeping: rotate the direction vector -90 degrees (`(dy, -dx)`,
-    /// reduced to a one-unit step since every segment under test is
-    /// axis-aligned) from the segment's midpoint, and ask `geom::contains`
-    /// whether that probe point lands inside the room's footprint. A test
-    /// that instead re-derived `a_forward` would just restate the
-    /// implementation and could not catch a regression in it.
+    /// bookkeeping: probe one unit off the segment's midpoint and ask
+    /// `geom::contains` whether that point lands inside the room's
+    /// footprint. A test that instead re-derived `a_forward` would just
+    /// restate the implementation and could not catch a regression in it.
     fn interior_is_on_the_right(ir: &Ir, room_idx: usize, p: Pt, q: Pt) -> bool {
-        let (dx, dy) = (q.x - p.x, q.y - p.y);
-        let probe = Pt {
-            x: i32::midpoint(p.x, q.x) + dy.signum(),
-            y: i32::midpoint(p.y, q.y) - dx.signum(),
-        };
-        contains(&ir.rooms[room_idx].footprint, probe)
+        contains(&ir.rooms[room_idx].footprint, probe(p, q))
+    }
+
+    /// The axis-aligned bounding rectangle of every vertex touching
+    /// `sector`'s boundary, as `(x_lo, x_hi, y_lo, y_hi)`.
+    ///
+    /// Valid for any compiler-generated sector whose own shape is a plain
+    /// axis-aligned rectangle — every gap sector [`emit_gap_sector`] builds,
+    /// for a plain portal's passage or a door. Recovering the rectangle
+    /// straight from the emitted geometry, rather than from a
+    /// fixture-specific hand computation, is what lets
+    /// [`sector_interior_is_on_the_right`] run against every fixture in this
+    /// suite uniformly — a gap sector has no IR footprint for
+    /// [`interior_is_on_the_right`] to check against.
+    fn gap_sector_bbox(data: &MapData, sector: usize) -> (i32, i32, i32, i32) {
+        let verts: Vec<Pt> = data
+            .linedefs
+            .iter()
+            .filter(|l| {
+                data.sidedefs[l.front].sector == sector
+                    || l.back.is_some_and(|b| data.sidedefs[b].sector == sector)
+            })
+            .flat_map(|l| [data.vertices[l.v1], data.vertices[l.v2]])
+            .collect();
+        (
+            verts
+                .iter()
+                .map(|v| v.x)
+                .min()
+                .expect("sector has geometry"),
+            verts
+                .iter()
+                .map(|v| v.x)
+                .max()
+                .expect("sector has geometry"),
+            verts
+                .iter()
+                .map(|v| v.y)
+                .min()
+                .expect("sector has geometry"),
+            verts
+                .iter()
+                .map(|v| v.y)
+                .max()
+                .expect("sector has geometry"),
+        )
+    }
+
+    /// Whether `sector`'s interior is on the right of travel from `p` to
+    /// `q`: [`interior_is_on_the_right`] for a real room, or a bounding-box
+    /// containment test via [`gap_sector_bbox`] for a compiler-generated gap
+    /// sector (any sector index at or past `ir.rooms.len()`).
+    fn sector_interior_is_on_the_right(
+        ir: &Ir,
+        data: &MapData,
+        sector: usize,
+        p: Pt,
+        q: Pt,
+    ) -> bool {
+        if sector < ir.rooms.len() {
+            interior_is_on_the_right(ir, sector, p, q)
+        } else {
+            let (x_lo, x_hi, y_lo, y_hi) = gap_sector_bbox(data, sector);
+            let pt = probe(p, q);
+            pt.x >= x_lo && pt.x <= x_hi && pt.y >= y_lo && pt.y <= y_hi
+        }
     }
 
     /// Asserts that every linedef in `data` — the untouched walls, the
-    /// flanking one-sided pieces, and the two-sided opening — has its front
+    /// flanking one-sided pieces, and the two-sided openings — has its front
     /// sidedef naming the sector whose interior is on the right of
     /// `v1`-to-`v2` travel, and (for a two-sided line) its back sidedef
     /// naming the sector on the left. This is the structural invariant the
@@ -711,29 +892,24 @@ mod tests {
     ///
     /// Called from `assert_well_formed` itself, alongside
     /// `assert_sector_boundaries_are_closed`, so every fixture that compiles
-    /// through it — not only the four flush-256-square cases this suite
-    /// originally pinned it to — is checked against this invariant too.
-    /// Before this, the offset, L-shaped, and two-portal fixtures exercised
-    /// boundary closure but not sidedef-facing, which is the same kind of
-    /// gap (a diversified fixture set not wired to the assertion meant to
-    /// cover it) that let real bugs through review elsewhere in this
-    /// project, just inverted: here the invariant held, but nothing checked
-    /// it on the newer fixtures.
+    /// through it — including a portal's own compiler-generated passage
+    /// sector, not just the rooms named in the IR — is checked against this
+    /// invariant too.
     fn assert_sidedefs_face_their_sectors(ir: &Ir, data: &MapData) {
         for l in &data.linedefs {
             let (p, q) = (data.vertices[l.v1], data.vertices[l.v2]);
             let front_sector = data.sidedefs[l.front].sector;
             assert!(
-                interior_is_on_the_right(ir, front_sector, p, q),
+                sector_interior_is_on_the_right(ir, data, front_sector, p, q),
                 "front sidedef of line {p:?} -> {q:?} names sector {front_sector}, \
-                 but that room's interior is not on the right of travel"
+                 but that sector's interior is not on the right of travel"
             );
             if let Some(back) = l.back {
                 let back_sector = data.sidedefs[back].sector;
                 assert!(
-                    interior_is_on_the_right(ir, back_sector, q, p),
+                    sector_interior_is_on_the_right(ir, data, back_sector, q, p),
                     "back sidedef of line {p:?} -> {q:?} names sector {back_sector}, \
-                     but that room's interior is not on the left of travel"
+                     but that sector's interior is not on the left of travel"
                 );
             }
         }
@@ -805,15 +981,16 @@ mod tests {
         pieces
     }
 
-    /// Two rooms whose shared wall is *not* the full side of either: room
-    /// `a` runs y 0..256 and room `b` runs y 128..384, both against x = 256,
-    /// so they share only y 128..256.
+    /// Two rooms whose facing wall is *not* the full side of either: room
+    /// `a` runs y 0..256 against x = 256, room `b` runs y 128..384 against
+    /// x = 320 (a legal 64-unit gap east of room `a`), so they face each
+    /// other only over y 128..256.
     const OFFSET_ROOMS: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
       "rooms":[
         { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
            "floor":0, "ceiling":128, "light":160,
            "floor_tex":"F", "ceil_tex":"C", "wall_tex":"WA" },
-        { "id":"b", "footprint":[[256,128],[256,384],[512,384],[512,128]],
+        { "id":"b", "footprint":[[320,128],[320,384],[576,384],[576,128]],
            "floor":0, "ceiling":128, "light":160,
            "floor_tex":"F", "ceil_tex":"C", "wall_tex":"WB" }
       ],
@@ -828,7 +1005,7 @@ mod tests {
         "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }"#;
 
     #[test]
-    fn an_offset_room_pair_shares_only_the_overlapping_stretch_of_wall() {
+    fn an_offset_room_pair_faces_only_the_overlapping_stretch_of_wall() {
         let (_, data) = assert_well_formed(OFFSET_ROOMS);
 
         // Room a's wall runs its own full height and is split at the
@@ -843,14 +1020,14 @@ mod tests {
             "room a's wall keeps its own ends (y 0 and y 256) around the opening"
         );
         assert_eq!(
-            wall_pieces(&data, 1, 256),
+            wall_pieces(&data, 1, 320),
             vec![(128, 160), (224, 384)],
             "room b's wall keeps its own ends (y 128 and y 384) around the opening"
         );
         assert_eq!(
             data.linedefs.iter().filter(|l| l.back.is_some()).count(),
-            1,
-            "exactly one two-sided opening"
+            2,
+            "exactly one near threshold and one far threshold"
         );
     }
 
@@ -873,16 +1050,21 @@ mod tests {
 
     #[test]
     fn an_l_shaped_room_is_not_adjacent_where_it_has_no_wall() {
-        // Room b sits against x = 256 over y 0..128 — inside room a's
-        // bounding box but past the end of room a's actual wall, which stops
-        // at y = 128. Bounding-box adjacency reported a shared wall here and
-        // cut a portal into thin air, naming room a's sector on a line
-        // nowhere near room a.
+        // Room b sits well clear of every real wall room a has (both its
+        // outer wall at x = 256, y 128..256, and its recessed inner wall at
+        // x = 128, y 0..128) — nowhere close enough in Y to face either one,
+        // however far east it sits in X. `facing_spans` matches real walls
+        // at any distance, not a bounding box, so simply placing room b
+        // "east of x = 256" the way earlier fixtures do is not by itself
+        // enough to prove non-adjacency here: room a's *recessed* wall would
+        // still genuinely face a room b placed at y 0..128, however far
+        // east — the exact bounding-box-shaped mistake this test exists to
+        // catch, just relocated by the gap model rather than eliminated.
         let ir_json = format!(
             r#"{{ "seed":1, "grid":64, "theme":"tech_base",
               "rooms":[
                 {L_SHAPED_A},
-                {{ "id":"b", "footprint":[[256,0],[256,128],[384,128],[384,0]],
+                {{ "id":"b", "footprint":[[320,-192],[320,-64],[448,-64],[448,-192]],
                    "floor":0, "ceiling":128, "light":160,
                    "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
               ],
@@ -899,12 +1081,12 @@ mod tests {
     #[test]
     fn an_l_shaped_room_opens_where_it_does_have_a_wall() {
         // The same L, with room b moved up against the stretch of wall that
-        // genuinely exists (y 128..256).
+        // genuinely exists (y 128..256), and out a legal 64-unit gap.
         let ir_json = format!(
             r#"{{ "seed":1, "grid":64, "theme":"tech_base",
               "rooms":[
                 {L_SHAPED_A},
-                {{ "id":"b", "footprint":[[256,128],[256,256],[384,256],[384,128]],
+                {{ "id":"b", "footprint":[[320,128],[320,256],[448,256],[448,128]],
                    "floor":0, "ceiling":128, "light":160,
                    "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
               ],
@@ -913,8 +1095,8 @@ mod tests {
         let (_, data) = assert_well_formed(&ir_json);
         assert_eq!(
             data.linedefs.iter().filter(|l| l.back.is_some()).count(),
-            1,
-            "the portal opened"
+            2,
+            "the portal opened: a near threshold and a far threshold"
         );
         assert_eq!(
             wall_pieces(&data, 0, 256),
@@ -923,8 +1105,9 @@ mod tests {
         );
     }
 
-    /// Two 256x512 rooms sharing the whole of x = 256, with two separate
-    /// openings in that one wall.
+    /// Two 256x512 rooms facing each other across a legal 64-unit gap (room
+    /// `a`'s east wall at x = 256, room `b`'s west wall at x = 320), with two
+    /// separate openings in that one wall pair.
     fn two_portal_ir(first: i32, first_width: i32, second: i32, second_width: i32) -> String {
         format!(
             r#"{{ "seed":1, "grid":64, "theme":"tech_base",
@@ -932,7 +1115,7 @@ mod tests {
                 {{ "id":"a", "footprint":[[0,0],[0,512],[256,512],[256,0]],
                    "floor":0, "ceiling":128, "light":160,
                    "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }},
-                {{ "id":"b", "footprint":[[256,0],[256,512],[512,512],[512,0]],
+                {{ "id":"b", "footprint":[[320,0],[320,512],[576,512],[576,0]],
                    "floor":0, "ceiling":128, "light":160,
                    "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
               ],
@@ -944,20 +1127,23 @@ mod tests {
     }
 
     #[test]
-    fn two_portals_in_one_wall_both_open_without_corrupting_each_other() {
+    fn two_portals_in_one_wall_pair_both_open_without_corrupting_each_other() {
         let (_, data) = assert_well_formed(&two_portal_ir(128, 64, 384, 64));
         assert_eq!(
             data.linedefs.iter().filter(|l| l.back.is_some()).count(),
-            2,
-            "both portals opened"
+            4,
+            "both portals opened, each with a near and a far threshold"
         );
-        for sector in [0, 1] {
-            assert_eq!(
-                wall_pieces(&data, sector, 256),
-                vec![(0, 96), (160, 352), (416, 512)],
-                "sector {sector}'s wall is in three pieces, one between the two openings"
-            );
-        }
+        assert_eq!(
+            wall_pieces(&data, 0, 256),
+            vec![(0, 96), (160, 352), (416, 512)],
+            "room a's wall is in three pieces, one between the two openings"
+        );
+        assert_eq!(
+            wall_pieces(&data, 1, 320),
+            vec![(0, 96), (160, 352), (416, 512)],
+            "room b's wall is in three pieces, one between the two openings"
+        );
     }
 
     #[test]
@@ -979,31 +1165,36 @@ mod tests {
         let (_, data) = assert_well_formed(&two_portal_ir(128, 128, 256, 128));
         assert_eq!(
             data.linedefs.iter().filter(|l| l.back.is_some()).count(),
-            2,
-            "both portals opened"
+            4,
+            "both portals opened, each with a near and a far threshold"
         );
-        for sector in [0, 1] {
-            assert_eq!(
-                wall_pieces(&data, sector, 256),
-                vec![(0, 64), (320, 512)],
-                "sector {sector} has no zero-length wall stub between the two openings"
-            );
-        }
+        assert_eq!(
+            wall_pieces(&data, 0, 256),
+            vec![(0, 64), (320, 512)],
+            "room a has no zero-length wall stub between the two openings"
+        );
+        assert_eq!(
+            wall_pieces(&data, 1, 320),
+            vec![(0, 64), (320, 512)],
+            "room b has no zero-length wall stub between the two openings"
+        );
     }
 
     #[test]
     fn sidedefs_face_their_sectors_when_room_a_is_west_of_a_vertical_wall() {
-        assert_well_formed(&ir_with_portal(128, (256, 128), 256));
+        assert_well_formed(&ir_with_portal(128, (256, 128), 320));
     }
 
     #[test]
     fn sidedefs_face_their_sectors_when_room_a_is_east_of_a_vertical_wall() {
+        // Room a's own wall stays at x = 256; room b (to a's west) is
+        // pushed a further 64 units west, to x = -64..192, for a legal gap.
         let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
           "rooms":[
             { "id":"a", "footprint":[[256,0],[256,256],[512,256],[512,0]],
                "floor":0, "ceiling":128, "light":160,
                "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
-            { "id":"b", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+            { "id":"b", "footprint":[[-64,0],[-64,256],[192,256],[192,0]],
                "floor":0, "ceiling":128, "light":160,
                "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
           ],
@@ -1013,12 +1204,14 @@ mod tests {
 
     #[test]
     fn sidedefs_face_their_sectors_when_room_a_is_south_of_a_horizontal_wall() {
+        // Room a's own wall stays at y = 256; room b (to a's north) is
+        // pushed a further 64 units north, to y = 320..576.
         let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
           "rooms":[
             { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
                "floor":0, "ceiling":128, "light":160,
                "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
-            { "id":"b", "footprint":[[0,256],[0,512],[256,512],[256,256]],
+            { "id":"b", "footprint":[[0,320],[0,576],[256,576],[256,320]],
                "floor":0, "ceiling":128, "light":160,
                "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
           ],
@@ -1028,12 +1221,14 @@ mod tests {
 
     #[test]
     fn sidedefs_face_their_sectors_when_room_a_is_north_of_a_horizontal_wall() {
+        // Room a's own wall stays at y = 256; room b (to a's south) is
+        // pushed a further 64 units south, to y = -64..192.
         let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
           "rooms":[
             { "id":"a", "footprint":[[0,256],[0,512],[256,512],[256,256]],
                "floor":0, "ceiling":128, "light":160,
                "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
-            { "id":"b", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+            { "id":"b", "footprint":[[0,-64],[0,192],[256,192],[256,-64]],
                "floor":0, "ceiling":128, "light":160,
                "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
           ],
@@ -1081,7 +1276,7 @@ mod tests {
         { "id":"a", "footprint":[[0,0],[0,256],[192,256],[256,192],[256,0]],
           "floor":0, "ceiling":128, "light":160,
           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
-        { "id":"b", "footprint":[[-256,0],[-256,256],[0,256],[0,0]],
+        { "id":"b", "footprint":[[-320,0],[-320,256],[-64,256],[-64,0]],
           "floor":0, "ceiling":128, "light":160,
           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
       ],
@@ -1092,18 +1287,59 @@ mod tests {
         let (_, data) = assert_well_formed(CHAMFERED_ROOM_WITH_PORTAL);
         assert_eq!(
             data.linedefs.iter().filter(|l| l.back.is_some()).count(),
-            1,
-            "the portal opened normally, away from the chamfer"
+            2,
+            "the portal opened normally, away from the chamfer, with a near and far threshold"
+        );
+    }
+
+    /// Room b is the full octagon fixture (`sectors::tests::OCTAGON`,
+    /// `OCTAGON_ROOM` above, and `doors::tests::OCTAGON_ROOM_B`): a
+    /// 256-unit square chamfered by 64 units at *every* corner, not just
+    /// one. `CHAMFERED_ROOM_WITH_PORTAL` above only ever exercises a
+    /// single-corner chamfer for a plain portal; the full octagon is
+    /// otherwise only proven for a door portal
+    /// (`doors::tests::a_door_into_an_octagonal_room_on_its_axis_aligned_wall_works`)
+    /// and for no portal at all
+    /// (`an_octagonal_room_with_no_portals_is_well_formed`) — this closes
+    /// that gap for the plain-portal case specifically. The door sits on
+    /// the octagon's west wall (x = 64, y in 64..192), a legal 64-unit gap
+    /// east of room a's own east wall (x = 0).
+    const OCTAGON_ROOM_WITH_PLAIN_PORTAL: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[-256,0],[-256,256],[0,256],[0,0]],
+           "floor":0, "ceiling":128, "light":160,
+           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+        { "id":"b",
+          "footprint":[[64,64],[64,192],[128,256],[256,256],[320,192],[320,64],[256,0],[128,0]],
+           "floor":0, "ceiling":128, "light":160,
+           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+      ],
+      "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":64, "at":[0,128] }] }"#;
+
+    #[test]
+    fn a_plain_portal_works_on_the_axis_aligned_wall_of_a_full_octagonal_room() {
+        let (_, data) = assert_well_formed(OCTAGON_ROOM_WITH_PLAIN_PORTAL);
+        assert_eq!(
+            data.linedefs.iter().filter(|l| l.back.is_some()).count(),
+            2,
+            "the portal opened normally, away from every chamfer, with a near and far threshold"
+        );
+        assert_eq!(
+            data.sectors.len(),
+            3,
+            "room a, the octagon, and the passage"
         );
     }
 
     /// Two right triangles splitting a 64-unit square along its own
     /// diagonal: room a is the upper-left half, room b the lower-right
     /// half. They share the *entire* diagonal (0,0)-(64,64) as a real wall
-    /// — but `wall_edges` filters diagonal edges out of `shared_spans`
-    /// entirely, so before this fix a portal placed here reported
-    /// `NotAdjacent` ("the rooms share no wall"), which is simply false:
-    /// they share exactly this wall, just not one v1 can cut a portal into.
+    /// — but `crate::geom::wall_edges` filters diagonal edges out of
+    /// `crate::geom::facing_spans` entirely, so before this fix a portal
+    /// placed here reported
+    /// `NotAdjacent` ("the rooms face no wall of each other"), which is
+    /// simply false: they share exactly this wall, just not one v1 can cut
+    /// a portal into.
     const DIAGONAL_TWIN_TRIANGLES: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
       "rooms":[
         { "id":"a", "footprint":[[0,0],[0,64],[64,64]],

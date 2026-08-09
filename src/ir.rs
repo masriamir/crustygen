@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
-use crate::geom::Pt;
+use crate::geom::{Pt, facing_spans, find_facing_span};
 
 impl<'de> Deserialize<'de> for Pt {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -17,9 +17,11 @@ impl<'de> Deserialize<'de> for Pt {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PortalKind {
-    /// An open doorway with no door sector.
+    /// An open passage through the wall gap, with no door sector — the
+    /// passage itself is still a real sector spanning the gap, just an open,
+    /// walkable one with no special.
     Plain,
-    /// A manual door with its own sector.
+    /// A manual door filling the wall gap with its own closed sector.
     Door,
     /// A door requiring a key.
     Locked,
@@ -142,18 +144,22 @@ pub struct Room {
 
 /// A connection between two rooms.
 ///
-/// `a` and `b` are not interchangeable for [`PortalKind::Door`] and
-/// [`PortalKind::Locked`]: the compiler always carves the door sector's
-/// recess out of room `b`'s side of the shared wall, leaving room `a`'s
-/// boundary untouched. Swapping `a` and `b` on such a portal physically
-/// relocates the door to the opposite room, not just its label.
+/// Rooms are authored apart, not flush: `a`'s wall and `b`'s wall face each
+/// other across a real void at least [`Ir::MIN_PORTAL_GAP`] units wide (see
+/// [`IrError::InvalidPortalGap`]), which the compiler fills with a passage —
+/// or, for [`PortalKind::Door`]/[`PortalKind::Locked`], a door sector — that
+/// spans the whole gap. `a` and `b` are not fully interchangeable: [`Self::at`]
+/// is always read against room `a`'s own wall coordinate (see that field's
+/// doc comment), so swapping the two labels without also updating `at` moves
+/// which room's wall the portal is measured from. The resulting geometry
+/// itself is symmetric — unlike the old flush-wall design, filling the gap
+/// no longer carves into either room's own territory, so which room is named
+/// `a` versus `b` no longer changes the map's real playable shape.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Portal {
     /// Identifier of the first room.
     pub a: String,
-    /// Identifier of the second room. For a door portal, this is the room
-    /// the compiler recesses to make room for the door sector — see the
-    /// struct-level note.
+    /// Identifier of the second room.
     pub b: String,
     /// The kind of connection.
     pub kind: PortalKind,
@@ -167,7 +173,10 @@ pub struct Portal {
     /// a zero or negative one would emit a degenerate or inverted opening.
     /// [`Ir::from_json`] rejects both.
     pub width: i32,
-    /// Midpoint of the opening on the shared wall.
+    /// A point on room `a`'s own wall: the coordinate that varies along the
+    /// wall gives the opening's along-wall midpoint, and the coordinate held
+    /// constant across it must equal room `a`'s own wall position exactly
+    /// (not room `b`'s, and not the gap's midpoint).
     pub at: Pt,
 }
 
@@ -330,6 +339,23 @@ pub enum IrError {
         /// The second room.
         b: String,
     },
+    /// A portal's facing walls are separated by a void narrower than
+    /// [`Ir::MIN_PORTAL_GAP`] units, or by a gap that is not a whole
+    /// multiple of it — rooms are authored apart, and the void between them
+    /// is real, solid wall, not the zero-thickness construction two flush
+    /// rooms produce.
+    #[error(
+        "portal `{a}` <-> `{b}` has a {gap}-unit gap between its facing walls; the gap must be \
+         at least 8 units and a multiple of 8"
+    )]
+    InvalidPortalGap {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The rejected gap width.
+        gap: i32,
+    },
     /// A room sets both [`Room::secret`] and an explicit [`Room::special`],
     /// leaving no way to tell which one the author actually wants.
     #[error("room `{room}` sets both `secret` and an explicit `special`; use one or the other")]
@@ -373,6 +399,16 @@ pub enum IrError {
 const MAP_RANGE: std::ops::RangeInclusive<i32> = (i16::MIN as i32)..=(i16::MAX as i32);
 
 impl Ir {
+    /// The minimum width of the void between two rooms' facing walls, in map
+    /// units, and the granularity every gap must be a whole multiple of.
+    ///
+    /// A compiler-construction constant, not an engine-sourced one — nothing
+    /// in the Doom engine constrains wall thickness. 8 is the smallest
+    /// distance that reads as real wall material rather than a rounding
+    /// artifact, and keeps every gap on the same fine grid door tracks and
+    /// jambs are commonly built on.
+    pub const MIN_PORTAL_GAP: i32 = 8;
+
     /// Parses and validates an IR document.
     ///
     /// Every numeric field a later pass divides by, halves, or writes into a
@@ -392,7 +428,10 @@ impl Ir {
     /// for a repeated room id, [`IrError::UnknownRoom`] for a portal naming a
     /// room that does not exist, [`IrError::OffGrid`] for any coordinate that
     /// is not a multiple of `grid`, [`IrError::LockedWithoutKey`] for a locked
-    /// portal that names no key, [`IrError::SecretWithExplicitSpecial`] for a
+    /// portal that names no key, [`IrError::InvalidPortalGap`] for a portal
+    /// whose facing walls are separated by less than [`Self::MIN_PORTAL_GAP`]
+    /// units or by a gap that is not a whole multiple of it,
+    /// [`IrError::SecretWithExplicitSpecial`] for a
     /// room that sets both `secret` and `special`, [`IrError::ExitUnknownRoom`]
     /// for an exit naming a room that does not exist,
     /// [`IrError::InvalidExitWidth`]/[`IrError::OddExitWidth`] for a
@@ -409,6 +448,7 @@ impl Ir {
 
         let seen = Self::validate_rooms(&ir)?;
         Self::validate_portals(&ir, &seen)?;
+        Self::validate_portal_gaps(&ir)?;
         Self::validate_exits(&ir, &seen)?;
 
         Ok(ir)
@@ -512,6 +552,43 @@ impl Ir {
         Ok(())
     }
 
+    /// Validates every portal's facing-wall gap.
+    ///
+    /// Only a portal whose `at` actually resolves to a real facing-wall pair
+    /// is checked here — [`crate::geom::find_facing_span`] applied to
+    /// [`crate::geom::facing_spans`] over the two rooms' footprints, the
+    /// exact geometry [`crate::compile::portals::resolve_portal`] uses at
+    /// compile time, so the two can never disagree about which span a point
+    /// resolves to. A portal naming rooms that share no facing wall at all,
+    /// or whose `at` lands off of every one they do share, is left for that
+    /// later, more specific structural error (`NotAdjacent`/`PortalOffWall`)
+    /// to report — this pass only judges the gap once a span is found.
+    ///
+    /// Runs after [`Self::validate_portals`], which already rejects an
+    /// unknown room id, so both room lookups below are guaranteed to
+    /// succeed.
+    fn validate_portal_gaps(ir: &Self) -> Result<(), IrError> {
+        for portal in &ir.portals {
+            let room_a = ir.room(&portal.a).expect("validated by validate_portals");
+            let room_b = ir.room(&portal.b).expect("validated by validate_portals");
+
+            let spans = facing_spans(&room_a.footprint, &room_b.footprint);
+            let Some(span) = find_facing_span(&spans, portal.at) else {
+                continue;
+            };
+
+            let gap = span.gap();
+            if gap < Self::MIN_PORTAL_GAP || gap % Self::MIN_PORTAL_GAP != 0 {
+                return Err(IrError::InvalidPortalGap {
+                    a: portal.a.clone(),
+                    b: portal.b.clone(),
+                    gap,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Validates every exit against the room ids [`Self::validate_rooms`]
     /// already collected.
     fn validate_exits(ir: &Self, seen: &HashSet<&str>) -> Result<(), IrError> {
@@ -557,6 +634,10 @@ impl Ir {
 mod tests {
     use super::{Ir, IrError, PortalKind};
 
+    // Room `b` sits a full grid step (64 units, a clean multiple of
+    // `Ir::MIN_PORTAL_GAP`) east of room `a`'s own east wall (still at
+    // x = 256, so `at` is unchanged from the pre-gap-model fixture): rooms
+    // are authored apart now, not flush.
     const TWO_ROOM: &str = r#"{
       "seed": 1, "grid": 64, "theme": "tech_base",
       "rooms": [
@@ -564,7 +645,7 @@ mod tests {
           "floor": 0, "ceiling": 128, "light": 160,
           "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
           "things": [{ "kind": "player1_start", "at": [128,128], "angle": 90 }] },
-        { "id": "b", "footprint": [[256,0],[256,256],[512,256],[512,0]],
+        { "id": "b", "footprint": [[320,0],[320,256],[576,256],[576,0]],
           "floor": 0, "ceiling": 128, "light": 160,
           "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
           "things": [] }
@@ -657,6 +738,85 @@ mod tests {
         ));
     }
 
+    /// Two rooms whose facing walls are separated by exactly `gap` units, on
+    /// a grid fine enough to express any `gap` from 0 upward.
+    fn ir_with_gap(gap: i32) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":4, "theme":"tech_base",
+              "rooms":[
+                {{ "id":"a", "footprint":[[0,0],[0,64],[64,64],[64,0]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }},
+                {{ "id":"b", "footprint":[[{},0],[{},64],[{},64],[{},0]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
+              ],
+              "portals":[{{ "a":"a", "b":"b", "kind":"plain", "width":32, "at":[64,32] }}] }}"#,
+            64 + gap,
+            64 + gap,
+            64 + gap + 64,
+            64 + gap + 64,
+        )
+    }
+
+    #[test]
+    fn rejects_two_rooms_authored_flush_with_no_gap_at_all() {
+        // Gap 0 is exactly the zero-thickness construction this model
+        // exists to forbid — the two walls are still recognized as facing
+        // each other (coincident, opposite winding), just with an invalid
+        // gap, rather than falling through to a generic "not adjacent"
+        // error that would misdescribe a wall that is plainly there.
+        assert!(matches!(
+            Ir::from_json(&ir_with_gap(0)),
+            Err(IrError::InvalidPortalGap { gap: 0, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_gap_narrower_than_the_minimum() {
+        assert!(matches!(
+            Ir::from_json(&ir_with_gap(4)),
+            Err(IrError::InvalidPortalGap { gap: 4, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_gap_that_is_not_a_multiple_of_the_minimum() {
+        // 12 clears the minimum (8) but is not a whole multiple of it.
+        assert!(matches!(
+            Ir::from_json(&ir_with_gap(12)),
+            Err(IrError::InvalidPortalGap { gap: 12, .. })
+        ));
+    }
+
+    #[test]
+    fn accepts_a_gap_at_exactly_the_minimum() {
+        assert!(
+            Ir::from_json(&ir_with_gap(8)).is_ok(),
+            "8 is the minimum, not a rejection boundary"
+        );
+    }
+
+    #[test]
+    fn accepts_a_gap_that_is_a_larger_multiple_of_the_minimum() {
+        assert!(Ir::from_json(&ir_with_gap(16)).is_ok());
+    }
+
+    #[test]
+    fn a_portal_whose_at_does_not_land_on_any_facing_span_is_not_gap_checked() {
+        // `at` sits on room a's own wall coordinate but outside the wall's
+        // along-range entirely (y = 128, past the 0..64 wall run) — no
+        // facing span matches, so gap validation has nothing to check and
+        // must not itself raise `InvalidPortalGap`; the later, more
+        // specific `CompileError::PortalOffWall` is `compile`'s job, not
+        // `Ir::from_json`'s.
+        let json = ir_with_gap(8).replace("\"at\":[64,32]", "\"at\":[64,128]");
+        assert!(
+            !matches!(Ir::from_json(&json), Err(IrError::InvalidPortalGap { .. })),
+            "no facing span matched, so the gap check must stay silent"
+        );
+    }
+
     #[test]
     fn rejects_a_room_whose_ceiling_is_not_above_its_floor() {
         let flat = TWO_ROOM.replace("\"ceiling\": 128", "\"ceiling\": 0");
@@ -677,7 +837,7 @@ mod tests {
 
     #[test]
     fn rejects_coordinates_and_heights_outside_the_binary_map_range() {
-        let far = TWO_ROOM.replace("[512,256]", "[65536,256]");
+        let far = TWO_ROOM.replace("[576,256]", "[65536,256]");
         assert!(matches!(
             Ir::from_json(&far),
             Err(IrError::CoordinateOutOfRange { x: 65536, .. })

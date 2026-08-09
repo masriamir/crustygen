@@ -137,7 +137,11 @@ mod tests {
         );
         let group = wad.map_group("MAP01").expect("group present");
         let map = Map::assemble(&wad, &group).expect("assembles");
-        assert_eq!(map.sectors().len(), 2, "two rooms");
+        assert_eq!(
+            map.sectors().len(),
+            3,
+            "two rooms plus the portal's passage sector"
+        );
     }
 
     #[test]
@@ -154,7 +158,11 @@ mod tests {
         );
         let group = wad.map_group("MAP01").expect("group present");
         let map = Map::assemble(&wad, &group).expect("assembles");
-        assert_eq!(map.sectors().len(), 2, "two rooms, same geometry");
+        assert_eq!(
+            map.sectors().len(),
+            3,
+            "two rooms plus the portal's passage sector, same geometry"
+        );
     }
 
     #[test]

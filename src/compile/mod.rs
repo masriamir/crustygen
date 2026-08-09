@@ -125,8 +125,8 @@ pub enum CompileError {
         /// The second room.
         b: String,
     },
-    /// A portal names two rooms that share no wall.
-    #[error("portal `{a}` <-> `{b}`: the rooms share no wall")]
+    /// A portal names two rooms that face no wall of each other.
+    #[error("portal `{a}` <-> `{b}`: the rooms face no wall of each other")]
     NotAdjacent {
         /// The first room.
         a: String,
@@ -134,7 +134,7 @@ pub enum CompileError {
         b: String,
     },
     /// A portal opening is wider than the wall it sits in.
-    #[error("portal `{a}` <-> `{b}`: opening of {width} exceeds the {available} shared wall")]
+    #[error("portal `{a}` <-> `{b}`: opening of {width} exceeds the {available} facing wall")]
     PortalTooWide {
         /// The first room.
         a: String,
@@ -142,11 +142,11 @@ pub enum CompileError {
         b: String,
         /// The requested opening width.
         width: i32,
-        /// The available shared-wall length.
+        /// The available facing-wall length.
         available: i32,
     },
-    /// A portal midpoint does not lie on the shared wall.
-    #[error("portal `{a}` <-> `{b}`: midpoint ({x}, {y}) is not on the shared wall")]
+    /// A portal midpoint does not lie on a facing wall.
+    #[error("portal `{a}` <-> `{b}`: midpoint ({x}, {y}) is not on a facing wall")]
     PortalOffWall {
         /// The first room.
         a: String,
@@ -200,35 +200,6 @@ pub enum CompileError {
         index: usize,
         /// The special it carries.
         special: u16,
-    },
-    /// A door portal's recess would be at least as deep as room `b`, which
-    /// would punch through or invert its far wall instead of stopping short
-    /// of it.
-    #[error(
-        "door `{a}` <-> `{b}` needs {needed} units of depth in room `{b}` but only {available} are available"
-    )]
-    DoorTooDeep {
-        /// The first room.
-        a: String,
-        /// The second room, whose wall is recessed.
-        b: String,
-        /// The depth the recess needs.
-        needed: i32,
-        /// The depth actually available in room `b` along that axis.
-        available: i32,
-    },
-    /// Two door portals recess into the same room and their carved
-    /// rectangles overlap, which would produce self-intersecting geometry.
-    #[error(
-        "door portals `{first_a}` <-> `{room}` and `{second_a}` <-> `{room}` both recess into room `{room}` and their carved areas overlap"
-    )]
-    OverlappingDoorRecesses {
-        /// The shared room both portals recess into.
-        room: String,
-        /// The far side of the first portal.
-        first_a: String,
-        /// The far side of the second portal.
-        second_a: String,
     },
     /// An exit's `at` does not lie on any wall of its host room.
     #[error("exit in room `{room}`: midpoint ({x}, {y}) is not on any wall of the room")]
@@ -402,21 +373,25 @@ pub struct Compiled {
 ///    substitution on `.special`, so it can run any time after step 1 and
 ///    before emission; placed here, immediately after, so it is not
 ///    forgotten.
-/// 3. [`portals::cut_portals`] opens every portal's shared wall. For a
-///    [`crate::ir::PortalKind::Plain`] portal this also emits the two-sided
-///    opening line; for a door portal it leaves the flanking walls cut but
-///    the opening itself unemitted, because that opening is a carved sector
-///    rather than a single line.
-/// 4. [`doors::emit_doors`] carves that dedicated sector for every door
-///    portal out of room `b`, allocating its tag from a fresh
-///    [`TagAllocator`] shared with every other tag-consuming pass.
+/// 3. [`portals::cut_portals`] cuts an opening into *each* room's own wall
+///    (rooms are authored apart — see [`crate::ir::Portal`] — so a portal
+///    never shares a single coincident wall between its two rooms). For a
+///    [`crate::ir::PortalKind::Plain`] portal this also fills the gap
+///    between the two openings with an open passage sector; for a door
+///    portal it leaves both flanking walls cut but the gap itself still
+///    empty, because that gap is a closed sector rather than a single line.
+/// 4. [`doors::emit_doors`] fills that gap with a dedicated closed sector for
+///    every door portal, allocating its tag from a fresh [`TagAllocator`]
+///    shared with every other tag-consuming pass. Neither room's own
+///    footprint is touched — the gap already exists by construction.
 /// 5. [`exits::emit_exits`] carves every level exit into its host room's own
 ///    wall, using the same [`TagAllocator`]. Runs after doors so a thing's
 ///    clearance (step 6) is measured against the exit's final geometry too.
 /// 6. [`things::place_things`] places every thing, measuring clearance and
 ///    headroom against the geometry emitted by steps 1–5 — not the IR's
-///    declared footprints, which a door recess or exit alcove can make stale
-///    — so it must run after doors and exits are carved, not before.
+///    declared footprints, which an exit alcove can still make stale even
+///    though a door no longer does — so it must run after doors and exits
+///    are carved, not before.
 /// 7. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
 ///    at tag 0, which would match every untagged sector in-engine.
 /// 8. [`textmap::emit_textmap`] renders the final, validated geometry.
