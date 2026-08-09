@@ -117,3 +117,82 @@ fn a_locked_door_survives_the_round_trip_with_its_special_and_tag() {
         "the blue card is in the map"
     );
 }
+
+/// A switch exit on room `a`'s south wall, a secret sector `b`, and one
+/// monster with a restricted skill set — the three new capabilities in one
+/// map, proving each survives a real crustywad round trip rather than only
+/// looking right as compiler-internal `MapData`.
+const EXIT_SECRET_AND_SKILLS: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+  "rooms":[
+    { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+      "floor":0, "ceiling":128, "light":160,
+      "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+      "things":[
+        { "kind":"player1_start", "at":[128,128], "angle":90 },
+        { "kind":"imp", "at":[64,64], "angle":0,
+          "skills": { "skill1":false, "skill2":false, "skill4":false, "skill5":false } }
+      ] },
+    { "id":"b", "footprint":[[256,0],[256,256],[512,256],[512,0]],
+      "floor":0, "ceiling":128, "light":160, "secret":true,
+      "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+  ],
+  "exits":[{ "room":"a", "trigger":"switch", "width":64, "at":[128,0] }],
+  "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }] }"#;
+
+#[test]
+fn an_exit_a_secret_sector_and_restricted_skills_all_survive_the_round_trip() {
+    let ir = Ir::from_json(EXIT_SECRET_AND_SKILLS).expect("ir");
+    let tables = Tables::load().expect("tables");
+    let out = compile(&ir, &tables).expect("compiles");
+
+    let mut builder = WadBuilder::new(WadKind::Pwad);
+    builder.add_lump("MAP01", b"");
+    builder.add_lump("TEXTMAP", out.textmap.as_bytes());
+    builder.add_lump("ENDMAP", b"");
+    let wad = Wad::from_bytes(builder.build().expect("serializes")).expect("parses");
+    let group = wad.map_group("MAP01").expect("group");
+    let map = Map::assemble(&wad, &group).expect("assembles");
+
+    // The exit: a real, usable, one-sided switch line.
+    let exit_special = i32::from(tables.exit_switch_special());
+    let exit_lines: Vec<_> = map
+        .linedefs()
+        .iter()
+        .filter(|l| l.special.special == exit_special)
+        .collect();
+    assert_eq!(exit_lines.len(), 1, "exactly one exit line assembled");
+    assert!(
+        map.linedef_left(exit_lines[0]).is_none(),
+        "the switch exit stays one-sided"
+    );
+
+    // The secret sector: room b carries the sourced secret special.
+    let secret_special = i32::from(tables.secret_sector_special());
+    assert_eq!(
+        map.sectors().len(),
+        2,
+        "two rooms, no door or alcove sector here"
+    );
+    assert_eq!(
+        map.sectors()[1].special,
+        secret_special,
+        "room b assembled with the secret sector special"
+    );
+    assert_eq!(
+        map.sectors()[0].special,
+        0,
+        "room a, which never opted in, has no special"
+    );
+
+    // The skill-restricted imp: crustywad folds skill1|skill2 -> bit 0,
+    // skill3 -> bit 1, skill4|skill5 -> bit 2 (see `map::graph::MapThing`).
+    // All four excluded skills clear both outer bits; skill3's default true
+    // keeps the middle bit set.
+    let imp_id = tables.thing_id("imp").expect("imp thing id");
+    let imp = map
+        .things()
+        .iter()
+        .find(|t| t.type_id == imp_id)
+        .expect("the imp is in the map");
+    assert_eq!(imp.flags & 0b111, 0b010, "only skill3 (bit 1) survived");
+}
