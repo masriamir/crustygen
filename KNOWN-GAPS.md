@@ -51,13 +51,6 @@ to end.
 
 ## Known gaps
 
-**No fixture anywhere has a 45-degree edge.** The design spec permits diagonal
-footprints, and two documented limitations rest on diagonal behavior:
-`shared_spans` cannot host a portal on a diagonal wall, and `depth_behind_wall`
-skips diagonal edges entirely — a room with a chamfered far side reports
-`DoorTooDeep { available: 0 }`, which reads as nonsense to an author. This is
-the next shape-space hole. Every previous one contained real defects.
-
 **The orphan-sidedef code path is documented but unexercised.** It fires only
 when an opening consumes a wall end to end so the reusable sidedef is never
 taken. No fixture reaches it.
@@ -93,6 +86,33 @@ Real doorways are routinely finer than the 64-unit grid their rooms sit on.
 **Tag 0 is rejected on any action line.** It is not "no tag" — it is the tag
 every untagged sector already carries, so an action left at zero matches every
 untagged sector in the map. One stray zero opens every door.
+
+**Portals and exits on diagonal walls remain unsupported by design, not by
+omission.** `wall_edges` (and so `shared_spans`) only ever reported
+axis-aligned edges, so a portal or exit requested on a genuinely diagonal wall
+used to fall through to `NotAdjacent`/`PortalOffWall`/`ExitOffWall` — messages
+that read as "there is no wall here" for a wall an author can plainly see.
+`resolve_portal` and `resolve_exit` now check `portals::on_diagonal_wall`
+before returning those errors and raise `CompileError::PortalOnDiagonalWall`/
+`ExitOnDiagonalWall` instead, naming the exact coordinate. Supporting a portal
+or exit *on* a diagonal wall properly would need a wall model wider than
+`(axis, fixed coordinate)`, which the opening-splitting, jamb, and recess
+machinery all assume; a chamfered room with its portals and doors on its
+square walls (the common real case) already works today, both proved by
+`portals::tests::a_portal_works_on_the_axis_aligned_wall_of_a_diagonally_shaped_room`
+and the equivalent exit/door fixtures.
+
+**`depth_behind_wall` measures diagonal far walls too, not just parallel
+ones.** It used to filter any edge with `across_p != across_q`, which
+correctly dropped a perpendicular side wall but *also* silently dropped a
+diagonal far wall — the two are geometrically distinct (a side wall bounds a
+single `along` position, a diagonal wall bounds a range with a linearly
+varying depth) but shared that one boolean. A room whose far side was
+chamfered therefore always measured `available: 0`, rejecting a door a deep
+room could plainly fit. The fix evaluates a diagonal edge's contribution at
+the two ends of its overlap with the opening (the minimum of a linear
+function over an interval always falls at an endpoint) instead of skipping it
+outright.
 
 **Lifts and teleports are repeatable, not one-shot.** A design choice, not a
 source fact: P5 requires a lift be operable from both ends, and a one-shot lift
