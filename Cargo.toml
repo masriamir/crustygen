@@ -11,6 +11,7 @@ description = "Generates playable Doom maps from a room-graph IR"
 [dependencies]
 crustywad = { version = "0.9.4", features = ["write", "nodebuild"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 thiserror = "2.0.20"
 toml = "1.1.4"
 

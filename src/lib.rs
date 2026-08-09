@@ -4,4 +4,5 @@
 //! geometry integrity and playability structurally rather than by inspection.
 
 pub mod geom;
+pub mod ir;
 pub mod tables;
