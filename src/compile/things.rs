@@ -67,10 +67,11 @@ fn emitted_clearance(data: &MapData, room_idx: usize, p: Pt) -> Option<f64> {
 /// Returns [`CompileError::UnknownThing`] for an unresolvable name,
 /// [`CompileError::ThingOutsideRoom`] for a point outside its room,
 /// [`CompileError::ThingTooClose`] when radius clearance fails,
-/// [`CompileError::NoHeadroom`] when the room is too short,
-/// [`CompileError::UnboundedRoom`] when a room's sector has no emitted
-/// linedef to measure against, and [`CompileError::OverlappingStarts`] for
-/// coincident player starts.
+/// [`CompileError::NoHeadroom`] when the room is too short — for the
+/// tallest placed thing, or for the player if the room is empty or shorter
+/// than the player alone — [`CompileError::UnboundedRoom`] when a room's
+/// sector has no emitted linedef to measure against, and
+/// [`CompileError::OverlappingStarts`] for coincident player starts.
 pub fn place_things(
     ir: &Ir,
     tables: &Tables,
@@ -78,9 +79,26 @@ pub fn place_things(
 ) -> Result<Vec<ThingOut>, CompileError> {
     let mut out = Vec::new();
     let mut starts: Vec<(i32, i32)> = Vec::new();
+    let player = tables.player();
 
     for (room_idx, room) in ir.rooms.iter().enumerate() {
         let headroom = room.ceiling - room.floor;
+
+        // P2's stated scope is "the player is always in that set" — a
+        // walkable room must admit the player regardless of what else it
+        // contains. Checked here, once per room, rather than only inside the
+        // per-thing loop below: a room with no `things` at all previously
+        // skipped this rule entirely, so an empty corridor too short for the
+        // player to stand in compiled clean (see `KNOWN-GAPS.md`).
+        if headroom < player.height {
+            return Err(CompileError::NoHeadroom {
+                room: room.id.clone(),
+                kind: "player".to_owned(),
+                have: headroom,
+                need: player.height,
+            });
+        }
+
         for thing in &room.things {
             let id = tables
                 .thing_id(&thing.kind)
@@ -360,6 +378,48 @@ mod tests {
             stale > f64::from(r),
             "footprint-only clearance ({stale}) looks safe even though the point is rejected \
              against the emitted geometry — that gap is exactly what data-based clearance closes"
+        );
+    }
+
+    /// A 512x64 corridor with no things at all — a shape distinct from every
+    /// other fixture in this file (all 256-squares carrying an explicit
+    /// thing), and specifically a room P2's blanket check must still cover
+    /// even though nothing is ever placed inside it.
+    fn empty_corridor_json(ceiling: i32) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":64, "theme":"tech_base",
+              "rooms":[{{ "id":"corridor", "footprint":[[0,0],[0,64],[512,64],[512,0]],
+                "floor":0, "ceiling":{ceiling}, "light":160,
+                "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W", "things":[] }}],
+              "portals":[] }}"#
+        )
+    }
+
+    #[test]
+    fn p2_an_empty_room_too_short_for_the_player_is_rejected() {
+        // Before this fix, `NoHeadroom` only fired inside the per-thing
+        // loop, so a room with no `things` at all skipped the check
+        // entirely — an empty corridor too short to stand in compiled
+        // clean. See `KNOWN-GAPS.md`'s former "P2 is only partially
+        // covered" note.
+        let tables = Tables::load().expect("tables");
+        let h = tables.player().height;
+
+        let ok = Ir::from_json(&empty_corridor_json(h)).expect("ir");
+        let data_ok = compiled_data(&ok, &tables);
+        assert!(
+            place_things(&ok, &tables, &data_ok).is_ok(),
+            "at exactly the player's height, an empty room is fine"
+        );
+
+        let bad = Ir::from_json(&empty_corridor_json(h - 1)).expect("ir");
+        let data_bad = compiled_data(&bad, &tables);
+        assert!(
+            matches!(
+                place_things(&bad, &tables, &data_bad),
+                Err(CompileError::NoHeadroom { .. })
+            ),
+            "an empty room one unit too short must still be rejected"
         );
     }
 }

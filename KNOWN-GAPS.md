@@ -7,8 +7,8 @@ otherwise have to re-derive.
 
 ## Not implemented, by design
 
-The compiler covers structural invariants S1–S6 and playability rules P1, P3,
-P4, P8, P9, P11, P13, P14, P19, P24, P25.
+The compiler covers structural invariants S1–S6 and playability rules P1, P2,
+P3, P4, P8, P9, P11, P13, P14, P19, P24, P25.
 
 Deliberately absent, deferred to the next stage: **P5** (lifts), **P6** (monster
 mobility), **P7** (no softlock), **P10** (clean vertical tiling), **P12** (sky
@@ -19,17 +19,16 @@ safety).
 
 P7 and P20 both need a key-aware reachability flood that does not exist yet.
 
-**P2 (headroom) is only partially covered.** `compile::things::place_things`
-rejects a placed thing whose room lacks headroom for it (`NoHeadroom`), which
-is a real per-thing check, not a stub — but it only runs where the IR places a
-thing. A room with no things in it gets no headroom check at all, so P2's
-literal scope ("a walkable sector's ceiling-minus-floor gap must be at least
-the height of the tallest thing required to occupy or pass through it — the
-player is always in that set") is not fully enforced: an empty corridor too
-short for the player to stand in would compile cleanly today. P25 (start
-clearance) *is* fully covered by the same code path, since every player start
-is itself a thing and always goes through the identical clearance/headroom/
-overlap checks.
+**P2 (headroom) is now fully covered.** `compile::things::place_things` checks
+every room's headroom against the player's own height once per room,
+regardless of whether that room places any things at all, in addition to the
+existing per-thing check for anything taller than the player. Previously the
+check only ran inside the per-thing loop, so a room with no things skipped it
+entirely and an empty corridor too short for the player to stand in compiled
+clean; `things::tests::p2_an_empty_room_too_short_for_the_player_is_rejected`
+pins the fix. P25 (start clearance) is fully covered by the same code path,
+since every player start is itself a thing and always goes through the
+identical clearance/headroom/overlap checks.
 
 Also absent: the packer, the verifier, the conformance report, the blank
 Markdown template, and any authored map. Specials for lifts, teleports, exits
