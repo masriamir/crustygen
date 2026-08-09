@@ -1,0 +1,19 @@
+[workspace]
+
+[package]
+name = "crustygen"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94.0"
+publish = false
+description = "Generates playable Doom maps from a room-graph IR"
+
+[dependencies]
+crustywad = { version = "0.9.4", features = ["write", "nodebuild"] }
+
+[lints.rust]
+missing_docs = "deny"
+
+[lints.clippy]
+all = "warn"
+pedantic = "warn"
