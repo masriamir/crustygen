@@ -4,7 +4,7 @@
       "floor":0, "ceiling":128, "light":160,
       "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
       "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
-    { "id":"b", "footprint":[[256,0],[256,256],[512,256],[512,0]],
+    { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
       "floor":0, "ceiling":128, "light":160,
       "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
   ],

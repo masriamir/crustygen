@@ -36,7 +36,11 @@ fn compiler_output_assembles_through_crustywad() {
     let group = wad.map_group("MAP01").expect("group");
     let map = Map::assemble(&wad, &group).expect("assembles");
 
-    assert_eq!(map.sectors().len(), 2, "two rooms");
+    assert_eq!(
+        map.sectors().len(),
+        3,
+        "two rooms plus the portal's passage sector"
+    );
     assert_eq!(map.things().len(), 1, "one player start");
     assert!(
         map.linedefs().iter().any(|l| map.linedef_left(l).is_some()),
@@ -54,7 +58,7 @@ const LOCKED_DOOR: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
         { "kind":"player1_start", "at":[128,128], "angle":90 },
         { "kind":"blue_card", "at":[64,64], "angle":0 }
       ] },
-    { "id":"b", "footprint":[[256,0],[256,256],[512,256],[512,0]],
+    { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
       "floor":0, "ceiling":128, "light":160,
       "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
   ],
@@ -132,7 +136,7 @@ const EXIT_SECRET_AND_SKILLS: &str = r#"{ "seed":1, "grid":64, "theme":"tech_bas
         { "kind":"imp", "at":[64,64], "angle":0,
           "skills": { "skill1":false, "skill2":false, "skill4":false, "skill5":false } }
       ] },
-    { "id":"b", "footprint":[[256,0],[256,256],[512,256],[512,0]],
+    { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
       "floor":0, "ceiling":128, "light":160, "secret":true,
       "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
   ],
@@ -170,8 +174,8 @@ fn an_exit_a_secret_sector_and_restricted_skills_all_survive_the_round_trip() {
     let secret_special = i32::from(tables.secret_sector_special());
     assert_eq!(
         map.sectors().len(),
-        2,
-        "two rooms, no door or alcove sector here"
+        3,
+        "two rooms plus the portal's own passage sector; no door or alcove sector here"
     );
     assert_eq!(
         map.sectors()[1].special,
