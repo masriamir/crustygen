@@ -49,3 +49,26 @@ radius = 30
 height = 56
 hitscan = false
 source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_SERGEANT] (demon/pinky): radius = 30*FRACUNIT, height = 56*FRACUNIT, doomednum = 3002; missilestate = 0 (no ranged attack state at all — melee only, via A_SargAttack). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c — matches placeholder, unchanged"
+
+# The sector special that marks a sector "secret" (rule P18). This is a
+# sector type, not a linedef special — a distinct numeric space from
+# `vocabulary.toml`'s [specials] table.
+[sector]
+secret = 9
+source = "id-Software/DOOM linuxdoom-1.10/p_spec.c, P_PlayerInSpecialSector: 'case 9: // SECRET SECTOR / player->secretcount++; / sector->special = 0; break;' — the engine's secret counter increments only when the player's sector special reads 9, which is why P18 checks the special rather than any authorial intent. P_SpawnSpecials confirms the same type drives the level-load %secrets total: 'case 9: // SECRET SECTOR / totalsecret++; break;'. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_spec.c"
+
+# Sector specials for the three damage tiers `flats.liquid.damage_tier`
+# names (light | medium | heavy). All three deal their damage once every 32
+# tics ('if (!(leveltime&0x1f))') and are blocked entirely by a radiation
+# suit or the `pw_ironfeet` power ('if (!player->powers[pw_ironfeet])'),
+# which is the primitive P17 (damage survivability) reasons about. Type 16
+# is used for "heavy" rather than the mechanically identical type 4: both
+# deal 20 damage, but 4 ("STROBE HURT") also drives a strobing light effect
+# (P_SpawnStrobeFlash in P_SpawnSpecials) that has nothing to do with the
+# spec's damage_tier concept, so 16 is the tier without a side effect riding
+# along with it.
+[sector.damage]
+light = 7
+medium = 5
+heavy = 16
+source = "id-Software/DOOM linuxdoom-1.10/p_spec.c, P_PlayerInSpecialSector: 'case 7: // NUKAGE DAMAGE ... P_DamageMobj (player->mo, NULL, NULL, 5);' (light, 5 damage); 'case 5: // HELLSLIME DAMAGE ... P_DamageMobj (player->mo, NULL, NULL, 10);' (medium, 10 damage); 'case 16: // SUPER HELLSLIME DAMAGE / case 4: // STROBE HURT ... P_DamageMobj (player->mo, NULL, NULL, 20);' (heavy, 20 damage; 16 and 4 share the same damage case, but only 4 is also handled in P_SpawnSpecials' light-effect switch). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_spec.c"

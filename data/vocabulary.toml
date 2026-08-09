@@ -19,8 +19,10 @@ red_card = 13
 blue_skull = 40
 yellow_skull = 39
 red_skull = 38
+teleport_dest = 14
 source = "id-Software/DOOM linuxdoom-1.10/p_mobj.c, P_SpawnMapThing: 'if (mthing->type <= 4) { playerstarts[mthing->type-1] = *mthing; ... }' establishes doomednum 1 as player 1's start. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_mobj.c — monster doomednums (zombieman 3004, shotgun_guy 9, imp 3001, pinky 3002) cross-checked against info.c mobjinfo in the same pinned commit, see data/engine.toml [species.*] citations"
 keys_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo, read at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0. Each entry's first field is its doomednum and its second its spawnstate, and states[] at the same commit gives each spawnstate's sprite: MT_MISC4 = { 5, S_BKEY } with S_BKEY = {SPR_BKEY,...} (blue card); MT_MISC6 = { 6, S_YKEY } / SPR_YKEY (yellow card); MT_MISC5 = { 13, S_RKEY } / SPR_RKEY (red card); MT_MISC9 = { 40, S_BSKULL } / SPR_BSKU (blue skull); MT_MISC7 = { 39, S_YSKULL } / SPR_YSKU (yellow skull); MT_MISC8 = { 38, S_RSKULL } / SPR_RSKU (red skull). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+teleport_dest_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_TELEPORTMAN]: doomednum = 14 (with spawnstate S_NULL, so it renders nothing — it is a pure position/angle marker). p_telept.c, EV_Teleport confirms the role: it walks every sector whose tag equals the teleport line's tag, finds the one MT_TELEPORTMAN mobj in that sector ('if (m->type != MT_TELEPORTMAN) continue;'), and moves the teleporting thing to that mobj's (x, y) and angle ('thing->angle = m->angle;'). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_telept.c"
 
 # Linedef specials the compiler writes onto a door portal's two face lines.
 #
@@ -40,6 +42,55 @@ yellow_skull = 27
 red_card = 28
 red_skull = 28
 source = "id-Software/DOOM linuxdoom-1.10/p_doors.c, EV_VerticalDoor lock switch: 'case 26: // Blue Lock / case 32: ... if (!player->cards[it_bluecard] && !player->cards[it_blueskull])'; 'case 27: // Yellow Lock / case 34: ... it_yellowcard ... it_yellowskull'; 'case 28: // Red Lock / case 33: ... it_redcard ... it_redskull' — each keyed type accepts the card OR the skull of its color, which is why both map to the same special. The second switch in the same function gives 'case 1: case 26: case 27: case 28: door->type = normal;', so 26/27/28 are the repeatable open-wait-close forms (31-34 are the one-shot 'open' forms, which clear line->special). p_switch.c, P_UseSpecialLine: 'case 26: // Blue Door/Locked', 'case 27: // Yellow Door /Locked', 'case 28: // Red Door /Locked' route to EV_VerticalDoor. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_doors.c and .../p_switch.c"
+
+# Line specials for the level exit. `progression.exit.kind` (normal | secret)
+# and `progression.exit.trigger` (switch | walkover) cross to four specials;
+# `kind: both` places one of each normal special and one of each secret
+# special rather than needing a fifth entry.
+#
+# All four are one-shot in vanilla ("S1"/"W1" in the community naming the
+# other tables in this file also use): ending the level makes a second use
+# moot, so — unlike `door` or `lift` below — no repeatable ("SR"/"WR") variant
+# exists for any of them, and none is needed here.
+[specials.exit]
+switch = 11
+walkover = 52
+secret_switch = 51
+secret_walkover = 124
+source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, P_UseSpecialLine: 'case 11: // Exit level / P_ChangeSwitchTexture(line,0); / G_ExitLevel ();' (switch, normal) and 'case 51: // Secret EXIT / P_ChangeSwitchTexture(line,0); / G_SecretExitLevel ();' (switch, secret) — both call P_ChangeSwitchTexture with useAgain=0, vanilla's one-shot ('S1') form. p_spec.c, P_CrossSpecialLine: 'case 52: // EXIT! / G_ExitLevel ();' (walkover, normal) and 'case 124: // Secret EXIT / G_SecretExitLevel ();' (walkover, secret), both in the function's leading 'TRIGGERS' block (one-shot; the level ending makes the usual line->special=0 reset moot). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_switch.c and .../p_spec.c"
+
+# Line specials for a lift: Doom's "PlatDownWaitUpStay" plat, which starts
+# down and, on trigger, raises to meet the highest neighboring floor, waits,
+# then lowers back. `progression.lifts.trigger` needs a switch and a
+# walkover form.
+#
+# The repeatable ("SR"/"WR") forms below are used rather than the one-shot
+# ("S1"/"W1") forms vanilla also defines for the same action (21 switch, 10
+# walkover): P5 requires a lift to be "operable from both ends", and a
+# once-only special would strand whichever side rode it first.
+[specials.lift]
+switch = 62
+walkover = 88
+source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, P_UseSpecialLine, under the '// BUTTONS' block: 'case 62: // PlatDownWaitUpStay / if (EV_DoPlat(line,downWaitUpStay,1)) / P_ChangeSwitchTexture(line,1);' — useAgain=1, vanilla's repeatable ('SR') form (the one-shot 'S1' form is case 21, calling P_ChangeSwitchTexture(line,0)). p_spec.c, P_CrossSpecialLine, under the '// RETRIGGERS' block: 'case 88: // PlatDownWaitUp / EV_DoPlat(line,downWaitUpStay,0);' — no line->special=0 reset, vanilla's repeatable ('WR') form (the one-shot 'W1' form is case 10, in the function's leading TRIGGERS block, which does reset it). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_switch.c and .../p_spec.c"
+
+# Line special for a teleporter.
+#
+# The repeatable ("WR") form below is used rather than the one-shot ("W1")
+# form vanilla also defines (39, EV_Teleport followed by line->special = 0),
+# so the same line can be crossed more than once — by a returning player, or
+# by more than one monster in a teleport ambush
+# (combat.ambush.teleport_ambushes).
+#
+# Nuance worth recording: unlike most walkover specials, a teleport line is
+# *not* usable from its back side even though P_CrossSpecialLine (unlike
+# P_UseSpecialLine) does not gate on side by default — EV_Teleport itself
+# checks: 'if (side == 1) return 0; // Don't teleport if hit back of line, so
+# you can get out of teleporter.' So the "front side only" rule this project
+# already treats as a use-special nuance also applies to this one walkover
+# special, deliberately, so a teleported thing has an exit route.
+[specials.teleport]
+line = 97
+source = "id-Software/DOOM linuxdoom-1.10/p_spec.c, P_CrossSpecialLine, under the '// RETRIGGERS' block: 'case 97: // TELEPORT! / EV_Teleport( line, side, thing );' — no line->special=0 reset, vanilla's repeatable ('WR') form (the one-shot 'W1' form is case 39, in the function's leading TRIGGERS block: 'EV_Teleport( line, side, thing ); line->special = 0;'). p_telept.c, EV_Teleport: 'if (side == 1) return 0;' gates activation to the line's front side despite being walkover-triggered. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_spec.c and .../p_telept.c"
 
 [textures.tech_base]
 wall = "STARTAN3"

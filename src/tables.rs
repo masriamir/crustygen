@@ -38,6 +38,23 @@ struct TextureSet {
     door_track: String,
 }
 
+/// Sector specials keyed by tier name, as used for
+/// `flats.liquid.damage_tier` (`light` | `medium` | `heavy`).
+#[derive(Debug, Deserialize)]
+struct DamageTiers {
+    light: u16,
+    medium: u16,
+    heavy: u16,
+}
+
+/// Sector (not linedef) specials: a distinct numeric space from
+/// `vocabulary.toml`'s `[specials]` table.
+#[derive(Debug, Deserialize)]
+struct SectorSpecials {
+    secret: u16,
+    damage: DamageTiers,
+}
+
 #[derive(Debug, Deserialize)]
 struct Engine {
     movement: Movement,
@@ -45,6 +62,31 @@ struct Engine {
     light: LightRange,
     player: ThingDims,
     species: HashMap<String, ThingDims>,
+    sector: SectorSpecials,
+}
+
+/// The linedef specials for the level exit, keyed by
+/// `progression.exit.kind` (`normal` uses `switch`/`walkover`, `secret` uses
+/// `secret_switch`/`secret_walkover`; `both` places one of each).
+#[derive(Debug, Deserialize)]
+struct ExitSpecials {
+    switch: u16,
+    walkover: u16,
+    secret_switch: u16,
+    secret_walkover: u16,
+}
+
+/// The linedef specials for a lift, keyed by `progression.lifts.trigger`.
+#[derive(Debug, Deserialize)]
+struct LiftSpecials {
+    switch: u16,
+    walkover: u16,
+}
+
+/// The linedef special for a teleporter line.
+#[derive(Debug, Deserialize)]
+struct TeleportSpecial {
+    line: u16,
 }
 
 /// The linedef specials that open a door, keyed the same way the engine
@@ -57,6 +99,9 @@ struct Engine {
 struct Specials {
     door: u16,
     locked: HashMap<String, toml::Value>,
+    exit: ExitSpecials,
+    lift: LiftSpecials,
+    teleport: TeleportSpecial,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,6 +214,70 @@ impl Tables {
             .ok()
     }
 
+    /// The linedef special for a switch-activated normal exit
+    /// (`progression.exit.kind = normal`, `trigger = switch`).
+    #[must_use]
+    pub fn exit_switch_special(&self) -> u16 {
+        self.vocabulary.specials.exit.switch
+    }
+
+    /// The linedef special for a walkover-activated normal exit
+    /// (`progression.exit.kind = normal`, `trigger = walkover`).
+    #[must_use]
+    pub fn exit_walkover_special(&self) -> u16 {
+        self.vocabulary.specials.exit.walkover
+    }
+
+    /// The linedef special for a switch-activated secret exit
+    /// (`progression.exit.kind = secret`, `trigger = switch`).
+    #[must_use]
+    pub fn secret_exit_switch_special(&self) -> u16 {
+        self.vocabulary.specials.exit.secret_switch
+    }
+
+    /// The linedef special for a walkover-activated secret exit
+    /// (`progression.exit.kind = secret`, `trigger = walkover`).
+    #[must_use]
+    pub fn secret_exit_walkover_special(&self) -> u16 {
+        self.vocabulary.specials.exit.secret_walkover
+    }
+
+    /// The linedef special for a switch-triggered lift.
+    #[must_use]
+    pub fn lift_switch_special(&self) -> u16 {
+        self.vocabulary.specials.lift.switch
+    }
+
+    /// The linedef special for a walkover-triggered lift.
+    #[must_use]
+    pub fn lift_walkover_special(&self) -> u16 {
+        self.vocabulary.specials.lift.walkover
+    }
+
+    /// The linedef special for a teleporter line.
+    #[must_use]
+    pub fn teleport_special(&self) -> u16 {
+        self.vocabulary.specials.teleport.line
+    }
+
+    /// The sector special marking a sector "secret" (rule P18).
+    #[must_use]
+    pub fn secret_sector_special(&self) -> u16 {
+        self.engine.sector.secret
+    }
+
+    /// The sector special for a liquid's damage tier (`flats.liquid.damage_tier`:
+    /// `light`, `medium`, or `heavy`), if the tier name is known.
+    #[must_use]
+    pub fn damage_special(&self, tier: &str) -> Option<u16> {
+        match tier {
+            "light" => Some(self.engine.sector.damage.light),
+            "medium" => Some(self.engine.sector.damage.medium),
+            "heavy" => Some(self.engine.sector.damage.heavy),
+            _ => None,
+        }
+    }
+
     /// The texture for a role (`wall`, `floor`, `ceiling`, `door`,
     /// `door_track`) under a theme, if both resolve.
     #[must_use]
@@ -236,5 +345,77 @@ mod tests {
         // The citation strings living alongside the numbers must never be
         // mistaken for one.
         assert_eq!(t.locked_door_special("source"), None);
+    }
+
+    /// Every name the compiler, the playability rules, or the design's
+    /// template frontmatter (`docs/superpowers/specs/2026-08-09-crustygen-map-spec-design.md`
+    /// section 5) references for exits, lifts, teleports, secrets, and
+    /// liquid damage must resolve through `Tables` — and a name that is not
+    /// in either table must fail loudly (`None`), never fall back to a
+    /// guessed value.
+    #[test]
+    fn exit_lift_teleport_and_sector_specials_resolve() {
+        let t = Tables::load().expect("tables load");
+
+        // `progression.exit.kind` (normal | secret) crossed with
+        // `progression.exit.trigger` (switch | walkover); `kind: both`
+        // places one of each rather than needing a fifth special.
+        let exits = [
+            t.exit_switch_special(),
+            t.exit_walkover_special(),
+            t.secret_exit_switch_special(),
+            t.secret_exit_walkover_special(),
+        ];
+        for special in exits {
+            assert_ne!(special, 0, "an exit special must be a real linedef special");
+        }
+        assert_eq!(
+            exits.iter().collect::<std::collections::HashSet<_>>().len(),
+            4,
+            "the four exit specials are all distinct"
+        );
+
+        // `progression.lifts.trigger` (walkover | switch | both_ends): the
+        // repeatable form for each of the two trigger kinds.
+        assert_ne!(t.lift_switch_special(), 0, "a lift switch special exists");
+        assert_ne!(
+            t.lift_walkover_special(),
+            0,
+            "a lift walkover special exists"
+        );
+        assert_ne!(
+            t.lift_switch_special(),
+            t.lift_walkover_special(),
+            "the switch and walkover lift specials are distinct"
+        );
+
+        // `progression.teleports`: the line special and the destination
+        // thing a `teleport` portal needs on both ends.
+        assert_ne!(t.teleport_special(), 0, "a teleport special exists");
+        assert!(
+            t.thing_id("teleport_dest").is_some(),
+            "`teleport_dest` has a thing ID"
+        );
+
+        // Rule P18's secret sector special.
+        assert_ne!(
+            t.secret_sector_special(),
+            0,
+            "a secret sector special exists"
+        );
+
+        // `flats.liquid.damage_tier` (light | medium | heavy).
+        let light = t.damage_special("light").expect("light tier resolves");
+        let medium = t.damage_special("medium").expect("medium tier resolves");
+        let heavy = t.damage_special("heavy").expect("heavy tier resolves");
+        assert!(
+            light != medium && medium != heavy && light != heavy,
+            "the three damage tiers are distinct sector specials"
+        );
+        assert_eq!(
+            t.damage_special("radioactive"),
+            None,
+            "an unknown damage tier must fail loudly, not silently fall back"
+        );
     }
 }
