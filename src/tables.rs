@@ -54,6 +54,75 @@ pub struct PickupEntry {
     pub class: Option<i32>,
 }
 
+/// The four ammunition pools weapons draw from (`ammotype_t` in the pinned
+/// Doom source: `am_clip`, `am_shell`, `am_cell`, `am_misl`, in that order).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AmmoType {
+    /// Bullets (`am_clip`) — pistol and chaingun ammo.
+    Bullets,
+    /// Shotgun shells (`am_shell`) — shotgun and super shotgun ammo.
+    Shells,
+    /// Plasma cells (`am_cell`) — plasma rifle and BFG9000 ammo.
+    Cells,
+    /// Rockets (`am_misl`) — rocket launcher ammo.
+    Rockets,
+}
+
+/// A weapon's ammo draw and expected damage, as loaded from `engine.toml`'s
+/// `[weapons.damage.*]` table.
+///
+/// Doom weapon damage is randomized per shot, so there is no "damage per
+/// ammo unit" constant to read out of the engine — every field here beyond
+/// `ammo_type`/`ammo_per_shot` is a COMPUTED value, derived from the
+/// relevant fire-function formula and the real `P_Random()` lookup table's
+/// empirical distribution (not an assumed-uniform one). See the matching
+/// `[weapons.damage.*]` entry's `derivation` field for the arithmetic, and
+/// its `source` field for where the underlying formula lives. `rocket_launcher`
+/// and `bfg9000` in particular carry an explicit modeling assumption in
+/// their `derivation` — see `engine.toml` for the full statement.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct WeaponDamage {
+    /// Which ammo pool this weapon draws from.
+    pub ammo_type: AmmoType,
+    /// Units of `ammo_type` consumed per trigger pull.
+    pub ammo_per_shot: i32,
+    /// Expected damage dealt to a directly hit target per trigger pull.
+    pub expected_damage_per_shot: f64,
+    /// Expected damage per unit of `ammo_type` consumed
+    /// (`expected_damage_per_shot / ammo_per_shot`) — the figure
+    /// `arsenal.ammo.ratio` ("placed ammo damage / total baseline monster
+    /// HP") needs.
+    pub expected_damage_per_ammo: f64,
+}
+
+/// How much of which ammo pool a placed ammo pickup grants, as loaded from
+/// `engine.toml`'s `[ammo.pickups.*]` table (all entries but `backpack`,
+/// which has its own shape — see [`BackpackGrant`]).
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct AmmoPickup {
+    /// How many units of `ammo_type` this pickup grants.
+    pub amount: i32,
+    /// Which ammo pool this pickup grants into.
+    pub ammo_type: AmmoType,
+}
+
+/// The ammo a backpack grants — one full clipammo load of every ammo type
+/// simultaneously (`P_TouchSpecialThing`'s `SPR_BPAK` case in the pinned
+/// Doom source), unlike every other ammo pickup, which grants one amount of
+/// one type. Loaded from `engine.toml`'s `[ammo.pickups.backpack]` table.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct BackpackGrant {
+    /// Bullets granted.
+    pub bullets: i32,
+    /// Shells granted.
+    pub shells: i32,
+    /// Cells granted.
+    pub cells: i32,
+    /// Rockets granted.
+    pub rockets: i32,
+}
+
 /// A monster species' collision dimensions and attack behavior, as loaded
 /// from `engine.toml`'s `[species.*]` table.
 ///
@@ -130,6 +199,57 @@ struct LinedefAttrs {
     flags: LinedefFlags,
 }
 
+/// The empirical distribution of `P_Random()`'s real 256-entry lookup table
+/// (`rndtable` in the pinned Doom source's `m_random.c`), computed by
+/// reading the table rather than assuming it is uniform. Every
+/// `[weapons.damage.*]` entry's `expected_damage_per_shot` derives from one
+/// of these two means.
+#[derive(Debug, Deserialize)]
+struct RandomLut {
+    /// The mean of `rndtable[i] % 3` for i in 0..256 — used by the
+    /// `pistol`/`shotgun`/`chaingun`/`super_shotgun` bullet-and-pellet
+    /// formula.
+    mod3_mean: f64,
+    /// The mean of `rndtable[i] % 8` (equivalently `& 7`) for i in 0..256 —
+    /// used by the rocket/plasma/BFG missile direct-hit multiplier and the
+    /// BFG's spray-tracer formula.
+    mod8_mean: f64,
+}
+
+#[derive(Debug, Deserialize)]
+struct WeaponsDamage {
+    pistol: WeaponDamage,
+    shotgun: WeaponDamage,
+    super_shotgun: WeaponDamage,
+    chaingun: WeaponDamage,
+    rocket_launcher: WeaponDamage,
+    plasma_rifle: WeaponDamage,
+    bfg9000: WeaponDamage,
+}
+
+#[derive(Debug, Deserialize)]
+struct Weapons {
+    damage: WeaponsDamage,
+}
+
+#[derive(Debug, Deserialize)]
+struct AmmoPickups {
+    clip: AmmoPickup,
+    box_of_bullets: AmmoPickup,
+    shells: AmmoPickup,
+    box_of_shells: AmmoPickup,
+    rocket: AmmoPickup,
+    box_of_rockets: AmmoPickup,
+    cell_charge: AmmoPickup,
+    cell_pack: AmmoPickup,
+    backpack: BackpackGrant,
+}
+
+#[derive(Debug, Deserialize)]
+struct AmmoTable {
+    pickups: AmmoPickups,
+}
+
 #[derive(Debug, Deserialize)]
 struct Engine {
     movement: Movement,
@@ -141,6 +261,9 @@ struct Engine {
     pickups: HashMap<String, PickupEntry>,
     sector: SectorSpecials,
     linedef: LinedefAttrs,
+    random: RandomLut,
+    weapons: Weapons,
+    ammo: AmmoTable,
 }
 
 /// The linedef specials for the level exit, keyed by
@@ -419,6 +542,76 @@ impl Tables {
         }
     }
 
+    /// The mean of `P_Random()`'s real 256-entry lookup table's values,
+    /// taken modulo 3 — the distribution the `pistol`/`shotgun`/`chaingun`/
+    /// `super_shotgun` bullet-and-pellet damage formula
+    /// (`5*(P_Random()%3+1)`) actually draws from, not an assumed-uniform
+    /// one. `weapon_damage`'s
+    /// `expected_damage_per_shot` for those four weapons derives from this
+    /// value; see `engine.toml`'s `[random]` table for the full histogram.
+    #[must_use]
+    pub fn random_mod3_mean(&self) -> f64 {
+        self.engine.random.mod3_mean
+    }
+
+    /// The mean of `P_Random()`'s real 256-entry lookup table's values,
+    /// taken modulo 8 (equivalently `& 7`) — the distribution the rocket
+    /// launcher's and plasma rifle's direct-hit multiplier and the BFG's
+    /// spray-tracer formula actually draw from, not an assumed-uniform one.
+    /// See `engine.toml`'s `[random]` table for the full histogram.
+    #[must_use]
+    pub fn random_mod8_mean(&self) -> f64 {
+        self.engine.random.mod8_mean
+    }
+
+    /// A named weapon's ammo draw and expected damage (`pistol` | `shotgun`
+    /// | `super_shotgun` | `chaingun` | `rocket_launcher` | `plasma_rifle` |
+    /// `bfg9000`), if listed. The chainsaw and fist draw no ammo and are
+    /// deliberately absent — see `engine.toml`'s `[weapons.damage.*]`
+    /// header comment.
+    #[must_use]
+    pub fn weapon_damage(&self, name: &str) -> Option<WeaponDamage> {
+        let damage = &self.engine.weapons.damage;
+        match name {
+            "pistol" => Some(damage.pistol),
+            "shotgun" => Some(damage.shotgun),
+            "super_shotgun" => Some(damage.super_shotgun),
+            "chaingun" => Some(damage.chaingun),
+            "rocket_launcher" => Some(damage.rocket_launcher),
+            "plasma_rifle" => Some(damage.plasma_rifle),
+            "bfg9000" => Some(damage.bfg9000),
+            _ => None,
+        }
+    }
+
+    /// A named ammo pickup's grant amount and ammo type (`clip` |
+    /// `box_of_bullets` | `shells` | `box_of_shells` | `rocket` |
+    /// `box_of_rockets` | `cell_charge` | `cell_pack`), if listed.
+    /// `backpack` is not a valid name here — it grants all four ammo types
+    /// at once, so it has its own shape; see [`Tables::ammo_backpack_grant`].
+    #[must_use]
+    pub fn ammo_pickup(&self, name: &str) -> Option<AmmoPickup> {
+        let pickups = &self.engine.ammo.pickups;
+        match name {
+            "clip" => Some(pickups.clip),
+            "box_of_bullets" => Some(pickups.box_of_bullets),
+            "shells" => Some(pickups.shells),
+            "box_of_shells" => Some(pickups.box_of_shells),
+            "rocket" => Some(pickups.rocket),
+            "box_of_rockets" => Some(pickups.box_of_rockets),
+            "cell_charge" => Some(pickups.cell_charge),
+            "cell_pack" => Some(pickups.cell_pack),
+            _ => None,
+        }
+    }
+
+    /// The ammo a backpack grants — one full clipammo load of every ammo
+    /// type simultaneously, unlike every other ammo pickup.
+    #[must_use]
+    pub fn ammo_backpack_grant(&self) -> BackpackGrant {
+        self.engine.ammo.pickups.backpack
+    }
+
     /// The texture for a role (`wall`, `floor`, `ceiling`, `door`,
     /// `door_track`, `switch`) under a theme, if both resolve.
     #[must_use]
@@ -438,7 +631,18 @@ impl Tables {
 
 #[cfg(test)]
 mod tests {
-    use super::Tables;
+    use super::{AmmoType, Tables};
+
+    /// Compares two `f64` values within a small absolute tolerance rather
+    /// than `==` — every derived weapon-damage/ammo-ratio figure this file
+    /// checks is an exact dyadic rational (denominators are powers of two,
+    /// per the `[random]`/`[weapons.damage.*]` derivations in
+    /// `engine.toml`) and IEEE 754 arithmetic reproduces it exactly, but an
+    /// epsilon comparison is still the idiomatic, robust way to assert on
+    /// floats.
+    fn approx_eq(actual: f64, expected: f64) -> bool {
+        (actual - expected).abs() < 1e-9
+    }
 
     #[test]
     fn loads_and_resolves_known_entries() {
@@ -912,6 +1116,204 @@ mod tests {
             t.texture("switch", "plaid_theme"),
             None,
             "an unknown theme resolves no texture at all"
+        );
+    }
+
+    /// The `[random]` table's two means — the empirical distribution of the
+    /// real `rndtable`'s values modulo 3 and modulo 8 — must resolve to the
+    /// exact figures computed from the pinned source's 256-entry table, not
+    /// an assumed-uniform 0..255 distribution (see `engine.toml`'s
+    /// `[random]` derivation for the full histogram this checks against).
+    #[test]
+    fn random_distribution_resolves() {
+        let t = Tables::load().expect("tables load");
+        assert!(
+            approx_eq(t.random_mod3_mean(), 1.070_312_5),
+            "mod3_mean is the real rndtable's empirical mean, not the \
+             uniform-assumption value of 255/256 ~ 0.996"
+        );
+        assert!(
+            approx_eq(t.random_mod8_mean(), 3.476_562_5),
+            "mod8_mean is the real rndtable's empirical mean, close to but \
+             not exactly the uniform-assumption value of 3.5"
+        );
+    }
+
+    /// Every weapon in `[weapons.damage.*]` — the compiler's first COMPUTED
+    /// (not read) figures — must resolve its ammo type, ammo cost, and both
+    /// expected-damage figures, checked individually against the exact
+    /// arithmetic recorded in each entry's `derivation` field. The chainsaw
+    /// and fist draw no ammo and must resolve nothing, and an unknown
+    /// weapon name must fail loudly rather than silently fall back.
+    #[test]
+    fn every_weapon_damage_resolves() {
+        let t = Tables::load().expect("tables load");
+        // (name, ammo_type, ammo_per_shot, expected_damage_per_shot, expected_damage_per_ammo)
+        let weapons: &[(&str, AmmoType, i32, f64, f64)] = &[
+            ("pistol", AmmoType::Bullets, 1, 10.351_562_5, 10.351_562_5),
+            ("shotgun", AmmoType::Shells, 1, 72.460_937_5, 72.460_937_5),
+            (
+                "super_shotgun",
+                AmmoType::Shells,
+                2,
+                207.031_25,
+                103.515_625,
+            ),
+            ("chaingun", AmmoType::Bullets, 1, 10.351_562_5, 10.351_562_5),
+            (
+                "rocket_launcher",
+                AmmoType::Rockets,
+                1,
+                217.531_25,
+                217.531_25,
+            ),
+            (
+                "plasma_rifle",
+                AmmoType::Cells,
+                1,
+                22.382_812_5,
+                22.382_812_5,
+            ),
+            (
+                "bfg9000",
+                AmmoType::Cells,
+                40,
+                514.804_687_5,
+                12.870_117_187_5,
+            ),
+        ];
+        for (name, ammo_type, ammo_per_shot, dmg_per_shot, dmg_per_ammo) in weapons {
+            let w = t
+                .weapon_damage(name)
+                .unwrap_or_else(|| panic!("`{name}` weapon damage"));
+            assert_eq!(w.ammo_type, *ammo_type, "`{name}` ammo_type");
+            assert_eq!(w.ammo_per_shot, *ammo_per_shot, "`{name}` ammo_per_shot");
+            assert!(
+                approx_eq(w.expected_damage_per_shot, *dmg_per_shot),
+                "`{name}` expected_damage_per_shot: got {}, want {}",
+                w.expected_damage_per_shot,
+                dmg_per_shot
+            );
+            assert!(
+                approx_eq(w.expected_damage_per_ammo, *dmg_per_ammo),
+                "`{name}` expected_damage_per_ammo: got {}, want {}",
+                w.expected_damage_per_ammo,
+                dmg_per_ammo
+            );
+        }
+        assert_eq!(weapons.len(), 7, "every listed weapon was checked");
+        assert!(
+            t.weapon_damage("chainsaw").is_none(),
+            "the chainsaw draws no ammo and carries no [weapons.damage.*] entry"
+        );
+        assert!(
+            t.weapon_damage("fist").is_none(),
+            "the fist draws no ammo and carries no [weapons.damage.*] entry"
+        );
+        assert!(
+            t.weapon_damage("plaid_gun").is_none(),
+            "an unknown weapon name must fail loudly, not silently fall back"
+        );
+    }
+
+    /// Every named ammo pickup in `[ammo.pickups.*]` must resolve its grant
+    /// amount and ammo type, checked individually; the backpack's distinct
+    /// all-four-types shape must resolve through
+    /// [`Tables::ammo_backpack_grant`] and must NOT resolve through
+    /// [`Tables::ammo_pickup`], which only handles the single-amount/
+    /// single-type shape the other entries share.
+    #[test]
+    fn every_ammo_pickup_resolves() {
+        let t = Tables::load().expect("tables load");
+        // (name, amount, ammo_type)
+        let pickups: &[(&str, i32, AmmoType)] = &[
+            ("clip", 10, AmmoType::Bullets),
+            ("box_of_bullets", 50, AmmoType::Bullets),
+            ("shells", 4, AmmoType::Shells),
+            ("box_of_shells", 20, AmmoType::Shells),
+            ("rocket", 1, AmmoType::Rockets),
+            ("box_of_rockets", 5, AmmoType::Rockets),
+            ("cell_charge", 20, AmmoType::Cells),
+            ("cell_pack", 100, AmmoType::Cells),
+        ];
+        for (name, amount, ammo_type) in pickups {
+            let p = t
+                .ammo_pickup(name)
+                .unwrap_or_else(|| panic!("`{name}` ammo pickup"));
+            assert_eq!(p.amount, *amount, "`{name}` amount");
+            assert_eq!(p.ammo_type, *ammo_type, "`{name}` ammo_type");
+        }
+        assert_eq!(pickups.len(), 8, "every listed ammo pickup was checked");
+
+        let backpack = t.ammo_backpack_grant();
+        assert_eq!(backpack.bullets, 10, "backpack bullets");
+        assert_eq!(backpack.shells, 4, "backpack shells");
+        assert_eq!(backpack.cells, 20, "backpack cells");
+        assert_eq!(backpack.rockets, 1, "backpack rockets");
+
+        assert!(
+            t.ammo_pickup("backpack").is_none(),
+            "backpack grants all four ammo types and must be read through \
+             ammo_backpack_grant, not ammo_pickup"
+        );
+        assert!(
+            t.ammo_pickup("plaid_ammo").is_none(),
+            "an unknown ammo pickup name must fail loudly, not silently fall back"
+        );
+    }
+
+    /// End-to-end proof that the ammo-damage model is actually usable, not
+    /// merely present: computes `arsenal.ammo.ratio` ("placed ammo damage /
+    /// total baseline monster HP") for a small synthetic case — three
+    /// placed clips (pistol ammo, unambiguous: the chaingun draws on the
+    /// same pool at an identical per-bullet rate) and one placed box of
+    /// rockets (rocket launcher ammo, the only weapon on that pool) against
+    /// a room holding one zombieman and one imp — entirely by chaining the
+    /// public `Tables` accessors, and asserts the exact resulting ratio.
+    #[test]
+    fn ammo_ratio_end_to_end_synthetic_case() {
+        let t = Tables::load().expect("tables load");
+
+        let clip = t.ammo_pickup("clip").expect("clip pickup");
+        let pistol = t.weapon_damage("pistol").expect("pistol damage");
+        assert_eq!(
+            clip.ammo_type, pistol.ammo_type,
+            "the placed clips must feed the weapon being costed"
+        );
+        let clip_count = 3;
+        let clip_damage = f64::from(clip_count * clip.amount) * pistol.expected_damage_per_ammo;
+
+        let box_of_rockets = t.ammo_pickup("box_of_rockets").expect("rocket box pickup");
+        let rocket_launcher = t
+            .weapon_damage("rocket_launcher")
+            .expect("rocket launcher damage");
+        assert_eq!(
+            box_of_rockets.ammo_type, rocket_launcher.ammo_type,
+            "the placed rocket box must feed the weapon being costed"
+        );
+        let rocket_box_count = 1;
+        let rocket_damage = f64::from(rocket_box_count * box_of_rockets.amount)
+            * rocket_launcher.expected_damage_per_ammo;
+
+        let total_ammo_damage = clip_damage + rocket_damage;
+
+        let zombieman_hp = t.spawnhealth("zombieman").expect("zombieman spawnhealth");
+        let imp_hp = t.spawnhealth("imp").expect("imp spawnhealth");
+        let total_monster_hp = f64::from(zombieman_hp + imp_hp);
+
+        let ratio = total_ammo_damage / total_monster_hp;
+
+        assert!(
+            approx_eq(total_ammo_damage, 1_398.203_125),
+            "total placed ammo damage: got {total_ammo_damage}"
+        );
+        assert!(
+            approx_eq(total_monster_hp, 80.0),
+            "total baseline monster HP: got {total_monster_hp}"
+        );
+        assert!(
+            approx_eq(ratio, 17.477_539_062_5),
+            "arsenal.ammo.ratio for this synthetic case: got {ratio}"
         );
     }
 }
