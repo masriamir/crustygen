@@ -41,7 +41,9 @@ impl Axis {
 /// sidedefs bound to the two rooms' sectors.
 ///
 /// # Errors
-/// Returns [`CompileError::NotAdjacent`] when the rooms share no wall,
+/// Returns [`CompileError::PortalOnDiagonalWall`] when the opening sits on a
+/// diagonal wall, which v1 does not support hosting a portal on,
+/// [`CompileError::NotAdjacent`] when the rooms share no (axis-aligned) wall,
 /// [`CompileError::PortalOffWall`] when the midpoint is not on a shared wall,
 /// [`CompileError::PortalTooWide`] when the opening exceeds the shared span,
 /// [`CompileError::OverlappingPortals`] when two openings overlap on the same
@@ -461,13 +463,51 @@ pub(crate) struct PortalGeometry {
     pub(crate) open_hi: i32,
 }
 
+/// Whether an edge is diagonal (exactly 45 degrees) rather than axis-aligned.
+///
+/// [`crate::geom::is_axis_or_diagonal`] admits both; this distinguishes the
+/// two, since [`on_diagonal_wall`] only cares about the one [`wall_edges`]
+/// drops.
+fn is_diagonal_edge(a: Pt, b: Pt) -> bool {
+    let dx = (i64::from(b.x) - i64::from(a.x)).abs();
+    let dy = (i64::from(b.y) - i64::from(a.y)).abs();
+    dx == dy && dx != 0
+}
+
+/// Whether `p` lies on (not just inside) a diagonal edge of `poly`.
+///
+/// `pub(crate)` so `exits::resolve_exit` can give the same specific,
+/// honest error `resolve_portal` does below when an exit's `at` sits on a
+/// diagonal wall, rather than `ExitOffWall`'s "not on any wall" for a point
+/// that demonstrably is on one.
+pub(crate) fn on_diagonal_wall(poly: &[Pt], p: Pt) -> bool {
+    edges(poly).any(|(a, b)| {
+        if !is_diagonal_edge(a, b) {
+            return false;
+        }
+        let cross = (i64::from(p.y) - i64::from(a.y)) * (i64::from(b.x) - i64::from(a.x))
+            - (i64::from(p.x) - i64::from(a.x)) * (i64::from(b.y) - i64::from(a.y));
+        cross == 0
+            && p.x >= a.x.min(b.x)
+            && p.x <= a.x.max(b.x)
+            && p.y >= a.y.min(b.y)
+            && p.y <= a.y.max(b.y)
+    })
+}
+
 /// Resolves one portal against the rooms' real shared walls.
 ///
 /// # Errors
-/// Returns [`CompileError::NotAdjacent`] when the rooms share no wall at all,
-/// [`CompileError::PortalOffWall`] when the midpoint lies on none of the
-/// walls they do share, and [`CompileError::PortalTooWide`] when the opening
-/// would run past the ends of that wall.
+/// Returns [`CompileError::PortalOnDiagonalWall`] when `portal.at` sits on a
+/// diagonal edge of either room — a real wall, just not one [`wall_edges`]
+/// (and so [`shared_spans`]) considers, since v1 cannot cut a portal into
+/// one; checked before the two errors below so a diagonal wall is never
+/// misreported as "no wall" or "off the wall" when it demonstrably is a
+/// wall. Returns [`CompileError::NotAdjacent`] when the rooms share no
+/// axis-aligned wall at all, [`CompileError::PortalOffWall`] when the
+/// midpoint lies on none of the axis-aligned walls they do share, and
+/// [`CompileError::PortalTooWide`] when the opening would run past the ends
+/// of that wall.
 ///
 /// # Panics
 /// Panics if the portal names a room absent from `ir.rooms` — unreachable,
@@ -485,25 +525,46 @@ pub(crate) fn resolve_portal(ir: &Ir, portal: &Portal) -> Result<PortalGeometry,
         .expect("validated in Ir::from_json");
 
     let spans = shared_spans(ir, ia, ib);
-    if spans.is_empty() {
-        return Err(CompileError::NotAdjacent {
-            a: portal.a.clone(),
-            b: portal.b.clone(),
-        });
-    }
+    let matched = spans.iter().find(|span| {
+        let (on_axis, across) = span.axis.split(portal.at);
+        across == span.fixed && on_axis > span.lo && on_axis < span.hi
+    });
 
-    let span = spans
-        .into_iter()
-        .find(|span| {
-            let (on_axis, across) = span.axis.split(portal.at);
-            across == span.fixed && on_axis > span.lo && on_axis < span.hi
-        })
-        .ok_or_else(|| CompileError::PortalOffWall {
-            a: portal.a.clone(),
-            b: portal.b.clone(),
-            x: portal.at.x,
-            y: portal.at.y,
-        })?;
+    let span = if let Some(span) = matched {
+        *span
+    } else {
+        // Before reporting the less specific errors below, check whether
+        // the requested opening actually sits on a diagonal wall of either
+        // room: that is a real wall v1 simply cannot cut a portal into (see
+        // `wall_edges`'s doc comment), which deserves an honest, specific
+        // message rather than `NotAdjacent`'s "the rooms share no wall" for
+        // a wall that is demonstrably there, or `PortalOffWall`'s "not on
+        // the shared wall" for a point that is exactly on *a* wall, just
+        // not one this pass considers.
+        if on_diagonal_wall(&ir.rooms[ia].footprint, portal.at)
+            || on_diagonal_wall(&ir.rooms[ib].footprint, portal.at)
+        {
+            return Err(CompileError::PortalOnDiagonalWall {
+                a: portal.a.clone(),
+                b: portal.b.clone(),
+                x: portal.at.x,
+                y: portal.at.y,
+            });
+        }
+        return Err(if spans.is_empty() {
+            CompileError::NotAdjacent {
+                a: portal.a.clone(),
+                b: portal.b.clone(),
+            }
+        } else {
+            CompileError::PortalOffWall {
+                a: portal.a.clone(),
+                b: portal.b.clone(),
+                x: portal.at.x,
+                y: portal.at.y,
+            }
+        });
+    };
 
     // `width` is positive and even, so the halves are exact (Ir::from_json).
     let half = portal.width / 2;
@@ -978,5 +1039,133 @@ mod tests {
           ],
           "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[128,256] }] }"#;
         assert_well_formed(ir_json);
+    }
+
+    /// An octagon: a 256-unit square chamfered by 64 units at each corner,
+    /// with no portals. The spec's `architecture.room_shapes` names
+    /// octagonal rooms explicitly, but before this, no fixture anywhere in
+    /// this crate had a diagonal edge (see `KNOWN-GAPS.md`'s "no fixture
+    /// anywhere has a 45-degree edge"). Routed through `assert_well_formed`
+    /// so the sidedef-facing invariant itself runs against a genuinely
+    /// diagonal-edged room, not merely the closure/count checks
+    /// `sectors::tests` already covers for the same shape.
+    const OCTAGON_ROOM: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a",
+          "footprint":[[0,64],[0,192],[64,256],[192,256],[256,192],[256,64],[192,0],[64,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+      ],
+      "portals":[] }"#;
+
+    #[test]
+    fn an_octagonal_room_with_no_portals_is_well_formed() {
+        let (_, data) = assert_well_formed(OCTAGON_ROOM);
+        assert_eq!(data.sectors.len(), 1);
+        assert_eq!(data.linedefs.len(), 8, "eight walls, four of them diagonal");
+        assert!(
+            data.linedefs.iter().all(|l| l.back.is_none()),
+            "no portals means every wall, diagonal included, stays one-sided"
+        );
+    }
+
+    /// Room a is a pentagon: a 256-unit square with just its NE corner
+    /// chamfered by 64 units, leaving its west, south, and most of its
+    /// north/east walls axis-aligned. Room b is a plain square sharing room
+    /// a's *west* wall — nowhere near the chamfer — proving a portal still
+    /// works normally on the surviving axis-aligned wall of a diagonally
+    /// shaped room, which is the common real case the project's decision to
+    /// leave diagonal-wall portals unsupported rests on.
+    const CHAMFERED_ROOM_WITH_PORTAL: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[192,256],[256,192],[256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+        { "id":"b", "footprint":[[-256,0],[-256,256],[0,256],[0,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+      ],
+      "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[0,128] }] }"#;
+
+    #[test]
+    fn a_portal_works_on_the_axis_aligned_wall_of_a_diagonally_shaped_room() {
+        let (_, data) = assert_well_formed(CHAMFERED_ROOM_WITH_PORTAL);
+        assert_eq!(
+            data.linedefs.iter().filter(|l| l.back.is_some()).count(),
+            1,
+            "the portal opened normally, away from the chamfer"
+        );
+    }
+
+    /// Two right triangles splitting a 64-unit square along its own
+    /// diagonal: room a is the upper-left half, room b the lower-right
+    /// half. They share the *entire* diagonal (0,0)-(64,64) as a real wall
+    /// — but `wall_edges` filters diagonal edges out of `shared_spans`
+    /// entirely, so before this fix a portal placed here reported
+    /// `NotAdjacent` ("the rooms share no wall"), which is simply false:
+    /// they share exactly this wall, just not one v1 can cut a portal into.
+    const DIAGONAL_TWIN_TRIANGLES: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,64],[64,64]],
+           "floor":0, "ceiling":128, "light":160,
+           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+        { "id":"b", "footprint":[[0,0],[64,64],[64,0]],
+           "floor":0, "ceiling":128, "light":160,
+           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+      ],
+      "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":16, "at":[32,32] }] }"#;
+
+    #[test]
+    fn a_portal_on_a_wall_two_rooms_share_only_diagonally_names_the_diagonal_wall() {
+        let ir = Ir::from_json(DIAGONAL_TWIN_TRIANGLES).expect("ir");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        let err =
+            cut_portals(&ir, &mut data).expect_err("a diagonal wall cannot host a portal in v1");
+        match err {
+            CompileError::PortalOnDiagonalWall { a, b, x, y } => {
+                assert_eq!(a, "a");
+                assert_eq!(b, "b");
+                assert_eq!((x, y), (32, 32), "names the requested opening's location");
+            }
+            other => panic!(
+                "expected PortalOnDiagonalWall naming the shared diagonal, got {other:?} \
+                 instead — a diagonal wall must never be reported as \"no wall\" or \"off the \
+                 wall\" when it demonstrably is a wall"
+            ),
+        }
+    }
+
+    /// The octagon fixture again, but paired with a room `b` that shares no
+    /// wall with it at all — the portal's `at` sits on room `a`'s NW
+    /// chamfer alone. Unlike the twin-triangle case above, where *both*
+    /// rooms have a diagonal edge at the requested point, this pins down
+    /// that `resolve_portal` checks each room independently
+    /// (`on_diagonal_wall(a) || on_diagonal_wall(b)`) rather than only ever
+    /// checking one side — a mutation that dropped either half of that `||`
+    /// would still pass the twin-triangle test above, since both sides are
+    /// true there, but not this one.
+    const OCTAGON_DIAGONAL_UNRELATED_B: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a",
+          "footprint":[[0,64],[0,192],[64,256],[192,256],[256,192],[256,64],[192,0],[64,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+        { "id":"b", "footprint":[[1024,1024],[1024,1088],[1088,1088],[1088,1024]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+      ],
+      "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":16, "at":[32,224] }] }"#;
+
+    #[test]
+    fn a_portal_on_room_as_own_diagonal_wall_is_flagged_even_when_room_b_is_unrelated() {
+        let ir = Ir::from_json(OCTAGON_DIAGONAL_UNRELATED_B).expect("ir");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        assert!(
+            matches!(
+                cut_portals(&ir, &mut data),
+                Err(CompileError::PortalOnDiagonalWall { x: 32, y: 224, .. })
+            ),
+            "room a's own diagonal wall must be flagged even though room b never touches it"
+        );
     }
 }

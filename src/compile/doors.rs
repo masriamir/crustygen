@@ -185,13 +185,14 @@ fn depth_behind_wall(poly: &[Pt], axis: Axis, fixed: i32, sign: i32, lo: i32, hi
 /// partially-emitted geometry behind.
 ///
 /// # Errors
-/// Returns [`CompileError::NotAdjacent`] if a door portal's rooms are not
-/// adjacent, which indicates `cut_portals` did not validate it first;
-/// [`CompileError::DoorTooDeep`] if room `b` is not at least `DOOR_DEPTH`
-/// deep behind the opening, which would let the recess punch through (or
-/// invert past) room `b`'s far wall; and
-/// [`CompileError::OverlappingDoorRecesses`] if two door portals recess into
-/// the same room and their carved rectangles overlap.
+/// Returns whatever [`portals::resolve_portal`] raises (`NotAdjacent`,
+/// `PortalOffWall`, `PortalOnDiagonalWall`, `PortalTooWide`) if a door
+/// portal's rooms are not adjacent on a wall v1 can cut, which indicates
+/// `cut_portals` did not validate it first; [`CompileError::DoorTooDeep`] if
+/// room `b` is not at least `DOOR_DEPTH` deep behind the opening, which
+/// would let the recess punch through (or invert past) room `b`'s far wall;
+/// and [`CompileError::OverlappingDoorRecesses`] if two door portals recess
+/// into the same room and their carved rectangles overlap.
 fn plan_doors(ir: &Ir) -> Result<Vec<DoorPlan>, CompileError> {
     let mut plans = Vec::new();
     for portal in &ir.portals {
@@ -1210,6 +1211,62 @@ mod tests {
                 Pt { x: 16, y: 96 },
                 Pt { x: 16, y: 160 },
             ],
+        );
+    }
+
+    /// Two right triangles splitting a 64-unit square along its own
+    /// diagonal, exactly like `portals::tests::DIAGONAL_TWIN_TRIANGLES`, but
+    /// with `"kind":"door"` instead of `"plain"`.
+    const DOOR_ON_DIAGONAL_WALL: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,64],[64,64]],
+           "floor":0, "ceiling":128, "light":160,
+           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+        { "id":"b", "footprint":[[0,0],[64,64],[64,0]],
+           "floor":0, "ceiling":128, "light":160,
+           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+      ],
+      "portals":[{ "a":"a", "b":"b", "kind":"door", "width":16, "at":[32,32] }] }"#;
+
+    #[test]
+    fn a_door_portal_requested_on_a_diagonal_wall_is_rejected_before_any_recess_is_carved() {
+        // In the real pipeline `cut_portals` resolves every portal — door or
+        // plain — before anything is cut, so this is what an author
+        // actually sees: the diagonal-wall check `portals::tests` pins for a
+        // plain portal must reach a door portal too, not just fall through
+        // to `NotAdjacent` because the portal happened to be a door.
+        let ir = Ir::from_json(DOOR_ON_DIAGONAL_WALL).expect("ir");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        assert!(
+            matches!(
+                cut_portals(&ir, &mut data),
+                Err(crate::compile::CompileError::PortalOnDiagonalWall { .. })
+            ),
+            "cut_portals must reject a door portal on a diagonal wall before doors ever run"
+        );
+    }
+
+    #[test]
+    fn plan_doors_independently_rejects_a_diagonal_wall_too() {
+        // `plan_doors` re-derives its own geometry via
+        // `portals::resolve_portal` rather than trusting `cut_portals`
+        // already ran — the same defense-in-depth the module doc comment
+        // describes for `DoorTooDeep`. This calls `emit_doors` directly
+        // without `cut_portals` first (unlike every other fixture in this
+        // module, and not how the real `compile_reporting` pipeline
+        // sequences things) specifically to prove `plan_doors`'s own
+        // resolution independently agrees, rather than merely relying on
+        // `cut_portals` to have already caught it upstream.
+        let ir = Ir::from_json(DOOR_ON_DIAGONAL_WALL).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        let mut tags = TagAllocator::new();
+        assert!(
+            matches!(
+                emit_doors(&ir, &tables, &mut data, &mut tags),
+                Err(crate::compile::CompileError::PortalOnDiagonalWall { .. })
+            ),
+            "plan_doors's own resolve_portal call must reject this independently of cut_portals"
         );
     }
 }

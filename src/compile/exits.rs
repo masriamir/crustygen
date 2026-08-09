@@ -49,7 +49,7 @@
 //! every action a run took, not just the ones that mechanically need one.
 
 use crate::compile::portals::{
-    Axis, Cut, SharedSpan, emit_opening, split_wall_for_opening, wall_edges,
+    Axis, Cut, SharedSpan, emit_opening, on_diagonal_wall, split_wall_for_opening, wall_edges,
 };
 use crate::compile::sectors::vertex_index;
 use crate::compile::tags::TagAllocator;
@@ -100,9 +100,14 @@ struct ExitPlan {
 /// Resolves one exit against its host room's real wall.
 ///
 /// # Errors
-/// Returns [`CompileError::ExitOffWall`] when `exit.at` lies on none of the
-/// room's walls, and [`CompileError::ExitTooWide`] when the requested width
-/// would run past the ends of the wall it does lie on.
+/// Returns [`CompileError::ExitOnDiagonalWall`] when `exit.at` sits on a
+/// diagonal edge of the room — a real wall, just not one [`wall_edges`]
+/// considers, since v1 cannot carve an exit into one; checked before the
+/// less specific error below so a diagonal wall is never misreported as
+/// no wall at all. Returns [`CompileError::ExitOffWall`] when `exit.at` lies
+/// on none of the room's axis-aligned walls, and
+/// [`CompileError::ExitTooWide`] when the requested width would run past the
+/// ends of the wall it does lie on.
 ///
 /// # Panics
 /// Panics if the exit names a room absent from `ir.rooms` — unreachable,
@@ -120,10 +125,24 @@ fn resolve_exit(ir: &Ir, exit: &Exit) -> Result<ExitPlan, CompileError> {
             let (on_axis, across) = axis.split(exit.at);
             across == fixed && on_axis > lo && on_axis < hi
         })
-        .ok_or_else(|| CompileError::ExitOffWall {
-            room: exit.room.clone(),
-            x: exit.at.x,
-            y: exit.at.y,
+        .ok_or_else(|| {
+            // A wall v1 simply cannot carve an exit into deserves an
+            // honest, specific message rather than "not on any wall" for a
+            // point that demonstrably is on one — see `on_diagonal_wall`'s
+            // doc comment.
+            if on_diagonal_wall(&room.footprint, exit.at) {
+                CompileError::ExitOnDiagonalWall {
+                    room: exit.room.clone(),
+                    x: exit.at.x,
+                    y: exit.at.y,
+                }
+            } else {
+                CompileError::ExitOffWall {
+                    room: exit.room.clone(),
+                    x: exit.at.x,
+                    y: exit.at.y,
+                }
+            }
         })?;
 
     // `width` is positive and even, so the halves are exact (Ir::from_json).
@@ -194,7 +213,9 @@ fn emit_alcove_wall(data: &mut MapData, p1: Pt, p2: Pt, sector: usize, wall_tex:
 /// Returns [`CompileError::UnknownTheme`] when `ir.theme` resolves to no
 /// texture set, [`CompileError::ExitAlcoveOutOfRange`] when a walkover
 /// exit's alcove would land outside the 16-bit map range, and whatever
-/// `resolve_exit` or `portals::split_wall_for_opening` raise.
+/// `resolve_exit` (including [`CompileError::ExitOnDiagonalWall`], if the
+/// requested position sits on a diagonal wall) or
+/// `portals::split_wall_for_opening` raise.
 ///
 /// # Panics
 /// Panics if `emit_opening` (used for a walkover exit's threshold) ever
@@ -793,6 +814,110 @@ mod tests {
             data.vertices.contains(&Pt { x: 96, y: far_y })
                 && data.vertices.contains(&Pt { x: 160, y: far_y }),
             "the alcove extends south (negative y), outward from the room"
+        );
+    }
+
+    /// An octagon: a 256-unit square chamfered by 64 units at each corner —
+    /// the same shape as `sectors::tests::OCTAGON` and
+    /// `portals::tests::OCTAGON_ROOM`, genuinely diagonal rather than merely
+    /// L-shaped like [`L_ROOM`] above.
+    const OCTAGON_ROOM: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a",
+          "footprint":[[0,64],[0,192],[64,256],[192,256],[256,192],[256,64],[192,0],[64,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+      ],
+      "portals":[] }"#;
+
+    #[test]
+    fn a_switch_exit_works_on_the_axis_aligned_wall_of_a_diagonally_shaped_room() {
+        // South wall, x in 64..192 — a straight run between two diagonal
+        // chamfers on either side, proving those chamfers do not confuse
+        // `wall_edges` into misreporting the span or its ends.
+        let json = OCTAGON_ROOM.replace(
+            "\"portals\":[]",
+            r#""exits":[{ "room":"a", "trigger":"switch", "width":64, "at":[128,0] }],
+               "portals":[]"#,
+        );
+        let (ir, data) = compiled(&json);
+        assert_well_formed(&ir, &data);
+        assert_eq!(data.sectors.len(), 1, "a switch exit adds no sector");
+        let lines: Vec<_> = data.linedefs.iter().filter(|l| l.special != 0).collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].back.is_none(), "a switch exit stays one-sided");
+    }
+
+    #[test]
+    fn a_walkover_exit_works_on_the_axis_aligned_wall_of_a_diagonally_shaped_room() {
+        let json = OCTAGON_ROOM.replace(
+            "\"portals\":[]",
+            r#""exits":[{ "room":"a", "trigger":"walkover", "width":64, "at":[128,0] }],
+               "portals":[]"#,
+        );
+        let (ir, data) = compiled(&json);
+        assert_well_formed(&ir, &data);
+        assert_eq!(data.sectors.len(), 2, "the alcove is a real extra sector");
+        let far_y = -EXIT_ALCOVE_DEPTH;
+        assert!(
+            data.vertices.contains(&Pt { x: 96, y: far_y })
+                && data.vertices.contains(&Pt { x: 160, y: far_y }),
+            "the alcove extends south, outward from the room, unaffected by the chamfers"
+        );
+    }
+
+    #[test]
+    fn an_exit_requested_on_a_diagonal_wall_names_the_diagonal_wall_not_no_wall_at_all() {
+        // (32,224) is the midpoint of the octagon's NW chamfer
+        // (0,192)-(64,256) — a real wall, just not one `wall_edges`
+        // considers. Before this fix this fell into the same
+        // `ExitOffWall` catch-all as a point that is not on any wall at
+        // all, e.g. the L's inner corner in `an_exit_not_on_any_wall_is_rejected`
+        // above — an honest author reading "not on any wall of the room"
+        // for a point they can see sitting exactly on one would have no way
+        // to tell the two situations apart.
+        let json = OCTAGON_ROOM.replace(
+            "\"portals\":[]",
+            r#""exits":[{ "room":"a", "trigger":"switch", "width":16, "at":[32,224] }],
+               "portals":[]"#,
+        );
+        let ir = Ir::from_json(&json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        assert!(
+            matches!(
+                emit_exits(&ir, &tables, &mut data, &mut tags),
+                Err(crate::compile::CompileError::ExitOnDiagonalWall { x: 32, y: 224, .. })
+            ),
+            "a diagonal wall must be named specifically, not folded into ExitOffWall"
+        );
+    }
+
+    #[test]
+    fn a_walkover_exit_requested_on_a_diagonal_wall_is_also_named_specifically() {
+        // The switch-exit case above proves `resolve_exit`'s diagonal check
+        // fires at all; this proves it is not somehow specific to the
+        // switch trigger — `resolve_exit` runs identically before either
+        // trigger's own construction (`emit_switch_exit`/
+        // `emit_walkover_exit`) ever sees the plan.
+        let json = OCTAGON_ROOM.replace(
+            "\"portals\":[]",
+            r#""exits":[{ "room":"a", "trigger":"walkover", "width":16, "at":[32,224] }],
+               "portals":[]"#,
+        );
+        let ir = Ir::from_json(&json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        assert!(
+            matches!(
+                emit_exits(&ir, &tables, &mut data, &mut tags),
+                Err(crate::compile::CompileError::ExitOnDiagonalWall { x: 32, y: 224, .. })
+            ),
+            "a walkover exit on a diagonal wall must be named specifically too"
         );
     }
 }

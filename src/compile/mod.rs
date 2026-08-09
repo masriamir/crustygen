@@ -157,6 +157,23 @@ pub enum CompileError {
         /// Midpoint Y.
         y: i32,
     },
+    /// A portal's midpoint sits on a diagonal (45-degree) wall, which v1
+    /// does not support hosting a portal on — the opening's endpoints, the
+    /// flanking wall pieces, and (for a door) the recess would all have to
+    /// land on non-integer coordinates to stay flush with it.
+    #[error(
+        "portal `{a}` <-> `{b}`: the wall at ({x}, {y}) is diagonal; v1 does not support portals on diagonal walls"
+    )]
+    PortalOnDiagonalWall {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// Midpoint X.
+        x: i32,
+        /// Midpoint Y.
+        y: i32,
+    },
     /// Two portals' openings overlap on the same wall line, so cutting the
     /// second would find no intact wall left where the first already opened.
     #[error("portals `{first}` and `{second}` have overlapping openings in the same wall")]
@@ -216,6 +233,19 @@ pub enum CompileError {
     /// An exit's `at` does not lie on any wall of its host room.
     #[error("exit in room `{room}`: midpoint ({x}, {y}) is not on any wall of the room")]
     ExitOffWall {
+        /// The host room.
+        room: String,
+        /// Midpoint X.
+        x: i32,
+        /// Midpoint Y.
+        y: i32,
+    },
+    /// An exit's `at` sits on a diagonal (45-degree) wall, which v1 does not
+    /// support carving an exit into.
+    #[error(
+        "exit in room `{room}`: the wall at ({x}, {y}) is diagonal; v1 does not support exits on diagonal walls"
+    )]
+    ExitOnDiagonalWall {
         /// The host room.
         room: String,
         /// Midpoint X.
