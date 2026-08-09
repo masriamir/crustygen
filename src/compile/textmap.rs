@@ -1,0 +1,144 @@
+//! Deterministic UDMF text emission.
+
+use std::fmt::Write as _;
+
+use crate::compile::MapData;
+use crate::compile::things::ThingOut;
+
+/// Renders map data as UDMF `TEXTMAP` text in the `doom` namespace.
+///
+/// Emission order is fixed — vertices, linedefs, sidedefs, sectors, things,
+/// each in index order — so identical input yields byte-identical output.
+/// `scalex` and `scaley` are never written (P9).
+///
+/// [`MapData::sidedefs`] may contain entries no longer referenced by any
+/// linedef's `front`/`back` — `compile::portals::drop_wall_segment` removes a
+/// solid wall segment's linedef when a portal opens through it but leaves
+/// that linedef's sidedef record in place, since renumbering every surviving
+/// `front`/`back` index to close the gap is exactly the kind of change that
+/// is easy to get subtly wrong. Those entries are written out here like any
+/// other: they are inert to the engine (nothing points at them) and their
+/// presence keeps every `LinedefOut::front`/`back` index a direct,
+/// unrenumbered index into this output's `sidedef` list.
+#[must_use]
+pub fn emit_textmap(data: &MapData, things: &[ThingOut]) -> String {
+    let mut s = String::from("namespace = \"doom\";\n\n");
+
+    for v in &data.vertices {
+        let _ = writeln!(s, "vertex {{ x = {}.0; y = {}.0; }}", v.x, v.y);
+    }
+    s.push('\n');
+
+    for l in &data.linedefs {
+        let _ = write!(
+            s,
+            "linedef {{ v1 = {}; v2 = {}; sidefront = {};",
+            l.v1, l.v2, l.front
+        );
+        if let Some(back) = l.back {
+            let _ = write!(s, " sideback = {back}; twosided = true;");
+        }
+        if l.blocking {
+            s.push_str(" blocking = true;");
+        }
+        if l.special != 0 {
+            let _ = write!(s, " special = {}; arg0 = {};", l.special, l.tag);
+        }
+        if l.lower_unpegged {
+            s.push_str(" dontpegbottom = true;");
+        }
+        if l.upper_unpegged {
+            s.push_str(" dontpegtop = true;");
+        }
+        s.push_str(" }\n");
+    }
+    s.push('\n');
+
+    for sd in &data.sidedefs {
+        let _ = write!(s, "sidedef {{ sector = {};", sd.sector);
+        for (key, tex) in [
+            ("texturetop", &sd.upper),
+            ("texturemiddle", &sd.middle),
+            ("texturebottom", &sd.lower),
+        ] {
+            if !tex.is_empty() {
+                let _ = write!(s, " {key} = \"{tex}\";");
+            }
+        }
+        s.push_str(" }\n");
+    }
+    s.push('\n');
+
+    for sec in &data.sectors {
+        let _ = write!(
+            s,
+            "sector {{ heightfloor = {}; heightceiling = {}; texturefloor = \"{}\"; \
+             textureceiling = \"{}\"; lightlevel = {};",
+            sec.floor, sec.ceiling, sec.floor_tex, sec.ceil_tex, sec.light
+        );
+        if sec.special != 0 {
+            let _ = write!(s, " special = {};", sec.special);
+        }
+        if sec.tag != 0 {
+            let _ = write!(s, " id = {};", sec.tag);
+        }
+        s.push_str(" }\n");
+    }
+    s.push('\n');
+
+    for t in things {
+        let _ = writeln!(
+            s,
+            "thing {{ x = {}.0; y = {}.0; angle = {}; type = {}; skill1 = true; skill2 = true; \
+             skill3 = true; skill4 = true; skill5 = true; single = true; }}",
+            t.x, t.y, t.angle, t.kind
+        );
+    }
+
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::compile::compile;
+    use crate::ir::Ir;
+    use crate::tables::Tables;
+
+    const TWO_ROOM: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+        { "id":"b", "footprint":[[256,0],[256,256],[512,256],[512,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }] }"#;
+
+    #[test]
+    fn emission_starts_with_the_doom_namespace() {
+        let ir = Ir::from_json(TWO_ROOM).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let out = compile(&ir, &tables).expect("compiles");
+        assert!(out.textmap.starts_with("namespace = \"doom\";"));
+    }
+
+    #[test]
+    fn emission_never_contains_texture_scaling() {
+        let ir = Ir::from_json(TWO_ROOM).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let out = compile(&ir, &tables).expect("compiles");
+        assert!(!out.textmap.contains("scalex"), "P9: no texture scaling");
+        assert!(!out.textmap.contains("scaley"), "P9: no texture scaling");
+    }
+
+    #[test]
+    fn the_same_ir_compiles_byte_identically_twice() {
+        let ir = Ir::from_json(TWO_ROOM).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let a = compile(&ir, &tables).expect("first");
+        let b = compile(&ir, &tables).expect("second");
+        assert_eq!(a.textmap, b.textmap, "S6: emission is deterministic");
+    }
+}

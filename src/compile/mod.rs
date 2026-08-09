@@ -4,6 +4,7 @@ pub mod doors;
 pub mod portals;
 pub mod sectors;
 pub mod tags;
+pub mod textmap;
 pub mod things;
 
 use crate::geom::Pt;
@@ -71,6 +72,13 @@ pub struct MapData {
     /// Sectors, one per room plus one per door.
     pub sectors: Vec<SectorOut>,
     /// Sidedefs.
+    ///
+    /// May contain entries no longer referenced by any linedef's
+    /// `front`/`back`: `portals::drop_wall_segment` removes a solid wall
+    /// segment's linedef when a portal opens through it, but leaves that
+    /// linedef's now-orphaned sidedef record in place rather than
+    /// renumbering every surviving index. See [`textmap::emit_textmap`]'s
+    /// doc comment for the full rationale.
     pub sidedefs: Vec<SidedefOut>,
     /// Linedefs.
     pub linedefs: Vec<LinedefOut>,
@@ -242,4 +250,64 @@ pub enum CompileError {
         /// Y coordinate.
         y: i32,
     },
+}
+
+use crate::compile::tags::TagAllocator;
+use crate::compile::things::ThingOut;
+use crate::ir::Ir;
+use crate::tables::Tables;
+
+/// Everything one compilation produced.
+#[derive(Debug)]
+pub struct Compiled {
+    /// The emitted UDMF text.
+    pub textmap: String,
+    /// The map records behind it.
+    pub data: MapData,
+    /// The placed things.
+    pub things: Vec<ThingOut>,
+    /// The tag manifest.
+    pub tags: TagAllocator,
+}
+
+/// Compiles a room graph into UDMF `TEXTMAP` text.
+///
+/// Passes run in a fixed order, each depending on the last:
+///
+/// 1. [`sectors::emit_sectors`] turns every room footprint into a closed,
+///    one-sided sector — a room is watertight by construction before any
+///    portal touches it.
+/// 2. [`portals::cut_portals`] opens every portal's shared wall. For a
+///    [`crate::ir::PortalKind::Plain`] portal this also emits the two-sided
+///    opening line; for a door portal it leaves the flanking walls cut but
+///    the opening itself unemitted, because that opening is a carved sector
+///    rather than a single line.
+/// 3. [`doors::emit_doors`] carves that dedicated sector for every door
+///    portal out of room `b`, allocating its tag from a fresh
+///    [`TagAllocator`] shared with every other tag-consuming pass.
+/// 4. [`things::place_things`] places every thing, measuring clearance and
+///    headroom against the geometry emitted by steps 1–3 — not the IR's
+///    declared footprints, which a door recess can make stale — so it must
+///    run after doors are carved, not before.
+/// 5. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
+///    at tag 0, which would match every untagged sector in-engine.
+/// 6. [`textmap::emit_textmap`] renders the final, validated geometry.
+///
+/// # Errors
+/// Returns the first [`CompileError`] raised by any pass; nothing is emitted
+/// unless every pass succeeds.
+pub fn compile(ir: &Ir, tables: &Tables) -> Result<Compiled, CompileError> {
+    let mut data = sectors::emit_sectors(ir)?;
+    portals::cut_portals(ir, &mut data)?;
+    let mut tags = TagAllocator::new();
+    doors::emit_doors(ir, tables, &mut data, &mut tags)?;
+    let things = things::place_things(ir, tables, &data)?;
+    tags::check_no_action_at_tag_zero(&data)?;
+    let textmap = textmap::emit_textmap(&data, &things);
+    Ok(Compiled {
+        textmap,
+        data,
+        things,
+        tags,
+    })
 }
