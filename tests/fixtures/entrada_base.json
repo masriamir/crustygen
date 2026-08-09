@@ -21,8 +21,8 @@
     {
       "id": "armory",
       "footprint": [
-        [256, 64], [256, 192], [320, 256], [448, 256],
-        [512, 192], [512, 64], [448, 0], [320, 0]
+        [320, 64], [320, 192], [384, 256], [512, 256],
+        [576, 192], [576, 64], [512, 0], [384, 0]
       ],
       "floor": 0,
       "ceiling": 128,
@@ -31,14 +31,14 @@
       "ceil_tex": "CEIL3_5",
       "wall_tex": "STARTAN3",
       "things": [
-        { "kind": "shotgun_guy", "at": [384, 176], "angle": 270 },
-        { "kind": "shotgun", "at": [384, 80], "angle": 0 },
-        { "kind": "box_of_shells", "at": [330, 128], "angle": 0 }
+        { "kind": "shotgun_guy", "at": [448, 176], "angle": 270 },
+        { "kind": "shotgun", "at": [448, 80], "angle": 0 },
+        { "kind": "box_of_shells", "at": [394, 128], "angle": 0 }
       ]
     },
     {
       "id": "hub",
-      "footprint": [[512, 0], [512, 256], [768, 256], [832, 192], [832, 0]],
+      "footprint": [[640, 0], [640, 256], [896, 256], [960, 192], [960, 0]],
       "floor": 0,
       "ceiling": 128,
       "light": 160,
@@ -46,13 +46,13 @@
       "ceil_tex": "CEIL3_5",
       "wall_tex": "STARTAN3",
       "things": [
-        { "kind": "techno_lamp", "at": [700, 220], "angle": 0 },
-        { "kind": "berserk", "at": [560, 40], "angle": 0 }
+        { "kind": "techno_lamp", "at": [828, 220], "angle": 0 },
+        { "kind": "berserk", "at": [688, 40], "angle": 0 }
       ]
     },
     {
       "id": "key_room",
-      "footprint": [[576, -192], [576, 0], [832, 0], [832, -192]],
+      "footprint": [[704, -256], [704, -64], [960, -64], [960, -256]],
       "floor": 0,
       "ceiling": 128,
       "light": 160,
@@ -60,14 +60,14 @@
       "ceil_tex": "CEIL3_5",
       "wall_tex": "STARTAN3",
       "things": [
-        { "kind": "blue_card", "at": [620, -100], "angle": 0 },
-        { "kind": "imp", "at": [750, -60], "angle": 180 },
-        { "kind": "health_bonus", "at": [700, -160], "angle": 0 }
+        { "kind": "blue_card", "at": [748, -164], "angle": 0 },
+        { "kind": "imp", "at": [878, -124], "angle": 180 },
+        { "kind": "health_bonus", "at": [828, -224], "angle": 0 }
       ]
     },
     {
       "id": "combat",
-      "footprint": [[832, 0], [832, 256], [1152, 256], [1152, 0]],
+      "footprint": [[1024, 0], [1024, 256], [1344, 256], [1344, 0]],
       "floor": 0,
       "ceiling": 128,
       "light": 160,
@@ -75,32 +75,16 @@
       "ceil_tex": "CEIL3_5",
       "wall_tex": "STARTAN3",
       "things": [
-        { "kind": "imp", "at": [880, 190], "angle": 180 },
-        { "kind": "pinky", "at": [1000, 60], "angle": 90 },
-        { "kind": "barrel", "at": [1030, 190], "angle": 0 },
-        { "kind": "chaingun", "at": [870, 50], "angle": 0 },
-        { "kind": "box_of_bullets", "at": [920, 50], "angle": 0 },
-        { "kind": "medikit", "at": [1100, 220], "angle": 0 }
+        { "kind": "imp", "at": [1072, 190], "angle": 180 },
+        { "kind": "pinky", "at": [1192, 60], "angle": 90 },
+        { "kind": "barrel", "at": [1222, 190], "angle": 0 },
+        { "kind": "chaingun", "at": [1062, 50], "angle": 0 },
+        { "kind": "box_of_bullets", "at": [1112, 50], "angle": 0 },
+        { "kind": "medikit", "at": [1292, 220], "angle": 0 }
       ]
     },
     {
       "id": "vault",
-      "footprint": [[1152, 0], [1152, 256], [1408, 256], [1408, 0]],
-      "floor": 0,
-      "ceiling": 128,
-      "light": 160,
-      "floor_tex": "FLOOR4_8",
-      "ceil_tex": "CEIL3_5",
-      "wall_tex": "STARTAN3",
-      "things": [
-        { "kind": "hell_knight", "at": [1280, 128], "angle": 180 },
-        { "kind": "soulsphere", "at": [1200, 210], "angle": 0 },
-        { "kind": "green_armor", "at": [1200, 50], "angle": 0 },
-        { "kind": "cell_charge", "at": [1360, 128], "angle": 0 }
-      ]
-    },
-    {
-      "id": "exit_hall",
       "footprint": [[1408, 0], [1408, 256], [1664, 256], [1664, 0]],
       "floor": 0,
       "ceiling": 128,
@@ -109,21 +93,37 @@
       "ceil_tex": "CEIL3_5",
       "wall_tex": "STARTAN3",
       "things": [
-        { "kind": "rocket_launcher", "at": [1480, 180], "angle": 0 },
-        { "kind": "box_of_rockets", "at": [1480, 80], "angle": 0 },
-        { "kind": "stimpack", "at": [1600, 128], "angle": 0 }
+        { "kind": "hell_knight", "at": [1536, 128], "angle": 180 },
+        { "kind": "soulsphere", "at": [1456, 210], "angle": 0 },
+        { "kind": "green_armor", "at": [1456, 50], "angle": 0 },
+        { "kind": "cell_charge", "at": [1616, 128], "angle": 0 }
+      ]
+    },
+    {
+      "id": "exit_hall",
+      "footprint": [[1728, 0], [1728, 256], [1984, 256], [1984, 0]],
+      "floor": 0,
+      "ceiling": 128,
+      "light": 160,
+      "floor_tex": "FLOOR4_8",
+      "ceil_tex": "CEIL3_5",
+      "wall_tex": "STARTAN3",
+      "things": [
+        { "kind": "rocket_launcher", "at": [1800, 180], "angle": 0 },
+        { "kind": "box_of_rockets", "at": [1800, 80], "angle": 0 },
+        { "kind": "stimpack", "at": [1920, 128], "angle": 0 }
       ]
     }
   ],
   "portals": [
     { "a": "start", "b": "armory", "kind": "plain", "width": 128, "at": [256, 128] },
-    { "a": "armory", "b": "hub", "kind": "door", "width": 128, "at": [512, 128] },
-    { "a": "hub", "b": "key_room", "kind": "plain", "width": 128, "at": [704, 0] },
-    { "a": "hub", "b": "combat", "kind": "plain", "width": 128, "at": [832, 96] },
-    { "a": "combat", "b": "vault", "kind": "locked", "lock": "blue_card", "width": 128, "at": [1152, 128] },
-    { "a": "vault", "b": "exit_hall", "kind": "plain", "width": 128, "at": [1408, 128] }
+    { "a": "armory", "b": "hub", "kind": "door", "width": 128, "at": [576, 128] },
+    { "a": "hub", "b": "key_room", "kind": "plain", "width": 128, "at": [832, 0] },
+    { "a": "hub", "b": "combat", "kind": "plain", "width": 128, "at": [960, 96] },
+    { "a": "combat", "b": "vault", "kind": "locked", "lock": "blue_card", "width": 128, "at": [1344, 128] },
+    { "a": "vault", "b": "exit_hall", "kind": "plain", "width": 128, "at": [1664, 128] }
   ],
   "exits": [
-    { "room": "exit_hall", "trigger": "switch", "width": 64, "at": [1664, 128] }
+    { "room": "exit_hall", "trigger": "switch", "width": 64, "at": [1984, 128] }
   ]
 }

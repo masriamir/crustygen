@@ -20,8 +20,8 @@ fn entrada_base_compiles_and_reassembles_through_crustywad() {
 
     assert_eq!(
         compiled.data.sectors.len(),
-        9,
-        "7 rooms + 2 door sectors (the manual door and the locked door)"
+        13,
+        "7 rooms + 6 portal gap sectors (4 plain passages, the manual door, and the locked door)"
     );
     assert!(
         !compiled.things.is_empty(),
@@ -38,7 +38,7 @@ fn entrada_base_compiles_and_reassembles_through_crustywad() {
     );
     let plain_group = plain_wad.map_group("MAP01").expect("MAP01 present");
     let plain_map = Map::assemble(&plain_wad, &plain_group).expect("un-noded map assembles");
-    assert_eq!(plain_map.sectors().len(), 9);
+    assert_eq!(plain_map.sectors().len(), 13);
     assert_eq!(plain_map.linedefs().len(), compiled.data.linedefs.len());
 
     // The noded artifact: MAP01/TEXTMAP/ZNODES/ENDMAP, engine-playable.
@@ -53,7 +53,7 @@ fn entrada_base_compiles_and_reassembles_through_crustywad() {
     let noded_map = Map::assemble(&noded_wad, &noded_group).expect("noded map assembles");
     assert_eq!(
         noded_map.sectors().len(),
-        9,
+        13,
         "same geometry, both artifacts"
     );
 
