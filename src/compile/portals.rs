@@ -87,7 +87,7 @@ fn cut_one(ir: &Ir, data: &mut MapData, portal: &Portal) -> Result<(), CompileEr
 
     let wall_tex = ir.rooms[ia].wall_tex.clone();
     emit_flanking_walls(data, &cut, ia, ib, a_forward, &wall_tex);
-    emit_opening(data, &cut, ia, ib);
+    emit_opening(data, &cut, ia, ib, a_forward);
 
     Ok(())
 }
@@ -188,9 +188,21 @@ fn emit_flanking_walls(
 
 /// Emits the opening itself: one two-sided line, front on room A, back on
 /// room B.
-fn emit_opening(data: &mut MapData, cut: &Cut, sector_a: usize, sector_b: usize) {
-    let v1 = vertex_index(&mut data.vertices, cut.pt(cut.open_lo));
-    let v2 = vertex_index(&mut data.vertices, cut.pt(cut.open_hi));
+///
+/// `a_forward` (see `shared_span`) picks the `v1`-to-`v2` direction so room
+/// A's front sidedef lands on the geometric right regardless of which side
+/// of the wall room A sits on — the same rule `emit_flanking_walls` applies,
+/// so front/back here name the correct bordering sector even after later
+/// stages give the two rooms different floor or ceiling heights, or write
+/// upper/lower textures onto these sidedefs (e.g. door tracks).
+fn emit_opening(data: &mut MapData, cut: &Cut, sector_a: usize, sector_b: usize, a_forward: bool) {
+    let (p1, p2) = if a_forward {
+        (cut.pt(cut.open_lo), cut.pt(cut.open_hi))
+    } else {
+        (cut.pt(cut.open_hi), cut.pt(cut.open_lo))
+    };
+    let v1 = vertex_index(&mut data.vertices, p1);
+    let v2 = vertex_index(&mut data.vertices, p2);
     let front = data.sidedefs.len();
     data.sidedefs.push(SidedefOut {
         sector: sector_a,
@@ -278,6 +290,7 @@ mod tests {
     use crate::compile::CompileError;
     use crate::compile::portals::cut_portals;
     use crate::compile::sectors::emit_sectors;
+    use crate::geom::{Pt, contains};
     use crate::ir::Ir;
 
     fn ir_with_portal(width: i32, at: (i32, i32), b_origin: i32) -> String {
@@ -361,5 +374,107 @@ mod tests {
             cut_portals(&ir, &mut data),
             Err(CompileError::PortalOffWall { .. })
         ));
+    }
+
+    /// Whether room `room_idx`'s original footprint has its interior on the
+    /// right of travel from `p` to `q`.
+    ///
+    /// This is computed independently of `cut_portals`'s own `Cut`/`a_forward`
+    /// bookkeeping: rotate the direction vector -90 degrees (`(dy, -dx)`,
+    /// reduced to a one-unit step since every segment under test is
+    /// axis-aligned) from the segment's midpoint, and ask `geom::contains`
+    /// whether that probe point lands inside the room's footprint. A test
+    /// that instead re-derived `a_forward` would just restate the
+    /// implementation and could not catch a regression in it.
+    fn interior_is_on_the_right(ir: &Ir, room_idx: usize, p: Pt, q: Pt) -> bool {
+        let (dx, dy) = (q.x - p.x, q.y - p.y);
+        let probe = Pt {
+            x: i32::midpoint(p.x, q.x) + dy.signum(),
+            y: i32::midpoint(p.y, q.y) - dx.signum(),
+        };
+        contains(&ir.rooms[room_idx].footprint, probe)
+    }
+
+    /// Asserts that every linedef `cut_portals` leaves behind — the
+    /// untouched walls, the flanking one-sided pieces, and the two-sided
+    /// opening — has its front sidedef naming the sector whose interior is
+    /// on the right of `v1`-to-`v2` travel, and (for the two-sided line) its
+    /// back sidedef naming the sector on the left. This is the structural
+    /// invariant the whole pass exists to guarantee: a linedef's declared
+    /// sides must match its actual geometry, or the engine (and crustywad's
+    /// own BSP/GL-node builder) attributes the wrong sector to the wrong
+    /// side.
+    fn assert_sidedefs_face_their_sectors(ir_json: &str) {
+        let ir = Ir::from_json(ir_json).expect("ir");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &mut data).expect("portals cut");
+
+        for l in &data.linedefs {
+            let (p, q) = (data.vertices[l.v1], data.vertices[l.v2]);
+            let front_sector = data.sidedefs[l.front].sector;
+            assert!(
+                interior_is_on_the_right(&ir, front_sector, p, q),
+                "front sidedef of line {p:?} -> {q:?} names sector {front_sector}, \
+                 but that room's interior is not on the right of travel"
+            );
+            if let Some(back) = l.back {
+                let back_sector = data.sidedefs[back].sector;
+                assert!(
+                    interior_is_on_the_right(&ir, back_sector, q, p),
+                    "back sidedef of line {p:?} -> {q:?} names sector {back_sector}, \
+                     but that room's interior is not on the left of travel"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sidedefs_face_their_sectors_when_room_a_is_west_of_a_vertical_wall() {
+        assert_sidedefs_face_their_sectors(&ir_with_portal(128, (256, 128), 256));
+    }
+
+    #[test]
+    fn sidedefs_face_their_sectors_when_room_a_is_east_of_a_vertical_wall() {
+        let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[256,0],[256,256],[512,256],[512,0]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+            { "id":"b", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }] }"#;
+        assert_sidedefs_face_their_sectors(ir_json);
+    }
+
+    #[test]
+    fn sidedefs_face_their_sectors_when_room_a_is_south_of_a_horizontal_wall() {
+        let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+            { "id":"b", "footprint":[[0,256],[0,512],[256,512],[256,256]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[128,256] }] }"#;
+        assert_sidedefs_face_their_sectors(ir_json);
+    }
+
+    #[test]
+    fn sidedefs_face_their_sectors_when_room_a_is_north_of_a_horizontal_wall() {
+        let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,256],[0,512],[256,512],[256,256]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+            { "id":"b", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[128,256] }] }"#;
+        assert_sidedefs_face_their_sectors(ir_json);
     }
 }
