@@ -160,6 +160,9 @@ struct TextureSet {
     door: String,
     door_track: String,
     switch: String,
+    /// The texture for a door's optional trim alcove sectors
+    /// ([`crate::ir::Portal::alcove_near`]/[`crate::ir::Portal::alcove_far`]).
+    trim: String,
 }
 
 /// Sector specials keyed by tier name, as used for
@@ -305,11 +308,20 @@ struct Specials {
     teleport: TeleportSpecial,
 }
 
+/// The curated (not sourced — see [`Tables::is_door_texture`]) list of
+/// texture names recognized as genuine door-panel textures, loaded from
+/// `vocabulary.toml`'s `[door_texture_catalog]` table.
+#[derive(Debug, Deserialize)]
+struct DoorTextureCatalog {
+    names: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 struct Vocabulary {
     things: HashMap<String, toml::Value>,
     specials: Specials,
     textures: HashMap<String, TextureSet>,
+    door_texture_catalog: DoorTextureCatalog,
 }
 
 /// Errors raised while loading the data tables.
@@ -613,7 +625,7 @@ impl Tables {
     }
 
     /// The texture for a role (`wall`, `floor`, `ceiling`, `door`,
-    /// `door_track`, `switch`) under a theme, if both resolve.
+    /// `door_track`, `switch`, `trim`) under a theme, if both resolve.
     #[must_use]
     pub fn texture(&self, role: &str, theme: &str) -> Option<&str> {
         let set = self.vocabulary.textures.get(theme)?;
@@ -624,8 +636,33 @@ impl Tables {
             "door" => Some(&set.door),
             "door_track" => Some(&set.door_track),
             "switch" => Some(&set.switch),
+            "trim" => Some(&set.trim),
             _ => None,
         }
+    }
+
+    /// Whether `name` is a texture the project's curated catalog recognizes
+    /// as a genuine door-panel texture — as opposed to a door's track, a
+    /// plain wall, or any other role.
+    ///
+    /// **Not sourced from the engine.** Every other table in this file
+    /// carries a `source` citation to the pinned Doom release or a primary
+    /// spec; this one cannot, because which texture *names* "read as a
+    /// door" is an asset-naming convention, not an engine constant and not
+    /// derivable from one — nothing in `linuxdoom-1.10` enumerates "the
+    /// door textures". `vocabulary.toml`'s `[door_texture_catalog]` table
+    /// carries a `curated` field in place of the usual `source` for exactly
+    /// this reason: it names how the list was built (the classic
+    /// `BIGDOOR`/`DOOR*`/`SPCDOOR`/`ZDOOR*` id-Software/Freedoom texture
+    /// families) and how it was verified (every name confirmed present as a
+    /// composite texture in both Freedoom IWADs' `TEXTURE1` lump).
+    #[must_use]
+    pub fn is_door_texture(&self, name: &str) -> bool {
+        self.vocabulary
+            .door_texture_catalog
+            .names
+            .iter()
+            .any(|n| n == name)
     }
 }
 
@@ -1116,6 +1153,69 @@ mod tests {
             t.texture("switch", "plaid_theme"),
             None,
             "an unknown theme resolves no texture at all"
+        );
+    }
+
+    /// A door's optional trim alcove sectors need a texture role of their
+    /// own, alongside `wall`/`floor`/`ceiling`/`door`/`door_track`/`switch`.
+    #[test]
+    fn trim_texture_resolves() {
+        let t = Tables::load().expect("tables load");
+        assert_eq!(
+            t.texture("trim", "tech_base"),
+            Some("STARGR2"),
+            "tech_base has a trim texture"
+        );
+        assert_eq!(
+            t.texture("trim", "plaid_theme"),
+            None,
+            "an unknown theme resolves no texture at all"
+        );
+    }
+
+    /// The curated (not sourced) door-texture catalog: `tech_base`'s own
+    /// configured `door` texture (BIGDOOR2) must be recognized, a
+    /// representative sample of the rest of the curated family must resolve
+    /// too, and — the actual point of the check — a texture that is
+    /// unambiguously NOT a door (a plain wall, a flat, an unrelated door
+    /// *role* this project already treats distinctly, and a name that
+    /// merely contains the substring "DOOR") must all be rejected.
+    #[test]
+    fn the_curated_door_texture_catalog_distinguishes_real_door_textures() {
+        let t = Tables::load().expect("tables load");
+        assert!(
+            t.is_door_texture("BIGDOOR2"),
+            "tech_base's own configured door texture must be recognized"
+        );
+        for name in ["BIGDOOR1", "DOOR1", "DOORBLU", "SPCDOOR1", "ZELDOOR"] {
+            assert!(
+                t.is_door_texture(name),
+                "`{name}` is a curated door texture"
+            );
+        }
+        assert!(
+            !t.is_door_texture("STARTAN3"),
+            "a plain wall texture is not a door texture"
+        );
+        assert!(
+            !t.is_door_texture("FLOOR4_8"),
+            "a flat is not a door texture"
+        );
+        assert!(
+            !t.is_door_texture("DOORTRAK"),
+            "the door's own TRACK texture is a distinct role, not the door panel itself"
+        );
+        assert!(
+            !t.is_door_texture("DOORSTOP"),
+            "a doorstop prop texture is not the door panel itself"
+        );
+        assert!(
+            !t.is_door_texture("M_BDOOR"),
+            "a menu HUD graphic that merely contains the substring DOOR is not a door texture"
+        );
+        assert!(
+            !t.is_door_texture("plaid_door"),
+            "an unknown name must fail loudly, not fall back to a fuzzy match"
         );
     }
 

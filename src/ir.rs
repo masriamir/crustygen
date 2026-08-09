@@ -142,19 +142,36 @@ pub struct Room {
     pub things: Vec<IrThing>,
 }
 
+/// Returns `true`, for use as a serde field default so an absent
+/// `track_lower_unpegged` key means "lower-unpegged", matching real door
+/// track construction (the texture must stay anchored to the floor rather
+/// than sliding as the door sector's ceiling animates open).
+const fn track_lower_unpegged_default() -> bool {
+    true
+}
+
 /// A connection between two rooms.
 ///
 /// Rooms are authored apart, not flush: `a`'s wall and `b`'s wall face each
 /// other across a real void at least [`Ir::MIN_PORTAL_GAP`] units wide (see
 /// [`IrError::InvalidPortalGap`]), which the compiler fills with a passage —
-/// or, for [`PortalKind::Door`]/[`PortalKind::Locked`], a door sector — that
-/// spans the whole gap. `a` and `b` are not fully interchangeable: [`Self::at`]
-/// is always read against room `a`'s own wall coordinate (see that field's
-/// doc comment), so swapping the two labels without also updating `at` moves
-/// which room's wall the portal is measured from. The resulting geometry
-/// itself is symmetric — unlike the old flush-wall design, filling the gap
-/// no longer carves into either room's own territory, so which room is named
-/// `a` versus `b` no longer changes the map's real playable shape.
+/// or, for [`PortalKind::Door`]/[`PortalKind::Locked`], a door construction —
+/// that spans the whole gap. `a` and `b` are not fully interchangeable:
+/// [`Self::at`] is always read against room `a`'s own wall coordinate (see
+/// that field's doc comment), so swapping the two labels without also
+/// updating `at` moves which room's wall the portal is measured from. The
+/// resulting geometry itself is symmetric — unlike the old flush-wall
+/// design, filling the gap no longer carves into either room's own
+/// territory, so which room is named `a` versus `b` no longer changes the
+/// map's real playable shape.
+///
+/// [`Self::door_thickness`], [`Self::alcove_near`], and [`Self::alcove_far`]
+/// only apply to [`PortalKind::Door`]/[`PortalKind::Locked`] — a
+/// [`PortalKind::Plain`] portal has no door and so no thickness or alcove of
+/// its own; [`Ir::from_json`] rejects a plain portal that sets any of them
+/// (see [`IrError::DoorFieldsOnPlainPortal`]) rather than silently ignoring
+/// values that would do nothing, matching the reject-don't-degrade posture
+/// [`Self::width`] already takes on an odd value.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Portal {
     /// Identifier of the first room.
@@ -178,6 +195,47 @@ pub struct Portal {
     /// constant across it must equal room `a`'s own wall position exactly
     /// (not room `b`'s, and not the gap's midpoint).
     pub at: Pt,
+    /// The door's own depth along the gap axis, in map units.
+    ///
+    /// Required for [`PortalKind::Door`]/[`PortalKind::Locked`]
+    /// ([`IrError::MissingDoorThickness`] otherwise) and must be one of
+    /// [`Ir::DOOR_DIMENSIONS`] ([`IrError::InvalidDoorDimension`]
+    /// otherwise). Meaningless (and rejected) on a
+    /// [`PortalKind::Plain`] portal.
+    #[serde(default)]
+    pub door_thickness: Option<i32>,
+    /// An optional buffer sector between room `a` and the door, in map
+    /// units.
+    ///
+    /// When present, must be one of [`Ir::DOOR_DIMENSIONS`]
+    /// ([`IrError::InvalidDoorDimension`] otherwise). Meaningless (and
+    /// rejected) on a [`PortalKind::Plain`] portal. See [`Self::alcove_far`]
+    /// for the naming rationale — "near" and "far" name room `a`'s and room
+    /// `b`'s own walls, mirroring the compiler's internal `near`/`far`
+    /// facing-wall terminology, not a "front"/"behind" the task that
+    /// requested this named ambiguously (a corridor is walked in both
+    /// directions, so "in front of the door" has no fixed meaning without
+    /// picking a travel direction).
+    #[serde(default)]
+    pub alcove_near: Option<i32>,
+    /// An optional buffer sector between the door and room `b`, in map
+    /// units. See [`Self::alcove_near`] for the shared constraints and the
+    /// near/far naming rationale.
+    #[serde(default)]
+    pub alcove_far: Option<i32>,
+    /// Whether the door's track (the linedefs exposed as the door sector's
+    /// ceiling rises) is emitted lower-unpegged, so its `DOORTRAK` texture
+    /// stays anchored to the floor rather than sliding as the door opens.
+    ///
+    /// Defaults to `true` — real door track construction is lower-unpegged
+    /// unless an author deliberately opts out. Meaningless on a
+    /// [`PortalKind::Plain`] portal, which has no door track at all; unlike
+    /// [`Self::door_thickness`]/[`Self::alcove_near`]/[`Self::alcove_far`]
+    /// this is not rejected there, since a bare `bool` default carries no
+    /// signal that an author deliberately set it (see [`ThingSkills`] for
+    /// the same reasoning applied to `skillN` defaults).
+    #[serde(default = "track_lower_unpegged_default")]
+    pub track_lower_unpegged: bool,
 }
 
 /// How the player triggers a level exit.
@@ -386,6 +444,75 @@ pub enum IrError {
         /// The rejected width.
         width: i32,
     },
+    /// A [`PortalKind::Door`]/[`PortalKind::Locked`] portal names no
+    /// [`Portal::door_thickness`].
+    #[error("portal `{a}` <-> `{b}` is a door but names no door_thickness")]
+    MissingDoorThickness {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+    },
+    /// A [`Portal::door_thickness`], [`Portal::alcove_near`], or
+    /// [`Portal::alcove_far`] value is not one of [`Ir::DOOR_DIMENSIONS`].
+    #[error("portal `{a}` <-> `{b}` has {field} {value}, which must be 8, 16, or 32 map units")]
+    InvalidDoorDimension {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// Which field was rejected: `"door_thickness"`, `"alcove_near"`, or
+        /// `"alcove_far"`.
+        field: &'static str,
+        /// The rejected value.
+        value: i32,
+    },
+    /// A [`PortalKind::Plain`] portal sets [`Portal::door_thickness`],
+    /// [`Portal::alcove_near`], or [`Portal::alcove_far`] — fields that only
+    /// mean something for a door, and would otherwise be silently ignored.
+    #[error(
+        "portal `{a}` <-> `{b}` is plain but sets a door field ({field}); use `door` or `locked`, or remove it"
+    )]
+    DoorFieldsOnPlainPortal {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// Which field was set: `"door_thickness"`, `"alcove_near"`, or
+        /// `"alcove_far"`.
+        field: &'static str,
+    },
+    /// A [`PortalKind::Door`]/[`PortalKind::Locked`] portal's facing-wall gap
+    /// does not exactly equal [`Portal::door_thickness`] plus
+    /// [`Portal::alcove_near`] plus [`Portal::alcove_far`] (each alcove
+    /// counted as 0 when absent).
+    ///
+    /// Exact equality, not merely "at least" — see this variant's citation in
+    /// the door-redesign report for why a gap wider than the sum is
+    /// unsound, not just untidy: the leftover span would have no sector to
+    /// fill it, breaking the passage between the door and whichever real
+    /// room or alcove sits beyond the shortfall.
+    #[error(
+        "portal `{a}` <-> `{b}` has a {gap}-unit gap, but door_thickness {door_thickness} + \
+         alcove_near {alcove_near} + alcove_far {alcove_far} = {needed}; the gap must equal \
+         that sum exactly"
+    )]
+    DoorGapMismatch {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The gap actually measured between the two facing walls.
+        gap: i32,
+        /// The door's own thickness.
+        door_thickness: i32,
+        /// The near alcove's length (0 when absent).
+        alcove_near: i32,
+        /// The far alcove's length (0 when absent).
+        alcove_far: i32,
+        /// `door_thickness + alcove_near + alcove_far`.
+        needed: i32,
+    },
 }
 
 /// The inclusive coordinate and height range every Doom map format stores in
@@ -408,6 +535,18 @@ impl Ir {
     /// artifact, and keeps every gap on the same fine grid door tracks and
     /// jambs are commonly built on.
     pub const MIN_PORTAL_GAP: i32 = 8;
+
+    /// The legal values for [`Portal::door_thickness`], [`Portal::alcove_near`],
+    /// and [`Portal::alcove_far`], in map units.
+    ///
+    /// A compiler-construction constant, like [`Self::MIN_PORTAL_GAP`], not
+    /// an engine-sourced one — nothing in the Doom engine constrains door or
+    /// alcove depth. Three enumerated sizes (rather than "any multiple of
+    /// [`Self::MIN_PORTAL_GAP`]") is a deliberate authoring constraint the
+    /// playtester's request itself specified, matching real mapping
+    /// practice: a door is built at one of a few conventional depths, not an
+    /// arbitrary one.
+    pub const DOOR_DIMENSIONS: [i32; 3] = [8, 16, 32];
 
     /// Parses and validates an IR document.
     ///
@@ -435,7 +574,14 @@ impl Ir {
     /// room that sets both `secret` and `special`, [`IrError::ExitUnknownRoom`]
     /// for an exit naming a room that does not exist,
     /// [`IrError::InvalidExitWidth`]/[`IrError::OddExitWidth`] for a
-    /// non-positive or odd exit width, and the numeric-range variants listed
+    /// non-positive or odd exit width, [`IrError::MissingDoorThickness`] for
+    /// a door/locked portal that names no `door_thickness`,
+    /// [`IrError::InvalidDoorDimension`] for a `door_thickness`,
+    /// `alcove_near`, or `alcove_far` that is not 8, 16, or 32,
+    /// [`IrError::DoorFieldsOnPlainPortal`] for a plain portal that sets any
+    /// of those three fields, [`IrError::DoorGapMismatch`] for a door/locked
+    /// portal whose facing-wall gap does not exactly equal `door_thickness +
+    /// alcove_near + alcove_far`, and the numeric-range variants listed
     /// above (which an exit's `at` is also checked against).
     pub fn from_json(s: &str) -> Result<Self, IrError> {
         let ir: Self = serde_json::from_str(s)?;
@@ -449,6 +595,8 @@ impl Ir {
         let seen = Self::validate_rooms(&ir)?;
         Self::validate_portals(&ir, &seen)?;
         Self::validate_portal_gaps(&ir)?;
+        Self::validate_door_dimensions(&ir)?;
+        Self::validate_door_gap(&ir)?;
         Self::validate_exits(&ir, &seen)?;
 
         Ok(ir)
@@ -583,6 +731,103 @@ impl Ir {
                     a: portal.a.clone(),
                     b: portal.b.clone(),
                     gap,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates every portal's door-only fields
+    /// ([`Portal::door_thickness`]/[`Portal::alcove_near`]/[`Portal::alcove_far`]):
+    /// present and one of [`Self::DOOR_DIMENSIONS`] for
+    /// [`PortalKind::Door`]/[`PortalKind::Locked`], and absent for
+    /// [`PortalKind::Plain`].
+    ///
+    /// Runs unconditionally over every portal — unlike [`Self::validate_door_gap`],
+    /// this does not depend on `at` resolving to a real facing span, since a
+    /// malformed field (a missing thickness, or one set on a plain portal)
+    /// is wrong regardless of where the portal sits.
+    fn validate_door_dimensions(ir: &Self) -> Result<(), IrError> {
+        for portal in &ir.portals {
+            let fields: [(&'static str, Option<i32>); 3] = [
+                ("door_thickness", portal.door_thickness),
+                ("alcove_near", portal.alcove_near),
+                ("alcove_far", portal.alcove_far),
+            ];
+            match portal.kind {
+                PortalKind::Plain => {
+                    for (field, value) in fields {
+                        if value.is_some() {
+                            return Err(IrError::DoorFieldsOnPlainPortal {
+                                a: portal.a.clone(),
+                                b: portal.b.clone(),
+                                field,
+                            });
+                        }
+                    }
+                }
+                PortalKind::Door | PortalKind::Locked => {
+                    if portal.door_thickness.is_none() {
+                        return Err(IrError::MissingDoorThickness {
+                            a: portal.a.clone(),
+                            b: portal.b.clone(),
+                        });
+                    }
+                    for (field, value) in fields {
+                        if let Some(value) = value
+                            && !Self::DOOR_DIMENSIONS.contains(&value)
+                        {
+                            return Err(IrError::InvalidDoorDimension {
+                                a: portal.a.clone(),
+                                b: portal.b.clone(),
+                                field,
+                                value,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates every [`PortalKind::Door`]/[`PortalKind::Locked`] portal's
+    /// facing-wall gap against [`Portal::door_thickness`] +
+    /// [`Portal::alcove_near`] + [`Portal::alcove_far`].
+    ///
+    /// Runs after [`Self::validate_door_dimensions`], so every value it reads
+    /// is already known to be present and one of [`Self::DOOR_DIMENSIONS`].
+    /// Like [`Self::validate_portal_gaps`], only a portal whose `at` actually
+    /// resolves to a real facing-wall pair is checked here — a portal naming
+    /// rooms that share no facing wall, or whose `at` lands off of every one
+    /// they do share, is left for the later, more specific structural error
+    /// (`NotAdjacent`/`PortalOffWall`) to report.
+    fn validate_door_gap(ir: &Self) -> Result<(), IrError> {
+        for portal in &ir.portals {
+            let Some(door_thickness) = portal.door_thickness else {
+                continue;
+            };
+            let room_a = ir.room(&portal.a).expect("validated by validate_portals");
+            let room_b = ir.room(&portal.b).expect("validated by validate_portals");
+
+            let spans = facing_spans(&room_a.footprint, &room_b.footprint);
+            let Some(span) = find_facing_span(&spans, portal.at) else {
+                continue;
+            };
+
+            let alcove_near = portal.alcove_near.unwrap_or(0);
+            let alcove_far = portal.alcove_far.unwrap_or(0);
+            let needed = door_thickness + alcove_near + alcove_far;
+            let gap = span.gap();
+            if gap != needed {
+                return Err(IrError::DoorGapMismatch {
+                    a: portal.a.clone(),
+                    b: portal.b.clone(),
+                    gap,
+                    door_thickness,
+                    alcove_near,
+                    alcove_far,
+                    needed,
                 });
             }
         }
@@ -817,6 +1062,188 @@ mod tests {
         );
     }
 
+    /// Two rooms facing each other across a legal, grid-aligned gap of
+    /// `gap` units (a fine grid of 4, so any `gap` from 8 upward is
+    /// expressible), with a door portal whose optional door-only fields are
+    /// injected verbatim — `""` for a field to omit entirely.
+    fn ir_with_door(gap: i32, door_fields: &str) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":4, "theme":"tech_base",
+              "rooms":[
+                {{ "id":"a", "footprint":[[0,0],[0,64],[64,64],[64,0]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }},
+                {{ "id":"b", "footprint":[[{},0],[{},64],[{},64],[{},0]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
+              ],
+              "portals":[{{ "a":"a", "b":"b", "kind":"door", "width":32, "at":[64,32]{door_fields} }}] }}"#,
+            64 + gap,
+            64 + gap,
+            64 + gap + 64,
+            64 + gap + 64,
+        )
+    }
+
+    #[test]
+    fn a_door_portal_missing_door_thickness_is_rejected() {
+        assert!(matches!(
+            Ir::from_json(&ir_with_door(32, "")),
+            Err(IrError::MissingDoorThickness { .. })
+        ));
+    }
+
+    #[test]
+    fn a_door_portal_with_door_thickness_matching_the_gap_is_accepted() {
+        assert!(Ir::from_json(&ir_with_door(32, r#", "door_thickness":32"#)).is_ok());
+    }
+
+    #[test]
+    fn a_door_thickness_not_8_16_or_32_is_rejected() {
+        // 24 clears every other bound (positive, less than the gap) but is
+        // not one of the three enumerated sizes.
+        let err = Ir::from_json(&ir_with_door(32, r#", "door_thickness":24"#))
+            .expect_err("24 is not a legal door_thickness");
+        assert!(matches!(
+            err,
+            IrError::InvalidDoorDimension {
+                field: "door_thickness",
+                value: 24,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_alcove_length_not_8_16_or_32_is_rejected() {
+        let near = Ir::from_json(&ir_with_door(
+            64,
+            r#", "door_thickness":32, "alcove_near":24"#,
+        ))
+        .expect_err("24 is not a legal alcove_near");
+        assert!(matches!(
+            near,
+            IrError::InvalidDoorDimension {
+                field: "alcove_near",
+                value: 24,
+                ..
+            }
+        ));
+        let far = Ir::from_json(&ir_with_door(
+            64,
+            r#", "door_thickness":32, "alcove_far":24"#,
+        ))
+        .expect_err("24 is not a legal alcove_far");
+        assert!(matches!(
+            far,
+            IrError::InvalidDoorDimension {
+                field: "alcove_far",
+                value: 24,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_plain_portal_setting_a_door_field_is_rejected() {
+        let json = ir_with_door(32, r#", "door_thickness":32"#).replace("\"door\"", "\"plain\"");
+        assert!(matches!(
+            Ir::from_json(&json),
+            Err(IrError::DoorFieldsOnPlainPortal {
+                field: "door_thickness",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_plain_portal_setting_an_alcove_alone_is_also_rejected() {
+        // Pins that the check covers each of the three door-only fields
+        // independently, not just `door_thickness` — a mutation that only
+        // checked one field would still pass the test above.
+        let json = ir_with_door(32, r#", "alcove_near":16"#).replace("\"door\"", "\"plain\"");
+        assert!(matches!(
+            Ir::from_json(&json),
+            Err(IrError::DoorFieldsOnPlainPortal {
+                field: "alcove_near",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_door_gap_wider_than_thickness_plus_alcoves_is_rejected() {
+        // The task that requested alcoves phrased the rule as "at least" —
+        // gap >= door_thickness + alcove_near + alcove_far. That is unsound:
+        // a gap wider than the sum leaves a stretch of the corridor with no
+        // sector to fill it, disconnecting whatever lies beyond the
+        // shortfall (see the door-redesign report). `Ir::from_json`
+        // therefore requires exact equality — a gap of 64 with only 32
+        // units of door_thickness/alcove declared (32 short) is rejected,
+        // not silently accepted as "at least enough".
+        let err = Ir::from_json(&ir_with_door(64, r#", "door_thickness":32"#))
+            .expect_err("a 64-unit gap with only 32 units of chain declared must be rejected");
+        assert!(matches!(
+            err,
+            IrError::DoorGapMismatch {
+                gap: 64,
+                door_thickness: 32,
+                alcove_near: 0,
+                alcove_far: 0,
+                needed: 32,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_door_gap_narrower_than_thickness_plus_alcoves_is_also_rejected() {
+        let err = Ir::from_json(&ir_with_door(
+            32,
+            r#", "door_thickness":32, "alcove_near":16"#,
+        ))
+        .expect_err("a 32-unit gap cannot hold a 48-unit chain");
+        assert!(matches!(
+            err,
+            IrError::DoorGapMismatch {
+                gap: 32,
+                needed: 48,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_locked_portal_also_requires_the_gap_to_match_exactly() {
+        // `validate_door_gap` reads `Portal::door_thickness` directly,
+        // unconditional on `kind` beyond it being `Some` — this pins that a
+        // `Locked` portal (not just `Door`) is checked too.
+        let json = ir_with_door(64, r#", "lock":"blue_card", "door_thickness":32"#)
+            .replace("\"kind\":\"door\"", "\"kind\":\"locked\"");
+        assert!(matches!(
+            Ir::from_json(&json),
+            Err(IrError::DoorGapMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn track_lower_unpegged_defaults_to_true_and_can_be_disabled() {
+        let default_on = Ir::from_json(&ir_with_door(32, r#", "door_thickness":32"#)).expect("ir");
+        assert!(
+            default_on.portals[0].track_lower_unpegged,
+            "absent track_lower_unpegged defaults to true"
+        );
+        let disabled = Ir::from_json(&ir_with_door(
+            32,
+            r#", "door_thickness":32, "track_lower_unpegged":false"#,
+        ))
+        .expect("ir");
+        assert!(
+            !disabled.portals[0].track_lower_unpegged,
+            "explicit false is honored"
+        );
+    }
+
     #[test]
     fn rejects_a_room_whose_ceiling_is_not_above_its_floor() {
         let flat = TWO_ROOM.replace("\"ceiling\": 128", "\"ceiling\": 0");
@@ -863,7 +1290,8 @@ mod tests {
         ));
         let keyed = TWO_ROOM.replace(
             "\"kind\": \"plain\"",
-            "\"kind\": \"locked\", \"lock\": \"blue_card\"",
+            "\"kind\": \"locked\", \"lock\": \"blue_card\", \"door_thickness\": 32, \
+             \"alcove_near\": 16, \"alcove_far\": 16",
         );
         assert!(Ir::from_json(&keyed).is_ok(), "a named key is accepted");
     }

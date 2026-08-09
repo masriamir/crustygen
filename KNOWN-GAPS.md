@@ -1,7 +1,8 @@
 # crustygen — known gaps and carried decisions
 
 State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD →
-reassembles through crustywad. 164 tests. This file records what is deliberately
+reassembles through crustywad. 184 tests (177 lib + 1 first_map + 5
+golden_textmap + 1 walking_skeleton). This file records what is deliberately
 absent, what is known-fragile, and the decisions a future contributor would
 otherwise have to re-derive.
 
@@ -57,8 +58,11 @@ fires when an opening consumes a wall end to end, so the reusable sidedef
 reaches it twice — its `armory` room is only 128 units tall along the wall its
 `start`-facing portal opens (`width: 128` against a wall exactly 128 units
 long), so the portal consumes that whole wall and leaves `armory`'s original
-sidedef record unreferenced. Confirmed directly: the compiled map carries 81
-sidedef records but only 79 are ever named by a linedef's `front`/`back`.
+sidedef record unreferenced. Confirmed directly: the compiled map carries 93
+sidedef records but only 91 are ever named by a linedef's `front`/`back` (up
+from 81/79 before the door-thickness/alcove redesign added more sidedefs to
+the map's two door chains — the two orphaned records are still exactly
+`armory`'s own two end-to-end-consumed walls, unaffected by that change).
 
 **crustygen runs in no CI.** It declares its own `[workspace]`, so the parent
 repo's `cargo fmt --all` and `cargo clippy --workspace` do not reach it, and
@@ -85,24 +89,59 @@ multiple of that). `Ir::from_json` validates the gap via
 `geom::facing_spans`/`geom::find_facing_span` — the identical geometry
 `compile::portals::resolve_portal` later cuts through, so the two can never
 disagree about which wall pair a portal resolves to or how wide the gap
-between them is. A portal — of any kind — fills that gap with a new sector
-(`compile::portals::emit_gap_sector`): an open, walkable passage for
-`PortalKind::Plain`, or a closed sector for `PortalKind::Door`/`PortalKind::Locked`,
-built from the same shape either way — two threshold lines (room `a` <-> new
-sector, new sector <-> room `b`) and two one-sided jambs closing the gap's
-long sides, front bound to the new sector with solid rock behind. Neither
-room's own declared footprint is ever touched, which is what supersedes the
-old, asymmetric carve-into-`b` door construction this section used to
-describe: a door's depth is now simply the wall gap itself (already
-validated >= `MIN_PORTAL_GAP` at the IR boundary), not a separate
-`DOOR_DEPTH` compiler constant carved out of room `b`'s interior. Swapping
-`a` and `b` on a portal no longer physically relocates anything — the gap is
-filled identically regardless of which room is named first — though `at`'s
-convention (anchored to room `a`'s wall) still means the two labels are not
-*interchangeable* without also updating `at`. See `ir::Portal`'s doc comment
-and the wall-thickness report
+between them is. A `PortalKind::Plain` portal fills that gap with a single
+new sector (`compile::portals::emit_gap_sector`): an open, walkable passage,
+two threshold lines (room `a` <-> new sector, new sector <-> room `b`) and two
+one-sided jambs closing the gap's long sides, front bound to the new sector
+with solid rock behind. Neither room's own declared footprint is ever
+touched. Swapping `a` and `b` on a portal no longer physically relocates
+anything — the gap is filled identically regardless of which room is named
+first — though `at`'s convention (anchored to room `a`'s wall) still means
+the two labels are not *interchangeable* without also updating `at`. See
+`ir::Portal`'s doc comment and the wall-thickness report
 (`.superpowers/sdd/2026-08-09-crustygen-compiler/wall-thickness-report.md`)
-for the full derivation and worked coordinates.
+for the full derivation and worked coordinates. A door portal fills the same
+gap differently — see the next entry.
+
+**A door portal's gap decomposes into a chain: an optional near alcove, the
+door itself, an optional far alcove — the door-thickness/alcove model.**
+Superseding this section's own earlier claim that "a door's depth is simply
+the wall gap itself": a `PortalKind::Door`/`PortalKind::Locked` portal now
+requires `Portal::door_thickness` (one of 8, 16, or 32 map units — see
+`Ir::DOOR_DIMENSIONS`) and accepts two optional buffer sectors,
+`Portal::alcove_near` (adjacent to room `a`'s wall) and `Portal::alcove_far`
+(adjacent to room `b`'s), each from the same three-value set when present.
+`Ir::from_json` requires the facing-wall gap to equal
+`door_thickness + alcove_near + alcove_far` **exactly** — not merely "at
+least", which the feature's own requester proposed and which is unsound: a
+gap wider than the sum would leave a stretch of the corridor with no sector
+to fill it, disconnecting whatever lies beyond the shortfall, since every
+inch of the gap must belong to some emitted sector or the passage breaks.
+`compile::doors::emit_doors` builds the chain as one to three
+axis-aligned sectors in sequence (near alcove, door, far alcove — any
+absent), each via `compile::portals::emit_segment`/`emit_jambs`/`emit_opening`
+directly rather than through `emit_gap_sector` (which only ever builds a
+single segment spanning the *entire* gap, the shape `cut_portals` still uses
+for a plain portal). Only the door segment's own two faces carry the door
+special and its sector's tag; an alcove's two faces are a plain,
+non-blocking passage exactly like a plain portal's own gap sector, and its
+floor, ceiling, light, and floor/ceiling textures copy whichever real room it
+directly borders (room `a` for the near alcove, room `b` for the far one) —
+not `min`/`max`-blended the way the plain-portal passage sector is, since an
+alcove borders only one real room, not two. An alcove's own walls (its
+jambs) use the theme's new `trim` texture role (`STARGR2` for `tech_base`);
+the door's own jambs — "the track" — use `door_track` (`DOORTRAK`) as
+before, and are lower-unpegged by default so the texture stays anchored to
+the floor as the door sector's ceiling animates open, now with an explicit
+opt-out (`Portal::track_lower_unpegged: false`) — the door's own two faces
+stay lower-unpegged unconditionally, since that setting only ever governed
+the track. `compile::doors::validate_door_texture` additionally rejects a
+theme whose `door` texture is not in `vocabulary.toml`'s curated (not
+sourced — see that table's own leading comment)
+`[door_texture_catalog]`. See the door-redesign report
+(`.superpowers/sdd/2026-08-09-crustygen-compiler/door-redesign-report.md`)
+for the full derivation, worked coordinates, and why "at least" was rejected
+in favor of exact equality.
 
 **`facing_spans` has no distance bound, which can surprise an author moving a
 room away from a fixture that used to be adjacent.** Two walls "face" each
@@ -204,6 +243,15 @@ A wrong constant produces a map that loads, renders correctly, and is
 unplayable. **No test can catch it, because the test reads the same table the
 compiler does.** If a source is unreachable, leave the value unsourced and say
 so — a reported gap beats a plausible guess.
+
+**One deliberate, clearly-labeled exception: `vocabulary.toml`'s
+`[door_texture_catalog]`.** Which texture names read as a door is an
+asset-naming convention, not an engine constant and not derivable from one —
+there is no `linuxdoom-1.10` table of "the door textures" to cite. That table
+carries a `curated` field in place of `source` for exactly this reason, and
+`Tables::is_door_texture`'s doc comment repeats the distinction at the call
+site. Do not add a `source` field to it, and do not extend this exception to
+anything that *is* sourceable.
 
 Two engine facts worth keeping visible, both non-obvious and both found only by
 reading the source:

@@ -341,6 +341,25 @@ pub enum CompileError {
         /// The unresolvable key name.
         lock: String,
     },
+    /// A theme's `door` texture is not in the project's curated
+    /// door-texture catalog.
+    ///
+    /// Which texture names "read as a door" is an asset-naming convention,
+    /// not something sourced from the engine or derivable from it — see
+    /// [`crate::tables::Tables::is_door_texture`]'s doc comment. This is the
+    /// honest, structural half of validating it (the vocabulary table
+    /// itself carries the other half: every curated name was confirmed
+    /// present in the Freedoom fixtures — see `vocabulary.toml`'s
+    /// `[door_texture_catalog]` `curated` field).
+    #[error(
+        "theme `{theme}`'s door texture `{texture}` is not in the curated door-texture catalog"
+    )]
+    NotADoorTexture {
+        /// The theme naming the texture.
+        theme: String,
+        /// The unrecognized texture name.
+        texture: String,
+    },
     /// A room's sector has no emitted linedef bordering it, so nothing can
     /// be measured against it.
     #[error("room `{room}` has no emitted geometry to measure clearance against")]
@@ -409,9 +428,12 @@ pub struct Compiled {
 ///    portal it leaves both flanking walls cut but the gap itself still
 ///    empty, because that gap is a closed sector rather than a single line.
 /// 4. [`doors::emit_doors`] fills that gap with a dedicated closed sector for
-///    every door portal, allocating its tag from a fresh [`TagAllocator`]
-///    shared with every other tag-consuming pass. Neither room's own
-///    footprint is touched — the gap already exists by construction.
+///    every door portal — optionally flanked by up to two trim alcove
+///    sectors ([`crate::ir::Portal::alcove_near`]/
+///    [`crate::ir::Portal::alcove_far`]) — allocating its tag from a fresh
+///    [`TagAllocator`] shared with every other tag-consuming pass. Neither
+///    room's own footprint is touched — the gap already exists by
+///    construction.
 /// 5. [`exits::emit_exits`] carves every level exit into its host room's own
 ///    wall, using the same [`TagAllocator`]. Runs after doors so a thing's
 ///    clearance (step 7) is measured against the exit's final geometry too.

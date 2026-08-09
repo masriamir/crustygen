@@ -251,5 +251,33 @@ ceiling = "CEIL3_5"
 door = "BIGDOOR2"
 door_track = "DOORTRAK"
 switch = "SW1STARG"
-source = "Verified against tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad (fetched via `just fetch-fixtures` in the crustywad checkout; not modified). FLOOR4_8 (4096 bytes) and CEIL3_5 (4096 bytes) and DOORTRAK (1104 bytes) confirmed present as raw flat/patch lumps in both WADs via `./target/debug/cwad list <wad>`. STARTAN3, BIGDOOR2, and DOORTRAK confirmed as composite wall textures (present in the TEXTURE1 lump, 963 entries in each WAD) via crustywad::Wad::texture_set().find(name) returning Some for all three, checked with a throwaway binary against the crustywad path dependency — matches placeholder, unchanged"
+trim = "STARGR2"
+source = "Verified against tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad (fetched via `just fetch-fixtures` in the crustywad checkout; not modified). FLOOR4_8 (4096 bytes) and CEIL3_5 (4096 bytes) and DOORTRAK (1104 bytes) confirmed present as raw flat/patch lumps in both WADs via `./target/debug/cwad list <wad>`. STARTAN3, BIGDOOR2, DOORTRAK, and STARGR2 (added for the door-redesign task's trim role) confirmed as composite wall textures (present in the TEXTURE1 lump, 963 entries in each WAD) via crustywad::Wad::texture_set().find(name) returning Some for all four, checked with a throwaway binary against the crustywad path dependency"
 switch_source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, alphSwitchList[]: {\"SW1STARG\", \"SW2STARG\", 1} — the trailing 1 is the episode number, and this table's episode-1 block (the tech-base episode) is where SW1STARG/SW2STARG live, pairing thematically with the STARTAN wall family already used for tech_base. P_ChangeSwitchTexture toggles a placed switch texture to `switchlist[i^1]`, its paired member in this same table, on activation — so the vocabulary only needs the initially-placed (SW1) name; the engine derives the pressed (SW2) counterpart itself via SWITCHES. SW1STARG confirmed present as a composite texture name in both tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad's TEXTURE1 lump via crustywad::Wad::texture_set(), same throwaway-binary method as the row above. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_switch.c"
+trim_source = "NOT sourced from the engine (nothing in linuxdoom-1.10 names a 'trim' texture role) — a compiler-construction choice pairing thematically with tech_base's other textures: STARGR2 ('star grate') sits in the same STARTAN/STARG/SW1STARG 'episode 1' texture family this theme already draws wall/switch from (see the switch_source citation above for that family relationship). Confirmed present as a composite texture name in both tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad's TEXTURE1 lump via crustywad::Wad::texture_set(), same throwaway-binary method as the row above."
+
+# Which texture NAMES read as "a door" to a human mapper. This is deliberately
+# NOT a `source` field — see `curated` below in its place. Every value in
+# this file otherwise carries a `source` citation to a pinned engine commit
+# or a primary spec; this table cannot, because "which textures are door
+# textures" is neither a constant in the engine nor derivable from one — it
+# is an asset-naming convention. `Tables::is_door_texture` (crustygen's
+# compiler crate) rejects a theme whose configured `door` texture is not in
+# this list, catching a theme entry that names, say, a wall texture by
+# mistake. Deliberately excludes DOORTRAK (the door's *track*, a distinct
+# role already carried by `[textures.*].door_track`) and DOORSTOP (a small
+# floor prop, not a texture that reads as a door's own panel), and excludes
+# the `M_*`-prefixed names (`M_BDOOR`, `M_RDOOR`, `M_YDOOR`) that also
+# happen to contain "DOOR" and appear in Freedoom's TEXTURE1 lump — those are
+# menu HUD graphics reusing the texture-definition format, not door panels a
+# player ever sees on a wall.
+[door_texture_catalog]
+names = [
+  "BIGDOOR1", "BIGDOOR2", "BIGDOOR3", "BIGDOOR4", "BIGDOOR5", "BIGDOOR6", "BIGDOOR7",
+  "DOOR1", "DOOR3", "DOOR3L",
+  "DOORBLU", "DOORBLU2", "DOORRED", "DOORRED2", "DOORYEL", "DOORYEL2",
+  "SPCDOOR0", "SPCDOOR1", "SPCDOOR2", "SPCDOOR3", "SPCDOOR4",
+  "AQDOOR01", "AQDOOR02",
+  "ZDOORB1", "ZDOORF1", "ZELDOOR", "ICKDOOR1", "TNTDOOR", "EXITDOOR",
+]
+curated = "NOT sourced from the engine or derivable from it — which texture names read as a door is an asset-naming convention, not an engine constant (see the table's own leading comment above). Hand-curated from the classic id-Software/Freedoom BIGDOOR/DOOR*/SPCDOOR*/ZDOOR* texture-name families that denote a door's own moving panel surface. Every name above confirmed present as a composite texture in both tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad's TEXTURE1 lump via crustywad::Wad::texture_set().find(name), same throwaway-binary method [textures.tech_base].source documents. Deliberately excludes DOORTRAK, DOORSTOP, and the M_*DOOR menu-graphic names — see the table's leading comment for why each is excluded."

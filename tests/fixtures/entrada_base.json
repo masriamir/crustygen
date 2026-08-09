@@ -117,10 +117,12 @@
   ],
   "portals": [
     { "a": "start", "b": "armory", "kind": "plain", "width": 128, "at": [256, 128] },
-    { "a": "armory", "b": "hub", "kind": "door", "width": 128, "at": [576, 128] },
+    { "a": "armory", "b": "hub", "kind": "door", "width": 128, "at": [576, 128],
+      "door_thickness": 16, "alcove_near": 16, "alcove_far": 32 },
     { "a": "hub", "b": "key_room", "kind": "plain", "width": 128, "at": [832, 0] },
     { "a": "hub", "b": "combat", "kind": "plain", "width": 128, "at": [960, 96] },
-    { "a": "combat", "b": "vault", "kind": "locked", "lock": "blue_card", "width": 128, "at": [1344, 128] },
+    { "a": "combat", "b": "vault", "kind": "locked", "lock": "blue_card", "width": 128, "at": [1344, 128],
+      "door_thickness": 32, "alcove_near": 32 },
     { "a": "vault", "b": "exit_hall", "kind": "plain", "width": 128, "at": [1664, 128] }
   ],
   "exits": [

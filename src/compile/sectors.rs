@@ -604,6 +604,17 @@ mod tests {
     /// `b`'s own footprint, so `emit_sectors`'s room-vs-room overlap check
     /// cannot see it — only the gap-sector-vs-room check can.
     fn portal_through_third_room_ir(kind: &str) -> String {
+        // A door portal needs its own `door_thickness` (plus alcoves, here
+        // splitting the 64-unit gap into all three chain components) since
+        // `Ir::from_json` requires it for `PortalKind::Door`/`Locked`; a
+        // plain portal must carry none of those fields at all
+        // (`IrError::DoorFieldsOnPlainPortal`), so they are only appended
+        // for `kind == "door"`.
+        let door_fields = if kind == "door" {
+            r#", "door_thickness":32, "alcove_near":16, "alcove_far":16"#
+        } else {
+            ""
+        };
         format!(
             r#"{{ "seed":1, "grid":8, "theme":"tech_base",
               "rooms":[
@@ -617,7 +628,7 @@ mod tests {
                    "floor":0, "ceiling":128, "light":160,
                    "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
               ],
-              "portals":[{{ "a":"a", "b":"b", "kind":"{kind}", "width":128, "at":[256,128] }}] }}"#
+              "portals":[{{ "a":"a", "b":"b", "kind":"{kind}", "width":128, "at":[256,128]{door_fields} }}] }}"#
         )
     }
 

@@ -63,7 +63,8 @@ const LOCKED_DOOR: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
       "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
   ],
   "portals":[{ "a":"a", "b":"b", "kind":"locked", "lock":"blue_card",
-               "width":128, "at":[256,128] }] }"#;
+               "width":128, "at":[256,128], "door_thickness":32,
+               "alcove_near":16, "alcove_far":16 }] }"#;
 
 #[test]
 fn a_locked_door_survives_the_round_trip_with_its_special_and_tag() {
@@ -84,7 +85,12 @@ fn a_locked_door_survives_the_round_trip_with_its_special_and_tag() {
     let group = wad.map_group("MAP01").expect("group");
     let map = Map::assemble(&wad, &group).expect("assembles");
 
-    assert_eq!(map.sectors().len(), 3, "two rooms plus the door sector");
+    assert_eq!(
+        map.sectors().len(),
+        5,
+        "two rooms plus the door's 3-segment chain (a near and a far trim alcove flanking \
+         the door itself)"
+    );
 
     let keyed = i32::from(
         tables

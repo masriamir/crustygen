@@ -448,83 +448,64 @@ pub(crate) fn resolve_portal(ir: &Ir, portal: &Portal) -> Result<PortalGeometry,
     })
 }
 
-/// Everything about one newly emitted gap sector: its own index, and the
-/// near/far threshold linedef indices bordering rooms `sector_a`/`sector_b`
-/// respectively, so the caller can attach a special, tag, or texture to them
-/// — only the caller knows whether this is an open passage or a door.
-pub(crate) struct GapSector {
-    /// Index of the new sector spanning the gap.
+/// Everything about one segment of a gap-filling chain: an already-pushed
+/// sector, its own near/far threshold linedef indices, and its two jamb
+/// linedef indices. See [`emit_segment`].
+pub(crate) struct Segment {
+    /// Index of the segment's own sector.
     pub(crate) sector: usize,
-    /// Index of the threshold linedef bordering `sector_a`.
+    /// Index of the threshold linedef bordering `sector_near`.
     pub(crate) near_line: usize,
-    /// Index of the threshold linedef bordering `sector_b`.
+    /// Index of the threshold linedef bordering `sector_far`.
     pub(crate) far_line: usize,
-    /// Indices of the two one-sided jamb linedefs closing the sector's long
-    /// sides — exposed alongside the thresholds so a door can mark them
-    /// lower-unpegged too (P11), which a plain passage has no reason to.
+    /// Indices of the two one-sided jamb linedefs closing the segment's long
+    /// sides.
     pub(crate) jamb_lines: [usize; 2],
 }
 
-/// Emits a sector spanning the void between `span.near` (room `sector_a`'s
-/// own wall) and `span.far` (room `sector_b`'s own wall): a near threshold
-/// (`sector_a` <-> the new sector), a far threshold (the new sector <->
-/// `sector_b`), and two one-sided jambs closing its long sides, front bound
-/// to the new sector with solid rock behind.
+/// Emits the two one-sided jambs closing one rectangular segment's long
+/// sides — the sides parallel to the direction of travel through the
+/// gap — front bound to `sector` with solid rock behind, over the range
+/// `near_pos`..`far_pos` along `axis`. Returns their two linedef indices.
 ///
-/// Both `cut_portals` (for a [`PortalKind::Plain`] passage) and
-/// `doors::emit_doors` (for a door's own sector) call this: the two share the
-/// identical boundary shape and differ only in the sector's own properties
-/// (floor, ceiling, texture, special) and whether the threshold lines carry a
-/// linedef special — which only the caller knows, so it supplies the
-/// finished [`SectorOut`] and reads the two threshold indices back out of the
-/// returned [`GapSector`] to fill in afterward.
-///
-/// Both threshold lines put the *real room* on the front and the new sector
-/// on the back — `span.a_forward` for the near one, its opposite for the far
-/// one, mirroring [`emit_opening`]'s own orientation rule — which is what
-/// lets a door's threshold carry a special that only triggers from a line's
-/// front side (`P_UseSpecialLine`).
+/// The same pattern `exits::emit_walkover_exit` uses for its alcove's side
+/// walls: a segment is a passage with no far wall of its own (its far side
+/// is a threshold instead), so only its two long sides are solid.
+/// Deliberately separated from threshold emission (unlike [`emit_segment`],
+/// which bundles both): [`crate::compile::doors::emit_doors`] needs a
+/// segment's jambs and its *outer* threshold built independently when that
+/// segment's *inner* threshold is actually another segment's own boundary,
+/// already emitted by that other segment's own call — see that function's
+/// module documentation for the full chain construction.
 #[expect(
     clippy::too_many_arguments,
-    reason = "each parameter names an independent piece of the gap sector's geometry or its \
-              caller-supplied properties; bundling them would just move the same count into a \
-              throwaway struct"
+    reason = "each parameter names an independent piece of the segment's geometry; bundling them \
+              would just move the same count into a throwaway struct"
 )]
-pub(crate) fn emit_gap_sector(
+pub(crate) fn emit_jambs(
     data: &mut MapData,
-    span: &FacingSpan,
+    axis: Axis,
     open_lo: i32,
     open_hi: i32,
-    sector_a: usize,
-    sector_b: usize,
-    sector_out: SectorOut,
+    a_forward: bool,
+    near_pos: i32,
+    far_pos: i32,
+    sector: usize,
     jamb_tex: &str,
-) -> GapSector {
-    let sector = data.sectors.len();
-    data.sectors.push(sector_out);
-
+) -> [usize; 2] {
     let near_cut = Cut {
-        axis: span.axis,
-        fixed: span.near,
+        axis,
+        fixed: near_pos,
         open_lo,
         open_hi,
     };
     let far_cut = Cut {
-        axis: span.axis,
-        fixed: span.far,
+        axis,
+        fixed: far_pos,
         open_lo,
         open_hi,
     };
-
-    let near_line = emit_opening(data, &near_cut, sector_a, sector, span.a_forward);
-    let far_line = emit_opening(data, &far_cut, sector_b, sector, !span.a_forward);
-
-    // The two jambs closing the gap sector's long sides — the same pattern
-    // `exits::emit_walkover_exit` uses for its alcove's side walls, since a
-    // gap sector's own two side walls are exactly that: a passage with no
-    // far wall (its far side is the far threshold instead), so only the two
-    // sides are solid.
-    let (near_start, near_end) = if span.a_forward {
+    let (near_start, near_end) = if a_forward {
         (open_hi, open_lo)
     } else {
         (open_lo, open_hi)
@@ -543,13 +524,139 @@ pub(crate) fn emit_gap_sector(
         sector,
         jamb_tex,
     );
+    [jamb_end, jamb_start]
+}
 
-    GapSector {
-        sector,
+/// Emits one rectangular segment of a gap-filling chain: a near threshold
+/// (`sector_near` <-> `this_sector`, at `near_pos`), a far threshold
+/// (`this_sector` <-> `sector_far`, at `far_pos`), and its two one-sided
+/// jambs ([`emit_jambs`]).
+///
+/// `this_sector` must already be pushed onto `data.sectors` — this function
+/// only emits the segment's *boundary* geometry, not the sector record
+/// itself. `near_pos` and `far_pos` need not be
+/// [`FacingSpan::near`]/[`FacingSpan::far`] themselves — only the segment's
+/// own two boundary coordinates. `sector_near`/`sector_far` are whichever two
+/// sectors border this segment on each side (a real room, or — for
+/// [`emit_gap_sector`]'s single-segment case — the two rooms directly).
+///
+/// Only safe to call once per *boundary*: if `this_sector` is one segment of
+/// a longer chain whose neighbor on one side is *another* compiler-generated
+/// segment rather than a real room, that shared boundary must be built by
+/// exactly one of the two segments, never both, or the same physical wall is
+/// emitted twice as two coincident, overlapping linedefs. This is exactly
+/// why [`crate::compile::doors::emit_doors`] calls this for the door segment
+/// only — the door's own two faces are never shared with a third segment —
+/// and builds an alcove's own outer threshold and jambs directly via
+/// [`emit_opening`]/[`emit_jambs`] instead, leaving the alcove's inner
+/// threshold to the door's own call.
+///
+/// Both threshold lines put `sector_near`/`sector_far` on the front and
+/// `this_sector` on the back — `a_forward` for the near one, its opposite for
+/// the far one, mirroring [`emit_opening`]'s own orientation rule — which is
+/// what lets a door's threshold carry a special that only triggers from a
+/// line's front side (`P_UseSpecialLine`), regardless of whether the
+/// neighboring segment is a real room or another compiler-generated sector.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each parameter names an independent piece of the segment's geometry; bundling them \
+              would just move the same count into a throwaway struct"
+)]
+pub(crate) fn emit_segment(
+    data: &mut MapData,
+    axis: Axis,
+    open_lo: i32,
+    open_hi: i32,
+    a_forward: bool,
+    near_pos: i32,
+    far_pos: i32,
+    sector_near: usize,
+    this_sector: usize,
+    sector_far: usize,
+    jamb_tex: &str,
+) -> Segment {
+    let near_cut = Cut {
+        axis,
+        fixed: near_pos,
+        open_lo,
+        open_hi,
+    };
+    let far_cut = Cut {
+        axis,
+        fixed: far_pos,
+        open_lo,
+        open_hi,
+    };
+
+    let near_line = emit_opening(data, &near_cut, sector_near, this_sector, a_forward);
+    let far_line = emit_opening(data, &far_cut, sector_far, this_sector, !a_forward);
+    let jamb_lines = emit_jambs(
+        data,
+        axis,
+        open_lo,
+        open_hi,
+        a_forward,
+        near_pos,
+        far_pos,
+        this_sector,
+        jamb_tex,
+    );
+
+    Segment {
+        sector: this_sector,
         near_line,
         far_line,
-        jamb_lines: [jamb_end, jamb_start],
+        jamb_lines,
     }
+}
+
+/// Emits a sector spanning the *entire* void between `span.near` (room
+/// `sector_a`'s own wall) and `span.far` (room `sector_b`'s own wall) — the
+/// single-segment case of [`emit_segment`], with `sector_a`/`sector_b` as its
+/// only two neighbors. Returns the new sector's index.
+///
+/// `cut_portals` uses this for a [`PortalKind::Plain`] passage, which is
+/// always a single sector spanning the whole gap, open and carrying no
+/// special — so the caller has no further per-boundary bookkeeping to do
+/// with the returned index. `doors::emit_doors` does not use this at all: a
+/// door's own gap may be split into up to three segments (an optional near
+/// alcove, the door, an optional far alcove — see
+/// [`crate::ir::Portal::door_thickness`]), each needing its own properties
+/// filled in afterward, so it calls [`emit_segment`] directly, once per
+/// component, and reads the boundary/jamb indices back out of each
+/// [`Segment`] instead of this wrapper.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each parameter names an independent piece of the gap sector's geometry or its \
+              caller-supplied properties; bundling them would just move the same count into a \
+              throwaway struct"
+)]
+pub(crate) fn emit_gap_sector(
+    data: &mut MapData,
+    span: &FacingSpan,
+    open_lo: i32,
+    open_hi: i32,
+    sector_a: usize,
+    sector_b: usize,
+    sector_out: SectorOut,
+    jamb_tex: &str,
+) -> usize {
+    let sector = data.sectors.len();
+    data.sectors.push(sector_out);
+    emit_segment(
+        data,
+        span.axis,
+        open_lo,
+        open_hi,
+        span.a_forward,
+        span.near,
+        span.far,
+        sector_a,
+        sector,
+        sector_b,
+        jamb_tex,
+    );
+    sector
 }
 
 /// Emits a one-sided wall from `p1` to `p2`, front bound to `sector`, with

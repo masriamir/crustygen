@@ -407,7 +407,8 @@ mod tests {
                        "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W",
                        "things":[{{ "kind":"player1_start", "at":[{x},128], "angle":90 }}] }}
                   ],
-                  "portals":[{{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128] }}] }}"#
+                  "portals":[{{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128],
+                                "door_thickness":32, "alcove_near":16, "alcove_far":16 }}] }}"#
             )
         };
 

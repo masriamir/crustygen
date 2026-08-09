@@ -268,7 +268,8 @@ mod tests {
                    "floor":0, "ceiling":{ceiling_b}, "light":160,
                    "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }}
               ],
-              "portals":[{{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128] }}] }}"#
+              "portals":[{{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128],
+                            "door_thickness":32, "alcove_near":16, "alcove_far":16 }}] }}"#
         )
     }
 
@@ -443,7 +444,8 @@ mod tests {
     fn p24_a_locked_door_naming_an_unplaced_key_fails() {
         let locked = ir(0, 128, 160).replace(
             "\"kind\":\"plain\"",
-            "\"kind\":\"locked\", \"lock\":\"blue_card\"",
+            "\"kind\":\"locked\", \"lock\":\"blue_card\", \"door_thickness\":32, \
+             \"alcove_near\":16, \"alcove_far\":16",
         );
         assert!(violations(&locked).contains(&"P24".to_owned()));
     }
@@ -485,7 +487,8 @@ mod tests {
               "floor":0, "ceiling":128, "light":160,
               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
           ],
-          "portals":[{ "a":"a", "b":"b", "kind":"locked", "lock":"blue_card", "width":128, "at":[256,128] }] }"#;
+          "portals":[{ "a":"a", "b":"b", "kind":"locked", "lock":"blue_card", "width":128, "at":[256,128],
+                        "door_thickness":32, "alcove_near":16, "alcove_far":16 }] }"#;
         // The whole loop: a locked door, the key that opens it placed in a
         // reachable room, and a compile that succeeds because nothing is
         // violated. This is the smallest map that proves key progression is
