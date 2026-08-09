@@ -1,0 +1,24 @@
+# Vocabulary tables for the crustygen compiler: thing type numbers and the
+# per-theme texture/flat names the compiler emits into TEXTMAP.
+#
+# `things` is sourced from the original Doom source release (see
+# data/engine.toml header for the pinned commit). `textures` is sourced by
+# direct lookup against the local Freedoom IWAD fixtures, since Freedoom is a
+# drop-in IWAD replacement that deliberately mirrors Doom's lump/texture
+# names — a name resolving there is a name that resolves against Doom too.
+
+[things]
+player1_start = 1
+zombieman = 3004
+shotgun_guy = 9
+imp = 3001
+pinky = 3002
+source = "id-Software/DOOM linuxdoom-1.10/p_mobj.c, P_SpawnMapThing: 'if (mthing->type <= 4) { playerstarts[mthing->type-1] = *mthing; ... }' establishes doomednum 1 as player 1's start. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_mobj.c — monster doomednums (zombieman 3004, shotgun_guy 9, imp 3001, pinky 3002) cross-checked against info.c mobjinfo in the same pinned commit, see data/engine.toml [species.*] citations — matches placeholder, unchanged"
+
+[textures.tech_base]
+wall = "STARTAN3"
+floor = "FLOOR4_8"
+ceiling = "CEIL3_5"
+door = "BIGDOOR2"
+door_track = "DOORTRAK"
+source = "Verified against tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad (fetched via `just fetch-fixtures` in the crustywad checkout; not modified). FLOOR4_8 (4096 bytes) and CEIL3_5 (4096 bytes) and DOORTRAK (1104 bytes) confirmed present as raw flat/patch lumps in both WADs via `./target/debug/cwad list <wad>`. STARTAN3, BIGDOOR2, and DOORTRAK confirmed as composite wall textures (present in the TEXTURE1 lump, 963 entries in each WAD) via crustywad::Wad::texture_set().find(name) returning Some for all three, checked with a throwaway binary against the crustywad path dependency — matches placeholder, unchanged"

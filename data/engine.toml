@@ -1,0 +1,51 @@
+# Engine constants for the crustygen compiler.
+#
+# Every table below carries a `source` field naming the primary reference the
+# value was read from. Values are sourced from the original Doom source
+# release (id-Software/DOOM, linuxdoom-1.10) pinned to commit
+# a77dfb96cb91780ca334d0d4cfd86957558007e0, the UDMF specification, or the
+# Unofficial Doom Specs (the standard primary reference for the classic
+# binary lump layouts UDMF supersedes). Do not hand-edit a numeric value
+# without updating its citation.
+
+[movement]
+max_step_height = 24
+source = "id-Software/DOOM linuxdoom-1.10/p_map.c, P_TryMove: 'tmfloorz - thing->z > 24*FRACUNIT ) return false; // too big a step up' (also mirrored in PTR_SlideTraverse). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_map.c — matches placeholder, unchanged"
+
+[player]
+radius = 16
+height = 56
+source = "id-Software/DOOM linuxdoom-1.10/p_local.h: '#define PLAYERRADIUS 16*FRACUNIT'; linuxdoom-1.10/info.c mobjinfo[MT_PLAYER]: height = 56*FRACUNIT. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_local.h and .../info.c — matches placeholder, unchanged"
+
+[door]
+clearance_allowance = 4
+source = "id-Software/DOOM linuxdoom-1.10/p_doors.c, EV_DoDoor: 'door->topheight = P_FindLowestCeilingSurrounding(sec); door->topheight -= 4*FRACUNIT;' https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_doors.c — matches placeholder, unchanged"
+
+[light]
+min = 0
+max = 255
+source = "The Unofficial Doom Specs v1.666, section [4-9] SECTORS: 'lightlevel of this sector: 0 = total dark, 255 (0xff) = maximum light. There are actually only 32 brightnesses possible (see COLORMAP [8-2]).' https://ruinworld.sourceforge.net/notes/dmsp1666.html — corroborated by the UDMF spec's sector 'lightlevel = <integer>; // Light level. Default = 160.' (same 0-255 universe; UDMF itself states no explicit clamp) at https://github.com/rheit/zdoom/blob/fa2bf5a53f10c8f6b69403c3d0bebd456303fab7/specs/udmf.txt — matches placeholder, unchanged"
+
+[species.zombieman]
+radius = 20
+height = 56
+hitscan = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_POSSESSED]: radius = 20*FRACUNIT, height = 56*FRACUNIT, doomednum = 3004; missilestate S_POSS_ATK2 -> action A_PosAttack, which calls P_LineAttack (hitscan) in linuxdoom-1.10/p_enemy.c. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c — matches placeholder, unchanged"
+
+[species.shotgun_guy]
+radius = 20
+height = 56
+hitscan = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_SHOTGUY]: radius = 20*FRACUNIT, height = 56*FRACUNIT, doomednum = 9; missilestate S_SPOS_ATK2 -> action A_SPosAttack, which calls P_LineAttack three times (hitscan pellet spread) in linuxdoom-1.10/p_enemy.c. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c — matches placeholder, unchanged"
+
+[species.imp]
+radius = 20
+height = 56
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_TROOP]: radius = 20*FRACUNIT, height = 56*FRACUNIT, doomednum = 3001; action A_TroopAttack in linuxdoom-1.10/p_enemy.c calls P_DamageMobj directly at melee range but P_SpawnMissile(actor, target, MT_TROOPSHOT) — a projectile, not a hitscan — otherwise. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c — matches placeholder, unchanged"
+
+[species.pinky]
+radius = 30
+height = 56
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_SERGEANT] (demon/pinky): radius = 30*FRACUNIT, height = 56*FRACUNIT, doomednum = 3002; missilestate = 0 (no ranged attack state at all — melee only, via A_SargAttack). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c — matches placeholder, unchanged"
