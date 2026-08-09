@@ -6,4 +6,5 @@
 pub mod compile;
 pub mod geom;
 pub mod ir;
+pub mod rules;
 pub mod tables;
