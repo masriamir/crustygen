@@ -26,6 +26,32 @@ pub struct PropDims {
     /// Whether the prop blocks movement (`MF_SOLID` in the pinned Doom
     /// source).
     pub blocks: bool,
+    /// Whether the prop spawns hanging from the ceiling rather than
+    /// standing on the floor (`MF_SPAWNCEILING` in the pinned Doom source).
+    /// Rule P22 (hanging decoration headroom) needs this. Absent entries
+    /// default to `false` — every prop recorded before this field existed
+    /// stands on the floor.
+    #[serde(default)]
+    pub hangs: bool,
+}
+
+/// A health or armor pickup's amount, ceiling, and absorption class, as
+/// loaded from `engine.toml`'s `[pickups.*]` table. See that table's
+/// leading comment for the full mechanics (`P_GiveBody`/`P_GiveArmor` vs.
+/// the two "bonus" pickups, which bypass both).
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct PickupEntry {
+    /// How much health or armor this pickup grants. For `green_armor` and
+    /// `blue_armor` this is the flat value `P_GiveArmor` sets (skipped
+    /// entirely if the player's current armor already meets or exceeds
+    /// it), not an amount added to whatever the player already has.
+    pub amount: i32,
+    /// The health or armor ceiling this pickup cannot push past.
+    pub cap: i32,
+    /// The absorption class (`armortype` in the pinned Doom source) this
+    /// pickup sets, if it sets one at all. `None` for the three pure-health
+    /// pickups (`stimpack`, `medikit`, `health_bonus`).
+    pub class: Option<i32>,
 }
 
 /// A monster species' collision dimensions and attack behavior, as loaded
@@ -38,6 +64,7 @@ struct SpeciesEntry {
     radius: i32,
     height: i32,
     hitscan: bool,
+    spawnhealth: i32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +110,26 @@ struct SectorSpecials {
     damage: DamageTiers,
 }
 
+/// Linedef attribute flag bits (`doomdata.h`'s `ML_*` constants), a third
+/// numeric space distinct from `vocabulary.toml`'s `[specials]` (linedef
+/// *specials*) and this file's `[sector]`/`[sector.damage]` (*sector*
+/// specials). UDMF's `doom` namespace spells each flag as its own named
+/// boolean field on the linedef object rather than packing them — see
+/// `emit_textmap`'s existing `blocking`, `dontpegbottom`, `dontpegtop`
+/// output, which already follows that convention. The bit values recorded
+/// here anchor each flag to its defining constant in the pinned source;
+/// they are not themselves written to `TEXTMAP`.
+#[derive(Debug, Deserialize)]
+struct LinedefFlags {
+    block_monsters: u16,
+    sound_block: u16,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinedefAttrs {
+    flags: LinedefFlags,
+}
+
 #[derive(Debug, Deserialize)]
 struct Engine {
     movement: Movement,
@@ -91,7 +138,9 @@ struct Engine {
     player: ThingDims,
     species: HashMap<String, SpeciesEntry>,
     props: HashMap<String, PropDims>,
+    pickups: HashMap<String, PickupEntry>,
     sector: SectorSpecials,
+    linedef: LinedefAttrs,
 }
 
 /// The linedef specials for the level exit, keyed by
@@ -227,6 +276,16 @@ impl Tables {
         self.engine.species.get(name).map(|s| s.hitscan)
     }
 
+    /// A named monster species' `spawnhealth` — its starting hit points
+    /// (`mobjinfo[*].spawnhealth` in the pinned Doom source), if the
+    /// species is listed. `combat.max_simultaneous` and any future
+    /// encounter-strength reasoning need this: `radius`/`height` alone say
+    /// nothing about how hard a monster is to kill.
+    #[must_use]
+    pub fn spawnhealth(&self, name: &str) -> Option<i32> {
+        self.engine.species.get(name).map(|s| s.spawnhealth)
+    }
+
     /// The radius, height, and blocking behavior of a named non-monster
     /// prop (barrel, light source, or decoration), if the vocabulary
     /// records dimensions for it. Only props that block movement or hang
@@ -235,6 +294,15 @@ impl Tables {
     #[must_use]
     pub fn prop(&self, name: &str) -> Option<PropDims> {
         self.engine.props.get(name).copied()
+    }
+
+    /// The amount, ceiling, and absorption class of a named health or armor
+    /// pickup (`stimpack` | `medikit` | `health_bonus` | `armor_bonus` |
+    /// `green_armor` | `blue_armor`), if listed. `sustain.health_budget`
+    /// and the explicit per-pickup counts beside it need this.
+    #[must_use]
+    pub fn pickup(&self, name: &str) -> Option<PickupEntry> {
+        self.engine.pickups.get(name).copied()
     }
 
     /// The concrete thing ID for a high-level name, if listed.
@@ -327,6 +395,26 @@ impl Tables {
             "light" => Some(self.engine.sector.damage.light),
             "medium" => Some(self.engine.sector.damage.medium),
             "heavy" => Some(self.engine.sector.damage.heavy),
+            _ => None,
+        }
+    }
+
+    /// The `doomdata.h` bit value for a named linedef flag (`block_monsters`
+    /// | `sound_block`), if known. `combat.block_monster_lines` needs
+    /// `block_monsters` (`ML_BLOCKMONSTERS`); `combat.sound.block_sound_at`
+    /// needs `sound_block` (`ML_SOUNDBLOCK`).
+    ///
+    /// UDMF's `doom` namespace spells each flag as its own named boolean
+    /// field on the linedef object — `blockmonsters` and `blocksound`
+    /// respectively — rather than this packed bit; see `emit_textmap`'s
+    /// existing `blocking`/`dontpegbottom`/`dontpegtop` output for the
+    /// convention a future emission path should follow. Not wired into any
+    /// emission path yet.
+    #[must_use]
+    pub fn linedef_flag(&self, name: &str) -> Option<u16> {
+        match name {
+            "block_monsters" => Some(self.engine.linedef.flags.block_monsters),
+            "sound_block" => Some(self.engine.linedef.flags.sound_block),
             _ => None,
         }
     }
@@ -476,34 +564,35 @@ mod tests {
     /// Every monster species the vocabulary now carries — the original
     /// four plus every Doom/Doom II monster added for the map-spec
     /// template's `combat.monsters[].species` and `combat.boss` fields —
-    /// must resolve a doomednum, collision dims, and a hitscan flag.
+    /// must resolve a doomednum, collision dims, a hitscan flag, and its
+    /// `spawnhealth` (`mobjinfo[*].spawnhealth` in the pinned Doom source).
     /// Checked individually, not sampled: a name missing from either
     /// table is exactly the defect this test exists to catch.
     #[test]
     fn every_monster_species_resolves() {
         let t = Tables::load().expect("tables load");
-        // (name, doomednum, radius, height, hitscan)
-        let monsters: &[(&str, u16, i32, i32, bool)] = &[
-            ("zombieman", 3004, 20, 56, true),
-            ("shotgun_guy", 9, 20, 56, true),
-            ("imp", 3001, 20, 56, false),
-            ("pinky", 3002, 30, 56, false),
-            ("spectre", 58, 30, 56, false),
-            ("chaingunner", 65, 20, 56, true),
-            ("cacodemon", 3005, 31, 56, false),
-            ("lost_soul", 3006, 16, 56, false),
-            ("pain_elemental", 71, 31, 56, false),
-            ("hell_knight", 69, 24, 64, false),
-            ("baron_of_hell", 3003, 24, 64, false),
-            ("revenant", 66, 20, 56, false),
-            ("mancubus", 67, 48, 64, false),
-            ("arachnotron", 68, 64, 64, false),
-            ("archvile", 64, 20, 56, false),
-            ("cyberdemon", 16, 40, 110, false),
-            ("spider_mastermind", 7, 128, 100, true),
-            ("wolfenstein_ss", 84, 20, 56, true),
+        // (name, doomednum, radius, height, hitscan, spawnhealth)
+        let monsters: &[(&str, u16, i32, i32, bool, i32)] = &[
+            ("zombieman", 3004, 20, 56, true, 20),
+            ("shotgun_guy", 9, 20, 56, true, 30),
+            ("imp", 3001, 20, 56, false, 60),
+            ("pinky", 3002, 30, 56, false, 150),
+            ("spectre", 58, 30, 56, false, 150),
+            ("chaingunner", 65, 20, 56, true, 70),
+            ("cacodemon", 3005, 31, 56, false, 400),
+            ("lost_soul", 3006, 16, 56, false, 100),
+            ("pain_elemental", 71, 31, 56, false, 400),
+            ("hell_knight", 69, 24, 64, false, 500),
+            ("baron_of_hell", 3003, 24, 64, false, 1000),
+            ("revenant", 66, 20, 56, false, 300),
+            ("mancubus", 67, 48, 64, false, 600),
+            ("arachnotron", 68, 64, 64, false, 500),
+            ("archvile", 64, 20, 56, false, 700),
+            ("cyberdemon", 16, 40, 110, false, 4000),
+            ("spider_mastermind", 7, 128, 100, true, 3000),
+            ("wolfenstein_ss", 84, 20, 56, true, 50),
         ];
-        for (name, doomednum, radius, height, hitscan) in monsters {
+        for (name, doomednum, radius, height, hitscan, spawnhealth) in monsters {
             assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
             let dims = t
                 .species(name)
@@ -511,6 +600,11 @@ mod tests {
             assert_eq!(dims.radius, *radius, "`{name}` radius");
             assert_eq!(dims.height, *height, "`{name}` height");
             assert_eq!(t.hitscan(name), Some(*hitscan), "`{name}` hitscan");
+            assert_eq!(
+                t.spawnhealth(name),
+                Some(*spawnhealth),
+                "`{name}` spawnhealth"
+            );
         }
         assert_eq!(monsters.len(), 18, "every listed monster was checked");
         assert!(
@@ -521,6 +615,11 @@ mod tests {
             t.hitscan("plaid_imp"),
             None,
             "unlisted species hitscan is absent"
+        );
+        assert_eq!(
+            t.spawnhealth("plaid_imp"),
+            None,
+            "unlisted species spawnhealth is absent"
         );
     }
 
@@ -581,6 +680,78 @@ mod tests {
             unique.len(),
             pickups.len(),
             "all pickup doomednums are distinct"
+        );
+    }
+
+    /// Every health and armor pickup's amount, cap, and absorption class
+    /// (`engine.toml`'s `[pickups.*]` table) must resolve, checked
+    /// individually. `sustain.health_budget` and the explicit counts
+    /// beside it need real numbers, not just a doomednum, to derive from.
+    #[test]
+    fn every_health_and_armor_pickup_resolves_amount_cap_and_class() {
+        let t = Tables::load().expect("tables load");
+        // (name, amount, cap, class)
+        let pickups: &[(&str, i32, i32, Option<i32>)] = &[
+            ("stimpack", 10, 100, None),
+            ("medikit", 25, 100, None),
+            ("health_bonus", 1, 200, None),
+            ("armor_bonus", 1, 200, Some(1)),
+            ("green_armor", 100, 100, Some(1)),
+            ("blue_armor", 200, 200, Some(2)),
+        ];
+        for (name, amount, cap, class) in pickups {
+            let entry = t.pickup(name).unwrap_or_else(|| panic!("`{name}` pickup"));
+            assert_eq!(entry.amount, *amount, "`{name}` amount");
+            assert_eq!(entry.cap, *cap, "`{name}` cap");
+            assert_eq!(entry.class, *class, "`{name}` class");
+        }
+        assert_eq!(pickups.len(), 6, "every listed pickup was checked");
+        // The two "bonus" pickups can push past the ordinary maximum
+        // (stimpack/medikit's 100); their cap must reflect that.
+        assert!(
+            t.pickup("health_bonus").unwrap().cap > t.pickup("stimpack").unwrap().cap,
+            "health_bonus exceeds the ordinary health maximum"
+        );
+        assert!(
+            t.pickup("armor_bonus").unwrap().cap > t.pickup("green_armor").unwrap().cap,
+            "armor_bonus exceeds green_armor's own cap"
+        );
+        assert!(
+            t.pickup("plaid_stim").is_none(),
+            "unlisted pickup is absent"
+        );
+    }
+
+    /// The linedef flag bits that `combat.block_monster_lines` and
+    /// `combat.sound.block_sound_at` need must resolve, and an unknown flag
+    /// name must fail loudly rather than silently fall back.
+    #[test]
+    fn linedef_flags_resolve() {
+        let t = Tables::load().expect("tables load");
+        assert_eq!(
+            t.linedef_flag("block_monsters"),
+            Some(2),
+            "ML_BLOCKMONSTERS resolves"
+        );
+        assert_eq!(
+            t.linedef_flag("sound_block"),
+            Some(64),
+            "ML_SOUNDBLOCK resolves"
+        );
+        assert_ne!(
+            t.linedef_flag("block_monsters"),
+            t.linedef_flag("sound_block"),
+            "the two linedef flags are distinct bits"
+        );
+        assert_eq!(
+            t.linedef_flag("blocking"),
+            None,
+            "ML_BLOCKING is structural (LinedefOut::blocking), not a sourced flag entry"
+        );
+        assert_eq!(
+            t.linedef_flag("plaid_flag"),
+            None,
+            "an unknown flag name must fail loudly, not silently fall back"
         );
     }
 
