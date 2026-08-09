@@ -178,4 +178,72 @@ mod tests {
             Pt { x: i32::MAX, y: 0 }
         ));
     }
+
+    /// An octagon: a 256-unit square with each corner chamfered by 64 units,
+    /// wound clockwise in the same "west-up, north-right, east-down,
+    /// south-left" traversal `square` uses. Every edge is either
+    /// axis-aligned or exactly 45 degrees, per `is_axis_or_diagonal` — the
+    /// spec's `architecture.room_shapes` names octagonal rooms explicitly,
+    /// but no fixture anywhere in this crate had a diagonal edge before this
+    /// (see `KNOWN-GAPS.md`'s "no fixture anywhere has a 45-degree edge").
+    fn octagon() -> Vec<Pt> {
+        vec![
+            Pt { x: 0, y: 64 },
+            Pt { x: 0, y: 192 },
+            Pt { x: 64, y: 256 },
+            Pt { x: 192, y: 256 },
+            Pt { x: 256, y: 192 },
+            Pt { x: 256, y: 64 },
+            Pt { x: 192, y: 0 },
+            Pt { x: 64, y: 0 },
+        ]
+    }
+
+    #[test]
+    fn the_octagon_fixture_winds_clockwise() {
+        assert!(
+            is_clockwise(&octagon()),
+            "fixture must match the Doom winding convention"
+        );
+    }
+
+    #[test]
+    fn containment_holds_across_a_diagonal_edge_not_only_axis_aligned_ones() {
+        let o = octagon();
+        // The NW chamfer (0,192)-(64,256) lies on the line x - y + 192 = 0;
+        // its interior side (matching the square's own center) is positive.
+        // (40,220) sits just inside it: 40 - 220 + 192 = 12 > 0.
+        assert!(
+            contains(&o, Pt { x: 40, y: 220 }),
+            "just inside the diagonal chamfer"
+        );
+        // (16,240) sits in the corner the chamfer cuts away, on the outside
+        // of the same line: 16 - 240 + 192 = -32 < 0 — inside the original
+        // square's bounding box, but outside the octagon.
+        assert!(
+            !contains(&o, Pt { x: 16, y: 240 }),
+            "just outside the diagonal chamfer, in the corner it cuts off"
+        );
+        // The center is comfortably inside, far from every edge.
+        assert!(contains(&o, Pt { x: 128, y: 128 }));
+    }
+
+    #[test]
+    fn clearance_measures_perpendicular_distance_to_a_diagonal_edge() {
+        let o = octagon();
+        // (40,220) sits near the NW chamfer (0,192)-(64,256), whose line is
+        // x - y + 192 = 0. The perpendicular distance is
+        // |40 - 220 + 192| / sqrt(2) = 12 / sqrt(2) = 6*sqrt(2), and the
+        // foot of that perpendicular falls within the segment itself
+        // (t = 0.53125 along it, computed independently by hand), so this
+        // really is the nearest-edge distance, not just the nearest-line
+        // one — and it is well short of the distance to any axis-aligned
+        // wall (>= 36 in every direction from this point).
+        let expected = 12.0 / std::f64::consts::SQRT_2;
+        let d = clearance(&o, Pt { x: 40, y: 220 });
+        assert!(
+            (d - expected).abs() < 1e-9,
+            "clearance {d} does not match the hand-derived perpendicular distance {expected}"
+        );
+    }
 }

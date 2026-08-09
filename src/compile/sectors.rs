@@ -265,6 +265,79 @@ mod tests {
         ));
     }
 
+    /// An octagon: a 256-unit square with each corner chamfered by 64 units.
+    /// Every edge is either axis-aligned or exactly 45 degrees. The spec's
+    /// `architecture.room_shapes` names octagonal rooms explicitly, but no
+    /// fixture anywhere in this crate had a diagonal edge before this — see
+    /// `KNOWN-GAPS.md`'s "no fixture anywhere has a 45-degree edge".
+    const OCTAGON: &str = "[[0,64],[0,192],[64,256],[192,256],[256,192],[256,64],[192,0],[64,0]]";
+
+    #[test]
+    fn a_diagonally_shaped_room_emits_one_closed_sector() {
+        // Room b is dropped entirely here (unlike `ir_with`, which always
+        // pairs the fixture against a second square) so this pins the
+        // octagon's own emitted counts exactly, not diluted by room b's.
+        let ir_json = format!(
+            r#"{{ "seed":1, "grid":64, "theme":"tech_base",
+              "rooms":[
+                {{ "id":"a", "footprint":{OCTAGON},
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
+              ], "portals":[] }}"#
+        );
+        let ir = Ir::from_json(&ir_json).expect("ir");
+        let data = emit_sectors(&ir).expect("emits");
+        assert_eq!(data.sectors.len(), 1, "one sector for the one room");
+        assert_eq!(data.vertices.len(), 8, "all eight corners, none shared");
+        assert_eq!(data.linedefs.len(), 8, "eight walls, four of them diagonal");
+        assert!(
+            data.linedefs.iter().all(|l| l.back.is_none()),
+            "a room with no portals stays fully one-sided, diagonal walls included"
+        );
+    }
+
+    /// A 320x256 rectangle chamfered by 64 units at each corner — the same
+    /// chamfer construction as [`OCTAGON`], just wide enough (past x = 256)
+    /// to genuinely overlap `ir_with`'s room b, which spans x in
+    /// [256,512]: at y = 128 this shape's straight east flank reaches all
+    /// the way to x = 320, well past room b's own x = 256 wall, so the two
+    /// interiors — not merely their bounding boxes — actually intersect.
+    const WIDE_CHAMFERED: &str =
+        "[[0,64],[0,192],[64,256],[256,256],[320,192],[320,64],[256,0],[64,0]]";
+
+    #[test]
+    fn a_diagonally_shaped_room_overlapping_a_square_is_rejected() {
+        // Exercises `overlaps`'s vertex/edge-midpoint probes against a
+        // footprint whose boundary is partly diagonal, not just the
+        // axis-aligned case every other overlap test in this file covers.
+        let ir = Ir::from_json(&ir_with(WIDE_CHAMFERED)).expect("ir");
+        assert!(matches!(
+            emit_sectors(&ir),
+            Err(CompileError::Overlap { .. })
+        ));
+    }
+
+    #[test]
+    fn two_diagonally_shaped_rooms_that_only_share_a_wall_do_not_overlap() {
+        // Two right triangles splitting a 64-unit square along its own
+        // diagonal from (0,0) to (64,64): room a is the upper-left half,
+        // room b the lower-right half. They share the entire diagonal as a
+        // real wall but no interior area — `overlaps` must not confuse "the
+        // whole wall is diagonal" with "the footprints overlap".
+        let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,64],[64,64]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+            { "id":"b", "footprint":[[0,0],[64,64],[64,0]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+          ], "portals":[] }"#;
+        let ir = Ir::from_json(ir_json).expect("ir");
+        let data = emit_sectors(&ir).expect("two triangles sharing only a diagonal wall compile");
+        assert_eq!(data.sectors.len(), 2, "one sector per triangle");
+    }
+
     /// A room shaped 128x64 (not the ubiquitous 256-square), one secret and
     /// one not, so a fixture-diversity mutation cannot hide behind a shared
     /// dimension.

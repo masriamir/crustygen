@@ -196,3 +196,50 @@ fn an_exit_a_secret_sector_and_restricted_skills_all_survive_the_round_trip() {
         .expect("the imp is in the map");
     assert_eq!(imp.flags & 0b111, 0b010, "only skill3 (bit 1) survived");
 }
+
+/// An octagon: a 256-unit square chamfered by 64 units at each corner — the
+/// same shape used throughout `src/compile/*.rs`'s own unit tests
+/// (`sectors::tests::OCTAGON`, `portals::tests::OCTAGON_ROOM`, etc.), with a
+/// player start placed well clear of every wall, diagonal or not. Every
+/// diagonal-geometry fixture elsewhere in this crate only ever proves the
+/// compiler's own internal `MapData` is well formed; this is the one place
+/// that proves a diagonal-edged room also parses and assembles through
+/// crustywad's own binary UDMF reader, exactly like `TWO_ROOM` above does
+/// for the axis-aligned case — the WAD/UDMF format itself places no
+/// axis-alignment constraint on a linedef, so this is expected to just
+/// work, but "expected to" is not the same claim as "proven to".
+const OCTAGON_ROOM: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+  "rooms":[
+    { "id":"a",
+      "footprint":[[0,64],[0,192],[64,256],[192,256],[256,192],[256,64],[192,0],[64,0]],
+      "floor":0, "ceiling":128, "light":160,
+      "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+      "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] }
+  ],
+  "portals":[] }"#;
+
+#[test]
+fn a_diagonally_shaped_room_assembles_through_crustywad() {
+    let ir = Ir::from_json(OCTAGON_ROOM).expect("ir");
+    let tables = Tables::load().expect("tables");
+    let out = compile(&ir, &tables).expect("compiles");
+
+    let mut builder = WadBuilder::new(WadKind::Pwad);
+    builder.add_lump("MAP01", b"");
+    builder.add_lump("TEXTMAP", out.textmap.as_bytes());
+    builder.add_lump("ENDMAP", b"");
+    let bytes = builder.build().expect("wad serializes");
+
+    let wad = Wad::from_bytes(bytes).expect("wad parses");
+    let group = wad.map_group("MAP01").expect("MAP01 group present");
+    let map = Map::assemble(&wad, &group).expect("a diagonal-edged room assembles");
+
+    assert_eq!(map.sectors().len(), 1, "one sector");
+    assert_eq!(map.vertices().len(), 8, "all eight octagon corners");
+    assert_eq!(
+        map.linedefs().len(),
+        8,
+        "eight walls, four of them diagonal"
+    );
+    assert_eq!(map.things().len(), 1, "the player start");
+}

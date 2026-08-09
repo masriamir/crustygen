@@ -250,6 +250,72 @@ mod tests {
         ));
     }
 
+    /// An octagon: a 256-unit square chamfered by 64 units at each corner —
+    /// the same shape as `sectors::tests::OCTAGON`,
+    /// `portals::tests::OCTAGON_ROOM`, and `exits::tests::OCTAGON_ROOM`. The
+    /// NW chamfer runs (0,192)-(64,256), on the line `x - y + 192 = 0`
+    /// (positive on the interior side, matching the center (128,128): 192).
+    /// A point offset `(k, -k)` from that edge's midpoint (32,224) lands at
+    /// perpendicular distance `k * sqrt(2)` from it (the offset direction is
+    /// exactly the line's normal), which is irrational for any nonzero
+    /// integer `k` — unlike the axis-aligned case above, a diagonal wall
+    /// cannot be pinned to an *exact* integer-radius boundary the way
+    /// `clearance_is_boundary_pinned_to_the_player_radius` pins one; the
+    /// nearest achievable pair of integer points that still cleanly
+    /// straddles the player's actual radius is used instead.
+    fn ir_with_thing_near_octagon_chamfer(k: i32) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":64, "theme":"tech_base",
+              "rooms":[{{ "id":"a",
+                "footprint":[[0,64],[0,192],[64,256],[192,256],[256,192],[256,64],[192,0],[64,0]],
+                "floor":0, "ceiling":128, "light":160,
+                "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W",
+                "things":[{{ "kind":"player1_start", "at":[{},{}], "angle":90 }}] }}],
+              "portals":[] }}"#,
+            32 + k,
+            224 - k
+        )
+    }
+
+    #[test]
+    fn a_thing_too_close_to_a_diagonal_wall_is_rejected() {
+        let tables = Tables::load().expect("tables");
+        let r = tables.player().radius;
+        assert_eq!(r, 16, "the fixture's k values below assume this radius");
+        // k = 8 -> perpendicular distance 8*sqrt(2) ~ 11.3, well inside the
+        // player's own 16-unit radius, and near no other wall of the
+        // octagon (every other edge is at least 40+ units away from here).
+        let ir = Ir::from_json(&ir_with_thing_near_octagon_chamfer(8)).expect("ir");
+        let data = compiled_data(&ir, &tables);
+        assert!(
+            matches!(
+                place_things(&ir, &tables, &data),
+                Err(CompileError::ThingTooClose { .. })
+            ),
+            "a point 8*sqrt(2) ~ 11.3 units from the diagonal chamfer must be rejected \
+             against a 16-unit radius"
+        );
+    }
+
+    #[test]
+    fn a_thing_clear_of_a_diagonal_wall_by_more_than_its_radius_is_accepted() {
+        let tables = Tables::load().expect("tables");
+        let r = tables.player().radius;
+        assert_eq!(r, 16, "the fixture's k values below assume this radius");
+        // k = 12 -> perpendicular distance 12*sqrt(2) ~ 17.0, just past the
+        // 16-unit radius — close enough to the diagonal chamfer that an
+        // implementation measuring against the wrong (or no) edge would be
+        // exposed by moving k down to 8 in the sibling test above, but far
+        // enough to genuinely fit.
+        let ir = Ir::from_json(&ir_with_thing_near_octagon_chamfer(12)).expect("ir");
+        let data = compiled_data(&ir, &tables);
+        assert!(
+            place_things(&ir, &tables, &data).is_ok(),
+            "a point 12*sqrt(2) ~ 17.0 units from the diagonal chamfer must fit against a \
+             16-unit radius"
+        );
+    }
+
     #[test]
     fn headroom_is_boundary_pinned_to_the_thing_height() {
         let tables = Tables::load().expect("tables");
