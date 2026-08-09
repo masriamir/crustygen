@@ -628,30 +628,38 @@ mod tests {
         contains(&ir.rooms[room_idx].footprint, probe)
     }
 
-    /// Asserts that every linedef `cut_portals` leaves behind — the
-    /// untouched walls, the flanking one-sided pieces, and the two-sided
-    /// opening — has its front sidedef naming the sector whose interior is
-    /// on the right of `v1`-to-`v2` travel, and (for the two-sided line) its
-    /// back sidedef naming the sector on the left. This is the structural
-    /// invariant the whole pass exists to guarantee: a linedef's declared
-    /// sides must match its actual geometry, or the engine (and crustywad's
-    /// own BSP/GL-node builder) attributes the wrong sector to the wrong
-    /// side.
-    fn assert_sidedefs_face_their_sectors(ir_json: &str) {
-        let (ir, data) = assert_well_formed(ir_json);
-
+    /// Asserts that every linedef in `data` — the untouched walls, the
+    /// flanking one-sided pieces, and the two-sided opening — has its front
+    /// sidedef naming the sector whose interior is on the right of
+    /// `v1`-to-`v2` travel, and (for a two-sided line) its back sidedef
+    /// naming the sector on the left. This is the structural invariant the
+    /// whole pass exists to guarantee: a linedef's declared sides must match
+    /// its actual geometry, or the engine (and crustywad's own BSP/GL-node
+    /// builder) attributes the wrong sector to the wrong side.
+    ///
+    /// Called from `assert_well_formed` itself, alongside
+    /// `assert_sector_boundaries_are_closed`, so every fixture that compiles
+    /// through it — not only the four flush-256-square cases this suite
+    /// originally pinned it to — is checked against this invariant too.
+    /// Before this, the offset, L-shaped, and two-portal fixtures exercised
+    /// boundary closure but not sidedef-facing, which is the same kind of
+    /// gap (a diversified fixture set not wired to the assertion meant to
+    /// cover it) that let real bugs through review elsewhere in this
+    /// project, just inverted: here the invariant held, but nothing checked
+    /// it on the newer fixtures.
+    fn assert_sidedefs_face_their_sectors(ir: &Ir, data: &MapData) {
         for l in &data.linedefs {
             let (p, q) = (data.vertices[l.v1], data.vertices[l.v2]);
             let front_sector = data.sidedefs[l.front].sector;
             assert!(
-                interior_is_on_the_right(&ir, front_sector, p, q),
+                interior_is_on_the_right(ir, front_sector, p, q),
                 "front sidedef of line {p:?} -> {q:?} names sector {front_sector}, \
                  but that room's interior is not on the right of travel"
             );
             if let Some(back) = l.back {
                 let back_sector = data.sidedefs[back].sector;
                 assert!(
-                    interior_is_on_the_right(&ir, back_sector, q, p),
+                    interior_is_on_the_right(ir, back_sector, q, p),
                     "back sidedef of line {p:?} -> {q:?} names sector {back_sector}, \
                      but that room's interior is not on the left of travel"
                 );
@@ -699,12 +707,14 @@ mod tests {
     }
 
     /// Compiles a fixture through `emit_sectors` and `cut_portals`, asserting
-    /// that every sector's boundary closes, and hands back the result.
+    /// that every sector's boundary closes and every sidedef faces its real
+    /// sector, and hands back the result.
     fn assert_well_formed(ir_json: &str) -> (Ir, MapData) {
         let ir = Ir::from_json(ir_json).expect("ir");
         let mut data = emit_sectors(&ir).expect("sectors");
         cut_portals(&ir, &mut data).expect("portals cut");
         assert_sector_boundaries_are_closed(&data);
+        assert_sidedefs_face_their_sectors(&ir, &data);
         (ir, data)
     }
 
@@ -911,7 +921,7 @@ mod tests {
 
     #[test]
     fn sidedefs_face_their_sectors_when_room_a_is_west_of_a_vertical_wall() {
-        assert_sidedefs_face_their_sectors(&ir_with_portal(128, (256, 128), 256));
+        assert_well_formed(&ir_with_portal(128, (256, 128), 256));
     }
 
     #[test]
@@ -926,7 +936,7 @@ mod tests {
                "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
           ],
           "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }] }"#;
-        assert_sidedefs_face_their_sectors(ir_json);
+        assert_well_formed(ir_json);
     }
 
     #[test]
@@ -941,7 +951,7 @@ mod tests {
                "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
           ],
           "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[128,256] }] }"#;
-        assert_sidedefs_face_their_sectors(ir_json);
+        assert_well_formed(ir_json);
     }
 
     #[test]
@@ -956,6 +966,6 @@ mod tests {
                "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
           ],
           "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[128,256] }] }"#;
-        assert_sidedefs_face_their_sectors(ir_json);
+        assert_well_formed(ir_json);
     }
 }
