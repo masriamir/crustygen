@@ -47,9 +47,22 @@ struct Engine {
     species: HashMap<String, ThingDims>,
 }
 
+/// The linedef specials that open a door, keyed the same way the engine
+/// keys them.
+///
+/// `locked` is a `toml::Value` map for the same reason `Vocabulary::things`
+/// is: the table carries a `source` citation alongside its numbers, and a
+/// citation is not a special.
+#[derive(Debug, Deserialize)]
+struct Specials {
+    door: u16,
+    locked: HashMap<String, toml::Value>,
+}
+
 #[derive(Debug, Deserialize)]
 struct Vocabulary {
     things: HashMap<String, toml::Value>,
+    specials: Specials,
     textures: HashMap<String, TextureSet>,
 }
 
@@ -137,6 +150,25 @@ impl Tables {
             .ok()
     }
 
+    /// The linedef special that opens a manual door.
+    #[must_use]
+    pub fn door_special(&self) -> u16 {
+        self.vocabulary.specials.door
+    }
+
+    /// The linedef special that opens a door locked to the named key, if the
+    /// vocabulary lists one.
+    #[must_use]
+    pub fn locked_door_special(&self, key: &str) -> Option<u16> {
+        self.vocabulary
+            .specials
+            .locked
+            .get(key)?
+            .as_integer()?
+            .try_into()
+            .ok()
+    }
+
     /// The texture for a role (`wall`, `floor`, `ceiling`, `door`,
     /// `door_track`) under a theme, if both resolve.
     #[must_use]
@@ -177,5 +209,32 @@ mod tests {
             t.light_range().contains(&128),
             "a mid light level is in range"
         );
+    }
+
+    #[test]
+    fn door_specials_and_key_things_resolve() {
+        let t = Tables::load().expect("tables load");
+        assert_ne!(t.door_special(), 0, "a manual door has a real special");
+        // A card and the skull of the same color open the same door type —
+        // the engine's key check accepts either.
+        for (card, skull) in [
+            ("blue_card", "blue_skull"),
+            ("yellow_card", "yellow_skull"),
+            ("red_card", "red_skull"),
+        ] {
+            let by_card = t.locked_door_special(card).expect("card special");
+            assert_eq!(t.locked_door_special(skull), Some(by_card));
+            assert_ne!(
+                by_card,
+                t.door_special(),
+                "a keyed door differs from a plain one"
+            );
+            assert!(t.thing_id(card).is_some(), "`{card}` has a thing ID");
+            assert!(t.thing_id(skull).is_some(), "`{skull}` has a thing ID");
+        }
+        assert_eq!(t.locked_door_special("plaid_card"), None);
+        // The citation strings living alongside the numbers must never be
+        // mistaken for one.
+        assert_eq!(t.locked_door_special("source"), None);
     }
 }

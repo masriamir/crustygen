@@ -13,7 +13,33 @@ zombieman = 3004
 shotgun_guy = 9
 imp = 3001
 pinky = 3002
-source = "id-Software/DOOM linuxdoom-1.10/p_mobj.c, P_SpawnMapThing: 'if (mthing->type <= 4) { playerstarts[mthing->type-1] = *mthing; ... }' establishes doomednum 1 as player 1's start. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_mobj.c — monster doomednums (zombieman 3004, shotgun_guy 9, imp 3001, pinky 3002) cross-checked against info.c mobjinfo in the same pinned commit, see data/engine.toml [species.*] citations — matches placeholder, unchanged"
+blue_card = 5
+yellow_card = 6
+red_card = 13
+blue_skull = 40
+yellow_skull = 39
+red_skull = 38
+source = "id-Software/DOOM linuxdoom-1.10/p_mobj.c, P_SpawnMapThing: 'if (mthing->type <= 4) { playerstarts[mthing->type-1] = *mthing; ... }' establishes doomednum 1 as player 1's start. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_mobj.c — monster doomednums (zombieman 3004, shotgun_guy 9, imp 3001, pinky 3002) cross-checked against info.c mobjinfo in the same pinned commit, see data/engine.toml [species.*] citations"
+keys_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo, read at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0. Each entry's first field is its doomednum and its second its spawnstate, and states[] at the same commit gives each spawnstate's sprite: MT_MISC4 = { 5, S_BKEY } with S_BKEY = {SPR_BKEY,...} (blue card); MT_MISC6 = { 6, S_YKEY } / SPR_YKEY (yellow card); MT_MISC5 = { 13, S_RKEY } / SPR_RKEY (red card); MT_MISC9 = { 40, S_BSKULL } / SPR_BSKU (blue skull); MT_MISC7 = { 39, S_YSKULL } / SPR_YSKU (yellow skull); MT_MISC8 = { 38, S_RSKULL } / SPR_RSKU (red skull). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+# Linedef specials the compiler writes onto a door portal's two face lines.
+#
+# `door` is the manual, repeatable open-wait-close door; the `locked` table
+# maps each key name in [things] to the keyed door special that key opens.
+# Cards and skulls of the same color share a special because the engine
+# accepts either — see the citation.
+[specials]
+door = 1
+source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, P_UseSpecialLine: 'case 1: // Vertical Door ... EV_VerticalDoor (line, thing);' and p_doors.c, EV_VerticalDoor: 'case 1: case 26: case 27: case 28: door->type = normal; break;' — `normal` is open-wait-close, and unlike cases 31-34 the special is not cleared afterwards, so type 1 is repeatable. p_switch.c also lists 'case 1: // MANUAL DOOR RAISE' among the specials a non-player thing may activate, so monsters can open it. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_switch.c and .../p_doors.c"
+
+[specials.locked]
+blue_card = 26
+blue_skull = 26
+yellow_card = 27
+yellow_skull = 27
+red_card = 28
+red_skull = 28
+source = "id-Software/DOOM linuxdoom-1.10/p_doors.c, EV_VerticalDoor lock switch: 'case 26: // Blue Lock / case 32: ... if (!player->cards[it_bluecard] && !player->cards[it_blueskull])'; 'case 27: // Yellow Lock / case 34: ... it_yellowcard ... it_yellowskull'; 'case 28: // Red Lock / case 33: ... it_redcard ... it_redskull' — each keyed type accepts the card OR the skull of its color, which is why both map to the same special. The second switch in the same function gives 'case 1: case 26: case 27: case 28: door->type = normal;', so 26/27/28 are the repeatable open-wait-close forms (31-34 are the one-shot 'open' forms, which clear line->special). p_switch.c, P_UseSpecialLine: 'case 26: // Blue Door/Locked', 'case 27: // Yellow Door /Locked', 'case 28: // Red Door /Locked' route to EV_VerticalDoor. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_doors.c and .../p_switch.c"
 
 [textures.tech_base]
 wall = "STARTAN3"
