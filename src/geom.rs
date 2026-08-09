@@ -37,10 +37,13 @@ pub fn edges(poly: &[Pt]) -> impl Iterator<Item = (Pt, Pt)> + '_ {
 }
 
 /// Whether an edge is axis-aligned or at exactly 45 degrees.
+///
+/// Widened to `i64` like every other predicate here: an `i32` subtraction can
+/// overflow, and `i32::MIN.abs()` panics outright.
 #[must_use]
 pub fn is_axis_or_diagonal(a: Pt, b: Pt) -> bool {
-    let dx = (b.x - a.x).abs();
-    let dy = (b.y - a.y).abs();
+    let dx = (i64::from(b.x) - i64::from(a.x)).abs();
+    let dy = (i64::from(b.y) - i64::from(a.y)).abs();
     (dx == 0) != (dy == 0) || (dx == dy && dx != 0)
 }
 
@@ -141,5 +144,13 @@ mod tests {
         assert!(is_axis_or_diagonal(Pt { x: 0, y: 0 }, Pt { x: 0, y: 64 }));
         assert!(is_axis_or_diagonal(Pt { x: 0, y: 0 }, Pt { x: 64, y: 64 }));
         assert!(!is_axis_or_diagonal(Pt { x: 0, y: 0 }, Pt { x: 64, y: 32 }));
+    }
+
+    #[test]
+    fn extreme_coordinates_do_not_panic() {
+        assert!(is_axis_or_diagonal(
+            Pt { x: i32::MIN, y: 0 },
+            Pt { x: i32::MAX, y: 0 }
+        ));
     }
 }
