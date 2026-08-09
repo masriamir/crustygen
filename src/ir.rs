@@ -171,6 +171,43 @@ pub struct Portal {
     pub at: Pt,
 }
 
+/// How the player triggers a level exit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExitTrigger {
+    /// A switch the player presses (use-activated; vanilla only honors this
+    /// from a linedef's front side).
+    Switch,
+    /// A line the player walks across.
+    Walkover,
+}
+
+/// The level exit: a linedef special carved into one wall of one room.
+///
+/// Unlike [`Portal`], an exit connects to no second room — it is a special on
+/// a segment of its own room's boundary wall, not a passage between two. See
+/// [`crate::compile::exits`] for the construction.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Exit {
+    /// Identifier of the room whose wall carries the exit.
+    pub room: String,
+    /// How the exit is triggered.
+    pub trigger: ExitTrigger,
+    /// Whether this is the secret exit (`G_SecretExitLevel`) rather than the
+    /// normal one (`G_ExitLevel`).
+    #[serde(default)]
+    pub secret: bool,
+    /// Clear width of the exit segment in map units.
+    ///
+    /// Same positive-and-even constraint as [`Portal::width`], for the same
+    /// reason: the segment is centered on [`Self::at`], so an odd width could
+    /// not be split into two equal integer halves. [`Ir::from_json`] rejects
+    /// both zero-or-negative and odd values.
+    pub width: i32,
+    /// Midpoint of the exit segment on the room's wall.
+    pub at: Pt,
+}
+
 /// A complete room graph.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Ir {
@@ -184,6 +221,10 @@ pub struct Ir {
     pub rooms: Vec<Room>,
     /// The connections between rooms.
     pub portals: Vec<Portal>,
+    /// The level exit(s). Usually one, but nothing here forbids more (e.g. a
+    /// normal exit alongside a separate secret exit).
+    #[serde(default)]
+    pub exits: Vec<Exit>,
 }
 
 /// Errors raised while loading or validating an IR document.
@@ -296,6 +337,29 @@ pub enum IrError {
         /// The offending room.
         room: String,
     },
+    /// An exit names a room that does not exist.
+    #[error("exit references unknown room `{room}`")]
+    ExitUnknownRoom {
+        /// The unresolvable identifier.
+        room: String,
+    },
+    /// An exit declares a width that is zero or negative.
+    #[error("exit in room `{room}` has width {width}, which must be positive")]
+    InvalidExitWidth {
+        /// The room.
+        room: String,
+        /// The rejected width.
+        width: i32,
+    },
+    /// An exit declares an odd width, which cannot be centered on `at`
+    /// without landing half a unit off the integer grid.
+    #[error("exit in room `{room}` has odd width {width}; widths must be even")]
+    OddExitWidth {
+        /// The room.
+        room: String,
+        /// The rejected width.
+        width: i32,
+    },
 }
 
 /// The inclusive coordinate and height range every Doom map format stores in
@@ -329,8 +393,11 @@ impl Ir {
     /// room that does not exist, [`IrError::OffGrid`] for any coordinate that
     /// is not a multiple of `grid`, [`IrError::LockedWithoutKey`] for a locked
     /// portal that names no key, [`IrError::SecretWithExplicitSpecial`] for a
-    /// room that sets both `secret` and `special`, and the numeric-range
-    /// variants listed above.
+    /// room that sets both `secret` and `special`, [`IrError::ExitUnknownRoom`]
+    /// for an exit naming a room that does not exist,
+    /// [`IrError::InvalidExitWidth`]/[`IrError::OddExitWidth`] for a
+    /// non-positive or odd exit width, and the numeric-range variants listed
+    /// above (which an exit's `at` is also checked against).
     pub fn from_json(s: &str) -> Result<Self, IrError> {
         let ir: Self = serde_json::from_str(s)?;
 
@@ -342,12 +409,14 @@ impl Ir {
 
         let seen = Self::validate_rooms(&ir)?;
         Self::validate_portals(&ir, &seen)?;
+        Self::validate_exits(&ir, &seen)?;
 
         Ok(ir)
     }
 
     /// Validates every room and returns the set of ids seen, for
-    /// [`Self::validate_portals`] to check its own room references against.
+    /// [`Self::validate_portals`] and [`Self::validate_exits`] to check their
+    /// own room references against.
     fn validate_rooms(ir: &Self) -> Result<HashSet<&str>, IrError> {
         let mut seen = HashSet::new();
         for room in &ir.rooms {
@@ -437,6 +506,40 @@ impl Ir {
                 return Err(IrError::LockedWithoutKey {
                     a: portal.a.clone(),
                     b: portal.b.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates every exit against the room ids [`Self::validate_rooms`]
+    /// already collected.
+    fn validate_exits(ir: &Self, seen: &HashSet<&str>) -> Result<(), IrError> {
+        for exit in &ir.exits {
+            if !seen.contains(exit.room.as_str()) {
+                return Err(IrError::ExitUnknownRoom {
+                    room: exit.room.clone(),
+                });
+            }
+            if exit.width <= 0 {
+                return Err(IrError::InvalidExitWidth {
+                    room: exit.room.clone(),
+                    width: exit.width,
+                });
+            }
+            if exit.width % 2 != 0 {
+                return Err(IrError::OddExitWidth {
+                    room: exit.room.clone(),
+                    width: exit.width,
+                });
+            }
+            if !MAP_RANGE.contains(&exit.at.x) || !MAP_RANGE.contains(&exit.at.y) {
+                return Err(IrError::CoordinateOutOfRange {
+                    subject: format!("exit in room `{}`", exit.room),
+                    x: exit.at.x,
+                    y: exit.at.y,
+                    min: *MAP_RANGE.start(),
+                    max: *MAP_RANGE.end(),
                 });
             }
         }
@@ -603,6 +706,67 @@ mod tests {
             "\"kind\": \"locked\", \"lock\": \"blue_card\"",
         );
         assert!(Ir::from_json(&keyed).is_ok(), "a named key is accepted");
+    }
+
+    /// `TWO_ROOM` with an `exits` array spliced in ahead of `portals`,
+    /// naming room `a`'s south wall (y = 0, x in 0..256).
+    fn with_exit(exit_json: &str) -> String {
+        TWO_ROOM.replace(
+            "\"portals\": [",
+            &format!("\"exits\": [{exit_json}], \"portals\": ["),
+        )
+    }
+
+    #[test]
+    fn parses_an_exit_and_defaults_secret_to_false() {
+        let json = with_exit(r#"{ "room":"a", "trigger":"switch", "width":64, "at":[128,0] }"#);
+        let ir = Ir::from_json(&json).expect("ir");
+        assert_eq!(ir.exits.len(), 1);
+        assert!(!ir.exits[0].secret, "secret defaults to false");
+        assert_eq!(ir.exits[0].trigger, crate::ir::ExitTrigger::Switch);
+    }
+
+    #[test]
+    fn rejects_an_exit_naming_an_unknown_room() {
+        let json = with_exit(r#"{ "room":"ghost", "trigger":"switch", "width":64, "at":[128,0] }"#);
+        assert!(matches!(
+            Ir::from_json(&json),
+            Err(IrError::ExitUnknownRoom { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_zero_or_negative_exit_width() {
+        let zero = with_exit(r#"{ "room":"a", "trigger":"switch", "width":0, "at":[128,0] }"#);
+        assert!(matches!(
+            Ir::from_json(&zero),
+            Err(IrError::InvalidExitWidth { width: 0, .. })
+        ));
+        let negative =
+            with_exit(r#"{ "room":"a", "trigger":"switch", "width":-64, "at":[128,0] }"#);
+        assert!(matches!(
+            Ir::from_json(&negative),
+            Err(IrError::InvalidExitWidth { width: -64, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_an_odd_exit_width() {
+        let odd = with_exit(r#"{ "room":"a", "trigger":"switch", "width":63, "at":[128,0] }"#);
+        assert!(matches!(
+            Ir::from_json(&odd),
+            Err(IrError::OddExitWidth { width: 63, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_an_exit_coordinate_outside_the_binary_map_range() {
+        let json =
+            with_exit(r#"{ "room":"a", "trigger":"walkover", "width":64, "at":[128,40000] }"#);
+        assert!(matches!(
+            Ir::from_json(&json),
+            Err(IrError::CoordinateOutOfRange { y: 40000, .. })
+        ));
     }
 
     #[test]

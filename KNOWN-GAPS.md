@@ -42,11 +42,12 @@ concept with no representation in this IR; that check belongs at the stage
 that reads the map-spec, not here.
 
 Also absent: the packer, the verifier, the conformance report, the blank
-Markdown template, and any authored map. Specials for lifts, teleports, exits
-and liquid sector effects, monster `spawnhealth`, health/armor pickup amounts
-and caps, the gore prop set, and the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK`
-linedef flags are all **sourced and accessible** but nothing emits any of
-them yet. Doors and the secret sector special are wired end to end.
+Markdown template, and any authored map. Specials for lifts, teleports, and
+liquid sector effects, monster `spawnhealth`, health/armor pickup amounts and
+caps, the gore prop set, and the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef
+flags are all **sourced and accessible** but nothing emits any of them yet.
+Doors, exits (`compile::exits`), and the secret sector special are wired end
+to end.
 
 ## Known gaps
 
@@ -108,6 +109,24 @@ Inverted from bare Rust `bool` defaults on purpose: the pre-existing behavior
 at all, and `ThingSkills` needed the same "unless you say otherwise" default
 for a partially specified object too, so a per-field serde default function is
 used rather than `#[derive(Default)]`.
+
+**A walkover exit carves its own dead-end alcove; a switch exit does not.**
+The pinned engine's `PIT_CheckLine` rejects a mover's crossing — and never
+reaches the `spechit` bookkeeping that fires a walkover special — for both a
+one-sided line and a two-sided `ML_BLOCKING` one. A walkover exit therefore
+has to be a genuinely passable two-sided line, and placing one flush on a
+room's true perimeter would open the room to the void beyond it. `compile::exits`
+carves a small solid-walled recess out of the host room's own wall instead —
+the same recess construction `compile::doors` uses for a door portal's room
+`b`, but with no second room on the far side — so only the near threshold
+(front the room, back the alcove) is passable. A switch exit needs none of
+this: `P_UseSpecialLine` fires from a raycast, not a crossing, so the exit
+stays a normal solid one-sided wall.
+
+**Every exit is tagged, even though neither `G_ExitLevel` nor
+`G_SecretExitLevel` reads a tag.** Mirrors the existing precedent for manual
+doors (above): uniform tagging keeps `tags::check_no_action_at_tag_zero` a
+single exception-free invariant and the tag manifest complete.
 
 ## Sourcing rule — do not relax this
 

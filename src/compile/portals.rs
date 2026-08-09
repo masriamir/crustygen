@@ -20,7 +20,10 @@ pub(crate) enum Axis {
 impl Axis {
     /// Splits a point into `(along, across)` for this axis: the coordinate
     /// that varies along the wall, and the one held constant across it.
-    fn split(self, p: Pt) -> (i32, i32) {
+    ///
+    /// `pub(crate)` so `exits` can test an exit's `at` against a candidate
+    /// wall edge the same way [`resolve_portal`] does.
+    pub(crate) fn split(self, p: Pt) -> (i32, i32) {
         match self {
             Self::Vertical => (p.y, p.x),
             Self::Horizontal => (p.x, p.y),
@@ -180,7 +183,12 @@ impl Cut {
 /// # Errors
 /// Returns [`CompileError::OpeningNotInAWall`] when no single one-sided wall
 /// of `sector` lies on the cut's line and covers the whole opening.
-fn split_wall_for_opening(
+///
+/// `pub(crate)` so `exits::emit_exits` can carve an exit's span out of its
+/// host room's wall with the exact same machinery `cut_portals` and
+/// `doors::emit_doors` already use — an exit is "the same machinery, minus
+/// the second room".
+pub(crate) fn split_wall_for_opening(
     data: &mut MapData,
     cut: &Cut,
     sector: usize,
@@ -368,7 +376,10 @@ impl SharedSpan {
 /// recess would all have to land on non-integer coordinates to stay flush
 /// with it. Two rooms meeting only along a diagonal therefore report as not
 /// adjacent rather than silently receiving a mis-shaped opening.
-fn wall_edges(poly: &[Pt]) -> impl Iterator<Item = (Axis, i32, i32, i32, bool)> + '_ {
+///
+/// `pub(crate)` so `exits::emit_exits` can find which single-room wall an
+/// exit's `at` lands on, the same way [`shared_spans`] finds a two-room one.
+pub(crate) fn wall_edges(poly: &[Pt]) -> impl Iterator<Item = (Axis, i32, i32, i32, bool)> + '_ {
     edges(poly).filter_map(|(p, q)| {
         let axis = if p.x == q.x && p.y != q.y {
             Axis::Vertical

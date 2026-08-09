@@ -1,6 +1,7 @@
 //! Compiles the room-graph IR into UDMF map data.
 
 pub mod doors;
+pub mod exits;
 pub mod portals;
 pub mod sectors;
 pub mod tags;
@@ -212,6 +213,26 @@ pub enum CompileError {
         /// The far side of the second portal.
         second_a: String,
     },
+    /// An exit's `at` does not lie on any wall of its host room.
+    #[error("exit in room `{room}`: midpoint ({x}, {y}) is not on any wall of the room")]
+    ExitOffWall {
+        /// The host room.
+        room: String,
+        /// Midpoint X.
+        x: i32,
+        /// Midpoint Y.
+        y: i32,
+    },
+    /// An exit's width exceeds the wall it sits in.
+    #[error("exit in room `{room}`: width {width} exceeds the {available} available on that wall")]
+    ExitTooWide {
+        /// The host room.
+        room: String,
+        /// The requested width.
+        width: i32,
+        /// The available wall length.
+        available: i32,
+    },
     /// A thing lies outside the polygon of the room that declares it.
     #[error("thing `{kind}` at ({x}, {y}) is outside room `{room}`")]
     ThingOutsideRoom {
@@ -346,17 +367,20 @@ pub struct Compiled {
 /// 4. [`doors::emit_doors`] carves that dedicated sector for every door
 ///    portal out of room `b`, allocating its tag from a fresh
 ///    [`TagAllocator`] shared with every other tag-consuming pass.
-/// 5. [`things::place_things`] places every thing, measuring clearance and
-///    headroom against the geometry emitted by steps 1–4 — not the IR's
-///    declared footprints, which a door recess can make stale — so it must
-///    run after doors are carved, not before.
-/// 6. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
+/// 5. [`exits::emit_exits`] carves every level exit into its host room's own
+///    wall, using the same [`TagAllocator`]. Runs after doors so a thing's
+///    clearance (step 6) is measured against the exit's final geometry too.
+/// 6. [`things::place_things`] places every thing, measuring clearance and
+///    headroom against the geometry emitted by steps 1–5 — not the IR's
+///    declared footprints, which a door recess or exit alcove can make stale
+///    — so it must run after doors and exits are carved, not before.
+/// 7. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
 ///    at tag 0, which would match every untagged sector in-engine.
-/// 7. [`textmap::emit_textmap`] renders the final, validated geometry.
-/// 8. [`crate::rules::check_all`] runs the playability catalog over the
+/// 8. [`textmap::emit_textmap`] renders the final, validated geometry.
+/// 9. [`crate::rules::check_all`] runs the playability catalog over the
 ///    result and fails the compile if anything is violated.
 ///
-/// Step 8 is part of `compile` rather than a separate call the caller may
+/// Step 9 is part of `compile` rather than a separate call the caller may
 /// forget, because the design makes playability violations hard errors: "a
 /// door the player cannot fit through is a broken map, not a missed target".
 /// Leaving `check_all` optional meant every rule in `rules` was inert unless
@@ -399,6 +423,7 @@ pub fn compile_reporting(
     portals::cut_portals(ir, &mut data)?;
     let mut tags = TagAllocator::new();
     doors::emit_doors(ir, tables, &mut data, &mut tags)?;
+    exits::emit_exits(ir, tables, &mut data, &mut tags)?;
     let things = things::place_things(ir, tables, &data)?;
     tags::check_no_action_at_tag_zero(&data)?;
     let textmap = textmap::emit_textmap(&data, &things);
