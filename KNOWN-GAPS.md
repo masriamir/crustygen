@@ -1,7 +1,7 @@
 # crustygen — known gaps and carried decisions
 
 State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD →
-reassembles through crustywad. 100 tests. This file records what is deliberately
+reassembles through crustywad. 164 tests. This file records what is deliberately
 absent, what is known-fragile, and the decisions a future contributor would
 otherwise have to re-derive.
 
@@ -51,9 +51,14 @@ to end.
 
 ## Known gaps
 
-**The orphan-sidedef code path is documented but unexercised.** It fires only
-when an opening consumes a wall end to end so the reusable sidedef is never
-taken. No fixture reaches it.
+**The orphan-sidedef code path is exercised, not merely documented.** It
+fires when an opening consumes a wall end to end, so the reusable sidedef
+`split_wall_for_opening` sets aside is never taken. `tests/fixtures/entrada_base.json`
+reaches it twice — its `armory` room is only 128 units tall along the wall its
+`start`-facing portal opens (`width: 128` against a wall exactly 128 units
+long), so the portal consumes that whole wall and leaves `armory`'s original
+sidedef record unreferenced. Confirmed directly: the compiled map carries 81
+sidedef records but only 79 are ever named by a linedef's `front`/`back`.
 
 **crustygen runs in no CI.** It declares its own `[workspace]`, so the parent
 repo's `cargo fmt --all` and `cargo clippy --workspace` do not reach it, and
@@ -71,14 +76,47 @@ ray casting has no defined tie-break there. `point_on_polygon_boundary` guards
 the overlap test, and the radius-clearance check is the backstop everywhere
 else. Do not assume it is a strict interior test.
 
-**Door carving is asymmetric — always into room `b`.** Room `a` is never
-modified, which is what lets the far face reuse `emit_opening` unchanged.
-Consequence: swapping `a` and `b` in a portal declaration physically relocates
-the door. Documented on `Portal`.
+**Rooms are authored apart, not flush — the wall-thickness model.** Two
+rooms connected by a portal never share a coincident wall coordinate; instead
+`Portal::at`'s across-coordinate is read against room `a`'s own wall, and room
+`b`'s facing wall sits some real, solid distance beyond it
+(`Ir::MIN_PORTAL_GAP`, currently 8 map units, and the gap must be a whole
+multiple of that). `Ir::from_json` validates the gap via
+`geom::facing_spans`/`geom::find_facing_span` — the identical geometry
+`compile::portals::resolve_portal` later cuts through, so the two can never
+disagree about which wall pair a portal resolves to or how wide the gap
+between them is. A portal — of any kind — fills that gap with a new sector
+(`compile::portals::emit_gap_sector`): an open, walkable passage for
+`PortalKind::Plain`, or a closed sector for `PortalKind::Door`/`PortalKind::Locked`,
+built from the same shape either way — two threshold lines (room `a` <-> new
+sector, new sector <-> room `b`) and two one-sided jambs closing the gap's
+long sides, front bound to the new sector with solid rock behind. Neither
+room's own declared footprint is ever touched, which is what supersedes the
+old, asymmetric carve-into-`b` door construction this section used to
+describe: a door's depth is now simply the wall gap itself (already
+validated >= `MIN_PORTAL_GAP` at the IR boundary), not a separate
+`DOOR_DEPTH` compiler constant carved out of room `b`'s interior. Swapping
+`a` and `b` on a portal no longer physically relocates anything — the gap is
+filled identically regardless of which room is named first — though `at`'s
+convention (anchored to room `a`'s wall) still means the two labels are not
+*interchangeable* without also updating `at`. See `ir::Portal`'s doc comment
+and the wall-thickness report
+(`.superpowers/sdd/2026-08-09-crustygen-compiler/wall-thickness-report.md`)
+for the full derivation and worked coordinates.
 
-**Clearance measures emitted geometry, not the IR footprint.** Door carving
-makes room `b`'s declared polygon larger than its real playable area. Measuring
-the footprint reports a thing embedded in carved-away wall as comfortably clear.
+**`facing_spans` has no distance bound, which can surprise an author moving a
+room away from a fixture that used to be adjacent.** Two walls "face" each
+other if they run the same axis, opposite directions, with overlapping
+along-ranges — regardless of how far apart they are. A room's *recessed*
+wall (an L-shape's inner corner, say) can genuinely face a second room parked
+far away in the outward direction, even past another, nearer wall of the same
+first room that a naive "closest wall" intuition would expect to win instead.
+`compile::portals::tests::an_l_shaped_room_is_not_adjacent_where_it_has_no_wall`
+pins exactly this: relocating that fixture's room `b` outward without also
+moving it clear of the recessed wall's own along-range turned the intended
+`NotAdjacent` case into a `PortalOffWall` one instead (a real facing span
+exists between the two rooms, just not at the requested coordinate) — caught
+only by re-deriving the geometry by hand, not by intuition.
 
 **Portal `width` and `at` are exempt from the grid rule** that binds footprints.
 Real doorways are routinely finer than the 64-unit grid their rooms sit on.
@@ -88,11 +126,11 @@ every untagged sector already carries, so an action left at zero matches every
 untagged sector in the map. One stray zero opens every door.
 
 **Portals and exits on diagonal walls remain unsupported by design, not by
-omission.** `wall_edges` (and so `shared_spans`) only ever reported
+omission.** `wall_edges` (and so `facing_spans`) only ever reported
 axis-aligned edges, so a portal or exit requested on a genuinely diagonal wall
 used to fall through to `NotAdjacent`/`PortalOffWall`/`ExitOffWall` — messages
 that read as "there is no wall here" for a wall an author can plainly see.
-`resolve_portal` and `resolve_exit` now check `portals::on_diagonal_wall`
+`resolve_portal` and `resolve_exit` now check `geom::on_diagonal_wall`
 before returning those errors and raise `CompileError::PortalOnDiagonalWall`/
 `ExitOnDiagonalWall` instead, naming the exact coordinate. Supporting a portal
 or exit *on* a diagonal wall properly would need a wall model wider than
@@ -101,18 +139,6 @@ machinery all assume; a chamfered room with its portals and doors on its
 square walls (the common real case) already works today, both proved by
 `portals::tests::a_portal_works_on_the_axis_aligned_wall_of_a_diagonally_shaped_room`
 and the equivalent exit/door fixtures.
-
-**`depth_behind_wall` measures diagonal far walls too, not just parallel
-ones.** It used to filter any edge with `across_p != across_q`, which
-correctly dropped a perpendicular side wall but *also* silently dropped a
-diagonal far wall — the two are geometrically distinct (a side wall bounds a
-single `along` position, a diagonal wall bounds a range with a linearly
-varying depth) but shared that one boolean. A room whose far side was
-chamfered therefore always measured `available: 0`, rejecting a door a deep
-room could plainly fit. The fix evaluates a diagonal edge's contribution at
-the two ends of its overlap with the opening (the minimum of a linear
-function over an interval always falls at an endpoint) instead of skipping it
-outright.
 
 **Lifts and teleports are repeatable, not one-shot.** A design choice, not a
 source fact: P5 requires a lift be operable from both ends, and a one-shot lift
@@ -137,11 +163,12 @@ one-sided line and a two-sided `ML_BLOCKING` one. A walkover exit therefore
 has to be a genuinely passable two-sided line, and placing one flush on a
 room's true perimeter would open the room to the void beyond it. `compile::exits`
 carves a small solid-walled recess out of the host room's own wall instead —
-the same recess construction `compile::doors` uses for a door portal's room
-`b`, but with no second room on the far side — so only the near threshold
-(front the room, back the alcove) is passable. A switch exit needs none of
-this: `P_UseSpecialLine` fires from a raycast, not a crossing, so the exit
-stays a normal solid one-sided wall.
+the same near-threshold-plus-solid-sides shape `compile::portals::emit_gap_sector`
+builds for a two-room gap sector, just with no second room on the far side (a
+solid wall instead of a second threshold) — so only the near threshold (front
+the room, back the alcove) is passable. A switch exit needs none of this:
+`P_UseSpecialLine` fires from a raycast, not a crossing, so the exit stays a
+normal solid one-sided wall.
 
 **Every exit is tagged, even though neither `G_ExitLevel` nor
 `G_SecretExitLevel` reads a tag.** Mirrors the existing precedent for manual
