@@ -791,6 +791,112 @@ mod tests {
         assert!(t.prop("plaid_imp").is_none(), "unlisted prop is absent");
     }
 
+    /// Every gore prop `scenery.gore` (none | light | heavy) can place must
+    /// resolve a doomednum, checked individually across all four groups —
+    /// standing corpses, gib props, blood/bone floor decorations, and
+    /// hanging bodies. The nine that block (the three bone props and the
+    /// six hanging bodies) must also resolve `[props.*]` dims, and the six
+    /// hanging bodies specifically must report `hangs = true` (rule P22)
+    /// while the three bone props report `hangs = false` — floor-standing,
+    /// not `MF_SPAWNCEILING`, despite sharing `MF_SOLID` with the hanging
+    /// set.
+    #[test]
+    fn every_gore_prop_resolves() {
+        let t = Tables::load().expect("tables load");
+
+        // Standing corpses: non-blocking, no [props.*] entry.
+        let corpses: &[(&str, u16)] = &[
+            ("dead_zombieman", 18),
+            ("dead_shotgun_guy", 19),
+            ("dead_imp", 20),
+            ("dead_pinky", 21),
+            ("dead_cacodemon", 22),
+            ("dead_lost_soul", 23),
+            ("dead_player", 15),
+        ];
+        for (name, doomednum) in corpses {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            assert!(
+                t.prop(name).is_none(),
+                "`{name}` is a non-blocking standing corpse"
+            );
+        }
+        assert_eq!(corpses.len(), 7, "every standing corpse was checked");
+
+        // Gib props: non-blocking, no [props.*] entry.
+        let gibs: &[(&str, u16)] = &[("gibs", 24), ("bloody_mess", 10), ("bloody_mess_alt", 12)];
+        for (name, doomednum) in gibs {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            assert!(
+                t.prop(name).is_none(),
+                "`{name}` is a non-blocking gib prop"
+            );
+        }
+        assert_eq!(gibs.len(), 3, "every gib prop was checked");
+
+        // Blood floor decorations: non-blocking, no [props.*] entry.
+        let blood: &[(&str, u16)] = &[("small_pool", 80), ("colon_gibs", 79)];
+        for (name, doomednum) in blood {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            assert!(
+                t.prop(name).is_none(),
+                "`{name}` is a non-blocking blood decoration"
+            );
+        }
+        assert_eq!(blood.len(), 2, "every blood decoration was checked");
+
+        // Bone floor decorations: blocking, floor-standing (hangs = false).
+        let bone: &[(&str, u16)] = &[
+            ("heads_on_stick", 28),
+            ("head_on_a_stick", 27),
+            ("head_candles", 29),
+        ];
+        for (name, doomednum) in bone {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            let dims = t.prop(name).unwrap_or_else(|| panic!("`{name}` prop dims"));
+            assert_eq!(dims.radius, 16, "`{name}` radius");
+            assert_eq!(dims.height, 16, "`{name}` height");
+            assert!(dims.blocks, "`{name}` blocks movement");
+            assert!(!dims.hangs, "`{name}` is floor-standing, not hanging");
+        }
+        assert_eq!(bone.len(), 3, "every bone decoration was checked");
+
+        // Hanging bodies: blocking, hanging (hangs = true), P22-relevant.
+        let hanging: &[(&str, u16, i32)] = &[
+            ("hang_no_guts", 73, 88),
+            ("hang_no_brain", 74, 88),
+            ("hang_torso_look_down", 75, 64),
+            ("hang_torso_skull", 76, 64),
+            ("hang_torso_look_up", 77, 64),
+            ("hang_torso_no_brain", 78, 64),
+        ];
+        for (name, doomednum, height) in hanging {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            let dims = t.prop(name).unwrap_or_else(|| panic!("`{name}` prop dims"));
+            assert_eq!(dims.radius, 16, "`{name}` radius");
+            assert_eq!(dims.height, *height, "`{name}` height");
+            assert!(dims.blocks, "`{name}` blocks movement");
+            assert!(dims.hangs, "`{name}` hangs from the ceiling");
+        }
+        assert_eq!(hanging.len(), 6, "every hanging body was checked");
+
+        // Every gore doomednum above is distinct.
+        let all_ids: Vec<u16> = corpses
+            .iter()
+            .chain(gibs)
+            .chain(blood)
+            .chain(bone)
+            .map(|(_, id)| *id)
+            .chain(hanging.iter().map(|(_, id, _)| *id))
+            .collect();
+        let unique: std::collections::HashSet<_> = all_ids.iter().collect();
+        assert_eq!(
+            unique.len(),
+            all_ids.len(),
+            "all gore doomednums are distinct"
+        );
+    }
+
     /// An exit switch needs a switch texture to render — the theme's
     /// `[textures.*]` set must resolve one alongside its wall/floor/
     /// ceiling/door textures.

@@ -154,12 +154,14 @@ source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_WOLFSS]: radius = 2
 
 # Non-monster props that block movement or hang from a ceiling — data
 # rules P3 (passage width), P21 (light sources match lighting), and P22
-# (hanging decoration headroom) will need. Radius, height, and the
-# blocking flag are read from `mobjinfo` the same way `[species.*]` is;
-# doomednums for these same props live in vocabulary.toml's `[things]`
-# table under the identical key names. Only props that actually block
-# (MF_SOLID) or hang (MF_SPAWNCEILING) belong here — `candle` and `gibs`
-# in vocabulary.toml are neither, so they carry no entry in this table.
+# (hanging decoration headroom) will need. Radius, height, the blocking
+# flag, and (where true) the hanging flag are read from `mobjinfo` the same
+# way `[species.*]` is; doomednums for these same props live in
+# vocabulary.toml's `[things]` table under the identical key names. Only
+# props that actually block (MF_SOLID) or hang (MF_SPAWNCEILING) belong
+# here — `candle` in vocabulary.toml is neither, so it carries no entry in
+# this table, and none of the non-blocking, non-hanging gore props
+# (corpses, gibs, blood pools) do either.
 [props.barrel]
 radius = 10
 height = 42
@@ -183,6 +185,74 @@ radius = 16
 height = 16
 blocks = true
 source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC50] ('Candelabra'): doomednum = 35, spawnstate S_CANDELABRA, radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks) — contrast with mobjinfo[MT_MISC49] ('Candlestick'/candle, doomednum 34), flags = 0, non-blocking. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+# The three blocking "bone" gore floor decorations (`scenery.gore`) — see
+# vocabulary.toml's `# Gore` block and its `gore_source` citation for the
+# full doomednum/spawnstate/flags detail these three share with the six
+# hanging-body props below. Floor-standing (not MF_SPAWNCEILING), unlike
+# the hanging-bodies group.
+[props.heads_on_stick]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC70]: doomednum = 28, spawnstate S_HEADSONSTICK, radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.head_on_a_stick]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC72]: doomednum = 27, spawnstate S_HEADONASTICK, radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.head_candles]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC73]: doomednum = 29, spawnstate S_HEADCANDLES, radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+# The six hanging-body gore props (`scenery.gore`) — rule P22 (hanging
+# decoration headroom) needs `hangs`. See vocabulary.toml's `# Gore` block
+# for the full citation these six share.
+[props.hang_no_guts]
+radius = 16
+height = 88
+blocks = true
+hangs = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC78]: doomednum = 73, spawnstate S_HANGNOGUTS, radius = 16*FRACUNIT, height = 88*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY. p_mobj.h, MF_SPAWNCEILING: 'On level spawning (initial position), hang from ceiling instead of stand on floor.' https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_mobj.h"
+
+[props.hang_no_brain]
+radius = 16
+height = 88
+blocks = true
+hangs = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC79]: doomednum = 74, spawnstate S_HANGBNOBRAIN, radius = 16*FRACUNIT, height = 88*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.hang_torso_look_down]
+radius = 16
+height = 64
+blocks = true
+hangs = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC80]: doomednum = 75, spawnstate S_HANGTLOOKDN, radius = 16*FRACUNIT, height = 64*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.hang_torso_skull]
+radius = 16
+height = 64
+blocks = true
+hangs = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC81]: doomednum = 76, spawnstate S_HANGTSKULL, radius = 16*FRACUNIT, height = 64*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.hang_torso_look_up]
+radius = 16
+height = 64
+blocks = true
+hangs = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC82]: doomednum = 77, spawnstate S_HANGTLOOKUP, radius = 16*FRACUNIT, height = 64*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.hang_torso_no_brain]
+radius = 16
+height = 64
+blocks = true
+hangs = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC83]: doomednum = 78, spawnstate S_HANGTNOBRAIN, radius = 16*FRACUNIT, height = 64*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
 
 # Health and armor pickup amounts and caps, from p_inter.c's
 # P_TouchSpecialThing pickup switch, keyed to match vocabulary.toml's

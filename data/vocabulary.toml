@@ -106,24 +106,75 @@ computer_map = 2026
 powerups_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo doomednums: MT_MISC13 = 2023 (S_PSTR), MT_MISC12 = 2013 (S_SOUL), MT_MEGA = 83 (S_MEGA), MT_INV = 2022 (S_PINV), MT_INS = 2024 (S_PINS), MT_MISC14 = 2025 (S_SUIT), MT_MISC16 = 2045 (S_PVIS), MT_MISC15 = 2026 (S_PMAP), at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0. Cross-checked against p_inter.c, P_TouchSpecialThing: SPR_PSTR -> P_GivePower(pw_strength)/GOTBERSERK, SPR_SOUL -> health+=100/GOTSUPER, SPR_MEGA -> health=200 + P_GiveArmor(player,2)/GOTMSPHERE (gated 'if (gamemode != commercial) return;' — Doom II only in vanilla), SPR_PINV -> pw_invulnerability/GOTINVUL, SPR_PINS -> pw_invisibility/GOTINVIS, SPR_SUIT -> pw_ironfeet/GOTSUIT, SPR_PVIS -> pw_infrared/GOTVISOR, SPR_PMAP -> pw_allmap/GOTMAP. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_inter.c"
 
 # Hazards and scenery. `barrel`, `techno_lamp`, `floor_lamp`, and
-# `candelabra` block movement (MF_SOLID) and carry a matching
-# `[props.*]` entry in engine.toml (radius/height/blocks) for rules P3,
-# P21, and P22. `candle` and `gibs` are the "couple of common
-# non-blocking props" scenery.decorations needs — both flags = 0
-# (non-blocking) in mobjinfo, so neither carries a `[props.*]` entry;
-# they are the only non-blocking, non-hanging, non-`gore`-bucketed
-# decorations mobjinfo defines (every other undamaged decoration prop is
-# MF_SOLID, and every other non-blocking mobjinfo entry is a corpse/gib
-# item the template's own comment assigns to `scenery.gore`, not
-# `scenery.decorations` — see the design doc §5 "gore: ... corpses,
-# blood, impaled bodies").
+# `candelabra` block movement (MF_SOLID) and carry a matching `[props.*]`
+# entry in engine.toml (radius/height/blocks) for rules P3, P21, and P22.
+# `candle` is the one common non-blocking decoration prop — flags = 0
+# (non-blocking) in mobjinfo, so it carries no `[props.*]` entry.
+#
+# `gibs` (MT_MISC71, doomednum 24) previously lived in this block too, but
+# its own citation already called it a corpse/gib item, contradicting its
+# placement here — every other non-blocking mobjinfo entry mobjinfo defines
+# is a corpse/gib/blood item the template's own comment assigns to
+# `scenery.gore`, not `scenery.decorations` (design doc §5, "gore: ...
+# corpses, blood, impaled bodies"). It now lives in the `# Gore` block below
+# with the rest of that set, where its own reasoning always said it belonged.
 barrel = 2035
 floor_lamp = 2028
 techno_lamp = 85
 candelabra = 35
 candle = 34
+scenery_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo doomednums, at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0: MT_BARREL = 2035 (S_BAR1, flags MF_SOLID|MF_SHOOTABLE|MF_NOBLOOD), MT_MISC31 = 2028 (S_COLU, 'Floor lamp', MF_SOLID), MT_MISC29 = 85 (S_TECHLAMP, 'Tall techno lamp', MF_SOLID), MT_MISC50 = 35 (S_CANDELABRA, MF_SOLID), MT_MISC49 = 34 (S_CANDLESTIK, flags = 0, non-blocking). Dims and the blocking flag for the four MF_SOLID entries are recorded in data/engine.toml's [props.*] table. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+# Gore. `scenery.gore` (none | light | heavy) needs real things to place.
+# Four groups, all read from info.c mobjinfo at the pinned commit; see
+# `gore_source` below for the full doomednum/spawnstate/flags citation.
+#
+#   - Standing corpses (7): the seven post-death idle states, one per
+#     killable species this vocabulary already names plus the player.
+#     Keyed `dead_<species>` against the matching `[species.*]`/`[things]`
+#     key above (`dead_pinky`, not `dead_demon`, to match the `pinky` key
+#     this file already uses for MT_SERGEANT). All flags = 0: non-blocking,
+#     non-hanging, no `[props.*]` entry.
+#   - Gib props (3): `gibs` plus the two doomednums that both spawn the
+#     gibbed-player state (S_PLAY_XDIE9) — `bloody_mess`/`bloody_mess_alt`,
+#     visually identical placements under two separate doomednums. All
+#     flags = 0: non-blocking, no `[props.*]` entry.
+#   - Blood/bone floor decorations (5): `small_pool`/`colon_gibs` (blood,
+#     flags = MF_NOBLOCKMAP, non-blocking, no `[props.*]` entry) and
+#     `heads_on_stick`/`head_on_a_stick`/`head_candles` (bone, flags =
+#     MF_SOLID, blocking, floor-standing — not MF_SPAWNCEILING, so distinct
+#     from the hanging-bodies group below). The three bone props carry a
+#     matching `[props.*]` entry (rules P3, P22).
+#   - Hanging bodies (6): the six MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY
+#     "hang"/"torso" states. Each carries a `[props.*]` entry with
+#     `hangs = true` (rule P22 checks headroom beneath a hanging prop).
+#
+# Not included: MT_MISC51-60 (the "bloody twitch"/meat-hook hanging props,
+# doomednums 49-53 and 59-63) — also MF_SPAWNCEILING, but flesh-hook rather
+# than corpse/torso shaped, and left for a future pass rather than folded
+# into "hanging bodies" by assumption.
+dead_zombieman = 18
+dead_shotgun_guy = 19
+dead_imp = 20
+dead_pinky = 21
+dead_cacodemon = 22
+dead_lost_soul = 23
+dead_player = 15
 gibs = 24
-scenery_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo doomednums, at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0: MT_BARREL = 2035 (S_BAR1, flags MF_SOLID|MF_SHOOTABLE|MF_NOBLOOD), MT_MISC31 = 2028 (S_COLU, 'Floor lamp', MF_SOLID), MT_MISC29 = 85 (S_TECHLAMP, 'Tall techno lamp', MF_SOLID), MT_MISC50 = 35 (S_CANDELABRA, MF_SOLID), MT_MISC49 = 34 (S_CANDLESTIK, flags = 0, non-blocking), MT_MISC71 = 24 (S_GIBS, flags = 0, non-blocking). Dims and the blocking flag for the four MF_SOLID entries are recorded in data/engine.toml's [props.*] table. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+bloody_mess = 10
+bloody_mess_alt = 12
+small_pool = 80
+colon_gibs = 79
+heads_on_stick = 28
+head_on_a_stick = 27
+head_candles = 29
+hang_no_guts = 73
+hang_no_brain = 74
+hang_torso_look_down = 75
+hang_torso_skull = 76
+hang_torso_look_up = 77
+hang_torso_no_brain = 78
+gore_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo doomednums, spawnstates, and flags, at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0. Standing corpses (radius = 20*FRACUNIT, height = 16*FRACUNIT, flags = 0 for all seven): MT_MISC63 = 18 (S_POSS_DIE5, dead_zombieman), MT_MISC67 = 19 (S_SPOS_DIE5, dead_shotgun_guy), MT_MISC66 = 20 (S_TROO_DIE5, dead_imp), MT_MISC64 = 21 (S_SARG_DIE6, dead_pinky), MT_MISC61 = 22 (S_HEAD_DIE6, dead_cacodemon), MT_MISC65 = 23 (S_SKULL_DIE6, dead_lost_soul), MT_MISC62 = 15 (S_PLAY_DIE7, dead_player). Gib props (radius = 20*FRACUNIT, height = 16*FRACUNIT, flags = 0): MT_MISC71 = 24 (S_GIBS, gibs), MT_MISC68 = 10 (S_PLAY_XDIE9, bloody_mess), MT_MISC69 = 12 (S_PLAY_XDIE9, bloody_mess_alt — same spawnstate as bloody_mess, hence visually identical). Blood floor decorations (radius = 20*FRACUNIT, height = 16*FRACUNIT, flags = MF_NOBLOCKMAP): MT_MISC85 = 80 (S_SMALLPOOL, small_pool), MT_MISC84 = 79 (S_COLONGIBS, colon_gibs). Bone floor decorations (radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID): MT_MISC70 = 28 (S_HEADSONSTICK, heads_on_stick), MT_MISC72 = 27 (S_HEADONASTICK, head_on_a_stick), MT_MISC73 = 29 (S_HEADCANDLES, head_candles). Hanging bodies (radius = 16*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY): MT_MISC78 = 73 (S_HANGNOGUTS, height = 88*FRACUNIT, hang_no_guts), MT_MISC79 = 74 (S_HANGBNOBRAIN, height = 88*FRACUNIT, hang_no_brain), MT_MISC80 = 75 (S_HANGTLOOKDN, height = 64*FRACUNIT, hang_torso_look_down), MT_MISC81 = 76 (S_HANGTSKULL, height = 64*FRACUNIT, hang_torso_skull), MT_MISC82 = 77 (S_HANGTLOOKUP, height = 64*FRACUNIT, hang_torso_look_up), MT_MISC83 = 78 (S_HANGTNOBRAIN, height = 64*FRACUNIT, hang_torso_no_brain). MF_SPAWNCEILING per p_mobj.h: 'On level spawning (initial position), hang from ceiling instead of stand on floor.' Dims/blocks/hangs for the nine MF_SOLID entries are recorded in data/engine.toml's [props.*] table. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_mobj.h"
 
 # Linedef specials the compiler writes onto a door portal's two face lines.
 #
