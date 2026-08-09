@@ -293,11 +293,23 @@ pub enum CompileError {
         /// Y coordinate.
         y: i32,
     },
+    /// The compiled map breaks one or more playability rules.
+    #[error(
+        "map breaks {} playability rule(s): {}",
+        .violations.len(),
+        .violations.iter().map(ToString::to_string).collect::<Vec<_>>().join("; ")
+    )]
+    Playability {
+        /// Every violation found, not just the first — the whole point of
+        /// collecting them is that an author can fix them in one pass.
+        violations: Vec<RuleViolation>,
+    },
 }
 
 use crate::compile::tags::TagAllocator;
 use crate::compile::things::ThingOut;
 use crate::ir::Ir;
+use crate::rules::{RuleViolation, check_all};
 use crate::tables::Tables;
 
 /// Everything one compilation produced.
@@ -335,11 +347,47 @@ pub struct Compiled {
 /// 5. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
 ///    at tag 0, which would match every untagged sector in-engine.
 /// 6. [`textmap::emit_textmap`] renders the final, validated geometry.
+/// 7. [`crate::rules::check_all`] runs the playability catalog over the
+///    result and fails the compile if anything is violated.
+///
+/// Step 7 is part of `compile` rather than a separate call the caller may
+/// forget, because the design makes playability violations hard errors: "a
+/// door the player cannot fit through is a broken map, not a missed target".
+/// Leaving `check_all` optional meant every rule in `rules` was inert unless
+/// something else remembered to run it, which is exactly the failure the
+/// decision was written to prevent. Use [`compile_reporting`] when you want
+/// the geometry *and* the violation list — for a conformance report, say —
+/// rather than a hard failure.
 ///
 /// # Errors
-/// Returns the first [`CompileError`] raised by any pass; nothing is emitted
-/// unless every pass succeeds.
+/// Returns the first [`CompileError`] raised by any pass, or
+/// [`CompileError::Playability`] listing every rule the finished map breaks;
+/// nothing is returned unless every pass and every rule succeeds.
 pub fn compile(ir: &Ir, tables: &Tables) -> Result<Compiled, CompileError> {
+    let (compiled, violations) = compile_reporting(ir, tables)?;
+    if violations.is_empty() {
+        Ok(compiled)
+    } else {
+        Err(CompileError::Playability { violations })
+    }
+}
+
+/// Compiles a room graph and reports its playability violations instead of
+/// failing on them.
+///
+/// Structural errors — anything that would make the geometry itself invalid —
+/// still fail here exactly as in [`compile`]; only the playability catalog is
+/// downgraded to a returned list. That is what a conformance report needs:
+/// the emitted map *and* every rule it breaks, rather than the first refusal.
+///
+/// # Errors
+/// Returns the first [`CompileError`] raised by any geometry, thing, or tag
+/// pass. Playability violations are returned in the success value, never as
+/// an error.
+pub fn compile_reporting(
+    ir: &Ir,
+    tables: &Tables,
+) -> Result<(Compiled, Vec<RuleViolation>), CompileError> {
     let mut data = sectors::emit_sectors(ir)?;
     portals::cut_portals(ir, &mut data)?;
     let mut tags = TagAllocator::new();
@@ -347,10 +395,12 @@ pub fn compile(ir: &Ir, tables: &Tables) -> Result<Compiled, CompileError> {
     let things = things::place_things(ir, tables, &data)?;
     tags::check_no_action_at_tag_zero(&data)?;
     let textmap = textmap::emit_textmap(&data, &things);
-    Ok(Compiled {
+    let compiled = Compiled {
         textmap,
         data,
         things,
         tags,
-    })
+    };
+    let violations = check_all(ir, tables, &compiled);
+    Ok((compiled, violations))
 }

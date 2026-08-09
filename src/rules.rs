@@ -26,10 +26,20 @@ pub struct RuleViolation {
     pub detail: String,
 }
 
+impl std::fmt::Display for RuleViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({}): {}", self.rule, self.subject, self.detail)
+    }
+}
+
 /// Runs every stage-one playability check and returns all violations.
 ///
 /// Violations are returned rather than raised so the conformance report can
 /// list all of them at once instead of only the first.
+/// [`crate::compile::compile`] calls this itself and turns a non-empty result
+/// into [`crate::compile::CompileError::Playability`], so a violation is a
+/// hard error for anyone compiling a map; use
+/// [`crate::compile::compile_reporting`] to get the list without the failure.
 #[must_use]
 pub fn check_all(ir: &Ir, tables: &Tables, out: &Compiled) -> Vec<RuleViolation> {
     let mut v = Vec::new();
@@ -219,8 +229,8 @@ fn check_key_lock_coherence(ir: &Ir, v: &mut Vec<RuleViolation>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_all, check_key_lock_coherence};
-    use crate::compile::compile;
+    use super::check_key_lock_coherence;
+    use crate::compile::{CompileError, compile, compile_reporting};
     use crate::ir::Ir;
     use crate::tables::Tables;
 
@@ -288,14 +298,62 @@ mod tests {
         )
     }
 
+    /// The rule ids a fixture violates.
+    ///
+    /// Goes through `compile_reporting` rather than `compile`: `compile`
+    /// turns any violation into `CompileError::Playability`, which is the
+    /// point of these rules, but a test that has to distinguish *which* rule
+    /// fired needs the geometry compiled and the list returned.
     fn violations(json: &str) -> Vec<String> {
         let ir = Ir::from_json(json).expect("ir");
         let tables = Tables::load().expect("tables");
-        let out = compile(&ir, &tables).expect("compiles");
-        check_all(&ir, &tables, &out)
-            .into_iter()
-            .map(|v| v.rule.to_owned())
-            .collect()
+        let (_, found) = compile_reporting(&ir, &tables).expect("compiles");
+        found.into_iter().map(|v| v.rule.to_owned()).collect()
+    }
+
+    #[test]
+    fn compile_refuses_a_map_that_breaks_a_playability_rule() {
+        // The spec makes playability violations hard errors: "a door the
+        // player cannot fit through is a broken map, not a missed target".
+        // `compile` never ran these checks, so every rule in this module was
+        // inert unless a caller remembered to invoke `check_all` itself.
+        let tables = Tables::load().expect("tables");
+        let narrow = ir(0, tables.player().radius * 2 - 2, 160);
+        let parsed = Ir::from_json(&narrow).expect("ir");
+        let err = compile(&parsed, &tables).expect_err("a P3 violation must fail the compile");
+        let CompileError::Playability { violations } = err else {
+            panic!("expected a playability failure, got {err}");
+        };
+        assert!(violations.iter().any(|v| v.rule == "P3"));
+        // The error carries every violation, so an author can fix them in
+        // one pass rather than one recompile each.
+        assert!(
+            format!(
+                "{}",
+                CompileError::Playability {
+                    violations: violations.clone()
+                }
+            )
+            .contains("P3"),
+            "the message names the rules it collected"
+        );
+    }
+
+    #[test]
+    fn compile_reporting_returns_the_map_alongside_its_violations() {
+        let tables = Tables::load().expect("tables");
+        let narrow = ir(0, tables.player().radius * 2 - 2, 160);
+        let parsed = Ir::from_json(&narrow).expect("ir");
+        let (out, found) = compile_reporting(&parsed, &tables).expect("geometry still compiles");
+        assert!(!out.textmap.is_empty(), "the map is still emitted");
+        assert!(found.iter().any(|v| v.rule == "P3"));
+    }
+
+    #[test]
+    fn compile_accepts_a_map_that_breaks_no_rule() {
+        let tables = Tables::load().expect("tables");
+        let parsed = Ir::from_json(&ir(0, 128, 160)).expect("ir");
+        assert!(compile(&parsed, &tables).is_ok());
     }
 
     #[test]
