@@ -118,6 +118,24 @@ moving it clear of the recessed wall's own along-range turned the intended
 exists between the two rooms, just not at the requested coordinate) — caught
 only by re-deriving the geometry by hand, not by intuition.
 
+**`find_facing_span` returns the *first* matching span, not necessarily the
+nearest one.** For a genuinely comb- or zigzag-shaped room, `facing_spans`
+can return two spans that share the same `near` (room `a`'s own wall
+coordinate and along-range) but different `far` values — two structurally
+distinct walls of room `b`, one nearer and one farther, both legitimately
+facing the same stretch of room `a`'s wall. `Vec::iter().find()`'s
+first-match semantics mean whichever one `wall_edges(poly_b)` happens to
+enumerate first wins, silently, with no signal to the author that a second,
+equally valid candidate existed. This is deliberately left unresolved rather
+than fixed: it is not a soundness bug — either candidate is a real, legal
+facing wall, so whichever one is picked, the resulting gap sector is
+structurally valid and (as of the sector-overlap check above) verified not
+to collide with anything — only a *which of two valid walls did you mean*
+ambiguity for the rare non-convex room shape that presents it. Resolving it
+would need a policy decision (nearest wins? reject ambiguity outright?) that
+the spec does not currently call for; flagging it here is the honest
+alternative to guessing one.
+
 **Portal `width` and `at` are exempt from the grid rule** that binds footprints.
 Real doorways are routinely finer than the 64-unit grid their rooms sit on.
 

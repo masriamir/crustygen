@@ -125,6 +125,116 @@ pub fn resolve_secret_specials(ir: &Ir, tables: &Tables, data: &mut MapData) {
     }
 }
 
+/// A human-readable label for sector `sector`, for
+/// [`CompileError::SectorOverlap`].
+///
+/// A room sector is named by its own id; a compiler-generated sector (a
+/// portal's gap sector or a walkover exit's alcove) has no IR-level name, so
+/// it is named by its index instead — an author can still find it via the
+/// representative coordinate the error carries alongside it.
+fn sector_label(ir: &Ir, sector: usize) -> String {
+    ir.rooms.get(sector).map_or_else(
+        || format!("sector {sector}"),
+        |room| format!("room `{}`", room.id),
+    )
+}
+
+/// The polygon `sector` actually occupies in the emitted geometry.
+///
+/// A room sector's polygon is its IR-declared footprint, unmodified — rooms
+/// are never reshaped by portal, door, or exit construction (see
+/// `KNOWN-GAPS.md`'s wall-thickness entry). A compiler-generated sector (a
+/// portal's gap sector, built by `portals::emit_gap_sector`, or a walkover
+/// exit's alcove, built by `exits::emit_walkover_exit`) has no IR footprint;
+/// every one of them is an axis-aligned rectangle by construction, so the
+/// bounding box of every vertex on a linedef bordering it *is* its exact
+/// shape.
+fn sector_polygon(ir: &Ir, data: &MapData, sector: usize) -> Vec<Pt> {
+    if let Some(room) = ir.rooms.get(sector) {
+        return room.footprint.clone();
+    }
+    let verts: Vec<Pt> = data
+        .linedefs
+        .iter()
+        .filter(|l| {
+            data.sidedefs[l.front].sector == sector
+                || l.back.is_some_and(|b| data.sidedefs[b].sector == sector)
+        })
+        .flat_map(|l| [data.vertices[l.v1], data.vertices[l.v2]])
+        .collect();
+    let x_lo = verts
+        .iter()
+        .map(|v| v.x)
+        .min()
+        .expect("every compiler-generated sector has bordering geometry");
+    let x_hi = verts
+        .iter()
+        .map(|v| v.x)
+        .max()
+        .expect("every compiler-generated sector has bordering geometry");
+    let y_lo = verts
+        .iter()
+        .map(|v| v.y)
+        .min()
+        .expect("every compiler-generated sector has bordering geometry");
+    let y_hi = verts
+        .iter()
+        .map(|v| v.y)
+        .max()
+        .expect("every compiler-generated sector has bordering geometry");
+    vec![
+        Pt { x: x_lo, y: y_lo },
+        Pt { x: x_lo, y: y_hi },
+        Pt { x: x_hi, y: y_hi },
+        Pt { x: x_hi, y: y_lo },
+    ]
+}
+
+/// Rejects any two emitted sectors — rooms, portal gap sectors, or exit
+/// alcoves — that overlap in 2-D.
+///
+/// [`emit_sectors`]'s own overlap check only ever compares IR room
+/// footprints against each other, so it cannot catch a portal's gap sector
+/// driven through a third room's interior, or two gap sectors from
+/// different, unrelated portals crossing each other at a right angle —
+/// neither involves two room footprints overlapping, so nothing upstream
+/// complains. Must run after every sector-emitting pass (`emit_sectors`,
+/// `cut_portals`, `emit_doors`, `emit_exits`), since it inspects the final
+/// sector count and the final emitted geometry, not the IR alone.
+///
+/// # Errors
+/// Returns [`CompileError::SectorOverlap`] naming both sectors and a
+/// representative point (one of the sector's own corners) inside each.
+///
+/// # Panics
+/// Panics if any sector's polygon is empty — unreachable, since a room's
+/// footprint always has at least three points ([`emit_sectors`] rejects
+/// [`CompileError::Degenerate`] otherwise) and every compiler-generated
+/// sector always has at least the four corners
+/// `portals::emit_gap_sector`/`exits::emit_walkover_exit` build it from.
+pub fn check_no_sector_overlaps(ir: &Ir, data: &MapData) -> Result<(), CompileError> {
+    let polygons: Vec<Vec<Pt>> = (0..data.sectors.len())
+        .map(|s| sector_polygon(ir, data, s))
+        .collect();
+    for (i, poly_i) in polygons.iter().enumerate() {
+        for (j, poly_j) in polygons.iter().enumerate().skip(i + 1) {
+            if overlaps(poly_i, poly_j) {
+                let pi = *poly_i.first().expect("a sector's polygon has a vertex");
+                let pj = *poly_j.first().expect("a sector's polygon has a vertex");
+                return Err(CompileError::SectorOverlap {
+                    first: sector_label(ir, i),
+                    first_x: pi.x,
+                    first_y: pi.y,
+                    second: sector_label(ir, j),
+                    second_x: pj.x,
+                    second_y: pj.y,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Twice the signed area of triangle `abc`; positive when `c` is left of `ab`.
 fn orient(a: Pt, b: Pt, c: Pt) -> i64 {
     let (abx, aby) = (i64::from(b.x - a.x), i64::from(b.y - a.y));
@@ -388,6 +498,154 @@ mod tests {
         assert_eq!(
             data.sectors[0].special, 42,
             "the escape-hatch special is untouched by secret resolution"
+        );
+    }
+
+    // The tests below cover `check_no_sector_overlaps`: gap sectors are
+    // compiler-generated geometry with no IR footprint, so
+    // `emit_sectors`'s own room-vs-room overlap check (above) cannot see a
+    // gap sector colliding with anything. Every fixture here compiles clean
+    // through room-footprint overlap checking and portal/door/exit
+    // resolution; only the 2-D sector-polygon check added for this task
+    // catches them.
+
+    use crate::compile::MapData;
+    use crate::compile::doors::emit_doors;
+    use crate::compile::portals::cut_portals;
+    use crate::compile::sectors::check_no_sector_overlaps;
+    use crate::compile::tags::TagAllocator;
+    use crate::tables::Tables;
+
+    /// Runs the full geometry pipeline (sectors -> portals -> doors), the
+    /// same passes `compile::compile_reporting` runs before its own call to
+    /// `check_no_sector_overlaps`.
+    fn compiled_data(ir: &Ir) -> MapData {
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(ir).expect("sectors");
+        cut_portals(ir, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        emit_doors(ir, &tables, &mut data, &mut tags).expect("doors");
+        data
+    }
+
+    /// Two *perpendicular* plain portals whose gap sectors genuinely
+    /// overlap, even though no two rooms overlap and neither portal shares
+    /// a room with the other. Room `a` (x 0..256) and room `b` (x 320..576)
+    /// face each other across x, gap rectangle [256,320]x[64,192]. Room `c`
+    /// (its own north wall at y=56) and room `d` (its own south wall at
+    /// y=200) face each other across y over x 264..312, gap rectangle
+    /// [272,304]x[56,200] once the portal's width narrows it from the
+    /// walls' own 264..312 extent. The two gap rectangles share real 2-D
+    /// area: x in [272,304], y in [64,192]. `grid: 8` — none of these
+    /// coordinates are multiples of 64.
+    const PERPENDICULAR_GAP_SECTORS_COLLIDE: &str = r#"{ "seed":1, "grid":8, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+           "floor":0, "ceiling":128, "light":160,
+           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+           "floor":0, "ceiling":128, "light":160,
+           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+        { "id":"c", "footprint":[[264,-96],[264,56],[312,56],[312,-96]],
+           "floor":0, "ceiling":128, "light":160,
+           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+        { "id":"d", "footprint":[[264,200],[264,456],[312,456],[312,200]],
+           "floor":0, "ceiling":128, "light":160,
+           "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+      ],
+      "portals":[
+        { "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] },
+        { "a":"c", "b":"d", "kind":"plain", "width":32, "at":[288,56] }
+      ] }"#;
+
+    #[test]
+    fn two_perpendicular_gap_sectors_that_collide_are_rejected() {
+        let ir = Ir::from_json(PERPENDICULAR_GAP_SECTORS_COLLIDE).expect("ir");
+        let data = compiled_data(&ir);
+        assert!(
+            matches!(
+                check_no_sector_overlaps(&ir, &data),
+                Err(CompileError::SectorOverlap { .. })
+            ),
+            "two gap sectors from unrelated, perpendicular portals overlap in 2-D and must be \
+             rejected, even though no two rooms overlap and neither portal shares a room with \
+             the other"
+        );
+    }
+
+    /// The same fixture, translated so the two gap rectangles no longer
+    /// intersect (room `c`/`d`'s corridor moved out to x 600..648, well
+    /// clear of the a<->b corridor at x 256..320): proves the rejection
+    /// above is really about the 2-D intersection, not merely the presence
+    /// of two portals in the same map.
+    #[test]
+    fn two_perpendicular_gap_sectors_that_do_not_collide_are_accepted() {
+        let moved = PERPENDICULAR_GAP_SECTORS_COLLIDE
+            .replace("264,-96", "600,-96")
+            .replace("264,56", "600,56")
+            .replace("312,56", "648,56")
+            .replace("312,-96", "648,-96")
+            .replace("264,200", "600,200")
+            .replace("264,456", "600,456")
+            .replace("312,456", "648,456")
+            .replace("312,200", "648,200")
+            .replace("\"at\":[288,56]", "\"at\":[624,56]");
+        let ir = Ir::from_json(&moved).expect("ir");
+        let data = compiled_data(&ir);
+        assert!(
+            check_no_sector_overlaps(&ir, &data).is_ok(),
+            "two gap sectors that do not share any 2-D area must not be rejected"
+        );
+    }
+
+    /// Room `void_room` sits entirely inside the a<->b corridor (a<->b's
+    /// gap rectangle is [256,320]x[64,192]; `void_room` is
+    /// [264,312]x[96,160], strictly inside it) but overlaps neither `a` nor
+    /// `b`'s own footprint, so `emit_sectors`'s room-vs-room overlap check
+    /// cannot see it — only the gap-sector-vs-room check can.
+    fn portal_through_third_room_ir(kind: &str) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":8, "theme":"tech_base",
+              "rooms":[
+                {{ "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }},
+                {{ "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }},
+                {{ "id":"void_room", "footprint":[[264,96],[264,160],[312,160],[312,96]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
+              ],
+              "portals":[{{ "a":"a", "b":"b", "kind":"{kind}", "width":128, "at":[256,128] }}] }}"#
+        )
+    }
+
+    #[test]
+    fn a_plain_portals_gap_sector_driven_through_a_third_room_is_rejected() {
+        let ir = Ir::from_json(&portal_through_third_room_ir("plain")).expect("ir");
+        let data = compiled_data(&ir);
+        assert!(
+            matches!(
+                check_no_sector_overlaps(&ir, &data),
+                Err(CompileError::SectorOverlap { .. })
+            ),
+            "a plain portal's passage sector driven through an unrelated third room's \
+             interior must be rejected"
+        );
+    }
+
+    #[test]
+    fn a_doors_gap_sector_driven_through_a_third_room_is_rejected() {
+        let ir = Ir::from_json(&portal_through_third_room_ir("door")).expect("ir");
+        let data = compiled_data(&ir);
+        assert!(
+            matches!(
+                check_no_sector_overlaps(&ir, &data),
+                Err(CompileError::SectorOverlap { .. })
+            ),
+            "a door's own sector driven through an unrelated third room's interior must be \
+             rejected"
         );
     }
 }

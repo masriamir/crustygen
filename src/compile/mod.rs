@@ -193,6 +193,34 @@ pub enum CompileError {
         /// Midpoint Y of the opening.
         y: i32,
     },
+    /// Two emitted sectors — rooms, a portal's gap sector (passage or door),
+    /// or a walkover exit's alcove — overlap in the finished geometry.
+    ///
+    /// [`sectors::overlaps`](crate::compile::sectors) only ever compares IR
+    /// room footprints against each other, so it cannot see this: a gap
+    /// sector is compiler-generated geometry with no IR footprint of its
+    /// own, and can be driven straight through a third room's interior, or
+    /// cross another portal's gap sector at a right angle, without either
+    /// room named by either portal ever overlapping anything. Checked once,
+    /// after every sector-emitting pass has run, over every pair of emitted
+    /// sector polygons.
+    #[error(
+        "{first} and {second} overlap in the emitted geometry (near ({first_x}, {first_y}) and ({second_x}, {second_y}) respectively)"
+    )]
+    SectorOverlap {
+        /// A human-readable label for the first sector.
+        first: String,
+        /// A representative point inside the first sector.
+        first_x: i32,
+        /// A representative point inside the first sector.
+        first_y: i32,
+        /// A human-readable label for the second sector.
+        second: String,
+        /// A representative point inside the second sector.
+        second_x: i32,
+        /// A representative point inside the second sector.
+        second_y: i32,
+    },
     /// A linedef carries a special but no tag.
     #[error("linedef {index} has special {special} at tag 0, which matches every untagged sector")]
     ActionAtTagZero {
@@ -386,19 +414,24 @@ pub struct Compiled {
 ///    footprint is touched — the gap already exists by construction.
 /// 5. [`exits::emit_exits`] carves every level exit into its host room's own
 ///    wall, using the same [`TagAllocator`]. Runs after doors so a thing's
-///    clearance (step 6) is measured against the exit's final geometry too.
-/// 6. [`things::place_things`] places every thing, measuring clearance and
+///    clearance (step 7) is measured against the exit's final geometry too.
+/// 6. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
+///    that overlap in 2-D — a gap sector driven through a third room, or two
+///    gap sectors from unrelated portals crossing each other. Must run after
+///    every sector-emitting pass (steps 1, 3, 4, 5) and before anything that
+///    trusts the geometry is sound, which is everything from here on.
+/// 7. [`things::place_things`] places every thing, measuring clearance and
 ///    headroom against the geometry emitted by steps 1–5 — not the IR's
 ///    declared footprints, which an exit alcove can still make stale even
 ///    though a door no longer does — so it must run after doors and exits
 ///    are carved, not before.
-/// 7. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
+/// 8. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
 ///    at tag 0, which would match every untagged sector in-engine.
-/// 8. [`textmap::emit_textmap`] renders the final, validated geometry.
-/// 9. [`crate::rules::check_all`] runs the playability catalog over the
-///    result and fails the compile if anything is violated.
+/// 9. [`textmap::emit_textmap`] renders the final, validated geometry.
+/// 10. [`crate::rules::check_all`] runs the playability catalog over the
+///     result and fails the compile if anything is violated.
 ///
-/// Step 9 is part of `compile` rather than a separate call the caller may
+/// Step 10 is part of `compile` rather than a separate call the caller may
 /// forget, because the design makes playability violations hard errors: "a
 /// door the player cannot fit through is a broken map, not a missed target".
 /// Leaving `check_all` optional meant every rule in `rules` was inert unless
@@ -442,6 +475,7 @@ pub fn compile_reporting(
     let mut tags = TagAllocator::new();
     doors::emit_doors(ir, tables, &mut data, &mut tags)?;
     exits::emit_exits(ir, tables, &mut data, &mut tags)?;
+    sectors::check_no_sector_overlaps(ir, &data)?;
     let things = things::place_things(ir, tables, &data)?;
     tags::check_no_action_at_tag_zero(&data)?;
     let textmap = textmap::emit_textmap(&data, &things);
