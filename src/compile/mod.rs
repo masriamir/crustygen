@@ -4,6 +4,7 @@ pub mod doors;
 pub mod portals;
 pub mod sectors;
 pub mod tags;
+pub mod things;
 
 use crate::geom::Pt;
 
@@ -182,5 +183,63 @@ pub enum CompileError {
         first_a: String,
         /// The far side of the second portal.
         second_a: String,
+    },
+    /// A thing lies outside the polygon of the room that declares it.
+    #[error("thing `{kind}` at ({x}, {y}) is outside room `{room}`")]
+    ThingOutsideRoom {
+        /// The room that declared it.
+        room: String,
+        /// The vocabulary name.
+        kind: String,
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+    },
+    /// A thing sits closer to a wall than its own radius.
+    #[error(
+        "thing `{kind}` at ({x}, {y}) in room `{room}` has {have:.1} units of clearance but needs {need}"
+    )]
+    ThingTooClose {
+        /// The room.
+        room: String,
+        /// The vocabulary name.
+        kind: String,
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+        /// Available clearance.
+        have: f64,
+        /// Required radius.
+        need: i32,
+    },
+    /// A room is shorter than something that must stand in it.
+    #[error("room `{room}` has {have} units of headroom but `{kind}` needs {need}")]
+    NoHeadroom {
+        /// The room.
+        room: String,
+        /// The vocabulary name.
+        kind: String,
+        /// Available floor-to-ceiling gap.
+        have: i32,
+        /// Required height.
+        need: i32,
+    },
+    /// A thing name is not in the vocabulary table.
+    #[error("unknown thing `{kind}` in room `{room}`")]
+    UnknownThing {
+        /// The room.
+        room: String,
+        /// The unresolvable name.
+        kind: String,
+    },
+    /// Two player starts occupy the same spot.
+    #[error("two player starts overlap at ({x}, {y}); they would telefrag on spawn")]
+    OverlappingStarts {
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
     },
 }
