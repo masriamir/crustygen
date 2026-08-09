@@ -84,6 +84,11 @@ pub struct Portal {
     #[serde(default)]
     pub lock: Option<String>,
     /// Clear opening width in map units.
+    ///
+    /// Must be positive and even: the opening is centered on [`Self::at`],
+    /// so an odd width could not be split into two equal integer halves, and
+    /// a zero or negative one would emit a degenerate or inverted opening.
+    /// [`Ir::from_json`] rejects both.
     pub width: i32,
     /// Midpoint of the opening on the shared wall.
     pub at: Pt,
@@ -140,16 +145,106 @@ pub enum IrError {
         /// The configured grid size.
         grid: i32,
     },
+    /// A coordinate does not fit the 16-bit vertex range every Doom map
+    /// format uses.
+    #[error("`{subject}` has a coordinate ({x}, {y}) outside the map range {min}..={max}")]
+    CoordinateOutOfRange {
+        /// The room or portal that carries it.
+        subject: String,
+        /// The X coordinate.
+        x: i32,
+        /// The Y coordinate.
+        y: i32,
+        /// The lowest representable coordinate.
+        min: i32,
+        /// The highest representable coordinate.
+        max: i32,
+    },
+    /// A room's ceiling is not above its floor, so it encloses no volume.
+    #[error("room `{room}` has ceiling {ceiling} at or below floor {floor}")]
+    InvertedRoom {
+        /// The offending room.
+        room: String,
+        /// Its declared floor height.
+        floor: i32,
+        /// Its declared ceiling height.
+        ceiling: i32,
+    },
+    /// A room height does not fit the 16-bit range every Doom map format
+    /// uses for sector planes.
+    #[error("room `{room}` has a height {height} outside the map range {min}..={max}")]
+    HeightOutOfRange {
+        /// The offending room.
+        room: String,
+        /// The rejected floor or ceiling height.
+        height: i32,
+        /// The lowest representable height.
+        min: i32,
+        /// The highest representable height.
+        max: i32,
+    },
+    /// A portal declares a width that is zero or negative.
+    #[error("portal `{a}` <-> `{b}` has width {width}, which must be positive")]
+    InvalidPortalWidth {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The rejected width.
+        width: i32,
+    },
+    /// A portal declares an odd width, which cannot be centered on `at`
+    /// without landing half a unit off the integer grid.
+    #[error("portal `{a}` <-> `{b}` has odd width {width}; widths must be even")]
+    OddPortalWidth {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The rejected width.
+        width: i32,
+    },
+    /// A [`PortalKind::Locked`] portal does not name the key that opens it.
+    #[error("portal `{a}` <-> `{b}` is locked but names no key")]
+    LockedWithoutKey {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+    },
 }
+
+/// The inclusive coordinate and height range every Doom map format stores in
+/// a signed 16-bit field.
+///
+/// UDMF itself is textual and would accept wider values, but the design's
+/// second output is a Doom binary WAD produced by `cwad convert --to doom`
+/// (see the spec's architecture diagram), whose `VERTEXES` and `SECTORS`
+/// lumps are `i16`. Rejecting here keeps the two outputs equivalent instead
+/// of letting the binary one silently wrap.
+const MAP_RANGE: std::ops::RangeInclusive<i32> = (i16::MIN as i32)..=(i16::MAX as i32);
 
 impl Ir {
     /// Parses and validates an IR document.
     ///
+    /// Every numeric field a later pass divides by, halves, or writes into a
+    /// fixed-width map record is bounds-checked here, at the untrusted-input
+    /// boundary, so no downstream pass has to defend itself: `grid`
+    /// ([`IrError::InvalidGrid`]) because `x % 0` panics, `width`
+    /// ([`IrError::InvalidPortalWidth`], [`IrError::OddPortalWidth`]) because
+    /// a zero width emits a zero-length two-sided linedef and a negative one
+    /// inverts the opening, room heights ([`IrError::InvertedRoom`]) because
+    /// a ceiling at or below its floor encloses no playable volume, and both
+    /// coordinates and heights ([`IrError::CoordinateOutOfRange`],
+    /// [`IrError::HeightOutOfRange`]) because the binary Doom output stores
+    /// them in `i16`.
+    ///
     /// # Errors
     /// Returns [`IrError::Json`] for malformed input, [`IrError::DuplicateRoom`]
     /// for a repeated room id, [`IrError::UnknownRoom`] for a portal naming a
-    /// room that does not exist, and [`IrError::OffGrid`] for any coordinate
-    /// that is not a multiple of `grid`.
+    /// room that does not exist, [`IrError::OffGrid`] for any coordinate that
+    /// is not a multiple of `grid`, [`IrError::LockedWithoutKey`] for a locked
+    /// portal that names no key, and the numeric-range variants listed above.
     pub fn from_json(s: &str) -> Result<Self, IrError> {
         let ir: Self = serde_json::from_str(s)?;
 
@@ -166,6 +261,23 @@ impl Ir {
                     id: room.id.clone(),
                 });
             }
+            if room.ceiling <= room.floor {
+                return Err(IrError::InvertedRoom {
+                    room: room.id.clone(),
+                    floor: room.floor,
+                    ceiling: room.ceiling,
+                });
+            }
+            for height in [room.floor, room.ceiling] {
+                if !MAP_RANGE.contains(&height) {
+                    return Err(IrError::HeightOutOfRange {
+                        room: room.id.clone(),
+                        height,
+                        min: *MAP_RANGE.start(),
+                        max: *MAP_RANGE.end(),
+                    });
+                }
+            }
             for p in &room.footprint {
                 if p.x % ir.grid != 0 || p.y % ir.grid != 0 {
                     return Err(IrError::OffGrid {
@@ -173,6 +285,15 @@ impl Ir {
                         x: p.x,
                         y: p.y,
                         grid: ir.grid,
+                    });
+                }
+                if !MAP_RANGE.contains(&p.x) || !MAP_RANGE.contains(&p.y) {
+                    return Err(IrError::CoordinateOutOfRange {
+                        subject: room.id.clone(),
+                        x: p.x,
+                        y: p.y,
+                        min: *MAP_RANGE.start(),
+                        max: *MAP_RANGE.end(),
                     });
                 }
             }
@@ -183,6 +304,35 @@ impl Ir {
                 if !seen.contains(id.as_str()) {
                     return Err(IrError::UnknownRoom { id: id.clone() });
                 }
+            }
+            if portal.width <= 0 {
+                return Err(IrError::InvalidPortalWidth {
+                    a: portal.a.clone(),
+                    b: portal.b.clone(),
+                    width: portal.width,
+                });
+            }
+            if portal.width % 2 != 0 {
+                return Err(IrError::OddPortalWidth {
+                    a: portal.a.clone(),
+                    b: portal.b.clone(),
+                    width: portal.width,
+                });
+            }
+            if !MAP_RANGE.contains(&portal.at.x) || !MAP_RANGE.contains(&portal.at.y) {
+                return Err(IrError::CoordinateOutOfRange {
+                    subject: format!("{} <-> {}", portal.a, portal.b),
+                    x: portal.at.x,
+                    y: portal.at.y,
+                    min: *MAP_RANGE.start(),
+                    max: *MAP_RANGE.end(),
+                });
+            }
+            if portal.kind == PortalKind::Locked && portal.lock.is_none() {
+                return Err(IrError::LockedWithoutKey {
+                    a: portal.a.clone(),
+                    b: portal.b.clone(),
+                });
             }
         }
 
@@ -269,5 +419,85 @@ mod tests {
     #[test]
     fn rejects_malformed_json() {
         assert!(matches!(Ir::from_json("{ not json"), Err(IrError::Json(_))));
+    }
+
+    #[test]
+    fn rejects_a_zero_or_negative_portal_width() {
+        // Width 0 emits a two-sided linedef whose two vertices are the same
+        // point; a negative width inverts the opening so `open_lo > open_hi`.
+        // Both compiled clean before this guard existed — the same class of
+        // hole as the unguarded `grid` above.
+        let zero = TWO_ROOM.replace("\"width\": 128", "\"width\": 0");
+        assert!(matches!(
+            Ir::from_json(&zero),
+            Err(IrError::InvalidPortalWidth { width: 0, .. })
+        ));
+        let negative = TWO_ROOM.replace("\"width\": 128", "\"width\": -64");
+        assert!(matches!(
+            Ir::from_json(&negative),
+            Err(IrError::InvalidPortalWidth { width: -64, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_an_odd_portal_width() {
+        // `width / 2` truncates, so an odd width silently emitted a span one
+        // unit narrower than the value P3 validates.
+        let odd = TWO_ROOM.replace("\"width\": 128", "\"width\": 63");
+        assert!(matches!(
+            Ir::from_json(&odd),
+            Err(IrError::OddPortalWidth { width: 63, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_room_whose_ceiling_is_not_above_its_floor() {
+        let flat = TWO_ROOM.replace("\"ceiling\": 128", "\"ceiling\": 0");
+        assert!(matches!(
+            Ir::from_json(&flat),
+            Err(IrError::InvertedRoom {
+                floor: 0,
+                ceiling: 0,
+                ..
+            })
+        ));
+        let inverted = TWO_ROOM.replace("\"ceiling\": 128", "\"ceiling\": -8");
+        assert!(matches!(
+            Ir::from_json(&inverted),
+            Err(IrError::InvertedRoom { ceiling: -8, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_coordinates_and_heights_outside_the_binary_map_range() {
+        let far = TWO_ROOM.replace("[512,256]", "[65536,256]");
+        assert!(matches!(
+            Ir::from_json(&far),
+            Err(IrError::CoordinateOutOfRange { x: 65536, .. })
+        ));
+        let high = TWO_ROOM.replace("\"ceiling\": 128", "\"ceiling\": 40000");
+        assert!(matches!(
+            Ir::from_json(&high),
+            Err(IrError::HeightOutOfRange { height: 40000, .. })
+        ));
+        let off_wall = TWO_ROOM.replace("\"at\": [256,128]", "\"at\": [256,40000]");
+        assert!(matches!(
+            Ir::from_json(&off_wall),
+            Err(IrError::CoordinateOutOfRange { y: 40000, .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_a_locked_portal_that_names_no_key() {
+        let locked = TWO_ROOM.replace("\"kind\": \"plain\"", "\"kind\": \"locked\"");
+        assert!(matches!(
+            Ir::from_json(&locked),
+            Err(IrError::LockedWithoutKey { .. })
+        ));
+        let keyed = TWO_ROOM.replace(
+            "\"kind\": \"plain\"",
+            "\"kind\": \"locked\", \"lock\": \"blue_card\"",
+        );
+        assert!(Ir::from_json(&keyed).is_ok(), "a named key is accepted");
     }
 }

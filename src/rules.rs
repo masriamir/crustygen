@@ -307,11 +307,16 @@ mod tests {
     }
 
     #[test]
-    fn p3_a_passage_at_the_player_diameter_passes_and_one_unit_under_fails() {
+    fn p3_a_passage_at_the_player_diameter_passes_and_one_step_under_fails() {
         let tables = Tables::load().expect("tables");
         let need = tables.player().radius * 2;
         assert!(!violations(&ir(0, need, 160)).contains(&"P3".to_owned()));
-        assert!(violations(&ir(0, need - 1, 160)).contains(&"P3".to_owned()));
+        // `need` is a doubled radius and therefore always even, and
+        // `Ir::from_json` rejects odd widths outright (they cannot be
+        // centered on `at` in whole units), so the nearest expressible width
+        // below the threshold is two units under, not one. That still pins
+        // the `<` boundary: it is the largest legal value that must fail.
+        assert!(violations(&ir(0, need - 2, 160)).contains(&"P3".to_owned()));
     }
 
     #[test]
