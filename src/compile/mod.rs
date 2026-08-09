@@ -1,5 +1,6 @@
 //! Compiles the room-graph IR into UDMF map data.
 
+pub mod portals;
 pub mod sectors;
 
 use crate::geom::Pt;
@@ -110,5 +111,37 @@ pub enum CompileError {
         a: String,
         /// The second room.
         b: String,
+    },
+    /// A portal names two rooms that share no wall.
+    #[error("portal `{a}` <-> `{b}`: the rooms share no wall")]
+    NotAdjacent {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+    },
+    /// A portal opening is wider than the wall it sits in.
+    #[error("portal `{a}` <-> `{b}`: opening of {width} exceeds the {available} shared wall")]
+    PortalTooWide {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The requested opening width.
+        width: i32,
+        /// The available shared-wall length.
+        available: i32,
+    },
+    /// A portal midpoint does not lie on the shared wall.
+    #[error("portal `{a}` <-> `{b}`: midpoint ({x}, {y}) is not on the shared wall")]
+    PortalOffWall {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// Midpoint X.
+        x: i32,
+        /// Midpoint Y.
+        y: i32,
     },
 }
