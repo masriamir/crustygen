@@ -1,7 +1,7 @@
 //! Proves that hand-written UDMF `TEXTMAP` text becomes an assemblable map.
 
 use crustywad::map::Map;
-use crustywad::{Wad, WadKind, WadBuilder};
+use crustywad::{Wad, WadBuilder, WadKind};
 
 /// One 256x256 room, wound clockwise so each front sidedef faces inward.
 const TEXTMAP: &str = r#"namespace = "doom";
