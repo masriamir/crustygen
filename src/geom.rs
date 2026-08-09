@@ -51,10 +51,23 @@ pub fn is_axis_or_diagonal(a: Pt, b: Pt) -> bool {
 ///
 /// Even-odd ray casting in exact integer arithmetic — the crossing test is
 /// cross-multiplied rather than divided, so no rounding enters the topology.
+///
+/// A polygon of fewer than three points encloses no area, so nothing is
+/// inside it and `false` is returned. That guard is load-bearing rather than
+/// cosmetic: the ray cast starts from the last vertex, so an empty slice
+/// would underflow `n - 1` and panic.
+///
+/// Note this is *not* a strict interior test at the boundary — a point lying
+/// exactly on an edge may return either answer, since the ray-cast tie-break
+/// is undefined there. Callers that must exclude the boundary pair this with
+/// an explicit on-boundary test.
 #[must_use]
 #[allow(clippy::many_single_char_names)]
 pub fn contains(poly: &[Pt], p: Pt) -> bool {
     let n = poly.len();
+    if n < 3 {
+        return false;
+    }
     let mut inside = false;
     let mut j = n - 1;
     for i in 0..n {
@@ -144,6 +157,18 @@ mod tests {
         assert!(is_axis_or_diagonal(Pt { x: 0, y: 0 }, Pt { x: 0, y: 64 }));
         assert!(is_axis_or_diagonal(Pt { x: 0, y: 0 }, Pt { x: 64, y: 64 }));
         assert!(!is_axis_or_diagonal(Pt { x: 0, y: 0 }, Pt { x: 64, y: 32 }));
+    }
+
+    #[test]
+    fn a_polygon_with_no_area_contains_nothing() {
+        // An empty slice reached `j = n - 1` before this was guarded, so the
+        // subtraction underflowed and panicked rather than answering.
+        assert!(!contains(&[], Pt { x: 0, y: 0 }));
+        assert!(!contains(&[Pt { x: 0, y: 0 }], Pt { x: 0, y: 0 }));
+        assert!(!contains(
+            &[Pt { x: 0, y: 0 }, Pt { x: 64, y: 0 }],
+            Pt { x: 32, y: 0 }
+        ));
     }
 
     #[test]
