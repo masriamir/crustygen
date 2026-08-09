@@ -3,11 +3,14 @@
 use crate::compile::sectors::vertex_index;
 use crate::compile::{CompileError, LinedefOut, MapData, SidedefOut};
 use crate::geom::Pt;
-use crate::ir::{Ir, Portal};
+use crate::ir::{Ir, Portal, PortalKind};
 
 /// The axis a shared wall runs along.
+///
+/// `pub(crate)` so `doors` can re-derive a portal's shared-wall geometry via
+/// [`shared_span`] to carve its own recessed sector.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Axis {
+pub(crate) enum Axis {
     /// The wall is vertical; X is constant.
     Vertical,
     /// The wall is horizontal; Y is constant.
@@ -87,7 +90,13 @@ fn cut_one(ir: &Ir, data: &mut MapData, portal: &Portal) -> Result<(), CompileEr
 
     let wall_tex = ir.rooms[ia].wall_tex.clone();
     emit_flanking_walls(data, &cut, ia, ib, a_forward, &wall_tex);
-    emit_opening(data, &cut, ia, ib, a_forward);
+    // A plain portal's opening is the two-sided line straight across the
+    // shared wall. A door portal instead gets a carved-out sector of its own
+    // — see `doors::emit_doors`, which runs after `cut_portals` and expects
+    // to find flanking walls in place but no opening line yet.
+    if portal.kind == PortalKind::Plain {
+        emit_opening(data, &cut, ia, ib, a_forward);
+    }
 
     Ok(())
 }
@@ -95,25 +104,29 @@ fn cut_one(ir: &Ir, data: &mut MapData, portal: &Portal) -> Result<(), CompileEr
 /// The span geometry of one portal's cut: which axis and fixed coordinate the
 /// shared wall runs along, and the four along-axis boundaries from the solid
 /// wall's low end, through the opening, to the solid wall's high end.
-struct Cut {
+///
+/// `pub(crate)` (including every field) so `doors` can build a second `Cut`
+/// at a recessed `fixed` coordinate for a door sector's far face, reusing
+/// this same struct and [`emit_opening`] rather than duplicating them.
+pub(crate) struct Cut {
     /// The axis the shared wall runs along.
-    axis: Axis,
+    pub(crate) axis: Axis,
     /// The coordinate held constant along the wall (X for vertical, Y for
     /// horizontal).
-    fixed: i32,
+    pub(crate) fixed: i32,
     /// The low end of the shared wall span.
-    lo: i32,
+    pub(crate) lo: i32,
     /// The low end of the opening.
-    open_lo: i32,
+    pub(crate) open_lo: i32,
     /// The high end of the opening.
-    open_hi: i32,
+    pub(crate) open_hi: i32,
     /// The high end of the shared wall span.
-    hi: i32,
+    pub(crate) hi: i32,
 }
 
 impl Cut {
     /// The point at `along` distance along this cut's axis.
-    fn pt(&self, along: i32) -> Pt {
+    pub(crate) fn pt(&self, along: i32) -> Pt {
         match self.axis {
             Axis::Vertical => Pt {
                 x: self.fixed,
@@ -186,16 +199,29 @@ fn emit_flanking_walls(
     }
 }
 
-/// Emits the opening itself: one two-sided line, front on room A, back on
-/// room B.
+/// Emits a two-sided line along `cut`'s `fixed` coordinate, front bound to
+/// `sector_a`, back to `sector_b`. Returns the new linedef's index.
 ///
-/// `a_forward` (see `shared_span`) picks the `v1`-to-`v2` direction so room
-/// A's front sidedef lands on the geometric right regardless of which side
-/// of the wall room A sits on — the same rule `emit_flanking_walls` applies,
-/// so front/back here name the correct bordering sector even after later
-/// stages give the two rooms different floor or ceiling heights, or write
+/// For a plain portal this is the opening itself, front on room A, back on
+/// room B. `doors::emit_doors` also calls this twice per door portal — once
+/// with the door sector standing in for `sector_b` at the original wall
+/// coordinate, once with it standing in for `sector_a` at the recessed far
+/// coordinate — reusing the exact same orientation rule rather than
+/// duplicating it.
+///
+/// `a_forward` (see `shared_span`) picks the `v1`-to-`v2` direction so
+/// `sector_a`'s front sidedef lands on the geometric right regardless of
+/// which side of the wall it sits on — the same rule `emit_flanking_walls`
+/// applies, so front/back here name the correct bordering sector even after
+/// later stages give differing floor or ceiling heights, or write
 /// upper/lower textures onto these sidedefs (e.g. door tracks).
-fn emit_opening(data: &mut MapData, cut: &Cut, sector_a: usize, sector_b: usize, a_forward: bool) {
+pub(crate) fn emit_opening(
+    data: &mut MapData,
+    cut: &Cut,
+    sector_a: usize,
+    sector_b: usize,
+    a_forward: bool,
+) -> usize {
     let (p1, p2) = if a_forward {
         (cut.pt(cut.open_lo), cut.pt(cut.open_hi))
     } else {
@@ -228,6 +254,7 @@ fn emit_opening(data: &mut MapData, cut: &Cut, sector_a: usize, sector_b: usize,
         lower_unpegged: false,
         upper_unpegged: false,
     });
+    data.linedefs.len() - 1
 }
 
 /// Finds the axis, fixed coordinate, and overlapping span of two rooms' shared
@@ -245,7 +272,10 @@ fn emit_opening(data: &mut MapData, cut: &Cut, sector_a: usize, sector_b: usize,
 /// other, so `a_forward` is derived independently for each of the four
 /// `(axis, which edge of ia touched)` combinations below rather than shared
 /// across them.
-fn shared_span(ir: &Ir, ia: usize, ib: usize) -> Option<(Axis, i32, i32, i32, bool)> {
+///
+/// `pub(crate)` so `doors::emit_doors` can re-derive the same shared-wall
+/// geometry `cut_portals` already validated, without duplicating this logic.
+pub(crate) fn shared_span(ir: &Ir, ia: usize, ib: usize) -> Option<(Axis, i32, i32, i32, bool)> {
     let bbox = |i: usize| {
         let f = &ir.rooms[i].footprint;
         let xs: Vec<i32> = f.iter().map(|p| p.x).collect();

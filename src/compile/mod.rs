@@ -1,5 +1,6 @@
 //! Compiles the room-graph IR into UDMF map data.
 
+pub mod doors;
 pub mod portals;
 pub mod sectors;
 pub mod tags;
