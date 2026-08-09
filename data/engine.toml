@@ -350,3 +350,147 @@ source = "id-Software/DOOM linuxdoom-1.10/p_spec.c, P_PlayerInSpecialSector: 'ca
 block_monsters = 2
 sound_block = 64
 source = "id-Software/DOOM linuxdoom-1.10/doomdata.h: '#define ML_BLOCKMONSTERS 2 // Blocks monsters only.' and '#define ML_SOUNDBLOCK 64 // Sound rendering: dont let sound cross two of these.' Behavior confirmed in linuxdoom-1.10/p_map.c, PIT_CheckLine: 'if ( !tmthing->player && ld->flags & ML_BLOCKMONSTERS ) return false; // block monsters only' — gated on '!tmthing->player', so it never blocks the player, only non-player things — and linuxdoom-1.10/p_enemy.c, P_RecursiveSound (called from P_NoiseAlert): 'if (check->flags & ML_SOUNDBLOCK) { if (!soundblocks) P_RecursiveSound (other, 1); } else P_RecursiveSound (other, soundblocks);' — a line flagged ML_SOUNDBLOCK lets the sound-alert flood cross it exactly once (soundblocks 0->1) before stopping, rather than propagating indefinitely. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/doomdata.h, .../p_map.c, and .../p_enemy.c"
+
+# Weapon damage — the first COMPUTED values in this file, not read values.
+# Doom weapon damage is randomized per shot (a bullet is
+# `5 * (P_Random()%3 + 1)`; a shotgun fires several such pellets) — there is
+# no "damage per ammo unit" constant to read out of the engine, so
+# `arsenal.ammo.ratio` ("placed ammo damage / total baseline monster HP")
+# needs an expected value derived from the fire-function formulas instead.
+# Every entry below therefore carries a `derivation` field alongside its
+# `source`: `source` cites where the formula lives (as every other entry in
+# this file does); `derivation` shows the arithmetic that produced the
+# number, so a derived figure is never mistaken for a value that can be
+# checked by reading the engine alone. `P_Random()` is NOT a uniform
+# generator (see `[random]` below) — every expected value here uses that
+# table's real empirical distribution, not an assumed-uniform one.
+#
+# The chainsaw and fist (`wp_chainsaw`, `wp_fist`) draw from `am_noammo` —
+# zero ammo cost, per `d_items.c`'s `weaponinfo[]` — so they carry no
+# `[weapons.damage.*]` entry: a weapon with no ammo cost has no "damage per
+# unit of ammo consumed" for this table to report. Out of scope for
+# `arsenal.ammo.ratio` by construction, not an oversight.
+[random]
+mod3_mean = 1.0703125
+mod8_mean = 3.4765625
+source = "id-Software/DOOM linuxdoom-1.10/m_random.c: 'unsigned char rndtable[256] = { 0, 8, 109, 220, 222, 241, 149, 107, ... 120, 163, 236, 249 };' (256 entries; the first, last, and a few interior values are excerpted here — every entry was read at the pinned commit) and 'int P_Random (void) { prndindex = (prndindex+1)&0xff; return rndtable[prndindex]; }' — P_Random() advances a cyclic index into this fixed table and returns the byte stored there; it is a lookup, not a call into a uniform RNG. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/m_random.c"
+derivation = "prndindex cycles through all 256 slots in order and wraps (`&0xff`), so over any run long enough to complete a cycle, every slot is visited exactly once — the correct expected value of `P_Random() % N` is the mean of `rndtable[i] % N` for i in 0..256, weighting every TABLE SLOT equally, not every possible 0-255 BYTE VALUE equally (rndtable is not a permutation: only 166 distinct values occupy its 256 slots, so some values recur and 90 never appear at all). Read all 256 entries from the cited source and computed: histogram of rndtable[i] % 3 = {0: 75, 1: 88, 2: 93} (sums to 256) -> mod3_mean = (75*0 + 88*1 + 93*2) / 256 = 274/256 = 1.0703125. Histogram of rndtable[i] % 8 (equivalently `& 7`, since 8 is a power of two) = {0: 32, 1: 30, 2: 38, 3: 27, 4: 34, 5: 34, 6: 30, 7: 31} (sums to 256) -> mod8_mean = (0*32 + 1*30 + 2*38 + 3*27 + 4*34 + 5*34 + 6*30 + 7*31) / 256 = 890/256 = 3.4765625. For comparison, an ASSUMED-uniform Random(0..=255) would give mean(x%3) = 255/256 = 0.99609375 and mean(x%8) = 3.5 exactly (256 is a multiple of 8, so every residue occurs equally often across 0..=255). Checked, not assumed, per the task that added this table: the real table's mod3_mean is 3.72% HIGHER than that uniform assumption — a material difference, carried into every %3-based weapon figure below (pistol, shotgun, super_shotgun, chaingun) — while its mod8_mean is only 0.52% LOWER — negligible, carried into every %8/&7-based figure below (rocket_launcher, plasma_rifle, bfg9000)."
+
+[weapons.damage.pistol]
+ammo_type = "bullets"
+ammo_per_shot = 1
+expected_damage_per_shot = 10.3515625
+expected_damage_per_ammo = 10.3515625
+source = "id-Software/DOOM linuxdoom-1.10/d_items.c, weaponinfo[wp_pistol]: ammo = am_clip. p_pspr.c, A_FirePistol: 'player->ammo[weaponinfo[player->readyweapon].ammo]--;' (one bullet per shot) then 'P_BulletSlope (player->mo); P_GunShot (player->mo, !player->refire);'. P_GunShot: 'damage = 5*(P_Random ()%3+1); ... P_LineAttack (mo, angle, MISSILERANGE, bulletslope, damage);' — one hitscan bullet per shot; P_LineAttack applies exactly the `damage` it is passed on a hit, with no further randomization of its own. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/d_items.c and .../p_pspr.c"
+derivation = "P_GunShot's damage = 5*(P_Random()%3+1). Expected value over the real rndtable (see [random].mod3_mean = 1.0703125, not an assumed-uniform 0..255): E[damage] = 5*(1 + 1.0703125) = 5*2.0703125 = 10.3515625. One bullet fired, one `am_clip` unit consumed, so expected_damage_per_ammo = expected_damage_per_shot / 1 = 10.3515625."
+
+[weapons.damage.shotgun]
+ammo_type = "shells"
+ammo_per_shot = 1
+expected_damage_per_shot = 72.4609375
+expected_damage_per_ammo = 72.4609375
+source = "id-Software/DOOM linuxdoom-1.10/d_items.c, weaponinfo[wp_shotgun]: ammo = am_shell. p_pspr.c, A_FireShotgun: 'player->ammo[weaponinfo[player->readyweapon].ammo]--;' (one shell per shot) then 'for (i=0 ; i<7 ; i++) P_GunShot (player->mo, false);' — seven pellets, each an independent P_GunShot call using the same formula as the pistol. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/d_items.c and .../p_pspr.c"
+derivation = "Seven independent P_GunShot pellets, each E[damage] = 10.3515625 (see [weapons.damage.pistol]'s derivation for that figure, which reuses [random].mod3_mean). E[shot total] = 7 * 10.3515625 = 72.4609375. One shell consumed per shot, so expected_damage_per_ammo = 72.4609375 / 1 = 72.4609375."
+
+[weapons.damage.super_shotgun]
+ammo_type = "shells"
+ammo_per_shot = 2
+expected_damage_per_shot = 207.03125
+expected_damage_per_ammo = 103.515625
+source = "id-Software/DOOM linuxdoom-1.10/d_items.c, weaponinfo[wp_supershotgun]: ammo = am_shell. p_pspr.c, A_FireShotgun2: 'player->ammo[weaponinfo[player->readyweapon].ammo]-=2;' (two shells per shot) then 'for (i=0 ; i<20 ; i++) { damage = 5*(P_Random ()%3+1); angle = player->mo->angle; angle += (P_Random()-P_Random())<<19; P_LineAttack (player->mo, angle, MISSILERANGE, bulletslope + ((P_Random()-P_Random())<<5), damage); }' — twenty pellets, the same 5*(P_Random()%3+1) formula as P_GunShot, inlined rather than calling it. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/d_items.c and .../p_pspr.c"
+derivation = "Twenty independent pellets, each the same 5*(P_Random()%3+1) formula as the shotgun's P_GunShot: E[pellet] = 10.3515625 (see [random].mod3_mean and [weapons.damage.pistol]'s derivation). E[shot total] = 20 * 10.3515625 = 207.03125. Two shells consumed per shot, so expected_damage_per_ammo = 207.03125 / 2 = 103.515625 — nearly ten times the single shotgun's 72.4609375-per-shell figure for drawing on the same `shells` ammo pool, despite dealing under three times the per-shot damage. The two weapons are NOT interchangeable on a per-shell basis; a ratio computation that shares one ammo pool across both weapons must pick which weapon's figure applies to a given placed shell (or model a mix) — this table records both figures but does not decide that for it."
+
+[weapons.damage.chaingun]
+ammo_type = "bullets"
+ammo_per_shot = 1
+expected_damage_per_shot = 10.3515625
+expected_damage_per_ammo = 10.3515625
+source = "id-Software/DOOM linuxdoom-1.10/d_items.c, weaponinfo[wp_chaingun]: ammo = am_clip. p_pspr.c, A_FireCGun: 'if (!player->ammo[weaponinfo[player->readyweapon].ammo]) return; ... player->ammo[weaponinfo[player->readyweapon].ammo]--; ... P_BulletSlope (player->mo); P_GunShot (player->mo, !player->refire);' — one bullet per A_FireCGun invocation; the chaingun's rapid fire comes from its fire-state loop calling A_FireCGun repeatedly across game tics while the trigger is held, not from firing more than one bullet per invocation. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/d_items.c and .../p_pspr.c"
+derivation = "Identical formula and ammo cost to the pistol's single P_GunShot call (see [weapons.damage.pistol]): E[damage] = 10.3515625 for one bullet, one `am_clip` unit consumed. expected_damage_per_ammo = 10.3515625 — the chaingun deals no more damage per bullet than the pistol; its advantage is fire rate (bullets per second, driven by the fire-state loop, not by this per-shot formula), which this per-shot/per-ammo model does not represent."
+
+[weapons.damage.rocket_launcher]
+ammo_type = "rockets"
+ammo_per_shot = 1
+expected_damage_per_shot = 217.53125
+expected_damage_per_ammo = 217.53125
+source = "id-Software/DOOM linuxdoom-1.10/d_items.c, weaponinfo[wp_missile]: ammo = am_misl. p_pspr.c, A_FireMissile: 'player->ammo[weaponinfo[player->readyweapon].ammo]--; P_SpawnPlayerMissile (player->mo, MT_ROCKET);' (one rocket per shot). info.c mobjinfo[MT_ROCKET]: damage = 20, deathstate = S_EXPLODE1. p_map.c, PIT_CheckThing, missile-hits-thing branch: 'damage = ((P_Random()%8)+1)*tmthing->info->damage; P_DamageMobj (thing, tmthing, tmthing->target, damage);' — the direct-hit formula, applied when the rocket's own movement collides with the target; the collision also blocks the missile's move. p_mobj.c, P_XYMovement: a blocked non-player missile move calls P_ExplodeMissile, which sets the missile's deathstate. info.c states table: states[S_EXPLODE1] = {SPR_MISL,32769,8,{A_Explode},S_EXPLODE2,0,0}. p_enemy.c, A_Explode: 'P_RadiusAttack (thingy, thingy->target, 128);' — the rocket's splash, using a fixed radius/damage parameter of 128 (not mobjinfo's own damage field of 20). p_map.c, PIT_RadiusAttack: 'dist = (dist - thing->radius) >> FRACBITS; if (dist < 0) dist = 0; ... P_DamageMobj (thing, bombspot, bombsource, bombdamage - dist);' — splash damage decays linearly from 128 at zero distance to 0 at 128 map units, deterministically (no P_Random call in this formula). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/d_items.c, .../info.c, .../p_map.c, .../p_mobj.c, and .../p_enemy.c"
+derivation = "MODELING ASSUMPTION (stated explicitly, per the task that added this table): a rocket's damage is not a clean per-unit figure — splash decays linearly with distance from the impact point, and a target only takes the direct-hit component at all if the missile's own bounding box collides with it before it explodes. This entry models the case the weapon is aimed for — a rocket that directly strikes its target, which both blocks the missile's move (triggering the explosion at the target's own position, distance ~0) and applies the direct-hit formula — rather than an average over a spread of possible standoff distances, which this table does not attempt to model. In that case the target takes BOTH components: direct-hit damage = ((P_Random()%8)+1)*20, E = 20*(1 + [random].mod8_mean) = 20*(1+3.4765625) = 20*4.4765625 = 89.53125; plus point-blank splash at distance 0 = 128 - 0 = 128 exactly (deterministic — no randomness in this term). E[total] = 89.53125 + 128 = 217.53125. One rocket consumed, so expected_damage_per_ammo = 217.53125. A rocket that misses the target's bounding box but explodes nearby deals ONLY the splash component, reduced by standoff distance — potentially far less than this figure — which this table does not model; this entry is therefore an upper-bound/best-case figure for a connecting rocket, not an average over all possible rocket outcomes."
+
+[weapons.damage.plasma_rifle]
+ammo_type = "cells"
+ammo_per_shot = 1
+expected_damage_per_shot = 22.3828125
+expected_damage_per_ammo = 22.3828125
+source = "id-Software/DOOM linuxdoom-1.10/d_items.c, weaponinfo[wp_plasma]: ammo = am_cell. p_pspr.c, A_FirePlasma: 'player->ammo[weaponinfo[player->readyweapon].ammo]--; ... P_SpawnPlayerMissile (player->mo, MT_PLASMA);' (one cell per shot). info.c mobjinfo[MT_PLASMA]: damage = 5, deathstate = S_PLASEXP. info.c states table: states[S_PLASEXP] = {SPR_PLSE,32768,4,{NULL},S_PLASEXP2,0,0} — a NULL action, unlike the rocket's S_EXPLODE1: the plasma bolt's death state calls no A_Explode, so it has no splash. Damage comes solely from the direct-hit formula in p_map.c, PIT_CheckThing: 'damage = ((P_Random()%8)+1)*tmthing->info->damage;'. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/d_items.c, .../info.c, and .../p_map.c"
+derivation = "Direct-hit-only formula (no splash, unlike the rocket): E[damage] = 5*(1 + [random].mod8_mean) = 5*(1+3.4765625) = 5*4.4765625 = 22.3828125, using the real rndtable's mod8 distribution, not an assumed-uniform one. One cell consumed, so expected_damage_per_ammo = 22.3828125."
+
+[weapons.damage.bfg9000]
+ammo_type = "cells"
+ammo_per_shot = 40
+expected_damage_per_shot = 514.8046875
+expected_damage_per_ammo = 12.8701171875
+source = "id-Software/DOOM linuxdoom-1.10/p_pspr.c: '#define BFGCELLS 40' and A_FireBFG: 'player->ammo[weaponinfo[player->readyweapon].ammo] -= BFGCELLS; P_SpawnPlayerMissile (player->mo, MT_BFG);' (forty cells per shot; P_CheckAmmo confirms the same count: 'if (player->readyweapon == wp_bfg) count = BFGCELLS;'). d_items.c, weaponinfo[wp_bfg]: ammo = am_cell. info.c mobjinfo[MT_BFG]: damage = 100, deathstate = S_BFGLAND. p_map.c, PIT_CheckThing, missile-hits-thing branch: 'damage = ((P_Random()%8)+1)*tmthing->info->damage;' — the BFG ball's own direct-hit formula, same shape as the rocket's and plasma's. info.c states table, three frames into the BFG ball's death sequence: states[S_BFGLAND3] = {SPR_BFE1,32770,8,{A_BFGSpray},S_BFGLAND4,0,0}. p_pspr.c, A_BFGSpray: 'for (i=0 ; i<40 ; i++) { an = mo->angle - ANG90/2 + ANG90/40*i; P_AimLineAttack (mo->target, an, 16*64*FRACUNIT); if (!linetarget) continue; ... damage = 0; for (j=0;j<15;j++) damage += (P_Random()&7) + 1; P_DamageMobj (linetarget, mo->target, mo->target, damage); }' — the BFG's secondary 'tracer' spray, fired from the ball's impact point across a 90-degree fan of forty autoaimed rays, applying an independent sum-of-15-draws damage roll to every monster any ray happens to autoaim onto. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_pspr.c, .../d_items.c, .../info.c, and .../p_map.c"
+derivation = "MODELING ASSUMPTION, stated explicitly because the BFG's real damage is the least clean per-unit figure of any weapon in this table: A_BFGSpray can strike up to forty different monsters in one shot (one per ray that autoaims onto a target), or strike a single large/close monster more than once if several rays autoaim onto it — entirely dependent on encounter geometry this table has no way to model. This entry instead models the single-target case: the same target takes both the direct hit (if the ball's own bounding box collided with it) AND exactly one spray-tracer instance (as if exactly one of the forty rays lands on it) — the smallest, most conservative multi-monster case, and one that likely UNDERSTATES total room damage whenever more than one monster is in the blast's field of view. Direct hit: ((P_Random()%8)+1)*100, E = 100*(1 + [random].mod8_mean) = 100*4.4765625 = 447.65625. One spray tracer: sum of 15 draws of (P_Random()&7)+1 (`&7` equals `%8` for a non-negative byte, so this reuses [random].mod8_mean too), E = 15*4.4765625 = 67.1484375. E[total, single target] = 447.65625 + 67.1484375 = 514.8046875. Forty cells consumed per shot, so expected_damage_per_ammo = 514.8046875 / 40 = 12.8701171875 — the LOWEST per-ammo figure of any weapon in this table under this conservative single-target model, despite the BFG's reputation as the hardest-hitting weapon in the game; that reputation rests on its multi-target spray, which this per-shot/per-target model does not capture."
+
+# How much ammo each placed pickup grants, and which ammo pool it feeds —
+# `arsenal.ammo.ratio` needs both, to turn a placed pickup count into a
+# quantity `[weapons.damage.*]`'s `expected_damage_per_ammo` can multiply
+# against. Key names match vocabulary.toml's [things] ammo entries exactly.
+# Every value here is a literal read from the engine (`clipammo[]`/the
+# P_TouchSpecialThing switch), not a computed one — no `derivation` field,
+# matching every other `[pickups.*]`-style table in this file. All values
+# are undropped pickups (`MF_DROPPED` unset — a level author places these,
+# they are not items a killed monster drops) at the standard skill tier:
+# P_GiveAmmo doubles every figure here on sk_baby/sk_nightmare, which this
+# table does not model (the same `baseline: uv`-style convention this
+# project already uses elsewhere, e.g. `[species.*]`'s `spawnhealth`).
+[ammo.pickups.clip]
+amount = 10
+ammo_type = "bullets"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c: 'int clipammo[NUMAMMO] = {10, 4, 20, 1};' (indexed by ammotype_t: am_clip, am_shell, am_cell, am_misl — so clipammo[am_clip] = 10) and P_TouchSpecialThing: 'case SPR_CLIP: if (special->flags & MF_DROPPED) { if (!P_GiveAmmo (player,am_clip,0)) return; } else { if (!P_GiveAmmo (player,am_clip,1)) return; }'. P_GiveAmmo: 'if (num) num *= clipammo[ammo]; else num = clipammo[ammo]/2;' — an undropped clip pickup passes num=1, so it grants 1*clipammo[am_clip] = 10 bullets (a dropped clip, num=0, would give clipammo[am_clip]/2 = 5 — not modeled here, since this table only records placed, undropped pickups). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c"
+
+[ammo.pickups.box_of_bullets]
+amount = 50
+ammo_type = "bullets"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_AMMO: if (!P_GiveAmmo (player, am_clip,5)) return;' — 5*clipammo[am_clip] = 5*10 = 50 bullets. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c"
+
+[ammo.pickups.shells]
+amount = 4
+ammo_type = "shells"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c: 'int clipammo[NUMAMMO] = {10, 4, 20, 1};' (clipammo[am_shell] = 4) and P_TouchSpecialThing: 'case SPR_SHEL: if (!P_GiveAmmo (player, am_shell,1)) return;' — 1*clipammo[am_shell] = 4 shells. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c"
+
+[ammo.pickups.box_of_shells]
+amount = 20
+ammo_type = "shells"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_SBOX: if (!P_GiveAmmo (player, am_shell,5)) return;' — 5*clipammo[am_shell] = 5*4 = 20 shells. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c"
+
+[ammo.pickups.rocket]
+amount = 1
+ammo_type = "rockets"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c: 'int clipammo[NUMAMMO] = {10, 4, 20, 1};' (clipammo[am_misl] = 1) and P_TouchSpecialThing: 'case SPR_ROCK: if (!P_GiveAmmo (player, am_misl,1)) return;' — 1*clipammo[am_misl] = 1 rocket. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c"
+
+[ammo.pickups.box_of_rockets]
+amount = 5
+ammo_type = "rockets"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_BROK: if (!P_GiveAmmo (player, am_misl,5)) return;' — 5*clipammo[am_misl] = 5*1 = 5 rockets. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c"
+
+[ammo.pickups.cell_charge]
+amount = 20
+ammo_type = "cells"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c: 'int clipammo[NUMAMMO] = {10, 4, 20, 1};' (clipammo[am_cell] = 20) and P_TouchSpecialThing: 'case SPR_CELL: if (!P_GiveAmmo (player, am_cell,1)) return;' — 1*clipammo[am_cell] = 20 cells. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c"
+
+[ammo.pickups.cell_pack]
+amount = 100
+ammo_type = "cells"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_CELP: if (!P_GiveAmmo (player, am_cell,5)) return;' — 5*clipammo[am_cell] = 5*20 = 100 cells. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c"
+
+# The backpack (`SPR_BPAK`) is not shaped like the other ammo pickups above:
+# it grants one full clipammo load of ALL FOUR ammo types simultaneously,
+# rather than a single amount of a single type, so it gets its own table
+# shape instead of another `[ammo.pickups.<name>]` entry.
+[ammo.pickups.backpack]
+bullets = 10
+shells = 4
+cells = 20
+rockets = 1
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_BPAK: if (!player->backpack) { for (i=0 ; i<NUMAMMO ; i++) player->maxammo[i] *= 2; player->backpack = true; } for (i=0 ; i<NUMAMMO ; i++) P_GiveAmmo (player, i, 1);' — unlike every other ammo pickup, a backpack grants one full clipammo load of all four types at once (1*clipammo[am_clip]=10 bullets, 1*clipammo[am_shell]=4 shells, 1*clipammo[am_cell]=20 cells, 1*clipammo[am_misl]=1 rocket) and, on first pickup only, permanently doubles every maxammo ceiling — the ceiling doubling is a sustained-capacity effect, not a one-time damage grant, and is not represented in this table. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c"
