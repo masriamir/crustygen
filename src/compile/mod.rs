@@ -233,6 +233,19 @@ pub enum CompileError {
         /// The available wall length.
         available: i32,
     },
+    /// A walkover exit's alcove would place a vertex outside the 16-bit map
+    /// range every Doom map format uses.
+    #[error(
+        "exit in room `{room}`: the walkover alcove would place a vertex at ({x}, {y}), outside the map range"
+    )]
+    ExitAlcoveOutOfRange {
+        /// The host room.
+        room: String,
+        /// The out-of-range vertex's X coordinate.
+        x: i32,
+        /// The out-of-range vertex's Y coordinate.
+        y: i32,
+    },
     /// A thing lies outside the polygon of the room that declares it.
     #[error("thing `{kind}` at ({x}, {y}) is outside room `{room}`")]
     ThingOutsideRoom {

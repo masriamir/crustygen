@@ -58,6 +58,17 @@ use crate::geom::Pt;
 use crate::ir::{Exit, ExitTrigger, Ir};
 use crate::tables::Tables;
 
+/// The inclusive coordinate range every Doom map format stores in a signed
+/// 16-bit field.
+///
+/// A walkover exit's alcove is carved outward from its host room's wall with
+/// no containing room to bound it — unlike a door recess, whose far
+/// coordinate is forced strictly between the shared wall and room `b`'s own
+/// already-`i16`-validated far wall by `DoorTooDeep`, so it can never itself
+/// land out of range. The alcove has no such backstop, so it is checked
+/// directly here rather than assumed safe by analogy.
+const MAP_RANGE: std::ops::RangeInclusive<i32> = (i16::MIN as i32)..=(i16::MAX as i32);
+
 /// How far a walkover exit's alcove extends beyond the host room's wall, in
 /// map units.
 ///
@@ -181,8 +192,9 @@ fn emit_alcove_wall(data: &mut MapData, p1: Pt, p2: Pt, sector: usize, wall_tex:
 ///
 /// # Errors
 /// Returns [`CompileError::UnknownTheme`] when `ir.theme` resolves to no
-/// texture set, and whatever `resolve_exit` or
-/// `portals::split_wall_for_opening` raise.
+/// texture set, [`CompileError::ExitAlcoveOutOfRange`] when a walkover
+/// exit's alcove would land outside the 16-bit map range, and whatever
+/// `resolve_exit` or `portals::split_wall_for_opening` raise.
 ///
 /// # Panics
 /// Panics if `emit_opening` (used for a walkover exit's threshold) ever
@@ -230,7 +242,7 @@ pub fn emit_exits(
                 emit_switch_exit(data, &cut, &plan, special, tag, &switch_tex);
             }
             ExitTrigger::Walkover => {
-                emit_walkover_exit(ir, data, &cut, &plan, special, tag);
+                emit_walkover_exit(ir, data, &cut, &plan, &exit.room, special, tag)?;
             }
         }
     }
@@ -279,14 +291,21 @@ fn emit_switch_exit(
 /// the host wall, a passable threshold carrying the special, and the three
 /// alcove-only walls that close the recess. See the module documentation for
 /// the full derivation.
+///
+/// # Errors
+/// Returns [`CompileError::ExitAlcoveOutOfRange`] when the alcove's far wall
+/// would land outside the 16-bit map range — see [`MAP_RANGE`]'s doc comment
+/// for why this needs an explicit check rather than being implied by an
+/// already-validated bound.
 fn emit_walkover_exit(
     ir: &Ir,
     data: &mut MapData,
     cut: &Cut,
     plan: &ExitPlan,
+    exit_room: &str,
     special: u16,
     tag: u16,
-) {
+) -> Result<(), CompileError> {
     let room = &ir.rooms[plan.room_idx];
 
     // The recess's outward direction is exactly the "toward b" direction a
@@ -307,6 +326,15 @@ fn emit_walkover_exit(
         open_lo: plan.open_lo,
         open_hi: plan.open_hi,
     };
+
+    if !MAP_RANGE.contains(&far) {
+        let probe = far_cut.pt(plan.open_lo);
+        return Err(CompileError::ExitAlcoveOutOfRange {
+            room: exit_room.to_owned(),
+            x: probe.x,
+            y: probe.y,
+        });
+    }
 
     let alcove = data.sectors.len();
     data.sectors.push(SectorOut {
@@ -353,6 +381,8 @@ fn emit_walkover_exit(
         alcove,
         &room.wall_tex,
     );
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -590,6 +620,32 @@ mod tests {
     }
 
     #[test]
+    fn a_walkover_exit_alcove_landing_outside_the_map_range_is_rejected() {
+        // A room whose east wall sits at x = 32750: DOOR_DEPTH-style recesses
+        // are bounded by the containing room's own already-validated far
+        // wall, but a walkover exit's alcove has no containing room, so its
+        // far coordinate (32750 + EXIT_ALCOVE_DEPTH = 32782) can genuinely
+        // exceed i16::MAX (32767) with nothing else to catch it.
+        let json = r#"{ "seed":1, "grid":2, "theme":"tech_base",
+          "rooms":[
+            { "id":"edge", "footprint":[[32000,0],[32000,64],[32750,64],[32750,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+          ],
+          "exits":[{ "room":"edge", "trigger":"walkover", "width":32, "at":[32750,32] }],
+          "portals":[] }"#;
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        assert!(matches!(
+            emit_exits(&ir, &tables, &mut data, &mut tags),
+            Err(crate::compile::CompileError::ExitAlcoveOutOfRange { .. })
+        ));
+    }
+
+    #[test]
     fn an_exit_not_on_any_wall_is_rejected() {
         // (128, 128) is the L's own inner corner — inside the footprint's
         // bounding box, but not on any of its wall edges.
@@ -664,6 +720,79 @@ mod tests {
             data.vertices.contains(&Pt { x: 16, y: far_y })
                 && data.vertices.contains(&Pt { x: 48, y: far_y }),
             "the alcove extends north, outward from the room"
+        );
+    }
+
+    // The four tests above cover (Vertical, forward=false) [east, both
+    // triggers], (Horizontal, forward=false) [south, switch only so far],
+    // and (Horizontal, forward=true) [north, both triggers]. That leaves
+    // (Vertical, forward=true) — the L's *west* wall — untested for either
+    // trigger, and the south wall untested for walkover. Every `(axis,
+    // forward)` combination must be exercised for both trigger kinds: the
+    // axis-handling itself is well covered elsewhere (portals, doors), but
+    // this project has twice shipped Critical geometry defects from exactly
+    // this kind of orientation undercount, so the exit construction gets its
+    // own complete matrix rather than resting on that mitigation alone.
+
+    /// West wall (edge `(0,0)->(0,256)`, `Axis::Vertical`, `forward = true`)
+    /// — the missing fourth `(axis, forward)` combination for a switch exit.
+    #[test]
+    fn a_switch_exit_works_on_the_west_wall_where_forward_is_true() {
+        let json = L_ROOM.replace(
+            "\"portals\":[]",
+            r#""exits":[{ "room":"a", "trigger":"switch", "width":64, "at":[0,128] }],
+               "portals":[]"#,
+        );
+        let (ir, data) = compiled(&json);
+        assert_well_formed(&ir, &data);
+        let lines: Vec<_> = data.linedefs.iter().filter(|l| l.special != 0).collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].back.is_none(), "a switch exit stays one-sided");
+    }
+
+    /// Same west wall, walkover kind — the missing fourth `(axis, forward)`
+    /// combination for a walkover exit. `across_sign_toward_b` for
+    /// `(Vertical, forward=true)` is `-1`, so the alcove extends toward
+    /// *negative* x — the opposite sign from every other walkover test in
+    /// this file, none of which previously exercised a negative-direction
+    /// alcove at all.
+    #[test]
+    fn a_walkover_exit_works_on_the_west_wall_where_forward_is_true() {
+        let json = L_ROOM.replace(
+            "\"portals\":[]",
+            r#""exits":[{ "room":"a", "trigger":"walkover", "width":64, "at":[0,128] }],
+               "portals":[]"#,
+        );
+        let (ir, data) = compiled(&json);
+        assert_well_formed(&ir, &data);
+        assert_eq!(data.sectors.len(), 2);
+        let far_x = -EXIT_ALCOVE_DEPTH;
+        assert!(
+            data.vertices.contains(&Pt { x: far_x, y: 96 })
+                && data.vertices.contains(&Pt { x: far_x, y: 160 }),
+            "the alcove extends west (negative x), outward from the room"
+        );
+    }
+
+    /// South wall (edge `(256,0)->(0,0)`, `Axis::Horizontal`,
+    /// `forward = false`), walkover kind — the south wall was previously
+    /// exercised for switch only. `across_sign_toward_b` for `(Horizontal,
+    /// forward=false)` is `-1`, so the alcove extends toward negative y.
+    #[test]
+    fn a_walkover_exit_works_on_the_south_wall_where_forward_is_false() {
+        let json = L_ROOM.replace(
+            "\"portals\":[]",
+            r#""exits":[{ "room":"a", "trigger":"walkover", "width":64, "at":[128,0] }],
+               "portals":[]"#,
+        );
+        let (ir, data) = compiled(&json);
+        assert_well_formed(&ir, &data);
+        assert_eq!(data.sectors.len(), 2);
+        let far_y = -EXIT_ALCOVE_DEPTH;
+        assert!(
+            data.vertices.contains(&Pt { x: 96, y: far_y })
+                && data.vertices.contains(&Pt { x: 160, y: far_y }),
+            "the alcove extends south (negative y), outward from the room"
         );
     }
 }
