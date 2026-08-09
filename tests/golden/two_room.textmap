@@ -6,8 +6,8 @@ vertex { x = 256.0; y = 256.0; }
 vertex { x = 256.0; y = 0.0; }
 vertex { x = 512.0; y = 256.0; }
 vertex { x = 512.0; y = 0.0; }
-vertex { x = 256.0; y = 64.0; }
 vertex { x = 256.0; y = 192.0; }
+vertex { x = 256.0; y = 64.0; }
 
 linedef { v1 = 0; v2 = 1; sidefront = 0; blocking = true; }
 linedef { v1 = 1; v2 = 2; sidefront = 1; blocking = true; }
@@ -15,11 +15,11 @@ linedef { v1 = 3; v2 = 0; sidefront = 3; blocking = true; }
 linedef { v1 = 2; v2 = 4; sidefront = 5; blocking = true; }
 linedef { v1 = 4; v2 = 5; sidefront = 6; blocking = true; }
 linedef { v1 = 5; v2 = 3; sidefront = 7; blocking = true; }
-linedef { v1 = 6; v2 = 3; sidefront = 8; blocking = true; }
-linedef { v1 = 2; v2 = 7; sidefront = 9; blocking = true; }
-linedef { v1 = 3; v2 = 6; sidefront = 10; blocking = true; }
-linedef { v1 = 7; v2 = 2; sidefront = 11; blocking = true; }
-linedef { v1 = 7; v2 = 6; sidefront = 12; sideback = 13; twosided = true; }
+linedef { v1 = 2; v2 = 6; sidefront = 2; blocking = true; }
+linedef { v1 = 7; v2 = 3; sidefront = 8; blocking = true; }
+linedef { v1 = 3; v2 = 7; sidefront = 4; blocking = true; }
+linedef { v1 = 6; v2 = 2; sidefront = 9; blocking = true; }
+linedef { v1 = 6; v2 = 7; sidefront = 10; sideback = 11; twosided = true; }
 
 sidedef { sector = 0; texturemiddle = "STARTAN3"; }
 sidedef { sector = 0; texturemiddle = "STARTAN3"; }
@@ -30,8 +30,6 @@ sidedef { sector = 1; texturemiddle = "STARTAN3"; }
 sidedef { sector = 1; texturemiddle = "STARTAN3"; }
 sidedef { sector = 1; texturemiddle = "STARTAN3"; }
 sidedef { sector = 0; texturemiddle = "STARTAN3"; }
-sidedef { sector = 0; texturemiddle = "STARTAN3"; }
-sidedef { sector = 1; texturemiddle = "STARTAN3"; }
 sidedef { sector = 1; texturemiddle = "STARTAN3"; }
 sidedef { sector = 0; }
 sidedef { sector = 1; }

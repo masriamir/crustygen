@@ -12,14 +12,14 @@ use crate::compile::things::ThingOut;
 /// `scalex` and `scaley` are never written (P9).
 ///
 /// [`MapData::sidedefs`] may contain entries no longer referenced by any
-/// linedef's `front`/`back` — `compile::portals::drop_wall_segment` removes a
-/// solid wall segment's linedef when a portal opens through it but leaves
-/// that linedef's sidedef record in place, since renumbering every surviving
-/// `front`/`back` index to close the gap is exactly the kind of change that
-/// is easy to get subtly wrong. Those entries are written out here like any
-/// other: they are inert to the engine (nothing points at them) and their
-/// presence keeps every `LinedefOut::front`/`back` index a direct,
-/// unrenumbered index into this output's `sidedef` list.
+/// linedef's `front`/`back` — an opening that consumes a room's wall end to
+/// end leaves that wall's sidedef record with no surviving piece to inherit
+/// it, and the record stays, since renumbering every surviving `front`/`back`
+/// index to close the gap is exactly the kind of change that is easy to get
+/// subtly wrong. Those entries are written out here like any other: they are
+/// inert to the engine (nothing points at them) and their presence keeps
+/// every `LinedefOut::front`/`back` index a direct, unrenumbered index into
+/// this output's `sidedef` list.
 #[must_use]
 pub fn emit_textmap(data: &MapData, things: &[ThingOut]) -> String {
     let mut s = String::from("namespace = \"doom\";\n\n");

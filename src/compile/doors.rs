@@ -15,10 +15,11 @@
 //! door portal's flanking walls in place but no opening line — the opening
 //! is exactly what this pass constructs.
 
-use crate::compile::portals::{Axis, Cut, emit_opening, room_bbox, shared_span};
+use crate::compile::portals::{Axis, Cut, emit_opening, resolve_portal};
 use crate::compile::sectors::vertex_index;
 use crate::compile::tags::TagAllocator;
 use crate::compile::{CompileError, LinedefOut, MapData, SectorOut, SidedefOut};
+use crate::geom::{Pt, edges};
 use crate::ir::{Ir, PortalKind};
 use crate::tables::Tables;
 
@@ -46,12 +47,12 @@ struct DoorPlan {
     a: String,
     /// The recessed room's id, for error messages.
     b: String,
+    /// The key that opens it, for a [`PortalKind::Locked`] portal.
+    lock: Option<String>,
     ia: usize,
     ib: usize,
     axis: Axis,
     fixed: i32,
-    lo: i32,
-    hi: i32,
     open_lo: i32,
     open_hi: i32,
     a_forward: bool,
@@ -82,6 +83,49 @@ fn rects_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
     a.0 < b.1 && b.0 < a.1 && a.2 < b.3 && b.2 < a.3
 }
 
+/// How much room `b` has behind the shared wall, measured *across the
+/// opening* rather than over its whole bounding box.
+///
+/// Only footprint edges parallel to the wall bound a recess's depth, and only
+/// those whose along-axis extent overlaps the opening: a room can be deep
+/// everywhere except right where the door goes. The minimum over those edges
+/// is the depth the recess actually has to work with. Measuring the bounding
+/// box instead reported a non-rectangular room's *widest* depth no matter
+/// where the door sat, so an L-shaped room `b` with a shallow arm passed the
+/// `DoorTooDeep` guard and the recess punched straight through its far wall.
+///
+/// Diagonal edges are not considered, matching `portals::wall_edges`: a 45
+/// degree wall cannot host a portal in v1, so a recess never runs up against
+/// one. A room with no parallel edge beyond the wall measures zero and is
+/// rejected.
+fn depth_behind_wall(poly: &[Pt], axis: Axis, fixed: i32, sign: i32, lo: i32, hi: i32) -> i32 {
+    let mut depth: Option<i32> = None;
+    for (p, q) in edges(poly) {
+        let (along_p, across_p) = match axis {
+            Axis::Vertical => (p.y, p.x),
+            Axis::Horizontal => (p.x, p.y),
+        };
+        let (along_q, across_q) = match axis {
+            Axis::Vertical => (q.y, q.x),
+            Axis::Horizontal => (q.x, q.y),
+        };
+        if across_p != across_q {
+            continue;
+        }
+        // Positive only for edges strictly beyond the wall on room `b`'s
+        // side — which also excludes the shared wall itself.
+        let candidate = (across_p - fixed) * sign;
+        if candidate <= 0 {
+            continue;
+        }
+        let (edge_lo, edge_hi) = (along_p.min(along_q), along_p.max(along_q));
+        if edge_lo < hi && lo < edge_hi {
+            depth = Some(depth.map_or(candidate, |best: i32| best.min(candidate)));
+        }
+    }
+    depth.unwrap_or(0)
+}
+
 /// Gathers and validates every door portal's geometry before anything is
 /// emitted, so a degenerate carve is rejected cleanly instead of leaving
 /// partially-emitted geometry behind.
@@ -90,14 +134,10 @@ fn rects_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
 /// Returns [`CompileError::NotAdjacent`] if a door portal's rooms are not
 /// adjacent, which indicates `cut_portals` did not validate it first;
 /// [`CompileError::DoorTooDeep`] if room `b` is not at least `DOOR_DEPTH`
-/// deeper than the wall it shares with room `a`, which would let the recess
-/// punch through (or invert past) room `b`'s far wall; and
+/// deep behind the opening, which would let the recess punch through (or
+/// invert past) room `b`'s far wall; and
 /// [`CompileError::OverlappingDoorRecesses`] if two door portals recess into
 /// the same room and their carved rectangles overlap.
-///
-/// # Panics
-/// Panics if a portal names a room id absent from `ir.rooms` — unreachable
-/// in practice, since [`Ir::from_json`] already rejects that.
 fn plan_doors(ir: &Ir) -> Result<Vec<DoorPlan>, CompileError> {
     let mut plans = Vec::new();
     for portal in &ir.portals {
@@ -105,52 +145,29 @@ fn plan_doors(ir: &Ir) -> Result<Vec<DoorPlan>, CompileError> {
             continue;
         }
 
-        let ia = ir
-            .rooms
-            .iter()
-            .position(|r| r.id == portal.a)
-            .expect("validated in Ir::from_json");
-        let ib = ir
-            .rooms
-            .iter()
-            .position(|r| r.id == portal.b)
-            .expect("validated in Ir::from_json");
-
-        let (axis, fixed, lo, hi, a_forward) =
-            shared_span(ir, ia, ib).ok_or_else(|| CompileError::NotAdjacent {
-                a: portal.a.clone(),
-                b: portal.b.clone(),
-            })?;
-
-        let on_axis = match axis {
-            Axis::Vertical => portal.at.y,
-            Axis::Horizontal => portal.at.x,
-        };
-        let half = portal.width / 2;
-        let (open_lo, open_hi) = (on_axis - half, on_axis + half);
+        // The same resolution `cut_portals` performed, so the recess lands
+        // at exactly the span the flanking walls were split for.
+        let geometry = resolve_portal(ir, portal)?;
+        let span = geometry.span;
+        let (open_lo, open_hi) = (geometry.open_lo, geometry.open_hi);
 
         // Recess into room `b`: `far` moves away from room `a`'s side by
-        // `DOOR_DEPTH`. This is the sign-flipped mirror of the rule
-        // `shared_span` uses to pick `a_forward` for travel *along* the
-        // wall — here the travel is *across* it, so vertical and horizontal
-        // walls invert relative to `a_forward` in the opposite pattern. See
-        // the task-8 report for the full derivation and worked examples.
-        let axis_sign = match axis {
-            Axis::Vertical => 1,
-            Axis::Horizontal => -1,
-        };
-        let far = fixed + if a_forward { -axis_sign } else { axis_sign } * DOOR_DEPTH;
+        // `DOOR_DEPTH`.
+        let sign = span.across_sign_toward_b();
+        let far = span.fixed + sign * DOOR_DEPTH;
 
-        // Guard: room `b` must have strictly more than `DOOR_DEPTH` of its
-        // own extent along this axis, or the recess reaches (`==`) or
-        // overshoots (`>`) room `b`'s own far wall — either punching
-        // through it or leaving room `b` with zero real depth beyond the
-        // door.
-        let (bx0, bx1, by0, by1) = room_bbox(ir, ib);
-        let available = match axis {
-            Axis::Vertical => bx1 - bx0,
-            Axis::Horizontal => by1 - by0,
-        };
+        // Guard: room `b` must have strictly more than `DOOR_DEPTH` of depth
+        // behind the opening, or the recess reaches (`==`) or overshoots
+        // (`>`) room `b`'s own far wall — either punching through it or
+        // leaving room `b` with zero real depth beyond the door.
+        let available = depth_behind_wall(
+            &ir.rooms[geometry.ib].footprint,
+            span.axis,
+            span.fixed,
+            sign,
+            open_lo,
+            open_hi,
+        );
         if DOOR_DEPTH >= available {
             return Err(CompileError::DoorTooDeep {
                 a: portal.a.clone(),
@@ -163,15 +180,14 @@ fn plan_doors(ir: &Ir) -> Result<Vec<DoorPlan>, CompileError> {
         plans.push(DoorPlan {
             a: portal.a.clone(),
             b: portal.b.clone(),
-            ia,
-            ib,
-            axis,
-            fixed,
-            lo,
-            hi,
+            lock: portal.lock.clone(),
+            ia: geometry.ia,
+            ib: geometry.ib,
+            axis: span.axis,
+            fixed: span.fixed,
             open_lo,
             open_hi,
-            a_forward,
+            a_forward: span.a_forward,
             far,
         });
     }
@@ -193,15 +209,45 @@ fn plan_doors(ir: &Ir) -> Result<Vec<DoorPlan>, CompileError> {
     Ok(plans)
 }
 
-/// Emits a dedicated, initially closed sector for every door portal.
+/// Resolves the linedef special that opens one door.
 ///
-/// See the module documentation for the construction. Every line touching
-/// the new sector is lower-unpegged so its texture does not slide as the
-/// sector's ceiling later animates open (P11), and the sector carries a
-/// unique nonzero tag from `tags`.
+/// A [`PortalKind::Door`] gets the manual door special; a
+/// [`PortalKind::Locked`] gets the keyed one for the key it names. Both come
+/// from `vocabulary.toml`, never from a literal here — a wrong special
+/// produces a map that loads and does the wrong thing, which no test of ours
+/// can catch.
 ///
 /// # Errors
-/// See `plan_doors`, which this calls before emitting anything.
+/// Returns [`CompileError::UnknownLock`] when the named key has no keyed door
+/// special in the vocabulary table.
+fn door_special(tables: &Tables, plan: &DoorPlan) -> Result<u16, CompileError> {
+    match &plan.lock {
+        // `Ir::from_json` guarantees a locked portal names a key, so a
+        // `None` here is a plain door.
+        None => Ok(tables.door_special()),
+        Some(lock) => tables
+            .locked_door_special(lock)
+            .ok_or_else(|| CompileError::UnknownLock {
+                a: plan.a.clone(),
+                b: plan.b.clone(),
+                lock: lock.clone(),
+            }),
+    }
+}
+
+/// Emits a dedicated, initially closed sector for every door portal.
+///
+/// See the module documentation for the construction. Both face lines carry
+/// the door special (so the door can actually be opened, from either room)
+/// and the door sector's tag; every line touching the new sector is
+/// lower-unpegged so its texture does not slide as the sector's ceiling
+/// animates open (P11).
+///
+/// # Errors
+/// Returns [`CompileError::UnknownTheme`] when `ir.theme` resolves to no
+/// texture set, [`CompileError::UnknownLock`] when a locked portal names a
+/// key the vocabulary has no special for, and whatever `plan_doors` raises —
+/// which runs before anything is emitted.
 ///
 /// # Panics
 /// Panics if `emit_opening` ever returns a one-sided line — unreachable, as
@@ -212,18 +258,26 @@ pub fn emit_doors(
     data: &mut MapData,
     tags: &mut TagAllocator,
 ) -> Result<(), CompileError> {
+    // An unresolvable theme is an authoring error, not something to paper
+    // over with a hardcoded texture: silently substituting one meant a
+    // misspelled theme produced a map that looked deliberate. An unknown
+    // *thing* has always been a hard error; this makes the two consistent.
+    let unknown_theme = || CompileError::UnknownTheme {
+        theme: ir.theme.clone(),
+    };
     let door_tex = tables
         .texture("door", &ir.theme)
-        .unwrap_or("BIGDOOR2")
+        .ok_or_else(unknown_theme)?
         .to_owned();
     let track_tex = tables
         .texture("door_track", &ir.theme)
-        .unwrap_or("DOORTRAK")
+        .ok_or_else(unknown_theme)?
         .to_owned();
 
     let plans = plan_doors(ir)?;
 
     for plan in &plans {
+        let special = door_special(tables, plan)?;
         let floor = ir.rooms[plan.ia].floor.min(ir.rooms[plan.ib].floor);
         let sector = data.sectors.len();
         let tag = tags.allocate(sector, &format!("door {} <-> {}", plan.a, plan.b));
@@ -241,30 +295,32 @@ pub fn emit_doors(
         let near_cut = Cut {
             axis: plan.axis,
             fixed: plan.fixed,
-            lo: plan.lo,
             open_lo: plan.open_lo,
             open_hi: plan.open_hi,
-            hi: plan.hi,
         };
         let far_cut = Cut {
             axis: plan.axis,
             fixed: plan.far,
-            lo: plan.lo,
             open_lo: plan.open_lo,
             open_hi: plan.open_hi,
-            hi: plan.hi,
         };
 
         // The two face lines, perpendicular to the direction of travel
-        // through the doorway: room `a` <-> door, then door <-> room `b`.
-        // Both use the same `a_forward` — the door sector sits on the same
-        // side of each face that room `a` sits on relative to the near
-        // face, so the orientation rule `emit_opening` already applies
-        // carries over unchanged to the far face.
+        // through the doorway: room `a` <-> door, then room `b` <-> door.
+        // Both are oriented with the *room* on the front and the door sector
+        // on the back, which is how a door is built: `EV_VerticalDoor` acts
+        // on the sector across the line from the player, and vanilla's
+        // `P_UseLines` only triggers a special from a line's front side, so
+        // a face whose front named the door sector would be usable only from
+        // inside the door itself. The far face therefore takes the reversed
+        // direction (`!a_forward`), which puts room `b` on the geometric
+        // right exactly as `a_forward` puts room `a` there on the near face.
         let near_line = emit_opening(data, &near_cut, plan.ia, sector, plan.a_forward);
-        let far_line = emit_opening(data, &far_cut, sector, plan.ib, plan.a_forward);
+        let far_line = emit_opening(data, &far_cut, plan.ib, sector, !plan.a_forward);
         for line in [near_line, far_line] {
             data.linedefs[line].lower_unpegged = true;
+            data.linedefs[line].special = special;
+            data.linedefs[line].tag = tag;
             let front = data.linedefs[line].front;
             let back = data.linedefs[line]
                 .back
@@ -308,9 +364,15 @@ pub fn emit_doors(
 ///
 /// `forward` picks the `v1`-to-`v2` direction — `near_cut`'s point to
 /// `far_cut`'s, or the reverse — so that front lands on room `b`'s side
-/// regardless of which of the four `shared_span` sub-cases applies. Front is
-/// always room `b` at both jambs; only this direction varies. See the
-/// task-8 report for the derivation.
+/// regardless of which shared-wall orientation applies. Front is always room
+/// `b` at both jambs; only this direction varies. See the task-8 report for
+/// the derivation.
+///
+/// A jamb is the door's *track*: it blocks movement, as the equivalent
+/// two-sided track lines do in hand-built maps. Leaving it passable let the
+/// player step sideways into the recess and stand inside the door once it
+/// opened. It stays two-sided so the track texture renders from both sides
+/// and the door sector keeps a closed boundary.
 #[expect(
     clippy::too_many_arguments,
     reason = "each parameter names an independent piece of the jamb's geometry; \
@@ -353,7 +415,7 @@ fn emit_jamb(
         v2,
         front,
         back: Some(back),
-        blocking: false,
+        blocking: true,
         special: 0,
         tag: 0,
         lower_unpegged: true,
@@ -725,6 +787,204 @@ mod tests {
                 Err(crate::compile::CompileError::DoorTooDeep { .. })
             ),
             "a room shallower than DOOR_DEPTH must be rejected, not silently punched through"
+        );
+    }
+
+    /// Room `b` is L-shaped: 136 units deep over y 0..32, but only 8 units
+    /// deep over y 32..64, where the second door below is placed. Its
+    /// bounding box is 136 wide either way, so a bounding-box depth
+    /// measurement reports the deep arm no matter where the door goes.
+    fn l_shaped_b_ir(door_at: i32) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":8, "theme":"tech_base",
+              "rooms":[
+                {{ "id":"a", "footprint":[[0,0],[0,64],[64,64],[64,0]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }},
+                {{ "id":"b",
+                   "footprint":[[64,0],[64,64],[72,64],[72,32],[200,32],[200,0]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
+              ],
+              "portals":[{{ "a":"a", "b":"b", "kind":"door", "width":16, "at":[64,{door_at}] }}] }}"#
+        )
+    }
+
+    #[test]
+    fn a_door_into_a_shallow_arm_of_an_l_shaped_room_is_rejected() {
+        // The door sits at y = 48, in the 8-unit-deep arm — shallower than
+        // DOOR_DEPTH (16), so the recess would punch through room b's far
+        // wall at x = 72. The bounding box says 136 units are available,
+        // which is why measuring it passed this straight through.
+        let ir = Ir::from_json(&l_shaped_b_ir(48)).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        assert!(
+            matches!(
+                emit_doors(&ir, &tables, &mut data, &mut tags),
+                Err(crate::compile::CompileError::DoorTooDeep { available: 8, .. })
+            ),
+            "the depth behind the opening (8) must be measured, not the bounding box (136)"
+        );
+    }
+
+    #[test]
+    fn a_door_into_the_deep_arm_of_the_same_l_shaped_room_is_accepted() {
+        // Same room, door moved to y = 16 where room b really is 136 deep.
+        // Pairing this with the test above is what pins the measurement to
+        // the opening's position rather than to the room as a whole.
+        let (_, data, door) = compiled(&l_shaped_b_ir(16));
+        assert_eq!(data.sectors.len(), 3, "the door sector was carved");
+        assert!(
+            data.vertices.contains(&Pt { x: 80, y: 8 }),
+            "the far face lands 16 units into the deep arm"
+        );
+        assert_ne!(data.sectors[door].tag, 0, "the door sector is tagged");
+    }
+
+    #[test]
+    fn a_door_between_offset_rooms_carves_a_closed_sector() {
+        // Rooms sharing only part of their wall (y 128..256 of x = 256).
+        // Every previous door fixture was two flush equal squares.
+        let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+            { "id":"b", "footprint":[[256,128],[256,384],[512,384],[512,128]],
+               "floor":0, "ceiling":128, "light":160,
+               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"door", "width":64, "at":[256,192] }] }"#;
+        assert_door_construction(
+            ir_json,
+            [
+                Pt { x: 256, y: 160 },
+                Pt { x: 256, y: 224 },
+                Pt { x: 272, y: 160 },
+                Pt { x: 272, y: 224 },
+            ],
+        );
+    }
+
+    #[test]
+    fn both_door_faces_carry_the_door_special_and_the_door_sector_tag() {
+        // Without a special the door is a permanently sealed slab that
+        // disconnects the two rooms in-engine, which compiled clean.
+        let (_, data, door) = compiled(DOOR_IR);
+        let tables = Tables::load().expect("tables");
+        let expected = tables.door_special();
+        assert_ne!(expected, 0, "the vocabulary lists a real door special");
+
+        let faces: Vec<_> = data
+            .linedefs
+            .iter()
+            .filter(|l| l.special != 0)
+            .collect::<Vec<_>>();
+        assert_eq!(faces.len(), 2, "both faces of the door carry the special");
+        for face in faces {
+            assert_eq!(face.special, expected);
+            assert_eq!(
+                face.tag, data.sectors[door].tag,
+                "the action names the door sector's own tag, never tag 0"
+            );
+            assert!(
+                data.sidedefs[face.front].sector != door,
+                "a face's front names the room, not the door — vanilla only \
+                 triggers a special from a line's front side"
+            );
+            assert_eq!(
+                data.sidedefs[face.back.expect("two-sided")].sector,
+                door,
+                "the door sector is the back sector EV_VerticalDoor acts on"
+            );
+        }
+    }
+
+    #[test]
+    fn a_locked_door_carries_the_special_for_the_key_that_opens_it() {
+        // `Locked` compiled identically to `Door` before this: the key was
+        // recorded in the IR and then dropped on the floor.
+        let tables = Tables::load().expect("tables");
+        for key in ["blue_card", "yellow_skull"] {
+            let locked = DOOR_IR.replace(
+                "\"kind\":\"door\"",
+                &format!("\"kind\":\"locked\", \"lock\":\"{key}\""),
+            );
+            let (_, data, _) = compiled(&locked);
+            let expected = tables
+                .locked_door_special(key)
+                .expect("the vocabulary lists this key");
+            assert_ne!(
+                expected,
+                tables.door_special(),
+                "a locked door is not the same special as a plain one"
+            );
+            let specials: Vec<u16> = data
+                .linedefs
+                .iter()
+                .map(|l| l.special)
+                .filter(|s| *s != 0)
+                .collect();
+            assert_eq!(
+                specials,
+                vec![expected; 2],
+                "both faces carry `{key}`'s keyed door special"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lock_the_vocabulary_does_not_know_is_rejected() {
+        let locked = DOOR_IR.replace(
+            "\"kind\":\"door\"",
+            "\"kind\":\"locked\", \"lock\":\"plaid_card\"",
+        );
+        let ir = Ir::from_json(&locked).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        assert!(matches!(
+            emit_doors(&ir, &tables, &mut data, &mut tags),
+            Err(crate::compile::CompileError::UnknownLock { .. })
+        ));
+    }
+
+    #[test]
+    fn an_unknown_theme_is_rejected_rather_than_silently_substituted() {
+        // An unknown *thing* has always been a hard error; an unknown theme
+        // quietly fell back to hardcoded textures, so a misspelled theme
+        // produced a map that looked deliberate.
+        let themed = DOOR_IR.replace("\"theme\":\"tech_base\"", "\"theme\":\"tech_bass\"");
+        let ir = Ir::from_json(&themed).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        assert!(matches!(
+            emit_doors(&ir, &tables, &mut data, &mut tags),
+            Err(crate::compile::CompileError::UnknownTheme { .. })
+        ));
+    }
+
+    #[test]
+    fn door_jambs_block_movement_so_the_player_cannot_stand_in_the_track() {
+        let (_, data, door) = compiled(DOOR_IR);
+        // The jambs are the door sector's two-sided lines that carry no
+        // special — the faces carry it.
+        let jambs: Vec<_> = data
+            .linedefs
+            .iter()
+            .filter(|l| l.special == 0 && l.back.is_some_and(|b| data.sidedefs[b].sector == door))
+            .collect();
+        assert_eq!(jambs.len(), 2, "a door recess has two jambs");
+        assert!(
+            jambs.iter().all(|l| l.blocking),
+            "a door track blocks movement, like the equivalent two-sided \
+             track lines in hand-built maps"
         );
     }
 

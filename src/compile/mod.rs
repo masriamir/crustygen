@@ -74,11 +74,12 @@ pub struct MapData {
     /// Sidedefs.
     ///
     /// May contain entries no longer referenced by any linedef's
-    /// `front`/`back`: `portals::drop_wall_segment` removes a solid wall
-    /// segment's linedef when a portal opens through it, but leaves that
-    /// linedef's now-orphaned sidedef record in place rather than
-    /// renumbering every surviving index. See [`textmap::emit_textmap`]'s
-    /// doc comment for the full rationale.
+    /// `front`/`back`. `portals::split_wall_for_opening` hands the split
+    /// wall's own sidedef to the first surviving piece, so the usual split
+    /// orphans nothing; but an opening that consumes a wall end to end
+    /// leaves no piece to inherit it, and the record stays rather than every
+    /// surviving index being renumbered. See [`textmap::emit_textmap`]'s doc
+    /// comment for the full rationale.
     pub sidedefs: Vec<SidedefOut>,
     /// Linedefs.
     pub linedefs: Vec<LinedefOut>,
@@ -153,6 +154,25 @@ pub enum CompileError {
         /// Midpoint X.
         x: i32,
         /// Midpoint Y.
+        y: i32,
+    },
+    /// Two portals' openings overlap on the same wall line, so cutting the
+    /// second would find no intact wall left where the first already opened.
+    #[error("portals `{first}` and `{second}` have overlapping openings in the same wall")]
+    OverlappingPortals {
+        /// The first portal, as `a <-> b`.
+        first: String,
+        /// The second portal, as `a <-> b`.
+        second: String,
+    },
+    /// No single solid wall of a room spans a portal's opening.
+    #[error("portal opening at ({x}, {y}) does not lie within one solid wall of room `{room}`")]
+    OpeningNotInAWall {
+        /// The room whose wall was searched.
+        room: String,
+        /// Midpoint X of the opening.
+        x: i32,
+        /// Midpoint Y of the opening.
         y: i32,
     },
     /// A linedef carries a special but no tag.
@@ -241,6 +261,29 @@ pub enum CompileError {
         room: String,
         /// The unresolvable name.
         kind: String,
+    },
+    /// The IR's theme resolves to no texture set in the vocabulary table.
+    #[error("unknown theme `{theme}`")]
+    UnknownTheme {
+        /// The unresolvable theme name.
+        theme: String,
+    },
+    /// A locked portal names a key the vocabulary has no door special for.
+    #[error("portal `{a}` <-> `{b}` is locked by `{lock}`, which opens no known door type")]
+    UnknownLock {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The unresolvable key name.
+        lock: String,
+    },
+    /// A room's sector has no emitted linedef bordering it, so nothing can
+    /// be measured against it.
+    #[error("room `{room}` has no emitted geometry to measure clearance against")]
+    UnboundedRoom {
+        /// The room.
+        room: String,
     },
     /// Two player starts occupy the same spot.
     #[error("two player starts overlap at ({x}, {y}); they would telefrag on spawn")]

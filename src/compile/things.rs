@@ -32,7 +32,12 @@ pub struct ThingOut {
 /// Gathering from `data` rather than `room.footprint` picks that recess up
 /// automatically — and would pick up any other reshaping a later pass
 /// performs, without this function needing to know what changed.
-fn emitted_clearance(data: &MapData, room_idx: usize, p: Pt) -> f64 {
+///
+/// Returns `None` when the sector has no bordering linedef at all. An
+/// unbounded room cannot be measured, and folding to `f64::INFINITY` instead
+/// would have silently *passed* every clearance check — the failure mode
+/// where a broken room looks safest.
+fn emitted_clearance(data: &MapData, room_idx: usize, p: Pt) -> Option<f64> {
     data.linedefs
         .iter()
         .filter(|line| {
@@ -42,7 +47,7 @@ fn emitted_clearance(data: &MapData, room_idx: usize, p: Pt) -> f64 {
                     .is_some_and(|back| data.sidedefs[back].sector == room_idx)
         })
         .map(|line| dist_to_segment(p, data.vertices[line.v1], data.vertices[line.v2]))
-        .fold(f64::INFINITY, f64::min)
+        .reduce(f64::min)
 }
 
 /// Places every thing, proving it fits where it stands.
@@ -62,8 +67,10 @@ fn emitted_clearance(data: &MapData, room_idx: usize, p: Pt) -> f64 {
 /// Returns [`CompileError::UnknownThing`] for an unresolvable name,
 /// [`CompileError::ThingOutsideRoom`] for a point outside its room,
 /// [`CompileError::ThingTooClose`] when radius clearance fails,
-/// [`CompileError::NoHeadroom`] when the room is too short, and
-/// [`CompileError::OverlappingStarts`] for coincident player starts.
+/// [`CompileError::NoHeadroom`] when the room is too short,
+/// [`CompileError::UnboundedRoom`] when a room's sector has no emitted
+/// linedef to measure against, and [`CompileError::OverlappingStarts`] for
+/// coincident player starts.
 pub fn place_things(
     ir: &Ir,
     tables: &Tables,
@@ -98,7 +105,11 @@ pub fn place_things(
                 });
             }
 
-            let have = emitted_clearance(data, room_idx, thing.at);
+            let have = emitted_clearance(data, room_idx, thing.at).ok_or_else(|| {
+                CompileError::UnboundedRoom {
+                    room: room.id.clone(),
+                }
+            })?;
             if have < f64::from(dims.radius) {
                 return Err(CompileError::ThingTooClose {
                     room: room.id.clone(),
@@ -264,6 +275,22 @@ mod tests {
         assert!(matches!(
             place_things(&ir, &tables, &data),
             Err(CompileError::OverlappingStarts { .. })
+        ));
+    }
+
+    #[test]
+    fn a_room_with_no_emitted_geometry_is_rejected_rather_than_passing() {
+        // Folding an empty set of bounding linedefs to `f64::INFINITY` made
+        // an unbounded room pass *every* clearance check — the failure mode
+        // where the most broken input looks safest. It was unreachable while
+        // the only wall-removing pass required an exact full-span match; the
+        // splitting pass makes wall removal routine, so the fallback had to
+        // become an error.
+        let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
+        let tables = Tables::load().expect("tables");
+        assert!(matches!(
+            place_things(&ir, &tables, &MapData::default()),
+            Err(CompileError::UnboundedRoom { .. })
         ));
     }
 
