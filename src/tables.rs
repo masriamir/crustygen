@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(t.thing_id("player1_start"), Some(1));
         assert!(t.species("imp").is_some(), "imp is a known species");
         assert!(
-            t.species("archvile").is_none(),
+            t.species("plaid_imp").is_none(),
             "unlisted species is absent"
         );
         assert!(
