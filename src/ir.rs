@@ -64,11 +64,19 @@ pub struct Room {
 }
 
 /// A connection between two rooms.
+///
+/// `a` and `b` are not interchangeable for [`PortalKind::Door`] and
+/// [`PortalKind::Locked`]: the compiler always carves the door sector's
+/// recess out of room `b`'s side of the shared wall, leaving room `a`'s
+/// boundary untouched. Swapping `a` and `b` on such a portal physically
+/// relocates the door to the opposite room, not just its label.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Portal {
     /// Identifier of the first room.
     pub a: String,
-    /// Identifier of the second room.
+    /// Identifier of the second room. For a door portal, this is the room
+    /// the compiler recesses to make room for the door sector — see the
+    /// struct-level note.
     pub b: String,
     /// The kind of connection.
     pub kind: PortalKind,

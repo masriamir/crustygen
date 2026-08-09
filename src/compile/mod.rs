@@ -154,4 +154,33 @@ pub enum CompileError {
         /// The special it carries.
         special: u16,
     },
+    /// A door portal's recess would be at least as deep as room `b`, which
+    /// would punch through or invert its far wall instead of stopping short
+    /// of it.
+    #[error(
+        "door `{a}` <-> `{b}` needs {needed} units of depth in room `{b}` but only {available} are available"
+    )]
+    DoorTooDeep {
+        /// The first room.
+        a: String,
+        /// The second room, whose wall is recessed.
+        b: String,
+        /// The depth the recess needs.
+        needed: i32,
+        /// The depth actually available in room `b` along that axis.
+        available: i32,
+    },
+    /// Two door portals recess into the same room and their carved
+    /// rectangles overlap, which would produce self-intersecting geometry.
+    #[error(
+        "door portals `{first_a}` <-> `{room}` and `{second_a}` <-> `{room}` both recess into room `{room}` and their carved areas overlap"
+    )]
+    OverlappingDoorRecesses {
+        /// The shared room both portals recess into.
+        room: String,
+        /// The far side of the first portal.
+        first_a: String,
+        /// The far side of the second portal.
+        second_a: String,
+    },
 }

@@ -257,6 +257,24 @@ pub(crate) fn emit_opening(
     data.linedefs.len() - 1
 }
 
+/// The axis-aligned bounding box of a room's footprint: `(min_x, max_x,
+/// min_y, max_y)`.
+///
+/// `pub(crate)` so `doors::emit_doors` can measure how much across-axis
+/// depth a room actually has available for a door recess, without
+/// duplicating this scan.
+pub(crate) fn room_bbox(ir: &Ir, idx: usize) -> (i32, i32, i32, i32) {
+    let f = &ir.rooms[idx].footprint;
+    let xs: Vec<i32> = f.iter().map(|p| p.x).collect();
+    let ys: Vec<i32> = f.iter().map(|p| p.y).collect();
+    (
+        *xs.iter().min().expect("non-empty"),
+        *xs.iter().max().expect("non-empty"),
+        *ys.iter().min().expect("non-empty"),
+        *ys.iter().max().expect("non-empty"),
+    )
+}
+
 /// Finds the axis, fixed coordinate, and overlapping span of two rooms' shared
 /// wall, if they have one.
 ///
@@ -276,19 +294,8 @@ pub(crate) fn emit_opening(
 /// `pub(crate)` so `doors::emit_doors` can re-derive the same shared-wall
 /// geometry `cut_portals` already validated, without duplicating this logic.
 pub(crate) fn shared_span(ir: &Ir, ia: usize, ib: usize) -> Option<(Axis, i32, i32, i32, bool)> {
-    let bbox = |i: usize| {
-        let f = &ir.rooms[i].footprint;
-        let xs: Vec<i32> = f.iter().map(|p| p.x).collect();
-        let ys: Vec<i32> = f.iter().map(|p| p.y).collect();
-        (
-            *xs.iter().min().expect("non-empty"),
-            *xs.iter().max().expect("non-empty"),
-            *ys.iter().min().expect("non-empty"),
-            *ys.iter().max().expect("non-empty"),
-        )
-    };
-    let (ax0, ax1, ay0, ay1) = bbox(ia);
-    let (bx0, bx1, by0, by1) = bbox(ib);
+    let (ax0, ax1, ay0, ay1) = room_bbox(ir, ia);
+    let (bx0, bx1, by0, by1) = room_bbox(ir, ib);
 
     // `ia`'s east edge (max X) touches `ib`: `ia` is west of the wall, so its
     // interior is on the low-X side, opposite the increasing-Y walk direction.
