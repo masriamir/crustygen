@@ -24,6 +24,107 @@ source = "id-Software/DOOM linuxdoom-1.10/p_mobj.c, P_SpawnMapThing: 'if (mthing
 keys_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo, read at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0. Each entry's first field is its doomednum and its second its spawnstate, and states[] at the same commit gives each spawnstate's sprite: MT_MISC4 = { 5, S_BKEY } with S_BKEY = {SPR_BKEY,...} (blue card); MT_MISC6 = { 6, S_YKEY } / SPR_YKEY (yellow card); MT_MISC5 = { 13, S_RKEY } / SPR_RKEY (red card); MT_MISC9 = { 40, S_BSKULL } / SPR_BSKU (blue skull); MT_MISC7 = { 39, S_YSKULL } / SPR_YSKU (yellow skull); MT_MISC8 = { 38, S_RSKULL } / SPR_RSKU (red skull). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
 teleport_dest_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_TELEPORTMAN]: doomednum = 14 (with spawnstate S_NULL, so it renders nothing — it is a pure position/angle marker). p_telept.c, EV_Teleport confirms the role: it walks every sector whose tag equals the teleport line's tag, finds the one MT_TELEPORTMAN mobj in that sector ('if (m->type != MT_TELEPORTMAN) continue;'), and moves the teleporting thing to that mobj's (x, y) and angle ('thing->angle = m->angle;'). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_telept.c"
 
+# Monster species beyond the original four. Radius/height/hitscan for each
+# live alongside their citation in engine.toml's [species.*] table, under
+# the identical key name; this table carries only the doomednum.
+#
+# `spider_mastermind` is named for the task's request ("spider mastermind"),
+# not the map-spec template's `combat.boss` enum literal ("mastermind") —
+# no alias is added here; bridging that short form to this key is left to
+# the compiler layer that reads `combat.boss`, since guessing which of the
+# two the future code will want is exactly the kind of unsourced choice
+# this table exists to avoid.
+spectre = 58
+chaingunner = 65
+cacodemon = 3005
+lost_soul = 3006
+pain_elemental = 71
+hell_knight = 69
+baron_of_hell = 3003
+revenant = 66
+mancubus = 67
+arachnotron = 68
+archvile = 64
+cyberdemon = 16
+spider_mastermind = 7
+wolfenstein_ss = 84
+monsters_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo doomednums, read at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0: mobjinfo[MT_SHADOWS] = 58 (spectre), mobjinfo[MT_CHAINGUY] = 65 (chaingunner), mobjinfo[MT_HEAD] = 3005 (cacodemon), mobjinfo[MT_SKULL] = 3006 (lost_soul), mobjinfo[MT_PAIN] = 71 (pain_elemental), mobjinfo[MT_KNIGHT] = 69 (hell_knight), mobjinfo[MT_BRUISER] = 3003 (baron_of_hell), mobjinfo[MT_UNDEAD] = 66 (revenant), mobjinfo[MT_FATSO] = 67 (mancubus), mobjinfo[MT_BABY] = 68 (arachnotron), mobjinfo[MT_VILE] = 64 (archvile), mobjinfo[MT_CYBORG] = 16 (cyberdemon), mobjinfo[MT_SPIDER] = 7 (spider_mastermind), mobjinfo[MT_WOLFSS] = 84 (wolfenstein_ss). Dims and hitscan behavior are cross-checked against p_enemy.c's A_* attack functions per data/engine.toml [species.*] citation. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+# Weapons. Key names match `arsenal.weapons[].name` in the map-spec
+# template (docs/superpowers/specs/2026-08-09-crustygen-map-spec-design.md
+# §5) exactly, so a spec author's weapon name resolves with no translation.
+chainsaw = 2005
+shotgun = 2001
+super_shotgun = 82
+chaingun = 2002
+rocket_launcher = 2003
+plasma_rifle = 2004
+bfg9000 = 2006
+weapons_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo doomednums: MT_MISC26 = 2005 (S_CSAW), MT_SHOTGUN = 2001 (S_SHOT), MT_SUPERSHOTGUN = 82 (S_SHOT2), MT_CHAINGUN = 2002 (S_MGUN), MT_MISC27 = 2003 (S_LAUN), MT_MISC28 = 2004 (S_PLAS), MT_MISC25 = 2006 (S_BFUG), at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0. Cross-checked against p_inter.c, P_TouchSpecialThing's pickup switch on `special->sprite`: SPR_CSAW -> P_GiveWeapon(wp_chainsaw), SPR_SHOT -> wp_shotgun, SPR_SGN2 -> wp_supershotgun, SPR_MGUN -> wp_chaingun, SPR_LAUN -> wp_missile, SPR_PLAS -> wp_plasma, SPR_BFUG -> wp_bfg. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_inter.c"
+
+# Ammo. No spec field enumerates individual ammo pickup type names (only
+# `arsenal.ammo.backpack` does, and `backpack` below matches it exactly);
+# the rest are free-chosen, natural snake_case names.
+clip = 2007
+box_of_bullets = 2048
+shells = 2008
+box_of_shells = 2049
+rocket = 2010
+box_of_rockets = 2046
+cell_charge = 2047
+cell_pack = 17
+backpack = 8
+ammo_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo doomednums: MT_CLIP = 2007 (S_CLIP), MT_MISC17 = 2048 (S_AMMO), MT_MISC22 = 2008 (S_SHEL), MT_MISC23 = 2049 (S_SBOX), MT_MISC18 = 2010 (S_ROCK), MT_MISC19 = 2046 (S_BROK), MT_MISC20 = 2047 (S_CELL), MT_MISC21 = 17 (S_CELP), MT_MISC24 = 8 (S_BPAK), at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0. Cross-checked against p_inter.c, P_TouchSpecialThing: SPR_CLIP -> P_GiveAmmo(am_clip,1)/GOTCLIP, SPR_AMMO -> am_clip,5/GOTCLIPBOX, SPR_SHEL -> am_shell,1/GOTSHELLS, SPR_SBOX -> am_shell,5/GOTSHELLBOX, SPR_ROCK -> am_misl,1/GOTROCKET, SPR_BROK -> am_misl,5/GOTROCKBOX, SPR_CELL -> am_cell,1/GOTCELL, SPR_CELP -> am_cell,5/GOTCELLBOX, SPR_BPAK -> doubles maxammo and refills/GOTBACKPACK. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_inter.c"
+
+# Health and armor. Key names match `sustain.health.{stimpack,medikit,
+# health_bonus}` in the map-spec template exactly. `sustain.armor` names
+# its two armor tiers `green`/`blue` rather than `green_armor`/`blue_armor`
+# — a naming seam left for the compiler layer to bridge, the same call made
+# for `spider_mastermind` above, rather than guessing which bare name the
+# future code will actually use in a table that also holds unrelated
+# entries (a plain `green`/`blue` key risks colliding with some future
+# non-armor `green`/`blue` thing in this same flat table).
+stimpack = 2011
+medikit = 2012
+health_bonus = 2014
+armor_bonus = 2015
+green_armor = 2018
+blue_armor = 2019
+health_armor_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo doomednums: MT_MISC10 = 2011 (S_STIM), MT_MISC11 = 2012 (S_MEDI), MT_MISC2 = 2014 (S_BON1), MT_MISC3 = 2015 (S_BON2), MT_MISC0 = 2018 (S_ARM1), MT_MISC1 = 2019 (S_ARM2), at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0. Which bonus is health versus armor is NOT decidable from mobjinfo/sprite name alone (S_BON1/S_BON2 do not say); resolved instead from p_inter.c, P_TouchSpecialThing's pickup switch on `special->sprite`: 'case SPR_BON1: player->health++; ... GOTHTHBONUS' (2014 = health bonus) and 'case SPR_BON2: player->armorpoints++; ... GOTARMBONUS' (2015 = armor bonus); likewise 'case SPR_ARM1: P_GiveArmor(player,1); ... GOTARMOR' (2018 = green/basic armor) and 'case SPR_ARM2: P_GiveArmor(player,2); ... GOTMEGA' (2019 = blue/mega armor). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_inter.c"
+
+# Powerups. Key names match `sustain.powerups[].name` in the map-spec
+# template exactly, including its short forms (`radsuit`, `light_amp`) —
+# not `radiation_suit`/`light_amplification_visor`.
+berserk = 2023
+soulsphere = 2013
+megasphere = 83
+invulnerability = 2022
+invisibility = 2024
+radsuit = 2025
+light_amp = 2045
+computer_map = 2026
+powerups_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo doomednums: MT_MISC13 = 2023 (S_PSTR), MT_MISC12 = 2013 (S_SOUL), MT_MEGA = 83 (S_MEGA), MT_INV = 2022 (S_PINV), MT_INS = 2024 (S_PINS), MT_MISC14 = 2025 (S_SUIT), MT_MISC16 = 2045 (S_PVIS), MT_MISC15 = 2026 (S_PMAP), at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0. Cross-checked against p_inter.c, P_TouchSpecialThing: SPR_PSTR -> P_GivePower(pw_strength)/GOTBERSERK, SPR_SOUL -> health+=100/GOTSUPER, SPR_MEGA -> health=200 + P_GiveArmor(player,2)/GOTMSPHERE (gated 'if (gamemode != commercial) return;' — Doom II only in vanilla), SPR_PINV -> pw_invulnerability/GOTINVUL, SPR_PINS -> pw_invisibility/GOTINVIS, SPR_SUIT -> pw_ironfeet/GOTSUIT, SPR_PVIS -> pw_infrared/GOTVISOR, SPR_PMAP -> pw_allmap/GOTMAP. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_inter.c"
+
+# Hazards and scenery. `barrel`, `techno_lamp`, `floor_lamp`, and
+# `candelabra` block movement (MF_SOLID) and carry a matching
+# `[props.*]` entry in engine.toml (radius/height/blocks) for rules P3,
+# P21, and P22. `candle` and `gibs` are the "couple of common
+# non-blocking props" scenery.decorations needs — both flags = 0
+# (non-blocking) in mobjinfo, so neither carries a `[props.*]` entry;
+# they are the only non-blocking, non-hanging, non-`gore`-bucketed
+# decorations mobjinfo defines (every other undamaged decoration prop is
+# MF_SOLID, and every other non-blocking mobjinfo entry is a corpse/gib
+# item the template's own comment assigns to `scenery.gore`, not
+# `scenery.decorations` — see the design doc §5 "gore: ... corpses,
+# blood, impaled bodies").
+barrel = 2035
+floor_lamp = 2028
+techno_lamp = 85
+candelabra = 35
+candle = 34
+gibs = 24
+scenery_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo doomednums, at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0: MT_BARREL = 2035 (S_BAR1, flags MF_SOLID|MF_SHOOTABLE|MF_NOBLOOD), MT_MISC31 = 2028 (S_COLU, 'Floor lamp', MF_SOLID), MT_MISC29 = 85 (S_TECHLAMP, 'Tall techno lamp', MF_SOLID), MT_MISC50 = 35 (S_CANDELABRA, MF_SOLID), MT_MISC49 = 34 (S_CANDLESTIK, flags = 0, non-blocking), MT_MISC71 = 24 (S_GIBS, flags = 0, non-blocking). Dims and the blocking flag for the four MF_SOLID entries are recorded in data/engine.toml's [props.*] table. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
 # Linedef specials the compiler writes onto a door portal's two face lines.
 #
 # `door` is the manual, repeatable open-wait-close door; the `locked` table
@@ -98,4 +199,6 @@ floor = "FLOOR4_8"
 ceiling = "CEIL3_5"
 door = "BIGDOOR2"
 door_track = "DOORTRAK"
+switch = "SW1STARG"
 source = "Verified against tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad (fetched via `just fetch-fixtures` in the crustywad checkout; not modified). FLOOR4_8 (4096 bytes) and CEIL3_5 (4096 bytes) and DOORTRAK (1104 bytes) confirmed present as raw flat/patch lumps in both WADs via `./target/debug/cwad list <wad>`. STARTAN3, BIGDOOR2, and DOORTRAK confirmed as composite wall textures (present in the TEXTURE1 lump, 963 entries in each WAD) via crustywad::Wad::texture_set().find(name) returning Some for all three, checked with a throwaway binary against the crustywad path dependency — matches placeholder, unchanged"
+switch_source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, alphSwitchList[]: {\"SW1STARG\", \"SW2STARG\", 1} — the trailing 1 is the episode number, and this table's episode-1 block (the tech-base episode) is where SW1STARG/SW2STARG live, pairing thematically with the STARTAN wall family already used for tech_base. P_ChangeSwitchTexture toggles a placed switch texture to `switchlist[i^1]`, its paired member in this same table, on activation — so the vocabulary only needs the initially-placed (SW1) name; the engine derives the pressed (SW2) counterpart itself via SWITCHES. SW1STARG confirmed present as a composite texture name in both tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad's TEXTURE1 lump via crustywad::Wad::texture_set(), same throwaway-binary method as the row above. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_switch.c"

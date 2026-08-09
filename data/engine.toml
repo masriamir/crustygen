@@ -50,6 +50,122 @@ height = 56
 hitscan = false
 source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_SERGEANT] (demon/pinky): radius = 30*FRACUNIT, height = 56*FRACUNIT, doomednum = 3002; missilestate = 0 (no ranged attack state at all — melee only, via A_SargAttack). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c — matches placeholder, unchanged"
 
+[species.spectre]
+radius = 30
+height = 56
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_SHADOWS] (spectre): radius = 30*FRACUNIT, height = 56*FRACUNIT, doomednum = 58 — identical dimensions to mobjinfo[MT_SERGEANT] (pinky), differing only in the MF_SHADOW flag (partial invisibility); it reuses pinky's meleestate S_SARG_ATK1 (action A_SargAttack) and has missilestate = 0. A_SargAttack in p_enemy.c calls P_DamageMobj directly only when P_CheckMeleeRange succeeds — melee-only, not a hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.chaingunner]
+radius = 20
+height = 56
+hitscan = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_CHAINGUY]: radius = 20*FRACUNIT, height = 56*FRACUNIT, doomednum = 65; missilestate S_CPOS_ATK1, whose successor states (S_CPOS_ATK2/ATK3) carry action A_CPosAttack, which calls P_LineAttack in linuxdoom-1.10/p_enemy.c — hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.cacodemon]
+radius = 31
+height = 56
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_HEAD]: radius = 31*FRACUNIT, height = 56*FRACUNIT, doomednum = 3005; missilestate S_HEAD_ATK1 -> action A_HeadAttack in p_enemy.c: P_DamageMobj directly when P_CheckMeleeRange succeeds, otherwise P_SpawnMissile(actor, actor->target, MT_HEADSHOT) — a projectile, not a hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.lost_soul]
+radius = 16
+height = 56
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_SKULL]: radius = 16*FRACUNIT, height = 56*FRACUNIT, doomednum = 3006; missilestate S_SKULL_ATK1 -> action A_SkullAttack in p_enemy.c, which sets MF_SKULLFLY and gives the lost soul itself velocity toward its target (a charge) rather than calling P_LineAttack or P_SpawnMissile — damage comes from the resulting body-to-body collision, not from a hitscan or a spawned projectile. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.pain_elemental]
+radius = 31
+height = 56
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_PAIN]: radius = 31*FRACUNIT, height = 56*FRACUNIT, doomednum = 71; missilestate S_PAIN_ATK1 -> action A_PainAttack -> A_PainShootSkull in p_enemy.c, which spawns a new MT_SKULL (lost soul) and launches it at the target via A_SkullAttack — the pain elemental's attack spawns a child monster; it never calls P_LineAttack or spawns a damaging missile of its own, so it is not a hitscan attack. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.hell_knight]
+radius = 24
+height = 64
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_KNIGHT]: radius = 24*FRACUNIT, height = 64*FRACUNIT, doomednum = 69; meleestate and missilestate are both S_BOS2_ATK1 -> action A_BruisAttack in p_enemy.c: P_DamageMobj directly when P_CheckMeleeRange succeeds, otherwise P_SpawnMissile(actor, actor->target, MT_BRUISERSHOT) — not a hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.baron_of_hell]
+radius = 24
+height = 64
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_BRUISER]: radius = 24*FRACUNIT, height = 64*FRACUNIT, doomednum = 3003; meleestate and missilestate are both S_BOSS_ATK1 -> action A_BruisAttack — the same function the hell knight (MT_KNIGHT) uses: P_DamageMobj directly at melee range, otherwise P_SpawnMissile(actor, actor->target, MT_BRUISERSHOT) — not a hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.revenant]
+radius = 20
+height = 56
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_UNDEAD]: radius = 20*FRACUNIT, height = 56*FRACUNIT, doomednum = 66; meleestate S_SKEL_FIST1 -> action A_SkelFist (P_DamageMobj at melee range); missilestate S_SKEL_MISS1 -> action A_SkelMissile, which calls P_SpawnMissile(actor, actor->target, MT_TRACER) — a homing projectile (A_Tracer steers it in flight), not a hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.mancubus]
+radius = 48
+height = 64
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_FATSO]: radius = 48*FRACUNIT, height = 64*FRACUNIT, doomednum = 67; missilestate S_FATT_ATK1, whose successor states carry actions A_FatAttack1/A_FatAttack2/A_FatAttack3 in p_enemy.c, each of which calls P_SpawnMissile(actor, actor->target, MT_FATSHOT) one or more times per activation — not a hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.arachnotron]
+radius = 64
+height = 64
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_BABY]: radius = 64*FRACUNIT, height = 64*FRACUNIT, doomednum = 68; missilestate S_BSPI_ATK1 -> action A_BspiAttack in p_enemy.c, which calls P_SpawnMissile(actor, actor->target, MT_ARACHPLAZ) — not a hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.archvile]
+radius = 20
+height = 56
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_VILE]: radius = 20*FRACUNIT, height = 56*FRACUNIT, doomednum = 64; missilestate S_VILE_ATK1, whose successor states eventually carry action A_VileAttack in p_enemy.c: on line of sight (P_CheckSight) it calls P_DamageMobj(actor->target, actor, actor, 20) directly — unconditional on range — then repositions its `fire` companion object and calls P_RadiusAttack(fire, actor, 70) for splash damage. Neither call is P_LineAttack: the archvile's attack is a direct on-sight damage call plus a radius (splash) attack, not a hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.cyberdemon]
+radius = 40
+height = 110
+hitscan = false
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_CYBORG]: radius = 40*FRACUNIT, height = 110*FRACUNIT, doomednum = 16; missilestate S_CYBER_ATK1 -> action A_CyberAttack in p_enemy.c, which calls P_SpawnMissile(actor, actor->target, MT_ROCKET) — not a hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.spider_mastermind]
+radius = 128
+height = 100
+hitscan = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_SPIDER]: radius = 128*FRACUNIT, height = 100*FRACUNIT, doomednum = 7, attacksound = sfx_shotgn; missilestate S_SPID_ATK1, whose successor states carry action A_SPosAttack — the same hitscan pellet-spread function the shotgun guy (MT_SHOTGUY) uses — which calls P_LineAttack in p_enemy.c: hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+[species.wolfenstein_ss]
+radius = 20
+height = 56
+hitscan = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_WOLFSS]: radius = 20*FRACUNIT, height = 56*FRACUNIT, doomednum = 84; missilestate S_SSWV_ATK1, whose successor states carry action A_CPosAttack — the same hitscan function the chaingunner (MT_CHAINGUY) uses — which calls P_LineAttack in p_enemy.c: hitscan. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_enemy.c"
+
+# Non-monster props that block movement or hang from a ceiling — data
+# rules P3 (passage width), P21 (light sources match lighting), and P22
+# (hanging decoration headroom) will need. Radius, height, and the
+# blocking flag are read from `mobjinfo` the same way `[species.*]` is;
+# doomednums for these same props live in vocabulary.toml's `[things]`
+# table under the identical key names. Only props that actually block
+# (MF_SOLID) or hang (MF_SPAWNCEILING) belong here — `candle` and `gibs`
+# in vocabulary.toml are neither, so they carry no entry in this table.
+[props.barrel]
+radius = 10
+height = 42
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_BARREL]: radius = 10*FRACUNIT, height = 42*FRACUNIT, doomednum = 2035, flags = MF_SOLID|MF_SHOOTABLE|MF_NOBLOOD — MF_SOLID means the barrel blocks movement until destroyed. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.techno_lamp]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC29] ('Tall techno lamp'): doomednum = 85, spawnstate S_TECHLAMP, radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.floor_lamp]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC31] ('Floor lamp'): doomednum = 2028, spawnstate S_COLU, radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.candelabra]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC50] ('Candelabra'): doomednum = 35, spawnstate S_CANDELABRA, radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks) — contrast with mobjinfo[MT_MISC49] ('Candlestick'/candle, doomednum 34), flags = 0, non-blocking. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
 # The sector special that marks a sector "secret" (rule P18). This is a
 # sector type, not a linedef special — a distinct numeric space from
 # `vocabulary.toml`'s [specials] table.
