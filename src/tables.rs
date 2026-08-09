@@ -13,6 +13,33 @@ pub struct ThingDims {
     pub height: i32,
 }
 
+/// The radius, height, and blocking behavior of a non-monster prop —
+/// a barrel, light source, or decoration that can obstruct passage or
+/// hang from a ceiling. Rules P3 (passage width), P21 (light sources
+/// match lighting), and P22 (hanging decoration headroom) need this.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct PropDims {
+    /// Collision radius in map units.
+    pub radius: i32,
+    /// Collision height in map units.
+    pub height: i32,
+    /// Whether the prop blocks movement (`MF_SOLID` in the pinned Doom
+    /// source).
+    pub blocks: bool,
+}
+
+/// A monster species' collision dimensions and attack behavior, as loaded
+/// from `engine.toml`'s `[species.*]` table.
+///
+/// Kept distinct from [`ThingDims`] (used for `[player]`, which has no
+/// attack behavior of its own) rather than adding an optional field there.
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct SpeciesEntry {
+    radius: i32,
+    height: i32,
+    hitscan: bool,
+}
+
 #[derive(Debug, Deserialize)]
 struct Movement {
     max_step_height: i32,
@@ -36,6 +63,7 @@ struct TextureSet {
     ceiling: String,
     door: String,
     door_track: String,
+    switch: String,
 }
 
 /// Sector specials keyed by tier name, as used for
@@ -61,7 +89,8 @@ struct Engine {
     door: Door,
     light: LightRange,
     player: ThingDims,
-    species: HashMap<String, ThingDims>,
+    species: HashMap<String, SpeciesEntry>,
+    props: HashMap<String, PropDims>,
     sector: SectorSpecials,
 }
 
@@ -181,7 +210,31 @@ impl Tables {
     /// The collision dimensions of a named monster species, if listed.
     #[must_use]
     pub fn species(&self, name: &str) -> Option<ThingDims> {
-        self.engine.species.get(name).copied()
+        self.engine.species.get(name).map(|s| ThingDims {
+            radius: s.radius,
+            height: s.height,
+        })
+    }
+
+    /// Whether a named monster species' attack is a hitscan
+    /// (`P_LineAttack`) rather than a spawned projectile, a melee-only
+    /// attack, or something else entirely (see the per-species citation
+    /// in `engine.toml` for the archvile and pain elemental, neither of
+    /// which fits the hitscan/missile dichotomy cleanly), if the species
+    /// is listed.
+    #[must_use]
+    pub fn hitscan(&self, name: &str) -> Option<bool> {
+        self.engine.species.get(name).map(|s| s.hitscan)
+    }
+
+    /// The radius, height, and blocking behavior of a named non-monster
+    /// prop (barrel, light source, or decoration), if the vocabulary
+    /// records dimensions for it. Only props that block movement or hang
+    /// from a ceiling carry an entry — see `engine.toml`'s `[props.*]`
+    /// table.
+    #[must_use]
+    pub fn prop(&self, name: &str) -> Option<PropDims> {
+        self.engine.props.get(name).copied()
     }
 
     /// The concrete thing ID for a high-level name, if listed.
@@ -279,7 +332,7 @@ impl Tables {
     }
 
     /// The texture for a role (`wall`, `floor`, `ceiling`, `door`,
-    /// `door_track`) under a theme, if both resolve.
+    /// `door_track`, `switch`) under a theme, if both resolve.
     #[must_use]
     pub fn texture(&self, role: &str, theme: &str) -> Option<&str> {
         let set = self.vocabulary.textures.get(theme)?;
@@ -289,6 +342,7 @@ impl Tables {
             "ceiling" => Some(&set.ceiling),
             "door" => Some(&set.door),
             "door_track" => Some(&set.door_track),
+            "switch" => Some(&set.switch),
             _ => None,
         }
     }
@@ -416,6 +470,171 @@ mod tests {
             t.damage_special("radioactive"),
             None,
             "an unknown damage tier must fail loudly, not silently fall back"
+        );
+    }
+
+    /// Every monster species the vocabulary now carries — the original
+    /// four plus every Doom/Doom II monster added for the map-spec
+    /// template's `combat.monsters[].species` and `combat.boss` fields —
+    /// must resolve a doomednum, collision dims, and a hitscan flag.
+    /// Checked individually, not sampled: a name missing from either
+    /// table is exactly the defect this test exists to catch.
+    #[test]
+    fn every_monster_species_resolves() {
+        let t = Tables::load().expect("tables load");
+        // (name, doomednum, radius, height, hitscan)
+        let monsters: &[(&str, u16, i32, i32, bool)] = &[
+            ("zombieman", 3004, 20, 56, true),
+            ("shotgun_guy", 9, 20, 56, true),
+            ("imp", 3001, 20, 56, false),
+            ("pinky", 3002, 30, 56, false),
+            ("spectre", 58, 30, 56, false),
+            ("chaingunner", 65, 20, 56, true),
+            ("cacodemon", 3005, 31, 56, false),
+            ("lost_soul", 3006, 16, 56, false),
+            ("pain_elemental", 71, 31, 56, false),
+            ("hell_knight", 69, 24, 64, false),
+            ("baron_of_hell", 3003, 24, 64, false),
+            ("revenant", 66, 20, 56, false),
+            ("mancubus", 67, 48, 64, false),
+            ("arachnotron", 68, 64, 64, false),
+            ("archvile", 64, 20, 56, false),
+            ("cyberdemon", 16, 40, 110, false),
+            ("spider_mastermind", 7, 128, 100, true),
+            ("wolfenstein_ss", 84, 20, 56, true),
+        ];
+        for (name, doomednum, radius, height, hitscan) in monsters {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            let dims = t
+                .species(name)
+                .unwrap_or_else(|| panic!("`{name}` species dims"));
+            assert_eq!(dims.radius, *radius, "`{name}` radius");
+            assert_eq!(dims.height, *height, "`{name}` height");
+            assert_eq!(t.hitscan(name), Some(*hitscan), "`{name}` hitscan");
+        }
+        assert_eq!(monsters.len(), 18, "every listed monster was checked");
+        assert!(
+            t.species("plaid_imp").is_none(),
+            "unlisted species is absent"
+        );
+        assert_eq!(
+            t.hitscan("plaid_imp"),
+            None,
+            "unlisted species hitscan is absent"
+        );
+    }
+
+    /// Every weapon, ammo, health/armor, and powerup pickup the map-spec
+    /// template's `arsenal` and `sustain` sections can name must resolve a
+    /// doomednum. Checked individually — see `every_monster_species_resolves`
+    /// for why a loop over an explicit table still satisfies that.
+    #[test]
+    fn every_pickup_resolves() {
+        let t = Tables::load().expect("tables load");
+        let pickups: &[(&str, u16)] = &[
+            // Weapons — match `arsenal.weapons[].name` exactly.
+            ("chainsaw", 2005),
+            ("shotgun", 2001),
+            ("super_shotgun", 82),
+            ("chaingun", 2002),
+            ("rocket_launcher", 2003),
+            ("plasma_rifle", 2004),
+            ("bfg9000", 2006),
+            // Ammo.
+            ("clip", 2007),
+            ("box_of_bullets", 2048),
+            ("shells", 2008),
+            ("box_of_shells", 2049),
+            ("rocket", 2010),
+            ("box_of_rockets", 2046),
+            ("cell_charge", 2047),
+            ("cell_pack", 17),
+            ("backpack", 8),
+            // Health and armor — match `sustain.health.*` exactly;
+            // `sustain.armor.{green,blue}` map to `green_armor`/`blue_armor`
+            // here (see the `health_armor_source` citation in vocabulary.toml).
+            ("stimpack", 2011),
+            ("medikit", 2012),
+            ("health_bonus", 2014),
+            ("armor_bonus", 2015),
+            ("green_armor", 2018),
+            ("blue_armor", 2019),
+            // Powerups — match `sustain.powerups[].name` exactly, short
+            // forms included (`radsuit`, `light_amp`).
+            ("berserk", 2023),
+            ("soulsphere", 2013),
+            ("megasphere", 83),
+            ("invulnerability", 2022),
+            ("invisibility", 2024),
+            ("radsuit", 2025),
+            ("light_amp", 2045),
+            ("computer_map", 2026),
+        ];
+        for (name, doomednum) in pickups {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+        }
+        assert_eq!(pickups.len(), 30, "every listed pickup was checked");
+        // Every doomednum above is distinct — a duplicate would mean two
+        // spec-visible names silently resolve to the same physical pickup.
+        let unique: std::collections::HashSet<_> = pickups.iter().map(|(_, id)| id).collect();
+        assert_eq!(
+            unique.len(),
+            pickups.len(),
+            "all pickup doomednums are distinct"
+        );
+    }
+
+    /// The exploding barrel and every scenery/light-source prop must
+    /// resolve a doomednum; the four that block movement must also
+    /// resolve `[props.*]` dims (rules P3, P21, P22), and the two
+    /// non-blocking decorations must NOT carry a `[props.*]` entry —
+    /// asserting that distinction directly rather than only checking
+    /// `Some`/`None` loosely.
+    #[test]
+    fn every_scenery_prop_resolves() {
+        let t = Tables::load().expect("tables load");
+        // (name, doomednum, dims if it blocks: Some(radius, height))
+        let blocking: &[(&str, u16, i32, i32)] = &[
+            ("barrel", 2035, 10, 42),
+            ("floor_lamp", 2028, 16, 16),
+            ("techno_lamp", 85, 16, 16),
+            ("candelabra", 35, 16, 16),
+        ];
+        for (name, doomednum, radius, height) in blocking {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            let dims = t.prop(name).unwrap_or_else(|| panic!("`{name}` prop dims"));
+            assert_eq!(dims.radius, *radius, "`{name}` radius");
+            assert_eq!(dims.height, *height, "`{name}` height");
+            assert!(dims.blocks, "`{name}` blocks movement");
+        }
+
+        let non_blocking: &[(&str, u16)] = &[("candle", 34), ("gibs", 24)];
+        for (name, doomednum) in non_blocking {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            assert!(
+                t.prop(name).is_none(),
+                "`{name}` is non-blocking and carries no [props.*] entry"
+            );
+        }
+
+        assert!(t.prop("plaid_imp").is_none(), "unlisted prop is absent");
+    }
+
+    /// An exit switch needs a switch texture to render — the theme's
+    /// `[textures.*]` set must resolve one alongside its wall/floor/
+    /// ceiling/door textures.
+    #[test]
+    fn switch_texture_resolves() {
+        let t = Tables::load().expect("tables load");
+        assert_eq!(
+            t.texture("switch", "tech_base"),
+            Some("SW1STARG"),
+            "tech_base has a switch texture"
+        );
+        assert_eq!(
+            t.texture("switch", "plaid_theme"),
+            None,
+            "an unknown theme resolves no texture at all"
         );
     }
 }
