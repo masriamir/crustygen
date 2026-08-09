@@ -1,26 +1,41 @@
 # crustygen — known gaps and carried decisions
 
 State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD →
-reassembles through crustywad. 93 tests. This file records what is deliberately
+reassembles through crustywad. 100 tests. This file records what is deliberately
 absent, what is known-fragile, and the decisions a future contributor would
 otherwise have to re-derive.
 
 ## Not implemented, by design
 
 The compiler covers structural invariants S1–S6 and playability rules P1, P3,
-P4, P8, P9, P11, P13, P14, P19, P24.
+P4, P8, P9, P11, P13, P14, P19, P24, P25.
 
 Deliberately absent, deferred to the next stage: **P5** (lifts), **P6** (monster
 mobility), **P7** (no softlock), **P10** (clean vertical tiling), **P12** (sky
 coherence), **P15** (teleport pairing), **P16**/**P17** (liquids and damage
-survivability), **P20** (pickup accessibility), **P21** (light sources),
-**P22** (hanging decorations), **P23** (barrel safety).
+survivability), **P18** (secret accounting), **P20** (pickup accessibility),
+**P21** (light sources), **P22** (hanging decorations), **P23** (barrel
+safety).
 
 P7 and P20 both need a key-aware reachability flood that does not exist yet.
 
+**P2 (headroom) is only partially covered.** `compile::things::place_things`
+rejects a placed thing whose room lacks headroom for it (`NoHeadroom`), which
+is a real per-thing check, not a stub — but it only runs where the IR places a
+thing. A room with no things in it gets no headroom check at all, so P2's
+literal scope ("a walkable sector's ceiling-minus-floor gap must be at least
+the height of the tallest thing required to occupy or pass through it — the
+player is always in that set") is not fully enforced: an empty corridor too
+short for the player to stand in would compile cleanly today. P25 (start
+clearance) *is* fully covered by the same code path, since every player start
+is itself a thing and always goes through the identical clearance/headroom/
+overlap checks.
+
 Also absent: the packer, the verifier, the conformance report, the blank
 Markdown template, and any authored map. Specials for lifts, teleports, exits
-and sector effects are **sourced and accessible** but nothing emits them yet —
+and sector effects, monster `spawnhealth`, health/armor pickup amounts and
+caps, the gore prop set, and the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef
+flags are all **sourced and accessible** but nothing emits any of them yet —
 only doors are wired end to end.
 
 ## Known gaps
@@ -31,12 +46,6 @@ footprints, and two documented limitations rest on diagonal behavior:
 skips diagonal edges entirely — a room with a chamfered far side reports
 `DoorTooDeep { available: 0 }`, which reads as nonsense to an author. This is
 the next shape-space hole. Every previous one contained real defects.
-
-**`hitscan` in `engine.toml` is sourced but unreachable.** `ThingDims` carries
-only `radius` and `height`, and no accessor exposes the flag. The spec's
-`combat.hitscanner_ratio` will need it. Add `Tables::hitscan(name)` rather than
-re-deriving which monsters are hitscan from memory — that is precisely the
-failure the sourced tables exist to prevent.
 
 **The orphan-sidedef code path is documented but unexercised.** It fires only
 when an opening consumes a wall end to end so the reusable sidedef is never
