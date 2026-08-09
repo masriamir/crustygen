@@ -30,12 +30,23 @@ pins the fix. P25 (start clearance) is fully covered by the same code path,
 since every player start is itself a thing and always goes through the
 identical clearance/headroom/overlap checks.
 
+**P18's mechanism exists; its counting rule does not.** `Room::secret`
+(`compile::sectors::resolve_secret_specials`) gives a room a high-level way to
+carry the sourced secret sector special (`Tables::secret_sector_special`)
+instead of requiring an author to write the raw number into `Room::special` —
+the two are mutually exclusive, rejected at parse time
+(`IrError::SecretWithExplicitSpecial`) rather than resolved by silent
+precedence. What is still absent is P18's actual *rule* — "the number of
+secret sectors equals `secrets.count`" — since `secrets.count` is a map-spec
+concept with no representation in this IR; that check belongs at the stage
+that reads the map-spec, not here.
+
 Also absent: the packer, the verifier, the conformance report, the blank
 Markdown template, and any authored map. Specials for lifts, teleports, exits
-and sector effects, monster `spawnhealth`, health/armor pickup amounts and
-caps, the gore prop set, and the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef
-flags are all **sourced and accessible** but nothing emits any of them yet —
-only doors are wired end to end.
+and liquid sector effects, monster `spawnhealth`, health/armor pickup amounts
+and caps, the gore prop set, and the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK`
+linedef flags are all **sourced and accessible** but nothing emits any of
+them yet. Doors and the secret sector special are wired end to end.
 
 ## Known gaps
 
@@ -87,7 +98,16 @@ source fact: P5 requires a lift be operable from both ends, and a one-shot lift
 can strand a player. Recorded in the citations; disagree there if you prefer.
 
 **Odd portal widths are rejected rather than rounded**, per the spec's
-reject-don't-degrade posture.
+reject-don't-degrade posture. The same posture governs
+`IrError::SecretWithExplicitSpecial`: a room that sets both `Room::secret` and
+`Room::special` is rejected outright rather than letting one silently win.
+
+**A thing's unspecified `skillN` fields default to `true`, not `false`.**
+Inverted from bare Rust `bool` defaults on purpose: the pre-existing behavior
+(every thing on every skill) had to survive a thing that names no `skills` key
+at all, and `ThingSkills` needed the same "unless you say otherwise" default
+for a partially specified object too, so a per-field serde default function is
+used rather than `#[derive(Default)]`.
 
 ## Sourcing rule — do not relax this
 

@@ -332,25 +332,31 @@ pub struct Compiled {
 /// 1. [`sectors::emit_sectors`] turns every room footprint into a closed,
 ///    one-sided sector — a room is watertight by construction before any
 ///    portal touches it.
-/// 2. [`portals::cut_portals`] opens every portal's shared wall. For a
+/// 2. [`sectors::resolve_secret_specials`] turns each room's
+///    [`crate::ir::Room::secret`] flag into rule P18's secret sector special,
+///    unless [`crate::ir::Room::special`] already set one explicitly. Pure
+///    substitution on `.special`, so it can run any time after step 1 and
+///    before emission; placed here, immediately after, so it is not
+///    forgotten.
+/// 3. [`portals::cut_portals`] opens every portal's shared wall. For a
 ///    [`crate::ir::PortalKind::Plain`] portal this also emits the two-sided
 ///    opening line; for a door portal it leaves the flanking walls cut but
 ///    the opening itself unemitted, because that opening is a carved sector
 ///    rather than a single line.
-/// 3. [`doors::emit_doors`] carves that dedicated sector for every door
+/// 4. [`doors::emit_doors`] carves that dedicated sector for every door
 ///    portal out of room `b`, allocating its tag from a fresh
 ///    [`TagAllocator`] shared with every other tag-consuming pass.
-/// 4. [`things::place_things`] places every thing, measuring clearance and
-///    headroom against the geometry emitted by steps 1–3 — not the IR's
+/// 5. [`things::place_things`] places every thing, measuring clearance and
+///    headroom against the geometry emitted by steps 1–4 — not the IR's
 ///    declared footprints, which a door recess can make stale — so it must
 ///    run after doors are carved, not before.
-/// 5. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
+/// 6. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
 ///    at tag 0, which would match every untagged sector in-engine.
-/// 6. [`textmap::emit_textmap`] renders the final, validated geometry.
-/// 7. [`crate::rules::check_all`] runs the playability catalog over the
+/// 7. [`textmap::emit_textmap`] renders the final, validated geometry.
+/// 8. [`crate::rules::check_all`] runs the playability catalog over the
 ///    result and fails the compile if anything is violated.
 ///
-/// Step 7 is part of `compile` rather than a separate call the caller may
+/// Step 8 is part of `compile` rather than a separate call the caller may
 /// forget, because the design makes playability violations hard errors: "a
 /// door the player cannot fit through is a broken map, not a missed target".
 /// Leaving `check_all` optional meant every rule in `rules` was inert unless
@@ -389,6 +395,7 @@ pub fn compile_reporting(
     tables: &Tables,
 ) -> Result<(Compiled, Vec<RuleViolation>), CompileError> {
     let mut data = sectors::emit_sectors(ir)?;
+    sectors::resolve_secret_specials(ir, tables, &mut data);
     portals::cut_portals(ir, &mut data)?;
     let mut tags = TagAllocator::new();
     doors::emit_doors(ir, tables, &mut data, &mut tags)?;

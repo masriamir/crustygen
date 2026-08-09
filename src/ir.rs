@@ -25,6 +25,63 @@ pub enum PortalKind {
     Locked,
 }
 
+/// Returns `true`, for use as a serde field default so an absent
+/// `skill1..skill5` key in a partially specified [`ThingSkills`] object
+/// means "appears on this skill" rather than "excluded from it".
+const fn skill_default() -> bool {
+    true
+}
+
+/// Which of Doom's five skill levels a thing appears on.
+///
+/// UDMF's `doom` namespace spells these as five independent booleans
+/// (`skill1`..`skill5`, ITYTD through Nightmare); this mirrors that shape
+/// directly rather than packing them, matching the convention
+/// [`crate::compile::textmap::emit_textmap`] already uses for other
+/// per-object flags. Every field defaults to `true`, both at the whole-struct
+/// level (an [`IrThing`] with no `skills` key at all) and per-field (a
+/// `skills` object that names only some keys) — so a thing that never
+/// mentions skills keeps the compiler's original "appears on every skill"
+/// behavior, and every fixture written before this field existed is
+/// unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "these five booleans are not independent flags to model as a state machine — they \
+              are a direct, one-to-one mirror of UDMF's own skill1..skill5 fields, and any other \
+              shape would need translating back and forth at the emission boundary for no benefit"
+)]
+pub struct ThingSkills {
+    /// UDMF `skill1` — I'm Too Young To Die.
+    #[serde(default = "skill_default")]
+    pub skill1: bool,
+    /// UDMF `skill2` — Hey, Not Too Rough.
+    #[serde(default = "skill_default")]
+    pub skill2: bool,
+    /// UDMF `skill3` — Hurt Me Plenty.
+    #[serde(default = "skill_default")]
+    pub skill3: bool,
+    /// UDMF `skill4` — Ultra-Violence.
+    #[serde(default = "skill_default")]
+    pub skill4: bool,
+    /// UDMF `skill5` — Nightmare!.
+    #[serde(default = "skill_default")]
+    pub skill5: bool,
+}
+
+impl Default for ThingSkills {
+    /// All five skills — the behavior every fixture predating this type saw.
+    fn default() -> Self {
+        Self {
+            skill1: true,
+            skill2: true,
+            skill3: true,
+            skill4: true,
+            skill5: true,
+        }
+    }
+}
+
 /// A thing placed inside a room.
 #[derive(Debug, Clone, Deserialize)]
 pub struct IrThing {
@@ -34,6 +91,10 @@ pub struct IrThing {
     pub at: Pt,
     /// Facing angle in degrees.
     pub angle: u16,
+    /// Which skill levels this thing appears on. Defaults to all five when
+    /// the key is absent — see [`ThingSkills`].
+    #[serde(default)]
+    pub skills: ThingSkills,
 }
 
 /// One room: a closed footprint plus its surfaces and contents.
@@ -56,8 +117,24 @@ pub struct Room {
     /// Wall texture name.
     pub wall_tex: String,
     /// Sector special, if any.
+    ///
+    /// This is the escape hatch: an author who sets it directly gets exactly
+    /// that raw value, with no interpretation. It is mutually exclusive with
+    /// [`Self::secret`] — [`Ir::from_json`] rejects a room that sets both,
+    /// rather than picking a silent precedence between them (the same
+    /// reject-don't-degrade posture [`Portal::width`] already takes on an odd
+    /// width). Use `secret` for the common case; use `special` directly for
+    /// anything `secret` cannot express.
     #[serde(default)]
     pub special: Option<u16>,
+    /// Whether this sector carries rule P18's secret special
+    /// (`Tables::secret_sector_special`) rather than a plain 0.
+    ///
+    /// This is the high-level path: it spares an author from writing the raw
+    /// engine-sourced special number into [`Self::special`] by hand. See
+    /// that field's doc comment for how the two interact.
+    #[serde(default)]
+    pub secret: bool,
     /// Things placed in this room.
     #[serde(default)]
     pub things: Vec<IrThing>,
@@ -212,6 +289,13 @@ pub enum IrError {
         /// The second room.
         b: String,
     },
+    /// A room sets both [`Room::secret`] and an explicit [`Room::special`],
+    /// leaving no way to tell which one the author actually wants.
+    #[error("room `{room}` sets both `secret` and an explicit `special`; use one or the other")]
+    SecretWithExplicitSpecial {
+        /// The offending room.
+        room: String,
+    },
 }
 
 /// The inclusive coordinate and height range every Doom map format stores in
@@ -244,7 +328,9 @@ impl Ir {
     /// for a repeated room id, [`IrError::UnknownRoom`] for a portal naming a
     /// room that does not exist, [`IrError::OffGrid`] for any coordinate that
     /// is not a multiple of `grid`, [`IrError::LockedWithoutKey`] for a locked
-    /// portal that names no key, and the numeric-range variants listed above.
+    /// portal that names no key, [`IrError::SecretWithExplicitSpecial`] for a
+    /// room that sets both `secret` and `special`, and the numeric-range
+    /// variants listed above.
     pub fn from_json(s: &str) -> Result<Self, IrError> {
         let ir: Self = serde_json::from_str(s)?;
 
@@ -254,6 +340,15 @@ impl Ir {
             return Err(IrError::InvalidGrid { grid: ir.grid });
         }
 
+        let seen = Self::validate_rooms(&ir)?;
+        Self::validate_portals(&ir, &seen)?;
+
+        Ok(ir)
+    }
+
+    /// Validates every room and returns the set of ids seen, for
+    /// [`Self::validate_portals`] to check its own room references against.
+    fn validate_rooms(ir: &Self) -> Result<HashSet<&str>, IrError> {
         let mut seen = HashSet::new();
         for room in &ir.rooms {
             if !seen.insert(room.id.as_str()) {
@@ -266,6 +361,11 @@ impl Ir {
                     room: room.id.clone(),
                     floor: room.floor,
                     ceiling: room.ceiling,
+                });
+            }
+            if room.secret && room.special.is_some() {
+                return Err(IrError::SecretWithExplicitSpecial {
+                    room: room.id.clone(),
                 });
             }
             for height in [room.floor, room.ceiling] {
@@ -298,7 +398,12 @@ impl Ir {
                 }
             }
         }
+        Ok(seen)
+    }
 
+    /// Validates every portal against the room ids [`Self::validate_rooms`]
+    /// already collected.
+    fn validate_portals(ir: &Self, seen: &HashSet<&str>) -> Result<(), IrError> {
         for portal in &ir.portals {
             for id in [&portal.a, &portal.b] {
                 if !seen.contains(id.as_str()) {
@@ -335,8 +440,7 @@ impl Ir {
                 });
             }
         }
-
-        Ok(ir)
+        Ok(())
     }
 
     /// Looks up a room by identifier.
@@ -499,5 +603,59 @@ mod tests {
             "\"kind\": \"locked\", \"lock\": \"blue_card\"",
         );
         assert!(Ir::from_json(&keyed).is_ok(), "a named key is accepted");
+    }
+
+    #[test]
+    fn rejects_a_room_that_sets_both_secret_and_an_explicit_special() {
+        let json = TWO_ROOM.replace(
+            "\"id\": \"a\", \"footprint\"",
+            "\"id\": \"a\", \"secret\": true, \"special\": 9, \"footprint\"",
+        );
+        assert!(matches!(
+            Ir::from_json(&json),
+            Err(IrError::SecretWithExplicitSpecial { .. })
+        ));
+    }
+
+    #[test]
+    fn a_room_may_set_secret_alone_or_special_alone() {
+        let secret_only = TWO_ROOM.replace(
+            "\"id\": \"a\", \"footprint\"",
+            "\"id\": \"a\", \"secret\": true, \"footprint\"",
+        );
+        assert!(Ir::from_json(&secret_only).is_ok(), "secret alone is fine");
+
+        let special_only = TWO_ROOM.replace(
+            "\"id\": \"a\", \"footprint\"",
+            "\"id\": \"a\", \"special\": 9, \"footprint\"",
+        );
+        assert!(
+            Ir::from_json(&special_only).is_ok(),
+            "special alone is fine"
+        );
+    }
+
+    #[test]
+    fn a_thing_with_no_skills_key_defaults_to_all_five() {
+        let ir = Ir::from_json(TWO_ROOM).expect("ir");
+        let skills = ir.rooms[0].things[0].skills;
+        assert!(skills.skill1 && skills.skill2 && skills.skill3 && skills.skill4 && skills.skill5);
+    }
+
+    #[test]
+    fn a_thing_may_partially_specify_skills_defaulting_the_rest_true() {
+        let json = TWO_ROOM.replace(
+            "\"kind\": \"player1_start\", \"at\": [128,128], \"angle\": 90",
+            "\"kind\": \"player1_start\", \"at\": [128,128], \"angle\": 90, \
+             \"skills\": { \"skill1\": false, \"skill5\": false }",
+        );
+        let ir = Ir::from_json(&json).expect("ir");
+        let skills = ir.rooms[0].things[0].skills;
+        assert!(!skills.skill1, "explicitly excluded");
+        assert!(
+            skills.skill2 && skills.skill3 && skills.skill4,
+            "unmentioned keys default true"
+        );
+        assert!(!skills.skill5, "explicitly excluded");
     }
 }

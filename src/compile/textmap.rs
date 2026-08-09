@@ -87,12 +87,28 @@ pub fn emit_textmap(data: &MapData, things: &[ThingOut]) -> String {
     s.push('\n');
 
     for t in things {
-        let _ = writeln!(
+        let _ = write!(
             s,
-            "thing {{ x = {}.0; y = {}.0; angle = {}; type = {}; skill1 = true; skill2 = true; \
-             skill3 = true; skill4 = true; skill5 = true; single = true; }}",
+            "thing {{ x = {}.0; y = {}.0; angle = {}; type = {};",
             t.x, t.y, t.angle, t.kind
         );
+        // Only the skills this thing actually appears on are written —
+        // UDMF's `doom` namespace defaults every `skillN` field to `false`
+        // when absent, matching the convention every other boolean field in
+        // this function already follows (`blocking`, `dontpegbottom`,
+        // `dontpegtop`): state `true`, omit `false`.
+        for (present, name) in [
+            (t.skills.skill1, "skill1"),
+            (t.skills.skill2, "skill2"),
+            (t.skills.skill3, "skill3"),
+            (t.skills.skill4, "skill4"),
+            (t.skills.skill5, "skill5"),
+        ] {
+            if present {
+                let _ = write!(s, " {name} = true;");
+            }
+        }
+        s.push_str(" single = true; }\n");
     }
 
     s
@@ -140,5 +156,38 @@ mod tests {
         let a = compile(&ir, &tables).expect("first");
         let b = compile(&ir, &tables).expect("second");
         assert_eq!(a.textmap, b.textmap, "S6: emission is deterministic");
+    }
+
+    #[test]
+    fn a_default_thing_still_emits_all_five_skills_true() {
+        // Pins the pre-existing behavior byte-for-byte: a thing with no
+        // `skills` key must emit exactly what it always did.
+        let ir = Ir::from_json(TWO_ROOM).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let out = compile(&ir, &tables).expect("compiles");
+        assert!(out.textmap.contains(
+            "skill1 = true; skill2 = true; skill3 = true; skill4 = true; skill5 = true; \
+             single = true;"
+        ));
+    }
+
+    #[test]
+    fn only_the_things_selected_skills_are_emitted() {
+        let json = TWO_ROOM.replace(
+            "\"angle\":90",
+            "\"angle\":90, \"skills\": { \"skill1\": false, \"skill5\": false }",
+        );
+        let ir = Ir::from_json(&json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let out = compile(&ir, &tables).expect("compiles");
+        assert!(!out.textmap.contains("skill1 = true"), "skill1 excluded");
+        assert!(out.textmap.contains("skill2 = true"), "skill2 kept");
+        assert!(out.textmap.contains("skill3 = true"), "skill3 kept");
+        assert!(out.textmap.contains("skill4 = true"), "skill4 kept");
+        assert!(!out.textmap.contains("skill5 = true"), "skill5 excluded");
+        assert!(
+            out.textmap.contains("single = true"),
+            "single is unaffected"
+        );
     }
 }

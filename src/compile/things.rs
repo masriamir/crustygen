@@ -2,7 +2,7 @@
 
 use crate::compile::{CompileError, MapData};
 use crate::geom::{Pt, contains, dist_to_segment};
-use crate::ir::Ir;
+use crate::ir::{Ir, ThingSkills};
 use crate::tables::{Tables, ThingDims};
 
 /// A thing as it will be emitted.
@@ -16,6 +16,8 @@ pub struct ThingOut {
     pub angle: u16,
     /// Concrete Doom thing ID.
     pub kind: u16,
+    /// Which skill levels this thing appears on.
+    pub skills: ThingSkills,
 }
 
 /// The minimum distance from `p` to any emitted linedef bordering the sector
@@ -163,6 +165,7 @@ pub fn place_things(
                 y: thing.at.y,
                 angle: thing.angle,
                 kind: id,
+                skills: thing.skills,
             });
         }
     }
@@ -420,6 +423,37 @@ mod tests {
                 Err(CompileError::NoHeadroom { .. })
             ),
             "an empty room one unit too short must still be rejected"
+        );
+    }
+
+    #[test]
+    fn a_thing_with_no_skills_specified_emits_all_five_true() {
+        let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let data = compiled_data(&ir, &tables);
+        let things = place_things(&ir, &tables, &data).expect("placed");
+        let skills = things[0].skills;
+        assert!(
+            skills.skill1 && skills.skill2 && skills.skill3 && skills.skill4 && skills.skill5,
+            "no skills key means every skill, matching the compiler's original behavior"
+        );
+    }
+
+    #[test]
+    fn a_things_selected_skills_survive_into_thing_out() {
+        let json = ir_with_thing("imp", (128, 128), 128).replace(
+            "\"angle\":90",
+            "\"angle\":90, \"skills\": { \"skill1\": false, \"skill2\": false }",
+        );
+        let ir = Ir::from_json(&json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let data = compiled_data(&ir, &tables);
+        let things = place_things(&ir, &tables, &data).expect("placed");
+        let skills = things[0].skills;
+        assert!(!skills.skill1 && !skills.skill2, "explicitly excluded");
+        assert!(
+            skills.skill3 && skills.skill4 && skills.skill5,
+            "unmentioned skills default true"
         );
     }
 }

@@ -3,6 +3,7 @@
 use crate::compile::{CompileError, LinedefOut, MapData, SectorOut, SidedefOut};
 use crate::geom::{Pt, contains, edges, is_axis_or_diagonal, is_clockwise, shoelace2};
 use crate::ir::Ir;
+use crate::tables::Tables;
 
 /// Returns the index of `p`, appending it if it is not already present.
 ///
@@ -98,6 +99,30 @@ pub fn emit_sectors(ir: &Ir) -> Result<MapData, CompileError> {
         }
     }
     Ok(data)
+}
+
+/// Resolves each room's [`crate::ir::Room::secret`] flag into rule P18's
+/// secret sector special, unless [`crate::ir::Room::special`] already set one
+/// explicitly.
+///
+/// `Room::special` is the escape hatch documented on that field:
+/// [`Ir::from_json`] already rejects a room that sets both, so by the time
+/// this runs, a room with `secret == true` is guaranteed to have
+/// `special == None` — no precedence to pick between them here, just a
+/// straight substitution. Must run after [`emit_sectors`], which is what
+/// populates `data.sectors` in the first place, and before anything that
+/// might read `.special` (nothing downstream currently does, but this keeps
+/// the ordering obvious).
+///
+/// Relies on `emit_sectors` pushing exactly one sector per room, in
+/// `ir.rooms` order — the same invariant `compile::things` documents and
+/// depends on.
+pub fn resolve_secret_specials(ir: &Ir, tables: &Tables, data: &mut MapData) {
+    for (i, room) in ir.rooms.iter().enumerate() {
+        if room.secret {
+            data.sectors[i].special = tables.secret_sector_special();
+        }
+    }
 }
 
 /// Twice the signed area of triangle `abc`; positive when `c` is left of `ab`.
@@ -238,5 +263,58 @@ mod tests {
             emit_sectors(&ir),
             Err(CompileError::Degenerate { .. })
         ));
+    }
+
+    /// A room shaped 128x64 (not the ubiquitous 256-square), one secret and
+    /// one not, so a fixture-diversity mutation cannot hide behind a shared
+    /// dimension.
+    const SECRET_ROOM: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"vault", "footprint":[[0,0],[0,64],[128,64],[128,0]],
+          "floor":0, "ceiling":128, "light":160, "secret":true,
+          "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+        { "id":"hall", "footprint":[[128,0],[128,64],[256,64],[256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+      ], "portals":[] }"#;
+
+    #[test]
+    fn a_secret_room_gets_the_sourced_secret_special_and_a_plain_one_gets_zero() {
+        use crate::compile::sectors::resolve_secret_specials;
+        use crate::tables::Tables;
+
+        let ir = Ir::from_json(SECRET_ROOM).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        assert_eq!(
+            data.sectors[0].special, 0,
+            "before resolution, secret is not yet reflected in the raw special"
+        );
+        resolve_secret_specials(&ir, &tables, &mut data);
+        assert_eq!(
+            data.sectors[0].special,
+            tables.secret_sector_special(),
+            "the secret room's sector carries the sourced secret special"
+        );
+        assert_eq!(
+            data.sectors[1].special, 0,
+            "a room that never set secret or special stays at 0"
+        );
+    }
+
+    #[test]
+    fn an_explicit_special_is_left_untouched_when_secret_is_not_set() {
+        use crate::compile::sectors::resolve_secret_specials;
+        use crate::tables::Tables;
+
+        let ir_json = SECRET_ROOM.replace("\"secret\":true", "\"special\":42");
+        let ir = Ir::from_json(&ir_json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        resolve_secret_specials(&ir, &tables, &mut data);
+        assert_eq!(
+            data.sectors[0].special, 42,
+            "the escape-hatch special is untouched by secret resolution"
+        );
     }
 }
