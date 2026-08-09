@@ -229,7 +229,6 @@ fn check_key_lock_coherence(ir: &Ir, v: &mut Vec<RuleViolation>) {
 
 #[cfg(test)]
 mod tests {
-    use super::check_key_lock_coherence;
     use crate::compile::{CompileError, compile, compile_reporting};
     use crate::ir::Ir;
     use crate::tables::Tables;
@@ -449,18 +448,14 @@ mod tests {
         assert!(violations(&locked).contains(&"P24".to_owned()));
     }
 
-    // The vocabulary table (`data/vocabulary.toml`) does not currently list
-    // any key thing (e.g. `blue_card`) with a concrete thing ID, so an IR
-    // that *places* one cannot reach `compile()` successfully — `place_things`
-    // rejects it with `CompileError::UnknownThing` before `check_all` is ever
-    // called. That makes the "placed key opens no door" half of P24
-    // untestable through the public `check_all(ir, tables, out)` entry point
-    // today. `check_key_lock_coherence` itself only needs `&Ir`, though — it
-    // never resolves thing kinds against the vocabulary — so these two tests
-    // exercise it directly, bypassing `compile()`, per this crate's
-    // private-helper unit-test convention.
+    // Both halves of P24 now run through the public path: the vocabulary
+    // lists every key thing, so an IR that *places* one compiles instead of
+    // being rejected as an unknown thing, and a locked portal gets a real
+    // keyed door special. Until those tables existed, no locked-door
+    // progression was constructible end to end and these two tests had to
+    // call the private helper directly.
     #[test]
-    fn p24_a_placed_key_that_opens_no_door_fails_directly() {
+    fn p24_a_placed_key_that_opens_no_door_is_flagged() {
         let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
           "rooms":[
             { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
@@ -472,13 +467,7 @@ mod tests {
               ] }
           ],
           "portals":[] }"#;
-        let ir = Ir::from_json(ir_json).expect("ir");
-        let mut v = Vec::new();
-        check_key_lock_coherence(&ir, &mut v);
-        assert!(
-            v.iter().any(|violation| violation.rule == "P24"),
-            "a placed key opening no door must be flagged: {v:?}"
-        );
+        assert!(violations(ir_json).contains(&"P24".to_owned()));
     }
 
     #[test]
@@ -497,12 +486,19 @@ mod tests {
               "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
           ],
           "portals":[{ "a":"a", "b":"b", "kind":"locked", "lock":"blue_card", "width":128, "at":[256,128] }] }"#;
-        let ir = Ir::from_json(ir_json).expect("ir");
-        let mut v = Vec::new();
-        check_key_lock_coherence(&ir, &mut v);
+        // The whole loop: a locked door, the key that opens it placed in a
+        // reachable room, and a compile that succeeds because nothing is
+        // violated. This is the smallest map that proves key progression is
+        // constructible at all.
+        let parsed = Ir::from_json(ir_json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let out = compile(&parsed, &tables).expect("a coherent locked door compiles");
+        let keyed = tables
+            .locked_door_special("blue_card")
+            .expect("blue_card special");
         assert!(
-            v.is_empty(),
-            "a placed key that opens the door naming it is coherent: {v:?}"
+            out.data.linedefs.iter().any(|l| l.special == keyed),
+            "the locked door carries blue_card's keyed special"
         );
     }
 }
