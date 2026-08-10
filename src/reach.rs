@@ -479,6 +479,51 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
     })
 }
 
+/// A human-readable name for a node: a room's own id, or a compiler-made
+/// sector described by the nearest rooms around it, found by breadth-first
+/// search over plain adjacency (passability is irrelevant to naming).
+#[must_use]
+pub fn node_label(node: NodeIdx, ir: &Ir, graph: &ReachGraph) -> String {
+    if node < ir.rooms.len() {
+        return format!("room `{}`", ir.rooms[node].id);
+    }
+    let mut adj: Vec<Vec<NodeIdx>> = vec![Vec::new(); graph.nodes.len()];
+    for e in &graph.edges {
+        adj[e.a].push(e.b);
+        adj[e.b].push(e.a);
+    }
+    let mut seen = vec![false; graph.nodes.len()];
+    seen[node] = true;
+    let mut frontier = vec![node];
+    while !frontier.is_empty() {
+        let mut rooms: Vec<&str> = frontier
+            .iter()
+            .filter(|&&n| n < ir.rooms.len())
+            .map(|&n| ir.rooms[n].id.as_str())
+            .collect();
+        if !rooms.is_empty() {
+            rooms.sort_unstable();
+            rooms.dedup();
+            return match rooms.as_slice() {
+                [a] => format!("the recess off `{a}`"),
+                [a, b, ..] => format!("the passage between `{a}` and `{b}`"),
+                [] => unreachable!("guarded by is_empty above"),
+            };
+        }
+        let mut next = Vec::new();
+        for &n in &frontier {
+            for &to in &adj[n] {
+                if !seen[to] {
+                    seen[to] = true;
+                    next.push(to);
+                }
+            }
+        }
+        frontier = next;
+    }
+    format!("sector {node}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -968,6 +1013,18 @@ mod tests {
         assert!(!f.unfinishable, "the skull opens the blue door");
         // class_names for messages: both kinds of the colour, sorted.
         assert_eq!(b.class_names[class as usize], ["blue_card", "blue_skull"]);
+    }
+
+    #[test]
+    fn labels_name_rooms_directly_and_passages_by_their_rooms() {
+        let b = built(HUB_ANNEX);
+        let ir = Ir::from_json(HUB_ANNEX).expect("ir");
+        assert_eq!(node_label(0, &ir, &b.graph), "room `hub`");
+        assert_eq!(node_label(1, &ir, &b.graph), "room `annex`");
+        assert_eq!(
+            node_label(2, &ir, &b.graph),
+            "the passage between `annex` and `hub`"
+        );
     }
 
     #[test]
