@@ -317,6 +317,7 @@ fn emit_walkover_exit(
         ceil_tex: room.ceil_tex.clone(),
         special: 0,
         tag: 0,
+        wall_tex: room.wall_tex.clone(),
     });
 
     let near_line = emit_opening(data, cut, plan.room_idx, alcove, plan.forward);

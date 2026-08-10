@@ -73,6 +73,7 @@ pub fn emit_sectors(ir: &Ir) -> Result<MapData, CompileError> {
             ceil_tex: room.ceil_tex.clone(),
             special: room.special.unwrap_or(0),
             tag: 0,
+            wall_tex: room.wall_tex.clone(),
         });
 
         for (a, b) in edges(&room.footprint) {

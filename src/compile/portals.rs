@@ -137,6 +137,7 @@ fn cut_one(
             ceil_tex: room_a.ceil_tex.clone(),
             special: 0,
             tag: 0,
+            wall_tex: room_a.wall_tex.clone(),
         };
         emit_gap_sector(
             data,
@@ -1509,6 +1510,33 @@ mod tests {
                 Err(CompileError::PortalOnDiagonalWall { x: 32, y: 224, .. })
             ),
             "room a's own diagonal wall must be flagged even though room b never touches it"
+        );
+    }
+
+    /// Every emitted sector records the wall texture its faces use — rooms
+    /// their own, and the compiler-created passage sector the one belonging
+    /// to room `a`, whose jamb texture it already borrows.
+    #[test]
+    fn every_emitted_sector_records_a_wall_texture() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"F", "ceil_tex":"C", "wall_tex":"WA" },
+            { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"F", "ceil_tex":"C", "wall_tex":"WB" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }] }"#;
+        let ir = Ir::from_json(json).expect("ir");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &mut data).expect("portals");
+
+        assert_eq!(data.sectors[0].wall_tex, "WA", "room a keeps its own");
+        assert_eq!(data.sectors[1].wall_tex, "WB", "room b keeps its own");
+        assert_eq!(
+            data.sectors[2].wall_tex, "WA",
+            "the passage sector inherits room a's, matching its jamb texture"
         );
     }
 }

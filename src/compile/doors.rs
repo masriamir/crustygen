@@ -199,6 +199,7 @@ pub fn emit_doors(
             ceil_tex: room.ceil_tex.clone(),
             special: 0,
             tag: 0,
+            wall_tex: room.wall_tex.clone(),
         };
 
         let near_alcove = (alcove_near > 0).then(|| {
@@ -224,6 +225,7 @@ pub fn emit_doors(
             ceil_tex: room_a.ceil_tex.clone(),
             special: 0,
             tag,
+            wall_tex: room_a.wall_tex.clone(),
         });
 
         // The door's own two faces — whichever segment stands immediately

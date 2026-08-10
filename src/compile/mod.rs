@@ -27,6 +27,16 @@ pub struct SectorOut {
     pub special: u16,
     /// Allocated sector tag; 0 only where no action references it.
     pub tag: u16,
+    /// The wall texture this sector's faces use.
+    ///
+    /// **Not emitted to `TEXTMAP`** — a Doom sector carries no wall texture;
+    /// walls are a sidedef property. It is recorded here so
+    /// [`heights::apply_height_textures`] can source the riser a floor or
+    /// ceiling difference exposes, including for sectors the compiler creates
+    /// itself (a portal's passage, a door and its alcoves, a walkover exit's
+    /// recess), which belong to no room and so have no
+    /// [`crate::ir::Room::wall_tex`] of their own to read.
+    pub wall_tex: String,
 }
 
 /// A sidedef as it will be emitted.

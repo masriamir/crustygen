@@ -96,6 +96,7 @@ mod tests {
                 ceil_tex: "C".into(),
                 special: 0,
                 tag: 0,
+                wall_tex: String::new(),
             }],
             sidedefs: vec![SidedefOut {
                 sector: 0,
