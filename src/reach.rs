@@ -325,6 +325,7 @@ pub fn check(graph: &ReachGraph, limits: &Limits) -> Findings {
 }
 
 /// A [`ReachGraph`] plus the naming data reports need.
+#[derive(Debug)]
 pub struct BuiltGraph {
     /// The traversal graph.
     pub graph: ReachGraph,
@@ -350,8 +351,9 @@ pub struct BuiltGraph {
 /// valid sector index — so they are all in range by construction, and a
 /// hand-built graph is the only way to violate them.
 ///
-/// The interning below is likewise the enforcement point for the [`KeyClass`]
-/// "fewer than [`KeyMask::BITS`] classes" invariant.
+/// The interning below is likewise the enforcement point for [`KeyClass`]'s
+/// invariant that every class index is below [`KeyMask::BITS`] — the class
+/// *count* may be exactly [`KeyMask::BITS`], which is what the assert admits.
 ///
 /// Returns `None` when the map has no player 1 start or no exit line —
 /// the vacuous-pass gate: P7 presupposes a goal, and "this map has no
@@ -842,17 +844,79 @@ mod tests {
             r#""trigger":"switch", "width":32, "at":[0,128]"#,
             r#""trigger":"walkover", "width":64, "at":[0,128]"#,
         );
-        let b = built(&json);
-        assert_eq!(b.graph.goals.len(), 1);
-        let goal = b.graph.goals[0];
-        assert!(goal >= 2, "the goal is the carved recess, not a room");
-        // The recess is reachable, so the whole map is finishable.
+        let ir = Ir::from_json(&json).expect("ir");
         let tables = Tables::load().expect("tables");
+        let (out, _) = compile_reporting(&ir, &tables).expect("compile");
+        let b = graph_from_compiled(&ir, &tables, &out).expect("graph");
+        // Derived from the emitted map, not written down: the sector behind
+        // the line that actually carries the walkover special. `>= 2` would
+        // also accept the portal's passage sector, which is not the goal.
+        let walkover = tables.exit_walkover_special();
+        let recesses: Vec<NodeIdx> = out
+            .data
+            .linedefs
+            .iter()
+            .filter(|l| l.special == walkover)
+            .map(|l| {
+                let back = l.back.expect("a walkover threshold is two-sided");
+                out.data.sidedefs[back].sector
+            })
+            .collect();
+        assert_eq!(recesses.len(), 1, "one exit, one threshold");
+        assert_eq!(b.graph.goals, recesses, "the goal is that exact recess");
+        assert_ne!(b.graph.goals[0], 0, "not the host room");
+        // The recess is reachable, so the whole map is finishable.
         let limits = Limits {
             player_height: tables.player().height,
             max_step: tables.step_height(),
         };
         assert!(!check(&b.graph, &limits).unfinishable);
+    }
+
+    #[test]
+    fn an_unlocked_door_portal_yields_door_edges_with_no_lock() {
+        // Load-bearing and otherwise uncovered: an unlocked door portal's
+        // faces carry `tables.door_special()` (doors.rs `door_special`), and
+        // a door sector is emitted with ceiling == floor. `passable` skips
+        // the crossing-window check only for `EdgeKind::Door`, so if these
+        // faces were classified `Open` their zero-height window would make
+        // every map with an ordinary door read unfinishable.
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+            { "id":"annex", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[{ "a":"hub", "b":"annex", "kind":"door",
+                       "width":128, "at":[256,128],
+                       "door_thickness":32, "alcove_near":16, "alcove_far":16 }],
+          "exits":[{ "room":"annex", "trigger":"switch", "width":32, "at":[576,128] }] }"#;
+        let b = built(json);
+        let locks: Vec<Option<KeyClass>> = b
+            .graph
+            .edges
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EdgeKind::Door { lock } => Some(*lock),
+                EdgeKind::Open => None,
+            })
+            .collect();
+        assert_eq!(locks, vec![None, None], "both door faces, neither locked");
+        // Keyless, and the exit is on the far side of the door.
+        assert!(b.graph.nodes.iter().all(|n| n.keys == 0));
+        let tables = Tables::load().expect("tables");
+        let limits = Limits {
+            player_height: tables.player().height,
+            max_step: tables.step_height(),
+        };
+        assert!(
+            !check(&b.graph, &limits).unfinishable,
+            "a plain door opens, so the exit beyond it is reachable"
+        );
     }
 
     #[test]
