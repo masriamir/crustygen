@@ -59,11 +59,11 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: taiki-e/install-action@60c08ce81d769135aafd96f96efc85993d9cb8e4 # cargo-llvm-cov
-      # `--all-features` mirrors the `test` job. No `[features]` table exists
-      # today, so this is a no-op — which is exactly why it belongs here now:
-      # the moment a feature appears, coverage would otherwise silently stop
-      # measuring the code behind it while `test` kept exercising it, and the
-      # gap would read as "that code is covered" rather than "skipped".
+      # No `[features]` table exists today, so `--all-features` is a no-op —
+      # set now anyway so that the moment a feature appears, coverage keeps
+      # measuring the code behind it by default instead of silently skipping
+      # it, with the gap reading as "covered" rather than "skipped". (The
+      # `test` job runs without it and would need the same flag then too.)
       - run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
       - uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7
         with:
