@@ -1118,7 +1118,9 @@ mod tests {
         );
         assert!(
             v.iter()
-                .any(|x| x.subject.contains("high") && x.detail.contains("never be visited")),
+                // The room's own entry, not the recess off it: `contains`
+                // would accept either.
+                .any(|x| x.subject == "room `high`" && x.detail.contains("never be visited")),
             "{v:?}"
         );
     }

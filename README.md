@@ -22,7 +22,7 @@ Doom. What exists is the geometry core; the map-spec front end does not exist
 yet. See [Known gaps](#known-gaps).
 
 ```bash
-cargo test        # 239 tests
+cargo test        # 240 tests
 cargo run --example ...   # not yet — there is no CLI
 ```
 

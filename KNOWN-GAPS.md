@@ -1,7 +1,7 @@
 # crustygen — known gaps and carried decisions
 
 State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD →
-reassembles through crustywad. 239 tests (231 lib + 1 first_map + 6
+reassembles through crustywad. 240 tests (232 lib + 1 first_map + 6
 golden_textmap + 1 walking_skeleton), plus a separately-run `#[ignore]`d
 golden-regeneration generator not included in that count. This file records
 what is deliberately absent, what is known-fragile, and the decisions a

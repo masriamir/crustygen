@@ -407,8 +407,9 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
     specials.sort_unstable();
     specials.dedup();
     assert!(
-        specials.len() <= 8,
-        "KeyMask is u8; a vocabulary with more than 8 lock classes needs a wider mask"
+        specials.len() <= KeyMask::BITS as usize,
+        "a vocabulary with more than {} lock classes needs a wider KeyMask",
+        KeyMask::BITS
     );
     let class_of = |special: u16| -> Option<KeyClass> {
         specials
@@ -451,6 +452,8 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
     let mut edges = Vec::new();
     for line in &out.data.linedefs {
         let Some(back) = line.back else { continue };
+        // ML_BLOCKING stops a non-missile even on a two-sided line:
+        // PIT_CheckLine rejects it (pinned p_map.c:214-217).
         if line.blocking {
             continue;
         }
@@ -1013,6 +1016,47 @@ mod tests {
         assert!(!f.unfinishable, "the skull opens the blue door");
         // class_names for messages: both kinds of the colour, sorted.
         assert_eq!(b.class_names[class as usize], ["blue_card", "blue_skull"]);
+    }
+
+    #[test]
+    fn a_secret_switch_exit_is_a_goal_and_two_exits_in_a_room_collapse_to_one() {
+        // The two secret specials are live in `exit_specials` but were
+        // otherwise unfixtured: if `secret_exit_switch_special` were missing
+        // from that list, `goals` would be empty and the builder would gate
+        // out to `None`, so `built` panicking is the assertion.
+        let secret_only = HUB_ANNEX.replace(
+            r#"{ "room":"hub", "trigger":"switch", "width":32, "at":[0,128] }"#,
+            r#"{ "room":"hub", "trigger":"switch", "secret":true, "width":32, "at":[0,128] }"#,
+        );
+        let b = built(&secret_only);
+        assert_eq!(
+            b.graph.goals,
+            vec![0],
+            "a secret switch exit fires from its host room, same as a normal one"
+        );
+
+        // Two exits on two of hub's walls, both fronting hub: `goals.dedup()`
+        // is what keeps the same sector from being listed twice.
+        let two_exits = HUB_ANNEX.replace(
+            r#"{ "room":"hub", "trigger":"switch", "width":32, "at":[0,128] }"#,
+            r#"{ "room":"hub", "trigger":"switch", "width":32, "at":[0,128] },
+        { "room":"hub", "trigger":"switch", "secret":true, "width":32, "at":[128,0] }"#,
+        );
+        let ir = Ir::from_json(&two_exits).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (out, _) = compile_reporting(&ir, &tables).expect("compile");
+        let exit_lines = out
+            .data
+            .linedefs
+            .iter()
+            .filter(|l| {
+                l.special == tables.exit_switch_special()
+                    || l.special == tables.secret_exit_switch_special()
+            })
+            .count();
+        assert_eq!(exit_lines, 2, "both exits emitted, or dedup proves nothing");
+        let b = graph_from_compiled(&ir, &tables, &out).expect("graph");
+        assert_eq!(b.graph.goals, vec![0], "one goal, not one per exit line");
     }
 
     #[test]

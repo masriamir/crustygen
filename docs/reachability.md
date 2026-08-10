@@ -1,7 +1,7 @@
 # crustygen P7 reachability — design
 
 **Date:** 2026-08-10
-**Status:** approved, ready for an implementation plan
+**Status:** implemented (this branch); citation record for `src/reach.rs`
 **Issue:** #4 — P7: key-aware reachability flood (a one-way drop can strand the player)
 **Scope of this document:** the flood core, its compiled-geometry builder, and the three
 P7 checks. P20 and the `crustygen-check` verifier (#2) are consumers, not deliverables.
