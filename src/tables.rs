@@ -487,6 +487,25 @@ impl Tables {
             .ok()
     }
 
+    /// Every `(key kind, keyed-door special)` pair in the vocabulary,
+    /// sorted by kind name.
+    ///
+    /// Sorted because the backing table is a `HashMap` and the P7 flood
+    /// interns key classes from this list — unsorted iteration would make
+    /// class numbering, and therefore report wording, nondeterministic.
+    #[must_use]
+    pub fn locked_door_kinds(&self) -> Vec<(String, u16)> {
+        let mut kinds: Vec<(String, u16)> = self
+            .vocabulary
+            .specials
+            .locked
+            .iter()
+            .filter_map(|(k, v)| Some((k.clone(), u16::try_from(v.as_integer()?).ok()?)))
+            .collect();
+        kinds.sort();
+        kinds
+    }
+
     /// The linedef special for a switch-activated normal exit
     /// (`progression.exit.kind = normal`, `trigger = switch`).
     #[must_use]
@@ -779,6 +798,31 @@ mod tests {
         // The citation strings living alongside the numbers must never be
         // mistaken for one.
         assert_eq!(t.locked_door_special("source"), None);
+    }
+
+    #[test]
+    fn locked_door_kinds_lists_every_key_sorted() {
+        let t = Tables::load().expect("tables");
+        let kinds = t.locked_door_kinds();
+        let names: Vec<&str> = kinds.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "blue_card",
+                "blue_skull",
+                "red_card",
+                "red_skull",
+                "yellow_card",
+                "yellow_skull"
+            ]
+        );
+        for (kind, special) in &kinds {
+            assert_eq!(
+                t.locked_door_special(kind),
+                Some(*special),
+                "consistent with the single lookup"
+            );
+        }
     }
 
     /// Every name the compiler, the playability rules, or the design's

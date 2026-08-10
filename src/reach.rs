@@ -57,6 +57,10 @@
 //! absence from an exit-less map's violations reads as a decision rather than
 //! an oversight.
 
+use crate::compile::Compiled;
+use crate::ir::Ir;
+use crate::tables::Tables;
+
 /// Index of a node (sector) in a [`ReachGraph`].
 pub type NodeIdx = usize;
 
@@ -64,6 +68,12 @@ pub type NodeIdx = usize;
 /// keyed-door special the key satisfies, so the card and skull of a colour
 /// share one class — `EV_VerticalDoor` (pinned `p_doors.c:371-403`) accepts
 /// either: `!p->cards[it_bluecard] && !p->cards[it_blueskull]`.
+///
+/// **Invariant: a class is always below [`KeyMask::BITS`] (8).** Nothing in
+/// the type says so, and a class at or past that width shifts its bit off the
+/// end — a debug panic, but a silent alias onto class 0 in release. Interning
+/// is the one place that can enforce it, and [`graph_from_compiled`] does,
+/// asserting the vocabulary yields at most 8 distinct lock classes.
 pub type KeyClass = u8;
 
 /// A set of key classes held, one bit per [`KeyClass`].
@@ -314,9 +324,163 @@ pub fn check(graph: &ReachGraph, limits: &Limits) -> Findings {
     }
 }
 
+/// A [`ReachGraph`] plus the naming data reports need.
+pub struct BuiltGraph {
+    /// The traversal graph.
+    pub graph: ReachGraph,
+    /// For each key class, the key kinds that satisfy it, sorted — e.g.
+    /// class 0 -> `["blue_card", "blue_skull"]`. Used to word violations.
+    pub class_names: Vec<Vec<String>>,
+}
+
+/// Derives the traversal graph from what was actually emitted.
+///
+/// Geometry comes from [`MapData`](crate::compile::MapData) — sectors as
+/// nodes, two-sided non-blocking linedefs as edges — never from authored
+/// intent, so the graph cannot drift from the map. Keys and the start use the
+/// room-index-equals-sector-index invariant [`crate::compile::things`]
+/// documents and verifies.
+///
+/// This is also where [`check`]'s indexing preconditions are established.
+/// `check` indexes `nodes` by `start`, by every `goals` entry, and by each
+/// edge's `a`/`b`, and panics if any is out of range; here every one of those
+/// is a sector index read back out of the emitted `MapData` — an edge's ends
+/// come from `sidedefs[..].sector`, a goal from the sidedef of an emitted exit
+/// line, and the start from a room index, which that same invariant makes a
+/// valid sector index — so they are all in range by construction, and a
+/// hand-built graph is the only way to violate them.
+///
+/// The interning below is likewise the enforcement point for the [`KeyClass`]
+/// "fewer than [`KeyMask::BITS`] classes" invariant.
+///
+/// Returns `None` when the map has no player 1 start or no exit line —
+/// the vacuous-pass gate: P7 presupposes a goal, and "this map has no
+/// exit" is a spec-conformance finding for the stage that reads the
+/// map-spec, not a softlock.
+///
+/// # Panics
+///
+/// If the vocabulary lists more than [`KeyMask::BITS`] distinct keyed-door
+/// specials, which a [`KeyMask`] cannot represent.
+#[must_use]
+pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<BuiltGraph> {
+    // The start: the first room placing a `player1_start` (the IR vocabulary
+    // name; resolved to engine thing 1 by the tables at emission).
+    let start = ir
+        .rooms
+        .iter()
+        .position(|r| r.things.iter().any(|t| t.kind == "player1_start"))?;
+
+    let exit_specials = [
+        tables.exit_switch_special(),
+        tables.secret_exit_switch_special(),
+        tables.exit_walkover_special(),
+        tables.secret_exit_walkover_special(),
+    ];
+    let mut goals = Vec::new();
+    for line in &out.data.linedefs {
+        if !exit_specials.contains(&line.special) {
+            continue;
+        }
+        match line.back {
+            // A walkover exit's threshold fronts the host room and backs the
+            // carved recess; reaching the recess means the line was crossed.
+            Some(back) => goals.push(out.data.sidedefs[back].sector),
+            // A switch exit's one-sided line fronts its host room, and
+            // `P_UseSpecialLine` fires from the front side the player faces.
+            None => goals.push(out.data.sidedefs[line.front].sector),
+        }
+    }
+    if goals.is_empty() {
+        return None;
+    }
+    goals.sort_unstable();
+    goals.dedup();
+
+    // Intern key classes by keyed-door special: the card and skull of a
+    // colour share a special (`EV_VerticalDoor`, pinned p_doors.c:371-403),
+    // so they must share a class.
+    let kinds = tables.locked_door_kinds();
+    let mut specials: Vec<u16> = kinds.iter().map(|&(_, s)| s).collect();
+    specials.sort_unstable();
+    specials.dedup();
+    assert!(
+        specials.len() <= 8,
+        "KeyMask is u8; a vocabulary with more than 8 lock classes needs a wider mask"
+    );
+    let class_of = |special: u16| -> Option<KeyClass> {
+        specials
+            .iter()
+            .position(|&s| s == special)
+            .map(|i| KeyClass::try_from(i).expect("at most 8 classes"))
+    };
+    let class_names: Vec<Vec<String>> = specials
+        .iter()
+        .map(|&s| {
+            kinds
+                .iter()
+                .filter(|&&(_, ks)| ks == s)
+                .map(|(k, _)| k.clone())
+                .collect()
+        })
+        .collect();
+
+    let mut nodes: Vec<Node> = out
+        .data
+        .sectors
+        .iter()
+        .map(|s| Node {
+            floor: s.floor,
+            ceiling: s.ceiling,
+            keys: 0,
+        })
+        .collect();
+    for (i, room) in ir.rooms.iter().enumerate() {
+        for thing in &room.things {
+            if let Some(special) = tables.locked_door_special(&thing.kind)
+                && let Some(class) = class_of(special)
+            {
+                nodes[i].keys |= 1 << class;
+            }
+        }
+    }
+
+    let plain_door = tables.door_special();
+    let mut edges = Vec::new();
+    for line in &out.data.linedefs {
+        let Some(back) = line.back else { continue };
+        if line.blocking {
+            continue;
+        }
+        let kind = if line.special == plain_door {
+            EdgeKind::Door { lock: None }
+        } else if let Some(class) = class_of(line.special) {
+            EdgeKind::Door { lock: Some(class) }
+        } else {
+            EdgeKind::Open
+        };
+        edges.push(Edge {
+            a: out.data.sidedefs[line.front].sector,
+            b: out.data.sidedefs[back].sector,
+            kind,
+        });
+    }
+
+    Some(BuiltGraph {
+        graph: ReachGraph {
+            nodes,
+            edges,
+            start,
+            goals,
+        },
+        class_names,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compile::compile_reporting;
 
     /// Engine limits for hand-built graphs: the real player height and step
     /// cap, restated here as literals because these tests exercise the
@@ -630,6 +794,141 @@ mod tests {
             f.stranded,
             vec![(2, 0)],
             "entering the pit keyless is the softlock"
+        );
+    }
+
+    /// hub (start) — plain portal — annex, with a switch exit on hub's west
+    /// wall. Two compiler-made sectors: the portal's passage. Everything
+    /// level, so the graph is fully traversable.
+    const HUB_ANNEX: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+        { "id":"annex", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[{ "a":"hub", "b":"annex", "kind":"plain", "width":64, "at":[256,128] }],
+      "exits":[{ "room":"hub", "trigger":"switch", "width":32, "at":[0,128] }] }"#;
+
+    fn built(json: &str) -> BuiltGraph {
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (out, _) = compile_reporting(&ir, &tables).expect("compile");
+        graph_from_compiled(&ir, &tables, &out).expect("graph")
+    }
+
+    #[test]
+    fn the_builder_maps_rooms_starts_and_goals() {
+        let b = built(HUB_ANNEX);
+        assert_eq!(b.graph.start, 0, "hub is room 0 is sector 0");
+        assert_eq!(
+            b.graph.goals,
+            vec![0],
+            "a switch exit fires from its host room"
+        );
+        assert_eq!(b.graph.nodes[0].floor, 0);
+        assert_eq!(b.graph.nodes.len(), 3, "two rooms and one passage sector");
+        // Two thresholds: hub<->passage and passage<->annex, both Open.
+        assert_eq!(b.graph.edges.len(), 2);
+        assert!(b.graph.edges.iter().all(|e| e.kind == EdgeKind::Open));
+    }
+
+    #[test]
+    fn a_walkover_exits_goal_is_the_recess_beyond_its_threshold() {
+        let json = HUB_ANNEX.replace(
+            r#""trigger":"switch", "width":32, "at":[0,128]"#,
+            r#""trigger":"walkover", "width":64, "at":[0,128]"#,
+        );
+        let b = built(&json);
+        assert_eq!(b.graph.goals.len(), 1);
+        let goal = b.graph.goals[0];
+        assert!(goal >= 2, "the goal is the carved recess, not a room");
+        // The recess is reachable, so the whole map is finishable.
+        let tables = Tables::load().expect("tables");
+        let limits = Limits {
+            player_height: tables.player().height,
+            max_step: tables.step_height(),
+        };
+        assert!(!check(&b.graph, &limits).unfinishable);
+    }
+
+    #[test]
+    fn a_locked_door_edge_and_the_matching_key_share_a_colour_class() {
+        // The lock is blue_card; the placed key is blue_SKULL. EV_VerticalDoor
+        // accepts either of a colour, so the classes must collapse.
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 },
+                        { "kind":"blue_skull", "at":[64,64], "angle":0 }] },
+            { "id":"vault", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[{ "a":"hub", "b":"vault", "kind":"locked", "lock":"blue_card",
+                       "width":128, "at":[256,128],
+                       "door_thickness":32, "alcove_near":16, "alcove_far":16 }],
+          "exits":[{ "room":"vault", "trigger":"switch", "width":32, "at":[576,128] }] }"#;
+        let b = built(json);
+        let lock_classes: Vec<Option<KeyClass>> = b
+            .graph
+            .edges
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EdgeKind::Door { lock } => Some(*lock),
+                EdgeKind::Open => None,
+            })
+            .collect();
+        assert!(!lock_classes.is_empty(), "the door faces are Door edges");
+        let class = lock_classes[0].expect("the door is locked");
+        assert!(
+            lock_classes.iter().all(|l| *l == Some(class)),
+            "both faces, same class"
+        );
+        assert_eq!(
+            b.graph.nodes[0].keys,
+            1 << class,
+            "the skull satisfies the card's lock"
+        );
+        let tables = Tables::load().expect("tables");
+        let limits = Limits {
+            player_height: tables.player().height,
+            max_step: tables.step_height(),
+        };
+        let f = check(&b.graph, &limits);
+        assert!(!f.unfinishable, "the skull opens the blue door");
+        // class_names for messages: both kinds of the colour, sorted.
+        assert_eq!(b.class_names[class as usize], ["blue_card", "blue_skull"]);
+    }
+
+    #[test]
+    fn the_gate_returns_none_without_a_start_or_without_an_exit() {
+        let ir_no_exit = HUB_ANNEX.replace(
+            r#""exits":[{ "room":"hub", "trigger":"switch", "width":32, "at":[0,128] }]"#,
+            r#""exits":[]"#,
+        );
+        let ir = Ir::from_json(&ir_no_exit).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (out, _) = compile_reporting(&ir, &tables).expect("compile");
+        assert!(
+            graph_from_compiled(&ir, &tables, &out).is_none(),
+            "no exit: vacuous"
+        );
+
+        let ir_no_start = HUB_ANNEX.replace(
+            r#""things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },"#,
+            r#""things":[] },"#,
+        );
+        let ir = Ir::from_json(&ir_no_start).expect("ir");
+        let (out, _) = compile_reporting(&ir, &tables).expect("compile");
+        assert!(
+            graph_from_compiled(&ir, &tables, &out).is_none(),
+            "no start: vacuous"
         );
     }
 }
