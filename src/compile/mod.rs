@@ -204,6 +204,37 @@ pub enum CompileError {
         /// Midpoint Y of the opening.
         y: i32,
     },
+    /// A plain portal's two rooms do not overlap vertically by enough for
+    /// the player to pass through the passage sector between them.
+    ///
+    /// The passage takes the higher of the two floors and the lower of the
+    /// two ceilings, so `have` is `min(ceilings) - max(floors)`: its own
+    /// headroom. A non-positive value means the sector would be inverted
+    /// outright — its floor at or above its ceiling.
+    ///
+    /// This replaces the retired P1, which capped the floor delta between
+    /// connected rooms at `max_step_height` in *either* direction.
+    /// `P_TryMove` caps only the climb (`tmfloorz - thing->z > 24*FRACUNIT`)
+    /// and leaves falling unrestricted, and a corpus sweep of DOOM, DOOM2,
+    /// TNT, and PLUTONIA found 37.77% of passable two-sided lines exceeding
+    /// that cap — 62.5% of them permanent static drops. A one-way drop is
+    /// idiomatic Doom; a passage the player cannot fit through is not.
+    ///
+    /// Door portals are deliberately not checked here: a door sector's
+    /// ceiling is snapped to its floor by construction, so it can never be
+    /// inverted, and **P4** already rejects a door opening below the
+    /// player's height on a strictly tighter bound.
+    #[error("portal `{a}` <-> `{b}` has {have} units of headroom but the player needs {need}")]
+    PortalNoHeadroom {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The passage sector's headroom, `min(ceilings) - max(floors)`.
+        have: i32,
+        /// The player's height.
+        need: i32,
+    },
     /// Two emitted sectors — rooms, a portal's gap sector (passage or door),
     /// or a walkover exit's alcove — overlap in the finished geometry.
     ///
@@ -509,7 +540,7 @@ pub fn compile_reporting(
 ) -> Result<(Compiled, Vec<RuleViolation>), CompileError> {
     let mut data = sectors::emit_sectors(ir)?;
     sectors::resolve_secret_specials(ir, tables, &mut data);
-    portals::cut_portals(ir, &mut data)?;
+    portals::cut_portals(ir, tables, &mut data)?;
     let mut tags = TagAllocator::new();
     doors::emit_doors(ir, tables, &mut data, &mut tags)?;
     exits::emit_exits(ir, tables, &mut data, &mut tags)?;

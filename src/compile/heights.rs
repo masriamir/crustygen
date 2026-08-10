@@ -142,6 +142,7 @@ mod tests {
     use crate::compile::{LinedefOut, MapData, SectorOut, SidedefOut};
     use crate::geom::Pt;
     use crate::ir::Ir;
+    use crate::tables::Tables;
 
     /// Two rooms joined by a plain portal, each height independently
     /// tunable, and each with its own distinctive wall texture so a test can
@@ -167,8 +168,9 @@ mod tests {
     /// finished map is playable.
     fn emit(json: &str) -> MapData {
         let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         apply_height_textures(&mut data);
         data
     }

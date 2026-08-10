@@ -395,7 +395,7 @@ mod tests {
         let ir = Ir::from_json(ir_json).expect("ir");
         let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         let mut tags = TagAllocator::new();
         emit_doors(&ir, &tables, &mut data, &mut tags).expect("doors");
         emit_exits(&ir, &tables, &mut data, &mut tags).expect("exits");
@@ -584,7 +584,7 @@ mod tests {
         let ir = Ir::from_json(&json).expect("ir");
         let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         let mut tags = TagAllocator::new();
         assert!(matches!(
             emit_exits(&ir, &tables, &mut data, &mut tags),
@@ -610,7 +610,7 @@ mod tests {
         let ir = Ir::from_json(json).expect("ir");
         let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         let mut tags = TagAllocator::new();
         assert!(matches!(
             emit_exits(&ir, &tables, &mut data, &mut tags),
@@ -630,7 +630,7 @@ mod tests {
         let ir = Ir::from_json(&json).expect("ir");
         let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         let mut tags = TagAllocator::new();
         assert!(matches!(
             emit_exits(&ir, &tables, &mut data, &mut tags),
@@ -836,7 +836,7 @@ mod tests {
         let ir = Ir::from_json(&json).expect("ir");
         let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         let mut tags = TagAllocator::new();
         assert!(
             matches!(
@@ -862,7 +862,7 @@ mod tests {
         let ir = Ir::from_json(&json).expect("ir");
         let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         let mut tags = TagAllocator::new();
         assert!(
             matches!(

@@ -1,9 +1,17 @@
 //! Playability invariants checked against compiled output.
 //!
-//! `check_all` implements a deliberately partial rule catalog: **P1** (step
-//! height between connected rooms), **P3** (passage width), **P4** (door
-//! opening clearance), **P8** (no missing textures), **P9** (no texture
-//! scaling), **P19** (light bounds), and **P24** (key and lock coherence).
+//! `check_all` implements a deliberately partial rule catalog: **P3** (passage
+//! width), **P4** (door opening clearance), **P8** (no missing textures),
+//! **P9** (no texture scaling), **P19** (light bounds), and **P24** (key and
+//! lock coherence).
+//!
+//! **P1** (step height between connected rooms) has been **retired**: it
+//! capped the floor delta between connected rooms in either direction, but
+//! `P_TryMove` caps only the climb and leaves falling unrestricted, and a
+//! corpus sweep found the majority of vanilla Doom's height changes exceeding
+//! it. See
+//! [`CompileError::PortalNoHeadroom`](crate::compile::CompileError::PortalNoHeadroom)
+//! for what replaced it.
 //!
 //! **P7** (no softlock) and **P20** (pickup accessibility) are deliberately
 //! *not* implemented here — both need a key-aware reachability flood over the
@@ -19,7 +27,7 @@ use crate::tables::Tables;
 /// One failed playability check.
 #[derive(Debug, Clone)]
 pub struct RuleViolation {
-    /// The rule identifier, e.g. `"P1"`.
+    /// The rule identifier, e.g. `"P4"`.
     pub rule: &'static str,
     /// What failed — a room id, portal, or line index.
     pub subject: String,
@@ -44,7 +52,7 @@ impl std::fmt::Display for RuleViolation {
 #[must_use]
 pub fn check_all(ir: &Ir, tables: &Tables, out: &Compiled) -> Vec<RuleViolation> {
     let mut v = Vec::new();
-    check_step_height(ir, tables, &mut v);
+    check_door_clearance(ir, tables, &mut v);
     check_passage_width(ir, tables, &mut v);
     check_light_bounds(ir, tables, &mut v);
     check_no_scaling(out, &mut v);
@@ -53,50 +61,45 @@ pub fn check_all(ir: &Ir, tables: &Tables, out: &Compiled) -> Vec<RuleViolation>
     v
 }
 
-/// P1 and P4: connected rooms must not differ by more than one step, and a
-/// door's opening must clear the player.
+/// P4: a door's opening must clear the player.
 ///
-/// The two checks share this function because both walk the same portal
-/// loop and both need the same pair of rooms already resolved; splitting
-/// them would just duplicate that lookup.
-fn check_step_height(ir: &Ir, tables: &Tables, v: &mut Vec<RuleViolation>) {
-    let limit = tables.step_height();
+/// P1 — "connected rooms must not differ by more than one step" — used to
+/// share this loop and has been retired. It capped the floor delta in either
+/// direction, but `P_TryMove` caps only the climb, and a corpus sweep of
+/// DOOM, DOOM2, TNT, and PLUTONIA found 37.77% of passable two-sided lines
+/// over that cap, 62.5% of them permanent static drops. The degeneracy it
+/// incidentally prevented is now caught by
+/// [`CompileError::PortalNoHeadroom`](crate::compile::CompileError::PortalNoHeadroom),
+/// at compile time and on the passage sector itself.
+fn check_door_clearance(ir: &Ir, tables: &Tables, v: &mut Vec<RuleViolation>) {
     let player = tables.player();
     for p in &ir.portals {
+        if !matches!(p.kind, PortalKind::Door | PortalKind::Locked) {
+            continue;
+        }
         let (Some(a), Some(b)) = (ir.room(&p.a), ir.room(&p.b)) else {
             continue;
         };
-        let delta = (a.floor - b.floor).abs();
-        if delta > limit {
+        // A door's open ceiling stops short of the lowest neighboring
+        // ceiling by the engine's clearance allowance (P_DoorDoor:
+        // `topheight = P_FindLowestCeilingSurrounding(sec) - 4`), so the
+        // usable opening is smaller than the nominal room height. The
+        // clearance is measured from the *higher* of the two floors (`max`,
+        // not the door sector's own carved floor, which is the lower of the
+        // two): a player standing on the higher-floor side has less headroom
+        // to the door's open ceiling than one on the lower-floor side, so the
+        // higher floor is the binding constraint.
+        let opening =
+            a.ceiling.min(b.ceiling) - tables.door_clearance_allowance() - a.floor.max(b.floor);
+        if opening < player.height {
             v.push(RuleViolation {
-                rule: "P1",
+                rule: "P4",
                 subject: format!("{} <-> {}", p.a, p.b),
-                detail: format!("floor delta {delta} exceeds max step height {limit}"),
+                detail: format!(
+                    "door opening {opening} is below player height {}",
+                    player.height
+                ),
             });
-        }
-        if matches!(p.kind, PortalKind::Door | PortalKind::Locked) {
-            // A door's open ceiling stops short of the lowest neighboring
-            // ceiling by the engine's clearance allowance (P_DoorDoor:
-            // `topheight = P_FindLowestCeilingSurrounding(sec) - 4`), so the
-            // usable opening is smaller than the nominal room height. The
-            // clearance is measured from the *higher* of the two floors
-            // (`max`, not the door sector's own carved floor, which is the
-            // lower of the two): a player standing on the higher-floor side
-            // has less headroom to the door's open ceiling than one on the
-            // lower-floor side, so the higher floor is the binding
-            // constraint on whether the door actually clears the player.
-            let opening =
-                a.ceiling.min(b.ceiling) - tables.door_clearance_allowance() - a.floor.max(b.floor);
-            if opening < player.height {
-                v.push(RuleViolation {
-                    rule: "P4",
-                    subject: format!("{} <-> {}", p.a, p.b),
-                    detail: format!(
-                        "door opening {opening} is below player height {}",
-                        player.height
-                    ),
-                });
-            }
         }
     }
 }
@@ -369,11 +372,56 @@ mod tests {
     }
 
     #[test]
-    fn p1_a_step_at_the_limit_passes_and_one_unit_over_fails() {
+    fn a_large_drop_compiles_now_that_the_step_cap_is_gone() {
+        // 128 units down: the player walks off a ledge. `P_TryMove` caps the
+        // climb, not the fall, and 62.5% of the corpus's over-step lines are
+        // permanent static drops exactly like this one.
+        let violations = violations(&portal_ir(-128, 128, 128));
+        assert!(
+            violations.is_empty(),
+            "a one-way drop is legal Doom, got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn a_drop_far_inside_the_16_bit_range_compiles() {
+        // The rejection half of the range guard is already pinned in `ir.rs`;
+        // until the step cap was retired, no positive case could reach it.
+        let violations = violations(&portal_ir(-30000, 128, 128));
+        assert!(violations.is_empty(), "got {violations:?}");
+    }
+
+    #[test]
+    fn rooms_that_do_not_overlap_vertically_are_rejected() {
+        // Room b floats entirely above room a, so the passage sector between
+        // them would take floor 400 and ceiling 128 — a sector whose floor
+        // is above its own ceiling.
+        let ir = Ir::from_json(&portal_ir(400, 512, 128)).expect("ir");
         let tables = Tables::load().expect("tables");
-        let limit = tables.step_height();
-        assert!(!violations(&ir(limit, 128, 160)).contains(&"P1".to_owned()));
-        assert!(violations(&ir(limit + 1, 128, 160)).contains(&"P1".to_owned()));
+        let err = compile(&ir, &tables).expect_err("an inverted passage must be rejected");
+        let CompileError::PortalNoHeadroom { have, need, .. } = err else {
+            panic!("expected PortalNoHeadroom, got {err}");
+        };
+        assert_eq!(have, -272);
+        assert_eq!(need, tables.player().height);
+    }
+
+    #[test]
+    fn the_passage_headroom_boundary_is_exact() {
+        let tables = Tables::load().expect("tables");
+        let need = tables.player().height;
+        // Room a is 0..=128, so a room b floored at `128 - need` leaves
+        // exactly `need` units of overlap, and one unit higher leaves one
+        // too few.
+        let exact = Ir::from_json(&portal_ir(128 - need, 512, 128)).expect("ir");
+        compile(&exact, &tables).expect("exactly enough headroom compiles");
+
+        let short = Ir::from_json(&portal_ir(128 - need + 1, 512, 128)).expect("ir");
+        let err = compile(&short, &tables).expect_err("one unit short must be rejected");
+        assert!(matches!(
+            err,
+            CompileError::PortalNoHeadroom { have, .. } if have == need - 1
+        ));
     }
 
     #[test]

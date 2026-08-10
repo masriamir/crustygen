@@ -379,7 +379,7 @@ mod tests {
         let ir = Ir::from_json(ir_json).expect("ir");
         let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         let mut tags = TagAllocator::new();
         emit_doors(&ir, &tables, &mut data, &mut tags).expect("doors");
         let door = data.sectors.len() - 1;
@@ -391,7 +391,7 @@ mod tests {
         let ir = Ir::from_json(DOOR_IR).expect("ir");
         let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         let mut tags = TagAllocator::new();
 
         let rooms_before = data.sectors.len();
@@ -561,7 +561,7 @@ mod tests {
         let ir = Ir::from_json(&plain).expect("ir");
         let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         let before = data.sectors.len();
         let mut tags = TagAllocator::new();
         emit_doors(&ir, &tables, &mut data, &mut tags).expect("doors");
@@ -1194,7 +1194,7 @@ mod tests {
         let ir = Ir::from_json(&locked).expect("ir");
         let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         let mut tags = TagAllocator::new();
         assert!(matches!(
             emit_doors(&ir, &tables, &mut data, &mut tags),
@@ -1211,7 +1211,7 @@ mod tests {
         let ir = Ir::from_json(&themed).expect("ir");
         let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
         let mut tags = TagAllocator::new();
         assert!(matches!(
             emit_doors(&ir, &tables, &mut data, &mut tags),
@@ -1315,10 +1315,11 @@ mod tests {
         // plain portal must reach a door portal too, not just fall through
         // to `NotAdjacent` because the portal happened to be a door.
         let ir = Ir::from_json(DOOR_ON_DIAGONAL_WALL).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
         assert!(
             matches!(
-                cut_portals(&ir, &mut data),
+                cut_portals(&ir, &tables, &mut data),
                 Err(crate::compile::CompileError::PortalOnDiagonalWall { .. })
             ),
             "cut_portals must reject a door portal on a diagonal wall before doors ever run"

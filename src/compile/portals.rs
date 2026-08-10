@@ -16,6 +16,7 @@ use crate::compile::sectors::vertex_index;
 use crate::compile::{CompileError, LinedefOut, MapData, SectorOut, SidedefOut};
 use crate::geom::{Axis, FacingSpan, Pt, facing_spans, find_facing_span, on_diagonal_wall};
 use crate::ir::{Ir, Portal, PortalKind};
+use crate::tables::Tables;
 
 /// Opens every portal into the facing walls of its two rooms and fills the
 /// gap between them.
@@ -37,9 +38,11 @@ use crate::ir::{Ir, Portal, PortalKind};
 /// [`CompileError::PortalOffWall`] when the midpoint is not on a facing wall,
 /// [`CompileError::PortalTooWide`] when the opening exceeds the facing span,
 /// [`CompileError::OverlappingPortals`] when two openings overlap on the same
-/// wall line, and [`CompileError::OpeningNotInAWall`] when no single solid
-/// wall of a room spans the opening.
-pub fn cut_portals(ir: &Ir, data: &mut MapData) -> Result<(), CompileError> {
+/// wall line, [`CompileError::OpeningNotInAWall`] when no single solid wall
+/// of a room spans the opening, and [`CompileError::PortalNoHeadroom`] when a
+/// plain portal's passage sector would have too little (or no) headroom for
+/// the player.
+pub fn cut_portals(ir: &Ir, tables: &Tables, data: &mut MapData) -> Result<(), CompileError> {
     let resolved = ir
         .portals
         .iter()
@@ -49,7 +52,7 @@ pub fn cut_portals(ir: &Ir, data: &mut MapData) -> Result<(), CompileError> {
     check_no_overlapping_openings(&resolved)?;
 
     for (portal, geometry) in &resolved {
-        cut_one(ir, data, portal, geometry)?;
+        cut_one(ir, tables, data, portal, geometry)?;
     }
     Ok(())
 }
@@ -95,6 +98,7 @@ fn check_no_overlapping_openings(
 
 fn cut_one(
     ir: &Ir,
+    tables: &Tables,
     data: &mut MapData,
     portal: &Portal,
     geometry: &PortalGeometry,
@@ -129,9 +133,21 @@ fn cut_one(
     if portal.kind == PortalKind::Plain {
         let room_a = &ir.rooms[geometry.ia];
         let room_b = &ir.rooms[geometry.ib];
+        let floor = room_a.floor.max(room_b.floor);
+        let ceiling = room_a.ceiling.min(room_b.ceiling);
+        let need = tables.player().height;
+        let have = ceiling - floor;
+        if have < need {
+            return Err(CompileError::PortalNoHeadroom {
+                a: portal.a.clone(),
+                b: portal.b.clone(),
+                have,
+                need,
+            });
+        }
         let sector_out = SectorOut {
-            floor: room_a.floor.max(room_b.floor),
-            ceiling: room_a.ceiling.min(room_b.ceiling),
+            floor,
+            ceiling,
             light: room_a.light,
             floor_tex: room_a.floor_tex.clone(),
             ceil_tex: room_a.ceil_tex.clone(),
@@ -705,6 +721,7 @@ mod tests {
     use crate::compile::{CompileError, MapData};
     use crate::geom::{Pt, contains};
     use crate::ir::Ir;
+    use crate::tables::Tables;
 
     /// Room `a` is the fixed 256-unit square at the origin; room `b` is a
     /// same-size square whose west wall sits at `b_near`, which must be at
@@ -733,8 +750,9 @@ mod tests {
     #[test]
     fn a_portal_becomes_a_passage_with_two_thresholds_and_a_new_sector() {
         let ir = Ir::from_json(&ir_with_portal(128, (256, 128), 320)).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals cut");
+        cut_portals(&ir, &tables, &mut data).expect("portals cut");
 
         assert_eq!(data.sectors.len(), 3, "room a, room b, and the passage");
         let two_sided: Vec<_> = data.linedefs.iter().filter(|l| l.back.is_some()).collect();
@@ -844,9 +862,10 @@ mod tests {
     #[test]
     fn cutting_leaves_each_room_watertight() {
         let ir = Ir::from_json(&ir_with_portal(128, (256, 128), 320)).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
         let before = data.linedefs.len();
-        cut_portals(&ir, &mut data).expect("portals cut");
+        cut_portals(&ir, &tables, &mut data).expect("portals cut");
         // Each side's wall splits into two flanking one-sided pieces (4
         // total); the passage sector between them adds two thresholds and
         // two jambs (4 more): 8 - 2 + 4 + 4 = 14.
@@ -873,9 +892,10 @@ mod tests {
           ],
           "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }] }"#;
         let ir = Ir::from_json(ir_json).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
         assert!(matches!(
-            cut_portals(&ir, &mut data),
+            cut_portals(&ir, &tables, &mut data),
             Err(CompileError::NotAdjacent { .. })
         ));
     }
@@ -883,9 +903,10 @@ mod tests {
     #[test]
     fn rejects_an_opening_wider_than_the_facing_wall() {
         let ir = Ir::from_json(&ir_with_portal(512, (256, 128), 320)).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
         assert!(matches!(
-            cut_portals(&ir, &mut data),
+            cut_portals(&ir, &tables, &mut data),
             Err(CompileError::PortalTooWide { .. })
         ));
     }
@@ -893,9 +914,10 @@ mod tests {
     #[test]
     fn rejects_an_opening_that_is_not_on_the_facing_wall() {
         let ir = Ir::from_json(&ir_with_portal(128, (128, 128), 320)).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
         assert!(matches!(
-            cut_portals(&ir, &mut data),
+            cut_portals(&ir, &tables, &mut data),
             Err(CompileError::PortalOffWall { .. })
         ));
     }
@@ -1067,8 +1089,9 @@ mod tests {
     /// sector, and hands back the result.
     fn assert_well_formed(ir_json: &str) -> (Ir, MapData) {
         let ir = Ir::from_json(ir_json).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals cut");
+        cut_portals(&ir, &tables, &mut data).expect("portals cut");
         assert_sector_boundaries_are_closed(&data);
         assert_sidedefs_face_their_sectors(&ir, &data);
         (ir, data)
@@ -1179,9 +1202,10 @@ mod tests {
               "portals":[{{ "a":"a", "b":"b", "kind":"plain", "width":64, "at":[256,64] }}] }}"#
         );
         let ir = Ir::from_json(&ir_json).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
         assert!(matches!(
-            cut_portals(&ir, &mut data),
+            cut_portals(&ir, &tables, &mut data),
             Err(CompileError::NotAdjacent { .. })
         ));
     }
@@ -1259,9 +1283,10 @@ mod tests {
         // y 64..192 and y 128..256 overlap over y 128..192. Cutting the
         // second would find no intact wall where the first already opened.
         let ir = Ir::from_json(&two_portal_ir(128, 128, 192, 128)).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
         assert!(matches!(
-            cut_portals(&ir, &mut data),
+            cut_portals(&ir, &tables, &mut data),
             Err(CompileError::OverlappingPortals { .. })
         ));
     }
@@ -1462,9 +1487,10 @@ mod tests {
     #[test]
     fn a_portal_on_a_wall_two_rooms_share_only_diagonally_names_the_diagonal_wall() {
         let ir = Ir::from_json(DIAGONAL_TWIN_TRIANGLES).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        let err =
-            cut_portals(&ir, &mut data).expect_err("a diagonal wall cannot host a portal in v1");
+        let err = cut_portals(&ir, &tables, &mut data)
+            .expect_err("a diagonal wall cannot host a portal in v1");
         match err {
             CompileError::PortalOnDiagonalWall { a, b, x, y } => {
                 assert_eq!(a, "a");
@@ -1503,10 +1529,11 @@ mod tests {
     #[test]
     fn a_portal_on_room_as_own_diagonal_wall_is_flagged_even_when_room_b_is_unrelated() {
         let ir = Ir::from_json(OCTAGON_DIAGONAL_UNRELATED_B).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
         assert!(
             matches!(
-                cut_portals(&ir, &mut data),
+                cut_portals(&ir, &tables, &mut data),
                 Err(CompileError::PortalOnDiagonalWall { x: 32, y: 224, .. })
             ),
             "room a's own diagonal wall must be flagged even though room b never touches it"
@@ -1529,8 +1556,9 @@ mod tests {
           ],
           "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }] }"#;
         let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
         let mut data = emit_sectors(&ir).expect("sectors");
-        cut_portals(&ir, &mut data).expect("portals");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
 
         assert_eq!(data.sectors[0].wall_tex, "WA", "room a keeps its own");
         assert_eq!(data.sectors[1].wall_tex, "WB", "room b keeps its own");
