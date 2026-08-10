@@ -25,7 +25,9 @@
 //! door portal's flanking walls in place but the gap itself still empty —
 //! the chain this pass builds is exactly what fills it.
 
-use crate::compile::portals::{Cut, emit_jambs, emit_opening, emit_segment, resolve_portal};
+use crate::compile::portals::{
+    Cut, emit_jambs, emit_opening, emit_segment, mark_secret_thresholds, resolve_portal,
+};
 use crate::compile::tags::TagAllocator;
 use crate::compile::{CompileError, MapData, SectorOut};
 use crate::ir::{Ir, Portal, PortalKind, Room};
@@ -261,8 +263,13 @@ pub fn emit_doors(
         // built above, as one of the door's own two faces; building it again
         // here would emit the same physical wall twice as two coincident,
         // overlapping linedefs.
+        // Every two-sided line along the chain, outermost inward. A door
+        // into a secret room conceals all of them on the automap, not just
+        // the outer pair — see `mark_secret_thresholds`.
+        let mut thresholds = vec![door_seg.near_line, door_seg.far_line];
+
         if let Some(alcove) = near_alcove {
-            emit_opening(
+            thresholds.push(emit_opening(
                 data,
                 &Cut {
                     axis,
@@ -273,13 +280,13 @@ pub fn emit_doors(
                 geometry.ia,
                 alcove,
                 a_forward,
-            );
+            ));
             emit_jambs(
                 data, axis, open_lo, open_hi, a_forward, pos0, pos1, alcove, &trim_tex,
             );
         }
         if let Some(alcove) = far_alcove {
-            emit_opening(
+            thresholds.push(emit_opening(
                 data,
                 &Cut {
                     axis,
@@ -290,11 +297,13 @@ pub fn emit_doors(
                 geometry.ib,
                 alcove,
                 !a_forward,
-            );
+            ));
             emit_jambs(
                 data, axis, open_lo, open_hi, a_forward, pos2, pos3, alcove, &trim_tex,
             );
         }
+
+        mark_secret_thresholds(data, room_a.secret != room_b.secret, thresholds);
 
         for line in [door_seg.near_line, door_seg.far_line] {
             data.linedefs[line].lower_unpegged = true;
@@ -330,6 +339,54 @@ mod tests {
     use crate::geom::{Pt, contains};
     use crate::ir::Ir;
     use crate::tables::Tables;
+
+    /// A door into a secret room conceals **every** two-sided line of its
+    /// chain on the automap — the door's own two faces and both alcoves'
+    /// outer thresholds — not just the pair nearest the ordinary room.
+    ///
+    /// A door chain is the case a plain portal cannot cover: it has up to
+    /// four thresholds rather than two, built by two different code paths
+    /// (`emit_segment` for the door itself, `emit_opening` for each alcove),
+    /// so a fix applied to only one path would still pass the plain-portal
+    /// test in `portals.rs`.
+    #[test]
+    fn a_door_into_a_secret_room_conceals_its_whole_chain() {
+        let json = r#"{ "seed":1, "grid":8, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+            { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W", "secret":true }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128],
+                        "door_thickness":32, "alcove_near":16, "alcove_far":16 }] }"#;
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        emit_doors(&ir, &tables, &mut data, &mut tags).expect("doors");
+
+        let two_sided: Vec<_> = data.linedefs.iter().filter(|l| l.back.is_some()).collect();
+        assert_eq!(
+            two_sided.len(),
+            4,
+            "near alcove's outer threshold, the door's two faces, far alcove's outer threshold"
+        );
+        assert!(
+            two_sided.iter().all(|l| l.secret),
+            "every threshold in the chain is concealed, not just the outermost"
+        );
+        assert!(
+            data.linedefs
+                .iter()
+                .filter(|l| l.back.is_none())
+                .all(|l| !l.secret),
+            "the jambs and room walls are one-sided; the flag would do nothing there"
+        );
+    }
 
     #[test]
     fn validate_door_texture_accepts_a_curated_name_and_rejects_others() {

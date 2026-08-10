@@ -344,12 +344,15 @@ source = "id-Software/DOOM linuxdoom-1.10/p_spec.c, P_PlayerInSpecialSector: 'ca
 # `blocksound` respectively — matching the convention `emit_textmap`
 # already follows for `blocking`/`dontpegbottom`/`dontpegtop`. The values
 # below are the ML_* bit values themselves, kept for citation traceability;
-# they are not written to TEXTMAP directly. Not wired into any emission
-# path yet — see KNOWN-GAPS.md.
+# they are not written to TEXTMAP directly. Of the three, only `secret` is
+# wired into an emission path (`compile::portals` marks a secret room's
+# portal thresholds); `block_monsters` and `sound_block` are sourced and
+# accessible but unemitted — see KNOWN-GAPS.md.
 [linedef.flags]
 block_monsters = 2
+secret = 32
 sound_block = 64
-source = "id-Software/DOOM linuxdoom-1.10/doomdata.h: '#define ML_BLOCKMONSTERS 2 // Blocks monsters only.' and '#define ML_SOUNDBLOCK 64 // Sound rendering: dont let sound cross two of these.' Behavior confirmed in linuxdoom-1.10/p_map.c, PIT_CheckLine: 'if ( !tmthing->player && ld->flags & ML_BLOCKMONSTERS ) return false; // block monsters only' — gated on '!tmthing->player', so it never blocks the player, only non-player things — and linuxdoom-1.10/p_enemy.c, P_RecursiveSound (called from P_NoiseAlert): 'if (check->flags & ML_SOUNDBLOCK) { if (!soundblocks) P_RecursiveSound (other, 1); } else P_RecursiveSound (other, soundblocks);' — a line flagged ML_SOUNDBLOCK lets the sound-alert flood cross it exactly once (soundblocks 0->1) before stopping, rather than propagating indefinitely. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/doomdata.h, .../p_map.c, and .../p_enemy.c"
+source = "id-Software/DOOM linuxdoom-1.10/doomdata.h: '#define ML_BLOCKMONSTERS 2 // Blocks monsters only.', '#define ML_SECRET 32 // In AutoMap: don't map as two sided: IT'S A SECRET!', and '#define ML_SOUNDBLOCK 64 // Sound rendering: dont let sound cross two of these.' Behavior confirmed in linuxdoom-1.10/p_map.c, PIT_CheckLine: 'if ( !tmthing->player && ld->flags & ML_BLOCKMONSTERS ) return false; // block monsters only' — gated on '!tmthing->player', so it never blocks the player, only non-player things — and linuxdoom-1.10/p_enemy.c, P_RecursiveSound (called from P_NoiseAlert): 'if (check->flags & ML_SOUNDBLOCK) { if (!soundblocks) P_RecursiveSound (other, 1); } else P_RecursiveSound (other, soundblocks);' — a line flagged ML_SOUNDBLOCK lets the sound-alert flood cross it exactly once (soundblocks 0->1) before stopping, rather than propagating indefinitely. ML_SECRET's effect is purely cosmetic and purely automap-side, confirmed in linuxdoom-1.10/am_map.c, AM_drawWalls: the else-if chain draws a one-sided line in WALLCOLORS, then 'else if (lines[i].flags & ML_SECRET) { if (cheating) AM_drawMline(&l, SECRETWALLCOLORS + lightlev); else AM_drawMline(&l, WALLCOLORS+lightlev); }' — so a two-sided line carrying it is drawn as solid wall rather than falling through to the FDWALLCOLORS/CDWALLCOLORS branches that reveal a room beyond. Note SECRETWALLCOLORS is itself '#define SECRETWALLCOLORS WALLCOLORS', so even the cheating branch is not a distinct color; nothing in the pinned engine gives a secret *sector* (special 9) any automap treatment, and p_spec.c's P_PlayerInSpecialSector case 9 is only 'player->secretcount++; sector->special = 0;' — no sound, no message. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/doomdata.h, .../p_map.c, .../p_enemy.c, .../am_map.c, and .../p_spec.c"
 
 # Weapon damage — the first COMPUTED values in this file, not read values.
 # Doom weapon damage is randomized per shot (a bullet is

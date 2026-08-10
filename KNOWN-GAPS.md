@@ -119,6 +119,27 @@ wall, and `tests/first_map.rs` pins that exactly one emitted sector carries
 `Tables::secret_sector_special`. This exercises P18's *mechanism*; P18's
 counting rule still does not exist (see above).
 
+**A secret room's portal thresholds also carry `ML_SECRET`, and that is the
+only feedback vanilla gives.** Verified against the pinned engine: entering a
+secret sector runs `p_spec.c`'s `P_PlayerInSpecialSector` case 9, whose entire
+body is `player->secretcount++; sector->special = 0;` — **no sound and no
+message**. The "a secret is revealed" cue belongs to Boom/MBF and the ZDoom
+family, not to vanilla, and the automap gives a secret *sector* no treatment
+at all. What vanilla does offer is `ML_SECRET` (32, `doomdata.h`: "In AutoMap:
+don't map as two sided: IT'S A SECRET!") on a *linedef*: `am_map.c`'s
+`AM_drawWalls` draws such a line in `WALLCOLORS` rather than falling through
+to the floor/ceiling-difference colors that reveal a room beyond, so the
+opening reads as solid wall on the automap.
+`compile::portals::mark_secret_thresholds` sets it on every threshold of a
+portal whose two rooms differ in secrecy — both thresholds of a plain
+portal's passage, and all up to four of a door chain's, since a door's
+alcove thresholds are built by a different code path than its own faces.
+Keyed on the secrecy *difference*, so a portal between two secret rooms is
+left unmarked; there is nothing to conceal there. Note the flag is purely
+cosmetic — nothing about movement, sight, or world rendering changes — and
+`SECRETWALLCOLORS` is itself `#define SECRETWALLCOLORS WALLCOLORS`, so even
+vanilla's cheat-mode branch draws no distinct color.
+
 **Two map artifacts ship, and only one of them loads in a vanilla engine.**
 `maps/entrada.wad` is the **UDMF** build — `MAP01`, `TEXTMAP`, `ZNODES`,
 `ENDMAP` — and needs a ZDoom-family port (GZDoom, Odamex, Eternity).

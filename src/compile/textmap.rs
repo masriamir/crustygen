@@ -50,6 +50,9 @@ pub fn emit_textmap(data: &MapData, things: &[ThingOut]) -> String {
         if l.upper_unpegged {
             s.push_str(" dontpegtop = true;");
         }
+        if l.secret {
+            s.push_str(" secret = true;");
+        }
         s.push_str(" }\n");
     }
     s.push('\n');

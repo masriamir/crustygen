@@ -185,7 +185,7 @@ fn cut_one(
             tag: 0,
             wall_tex: room_a.wall_tex.clone(),
         };
-        emit_gap_sector(
+        let segment = emit_gap_sector(
             data,
             &geometry.span,
             geometry.open_lo,
@@ -194,6 +194,11 @@ fn cut_one(
             geometry.ib,
             sector_out,
             &room_a.wall_tex,
+        );
+        mark_secret_thresholds(
+            data,
+            room_a.secret != room_b.secret,
+            [segment.near_line, segment.far_line],
         );
     }
 
@@ -325,6 +330,7 @@ pub(crate) fn split_wall_for_opening(
             tag: 0,
             lower_unpegged: wall.lower_unpegged,
             upper_unpegged: wall.upper_unpegged,
+            secret: false,
         });
     }
     Ok(())
@@ -383,6 +389,7 @@ pub(crate) fn emit_opening(
         tag: 0,
         lower_unpegged: false,
         upper_unpegged: false,
+        secret: false,
     });
     data.linedefs.len() - 1
 }
@@ -687,7 +694,7 @@ pub(crate) fn emit_gap_sector(
     sector_b: usize,
     sector_out: SectorOut,
     jamb_tex: &str,
-) -> usize {
+) -> Segment {
     let sector = data.sectors.len();
     data.sectors.push(sector_out);
     emit_segment(
@@ -702,8 +709,37 @@ pub(crate) fn emit_gap_sector(
         sector,
         sector_b,
         jamb_tex,
-    );
-    sector
+    )
+}
+
+/// Sets `ML_SECRET` on `lines` when `crosses_boundary` — that is, when the
+/// portal these lines belong to joins a secret room to an ordinary one.
+///
+/// The flag is purely automap-side (`am_map.c`, `AM_drawWalls`: a two-sided
+/// line carrying it is drawn in `WALLCOLORS` instead of falling through to
+/// the floor/ceiling-difference colors that reveal a room beyond), so this
+/// changes nothing about movement or rendering in the world — it only stops
+/// the automap from advertising the way in.
+///
+/// Applied to *both* thresholds of the chain rather than only the outer one:
+/// concealing the opening from one side alone would still betray the room to
+/// a player who has mapped the passage between them.
+///
+/// Deliberately keyed on the secrecy *difference* rather than on either
+/// room's own flag, so a portal joining two secret rooms — one secret area
+/// subdivided — is left unmarked, exactly as a portal joining two ordinary
+/// rooms is. There is nothing to conceal at such a boundary.
+pub(crate) fn mark_secret_thresholds(
+    data: &mut MapData,
+    crosses_boundary: bool,
+    lines: impl IntoIterator<Item = usize>,
+) {
+    if !crosses_boundary {
+        return;
+    }
+    for line in lines {
+        data.linedefs[line].secret = true;
+    }
 }
 
 /// Emits a one-sided wall from `p1` to `p2`, front bound to `sector`, with
@@ -738,6 +774,7 @@ pub(crate) fn emit_side_wall(
         tag: 0,
         lower_unpegged: false,
         upper_unpegged: false,
+        secret: false,
     });
     data.linedefs.len() - 1
 }
@@ -1568,6 +1605,67 @@ mod tests {
             ),
             "room a's own diagonal wall must be flagged even though room b never touches it"
         );
+    }
+
+    /// A portal into a secret room marks both of its threshold lines
+    /// `ML_SECRET`, so the automap draws them as solid wall instead of
+    /// revealing a room beyond.
+    ///
+    /// Both thresholds, not just the outer one: the flag is what conceals
+    /// the opening, and concealing it from only one side would still betray
+    /// the room to a player who has mapped the passage.
+    #[test]
+    fn a_portal_into_a_secret_room_marks_its_thresholds_secret() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+            { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W", "secret":true }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }] }"#;
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
+
+        let thresholds: Vec<_> = data.linedefs.iter().filter(|l| l.back.is_some()).collect();
+        assert_eq!(thresholds.len(), 2, "a plain portal emits two thresholds");
+        assert!(
+            thresholds.iter().all(|l| l.secret),
+            "both thresholds of a portal into a secret room are ML_SECRET"
+        );
+        assert!(
+            data.linedefs
+                .iter()
+                .filter(|l| l.back.is_none())
+                .all(|l| !l.secret),
+            "one-sided walls are never marked secret — the flag only changes how a \
+             two-sided line is drawn"
+        );
+    }
+
+    /// The flag is tied to the secrecy *difference* across a portal, not to
+    /// the presence of a portal. A map with no secret room marks nothing.
+    #[test]
+    fn a_portal_between_two_ordinary_rooms_marks_nothing_secret() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+            { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }] }"#;
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
+        assert!(data.linedefs.iter().all(|l| !l.secret));
     }
 
     /// Every emitted sector records the wall texture its faces use — rooms

@@ -319,6 +319,7 @@ mod tests {
                 tag: 0,
                 lower_unpegged: false,
                 upper_unpegged: false,
+                secret: false,
             }],
         };
         apply_height_textures(&mut data);

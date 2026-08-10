@@ -96,6 +96,7 @@ pub fn emit_sectors(ir: &Ir) -> Result<MapData, CompileError> {
                 tag: 0,
                 lower_unpegged: false,
                 upper_unpegged: false,
+                secret: false,
             });
         }
     }

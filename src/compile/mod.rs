@@ -55,6 +55,13 @@ pub struct SidedefOut {
 
 /// A linedef as it will be emitted.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool mirrors an independent bit of the engine's `maplinedef_t.flags` \
+              bitfield, and UDMF's `doom` namespace spells each as its own named boolean \
+              field rather than packing them. Collapsing them into a state machine or \
+              two-variant enums would misrepresent a format where any combination is legal"
+)]
 pub struct LinedefOut {
     /// Start vertex index.
     pub v1: usize,
@@ -74,6 +81,13 @@ pub struct LinedefOut {
     pub lower_unpegged: bool,
     /// Upper-unpegged flag.
     pub upper_unpegged: bool,
+    /// `ML_SECRET`: the automap draws this line as solid wall rather than
+    /// revealing that a sector lies beyond it.
+    ///
+    /// Purely cosmetic and purely automap-side — it changes nothing about
+    /// movement, sight, or rendering in the world. Set on the threshold
+    /// lines of a portal joining a secret room to an ordinary one.
+    pub secret: bool,
 }
 
 /// The full set of emitted map records.

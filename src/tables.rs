@@ -194,6 +194,7 @@ struct SectorSpecials {
 #[derive(Debug, Deserialize)]
 struct LinedefFlags {
     block_monsters: u16,
+    secret: u16,
     sound_block: u16,
 }
 
@@ -549,6 +550,7 @@ impl Tables {
     pub fn linedef_flag(&self, name: &str) -> Option<u16> {
         match name {
             "block_monsters" => Some(self.engine.linedef.flags.block_monsters),
+            "secret" => Some(self.engine.linedef.flags.secret),
             "sound_block" => Some(self.engine.linedef.flags.sound_block),
             _ => None,
         }

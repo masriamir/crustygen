@@ -114,6 +114,7 @@ mod tests {
                 tag,
                 lower_unpegged: false,
                 upper_unpegged: false,
+                secret: false,
             }],
         }
     }
