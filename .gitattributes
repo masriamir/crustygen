@@ -1,0 +1,10 @@
+# The compiler emits LF unconditionally, and `tests/golden_textmap.rs`
+# compares its output to these fixtures byte-for-byte. A CRLF checkout on
+# Windows fails that comparison — which is exactly what happened on this
+# repository's first CI run, on three tests at once.
+*.textmap -text
+*.json    -text
+
+# WADs are binary. `tests/first_map.rs` compares the committed artifact to
+# freshly compiled bytes, so any newline translation would corrupt it.
+*.wad binary
