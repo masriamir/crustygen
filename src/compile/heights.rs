@@ -10,18 +10,72 @@ enum Slot {
     Lower,
 }
 
+/// Returns the sidedef the engine draws the **lower** texture on, given each
+/// side's own floor height and sidedef index — or `None` when the floors are
+/// equal and no lower is needed at all.
+///
+/// Doom samples exactly one sidedef per floor difference (`r_segs.c`,
+/// `R_StoreWallRange` at the pinned commit): the bottom texture is drawn
+/// `if (worldlow > worldbottom)`, both measured from the front sector. That
+/// resolves to a simple rule: the **lower** always comes from the sidedef
+/// whose own sector has the **lower** floor — so `front` is visible when
+/// `back`'s floor is the higher one, and `back` is visible otherwise.
+///
+/// This is the single place that comparison is made. [`apply_height_textures`]
+/// and `crate::rules::check_missing_textures` (the pass that fills a lower
+/// texture and the rule that requires one) both call this rather than
+/// re-deriving the comparison, so they cannot independently drift on which
+/// side is correct — the exact failure mode ("compiles clean, renders
+/// broken") this pass exists to close.
+#[must_use]
+pub fn visible_lower_side(
+    front_floor: i32,
+    back_floor: i32,
+    front: usize,
+    back: usize,
+) -> Option<usize> {
+    match front_floor.cmp(&back_floor) {
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Less => Some(front),
+        std::cmp::Ordering::Greater => Some(back),
+    }
+}
+
+/// Returns the sidedef the engine draws the **upper** texture on, given each
+/// side's own ceiling height and sidedef index — or `None` when the ceilings
+/// are equal and no upper is needed at all.
+///
+/// Doom samples exactly one sidedef per ceiling difference (`r_segs.c`,
+/// `R_StoreWallRange` at the pinned commit): the top texture is drawn
+/// `if (worldhigh < worldtop)`, both measured from the front sector. That
+/// resolves to a simple rule: the **upper** always comes from the sidedef
+/// whose own sector has the **higher** ceiling — so `front` is visible when
+/// `back`'s ceiling is the lower one, and `back` is visible otherwise.
+///
+/// See [`visible_lower_side`]'s doc comment for why this comparison is
+/// factored out into its own function rather than inlined at each call site.
+#[must_use]
+pub fn visible_upper_side(
+    front_ceiling: i32,
+    back_ceiling: i32,
+    front: usize,
+    back: usize,
+) -> Option<usize> {
+    match front_ceiling.cmp(&back_ceiling) {
+        std::cmp::Ordering::Equal => None,
+        std::cmp::Ordering::Greater => Some(front),
+        std::cmp::Ordering::Less => Some(back),
+    }
+}
+
 /// Writes the upper and lower textures every two-sided line needs, on the
 /// one side the engine actually draws.
 ///
-/// Doom samples exactly one sidedef per difference (`r_segs.c`,
-/// `R_StoreWallRange` at the pinned commit): the bottom texture is taken
-/// `if (worldlow > worldbottom)` and the top `if (worldhigh < worldtop)`,
-/// both measured from the front sector. So the **lower** comes from the
-/// sidedef whose own sector has the **lower floor**, and the **upper** from
-/// the sidedef whose own sector has the **higher ceiling**. The opposite
-/// sidedef is never read, which is why this fills one side and leaves the
-/// other bare — matching what vanilla maps themselves do 98.6% of the time
-/// (see the verticality corpus report).
+/// Which side that is comes from [`visible_lower_side`] and
+/// [`visible_upper_side`]; see their doc comments for the `r_segs.c`
+/// justification. The opposite sidedef is never read by the engine, which is
+/// why this fills one side and leaves the other bare — matching what vanilla
+/// maps themselves do 98.6% of the time (see the verticality corpus report).
 ///
 /// The texture is the bordering sector's own
 /// [`SectorOut::wall_tex`](crate::compile::SectorOut::wall_tex), so a riser
@@ -52,20 +106,10 @@ pub fn apply_height_textures(data: &mut MapData) {
             (s.floor, s.ceiling)
         };
 
-        if back_floor != front_floor {
-            let visible = if back_floor > front_floor {
-                front
-            } else {
-                back
-            };
+        if let Some(visible) = visible_lower_side(front_floor, back_floor, front, back) {
             fill(data, visible, &Slot::Lower);
         }
-        if back_ceiling != front_ceiling {
-            let visible = if back_ceiling < front_ceiling {
-                front
-            } else {
-                back
-            };
+        if let Some(visible) = visible_upper_side(front_ceiling, back_ceiling, front, back) {
             fill(data, visible, &Slot::Upper);
         }
     }
@@ -92,10 +136,11 @@ fn fill(data: &mut MapData, sidedef: usize, slot: &Slot) {
 
 #[cfg(test)]
 mod tests {
-    use crate::compile::MapData;
     use crate::compile::heights::apply_height_textures;
     use crate::compile::portals::cut_portals;
     use crate::compile::sectors::emit_sectors;
+    use crate::compile::{LinedefOut, MapData, SectorOut, SidedefOut};
+    use crate::geom::Pt;
     use crate::ir::Ir;
 
     /// Two rooms joined by a plain portal, each height independently
@@ -203,5 +248,83 @@ mod tests {
         assert_eq!(data.sidedefs[front].upper, "WA");
         assert!(data.sidedefs[back].lower.is_empty());
         assert!(data.sidedefs[back].upper.is_empty());
+    }
+
+    #[test]
+    fn a_higher_front_floor_and_lower_front_ceiling_textures_the_back_side() {
+        // Every fixture above only ever exercises the `front` arm of
+        // `visible_lower_side`/`visible_upper_side`: a plain portal's gap
+        // sector always takes `max(floor)`/`min(ceiling)`, and
+        // `compile::portals::emit_opening` always makes the *room's* own
+        // sidedef the linedef's front — so the compiler itself never
+        // currently emits a linedef whose *back* sidedef is the visible
+        // one. A hand-built `MapData` is the only way to exercise that arm
+        // directly today: two sectors and one two-sided linedef, with
+        // `front`'s own sector given the higher floor and the lower
+        // ceiling, so both the lower and the upper must land on `back`.
+        let mut data = MapData {
+            vertices: vec![Pt { x: 0, y: 0 }, Pt { x: 0, y: 64 }],
+            sectors: vec![
+                SectorOut {
+                    floor: 32,
+                    ceiling: 96,
+                    light: 160,
+                    floor_tex: "F".to_owned(),
+                    ceil_tex: "C".to_owned(),
+                    special: 0,
+                    tag: 0,
+                    wall_tex: "FRONT_TEX".to_owned(),
+                },
+                SectorOut {
+                    floor: 0,
+                    ceiling: 128,
+                    light: 160,
+                    floor_tex: "F".to_owned(),
+                    ceil_tex: "C".to_owned(),
+                    special: 0,
+                    tag: 0,
+                    wall_tex: "BACK_TEX".to_owned(),
+                },
+            ],
+            sidedefs: vec![
+                SidedefOut {
+                    sector: 0,
+                    upper: String::new(),
+                    middle: String::new(),
+                    lower: String::new(),
+                },
+                SidedefOut {
+                    sector: 1,
+                    upper: String::new(),
+                    middle: String::new(),
+                    lower: String::new(),
+                },
+            ],
+            linedefs: vec![LinedefOut {
+                v1: 0,
+                v2: 1,
+                front: 0,
+                back: Some(1),
+                blocking: false,
+                special: 0,
+                tag: 0,
+                lower_unpegged: false,
+                upper_unpegged: false,
+            }],
+        };
+        apply_height_textures(&mut data);
+        assert_eq!(
+            data.sidedefs[1].lower, "BACK_TEX",
+            "back has the lower floor, so the lower comes from back's own texture"
+        );
+        assert_eq!(
+            data.sidedefs[1].upper, "BACK_TEX",
+            "back has the higher ceiling, so the upper comes from back's own texture too"
+        );
+        assert!(
+            data.sidedefs[0].lower.is_empty(),
+            "front is never sampled by the renderer here and stays bare"
+        );
+        assert!(data.sidedefs[0].upper.is_empty());
     }
 }

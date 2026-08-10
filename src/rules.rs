@@ -12,6 +12,7 @@
 //! module as covering them.
 
 use crate::compile::Compiled;
+use crate::compile::heights::{visible_lower_side, visible_upper_side};
 use crate::ir::{Ir, PortalKind};
 use crate::tables::Tables;
 
@@ -165,45 +166,39 @@ fn check_missing_textures(out: &Compiled, v: &mut Vec<RuleViolation>) {
         let back = &out.data.sidedefs[back_idx];
         let front_sector = &out.data.sectors[front.sector];
         let back_sector = &out.data.sectors[back.sector];
-        // Doom samples only one sidedef per difference (`r_segs.c`,
-        // `R_StoreWallRange`): the lower from the sidedef whose own sector is
-        // the lower one, the upper from the sidedef whose own sector has the
-        // higher ceiling. Requiring the other side as well would reject the
+        // Which side the engine draws is decided in exactly one place —
+        // `heights::visible_lower_side`/`visible_upper_side`, the same
+        // functions `heights::apply_height_textures` calls to fill the
+        // texture in the first place — so the pass that fills a texture and
+        // the rule that requires one cannot independently drift on which
+        // side is right. Requiring the other side as well would reject the
         // overwhelming majority of vanilla Doom's own boundaries — measured
         // at 89.5% across DOOM, DOOM2, TNT, and PLUTONIA.
-        if front_sector.floor != back_sector.floor {
-            let visible = if back_sector.floor > front_sector.floor {
-                front
-            } else {
-                back
-            };
-            if visible.lower.is_empty() {
-                v.push(RuleViolation {
-                    rule: "P8",
-                    subject: format!("linedef {i}"),
-                    detail: format!(
-                        "floors differ ({} vs {}) but the lower side has no lower texture",
-                        front_sector.floor, back_sector.floor
-                    ),
-                });
-            }
+        if let Some(visible) =
+            visible_lower_side(front_sector.floor, back_sector.floor, l.front, back_idx)
+            && out.data.sidedefs[visible].lower.is_empty()
+        {
+            v.push(RuleViolation {
+                rule: "P8",
+                subject: format!("linedef {i}"),
+                detail: format!(
+                    "floors differ ({} vs {}) but the lower side has no lower texture",
+                    front_sector.floor, back_sector.floor
+                ),
+            });
         }
-        if front_sector.ceiling != back_sector.ceiling {
-            let visible = if back_sector.ceiling < front_sector.ceiling {
-                front
-            } else {
-                back
-            };
-            if visible.upper.is_empty() {
-                v.push(RuleViolation {
-                    rule: "P8",
-                    subject: format!("linedef {i}"),
-                    detail: format!(
-                        "ceilings differ ({} vs {}) but the higher-ceiling side has no upper texture",
-                        front_sector.ceiling, back_sector.ceiling
-                    ),
-                });
-            }
+        if let Some(visible) =
+            visible_upper_side(front_sector.ceiling, back_sector.ceiling, l.front, back_idx)
+            && out.data.sidedefs[visible].upper.is_empty()
+        {
+            v.push(RuleViolation {
+                rule: "P8",
+                subject: format!("linedef {i}"),
+                detail: format!(
+                    "ceilings differ ({} vs {}) but the higher-ceiling side has no upper texture",
+                    front_sector.ceiling, back_sector.ceiling
+                ),
+            });
         }
     }
 }
@@ -426,11 +421,32 @@ mod tests {
         assert!(!violations(&ir(0, 128, 160)).contains(&"P9".to_owned()));
     }
 
+    /// The (front, back) sidedef indices of the linedef joining room `a`
+    /// (sector 0) and the passage `portal_ir`'s single plain portal emits
+    /// (sector 2). Fixed by construction, not recomputed: `cut_portals`
+    /// always calls `emit_opening` with the *room* as `sector_a`, and
+    /// `emit_opening` always makes `sector_a` the linedef's front regardless
+    /// of orientation — so room `a`'s own sidedef is always `front` here.
+    /// Verified directly against `compile_reporting`'s output for this exact
+    /// fixture before being hard-coded (see the task-2 fix report).
+    fn room_a_passage_boundary(out: &crate::compile::Compiled) -> (usize, usize) {
+        out.data
+            .linedefs
+            .iter()
+            .filter_map(|l| l.back.map(|b| (l.front, b)))
+            .find(|(f, b)| out.data.sidedefs[*f].sector == 0 && out.data.sidedefs[*b].sector == 2)
+            .expect("room a borders the passage sector directly")
+    }
+
     #[test]
     fn p8_fires_when_the_drawn_side_loses_its_lower_texture() {
         // The compiler now fills this in, so the rule can only be exercised
         // by taking it back out — which is also the mutation proof that the
-        // rule is watching the side the renderer actually samples.
+        // rule is watching the side the renderer actually samples. Which
+        // side is "drawn" is a fixed expectation of this fixture
+        // (`room_a_passage_boundary`'s doc comment), not something
+        // recomputed here — a test that re-derived the visibility rule
+        // could not detect the rule itself changing.
         let ir = Ir::from_json(&portal_ir(16, 128, 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         let (mut out, found) = compile_reporting(&ir, &tables).expect("compiles");
@@ -439,25 +455,11 @@ mod tests {
             "a compiled height difference is textured, so P8 is quiet"
         );
 
-        let victim = out
-            .data
-            .linedefs
-            .iter()
-            .filter_map(|l| l.back.map(|b| (l.front, b)))
-            .find(|(f, b)| {
-                out.data.sectors[out.data.sidedefs[*f].sector].floor
-                    != out.data.sectors[out.data.sidedefs[*b].sector].floor
-            })
-            .expect("some boundary has a floor difference");
-        let (front, back) = victim;
-        let lower_side = if out.data.sectors[out.data.sidedefs[back].sector].floor
-            > out.data.sectors[out.data.sidedefs[front].sector].floor
-        {
-            front
-        } else {
-            back
-        };
-        out.data.sidedefs[lower_side].lower.clear();
+        // Room a's floor (0) is below the passage's (16), so room a's own
+        // sidedef — the boundary's front, by construction — is the drawn
+        // side.
+        let (front, _back) = room_a_passage_boundary(&out);
+        out.data.sidedefs[front].lower.clear();
 
         let violations = check_all(&ir, &tables, &out);
         assert!(violations.iter().any(|v| v.rule == "P8"));
@@ -468,22 +470,17 @@ mod tests {
         // The other half of the same rule: vanilla leaves the unsampled side
         // bare 89.5% of the time, so a bare hidden side must not be a
         // violation. A rule that still demanded both sides passes the test
-        // above and fails this one.
+        // above and fails this one. As above, which side is hidden (the
+        // passage's own sidedef, the boundary's back) is a fixed
+        // expectation, not recomputed.
         let ir = Ir::from_json(&portal_ir(16, 128, 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         let (out, _) = compile_reporting(&ir, &tables).expect("compiles");
-        let bare = out
-            .data
-            .linedefs
-            .iter()
-            .filter_map(|l| l.back.map(|b| (l.front, b)))
-            .any(|(f, b)| {
-                let ff = out.data.sectors[out.data.sidedefs[f].sector].floor;
-                let bf = out.data.sectors[out.data.sidedefs[b].sector].floor;
-                let hidden = if bf > ff { b } else { f };
-                ff != bf && out.data.sidedefs[hidden].lower.is_empty()
-            });
-        assert!(bare, "the unsampled side is left bare, and that is legal");
+        let (_front, back) = room_a_passage_boundary(&out);
+        assert!(
+            out.data.sidedefs[back].lower.is_empty(),
+            "the unsampled side is left bare, and that is legal"
+        );
         assert!(check_all(&ir, &tables, &out).iter().all(|v| v.rule != "P8"));
     }
 
