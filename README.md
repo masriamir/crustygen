@@ -94,9 +94,10 @@ The honest list is [`KNOWN-GAPS.md`](KNOWN-GAPS.md). The headlines:
   JSON; the Markdown front end in `docs/design.md` is designed, not built.
 - **No verifier and no conformance report.** `docs/design.md` §8 specifies
   five verification layers; layers 2 and 4 do not exist.
-- **No reachability check.** A drop beyond one step is legal and one-way, and
-  nothing confirms the player can still finish. That is rule P7.
-- **11 of 25 playability rules** are implemented.
+- **A reachability check exists.** A drop beyond one step is legal and
+  one-way, so `src/reach.rs` floods `(sector, keys-held)` states to confirm
+  the player can still finish. That is rule P7.
+- **12 of 25 playability rules** are implemented.
 - **Texture alignment is minimal** — only an exit switch is centred; offsets
   do not accumulate across collinear runs.
 

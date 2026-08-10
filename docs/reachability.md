@@ -63,14 +63,14 @@ The core owns an abstract traversal graph and the search over it:
 
 - **Nodes** are sectors: floor, ceiling, and the keys collectible there.
 - **Edges** are shared boundaries: two node indices and a kind — `Open`, or
-  `Door { lock: Option<KeyId> }`.
+  `Door { lock: Option<KeyClass> }`.
 - **`start`** is the node holding the player 1 start; **`goals`** are the nodes from
   which an exit fires.
 - **Locks are interned by color, not by key kind.** `p_doors.c`'s `EV_VerticalDoor`
   (371–403, pinned commit) opens special 26/27/28 for the card **or** the skull of the
   color — `!p->cards[it_bluecard] && !p->cards[it_blueskull]` — and the vocabulary
   maps both kinds of a color to the same special. A blue skull opens a door authored
-  `lock: "blue_card"`, and the flood must agree with the engine, so a `KeyId` is the
+  `lock: "blue_card"`, and the flood must agree with the engine, so a `KeyClass` is the
   color class and both key things of a color contribute it. A state is `(node, mask)`
   over a small bitmask (three colors); entering a node unions its keys into the mask,
   so masks only grow along a walk.
@@ -102,7 +102,11 @@ bookkeeping threads through the emit passes.
    graph; any forward-reachable state that cannot reach a goal is a softlock. Reported
    per node with the keys held — "the player can reach `key_room` holding `blue_card`
    but can no longer finish from there" — which for the shipped bug is the actionable
-   message naming the culprit room.
+   message naming the culprit room. When no exit is reachable at all — the finishable
+   check above already failed — every visited state is trivially doomed, so the
+   stranding report is narrowed to only the key-collecting sectors — the likely
+   culprits — rather than burying the finishability headline under every room in the
+   map.
 3. **Coverage** (§2's "every area reachable"). Any node never forward-reached in any
    state. Rooms are named by id; compiler-made sectors by adjacency.
 
@@ -191,3 +195,7 @@ P20's explicit per-pickup loop, the `crustygen-check` verifier and its
 and any lift-riding edge kind (phase 3). The "specified order" clause of §2 — keys and
 doors in the *authored* sequence — needs the map-spec (#1) and belongs to the
 conformance stage; P7 asserts an order exists, not that it matches the spec.
+
+Reconciling P7's colour-class lock checking with P24's exact-string lock checking is
+also out of scope — the two rules deliberately disagree; see `KNOWN-GAPS.md`'s
+"P24 is stricter than the engine about key kinds, and P7 is not."

@@ -10,18 +10,23 @@ future contributor would otherwise have to re-derive.
 ## Not implemented, by design
 
 The compiler covers structural invariants S1–S6 and playability rules P2,
-P3, P4, P8, P9, P11, P13, P14, P19, P24, P25. **P1** is retired — see
+P3, P4, P7, P8, P9, P11, P13, P14, P19, P24, P25. **P1** is retired — see
 `rules.rs`'s module doc and `CompileError::PortalNoHeadroom`, and the gap
 entry below.
 
 Deliberately absent, deferred to the next stage: **P5** (lifts), **P6** (monster
-mobility), **P7** (no softlock), **P10** (clean vertical tiling), **P12** (sky
+mobility), **P10** (clean vertical tiling), **P12** (sky
 coherence), **P15** (teleport pairing), **P16**/**P17** (liquids and damage
 survivability), **P18** (secret accounting), **P20** (pickup accessibility),
 **P21** (light sources), **P22** (hanging decorations), **P23** (barrel
 safety).
 
-P7 and P20 both need a key-aware reachability flood that does not exist yet.
+P20 still needs a per-pickup check. The key-aware reachability flood both
+P7 and P20 were waiting on now exists in `reach.rs`, but at today's geometry
+granularity — things live in rooms, not sub-room positions — P7's coverage
+check (every room forward-reached from the start) already subsumes P20's
+"every pickup is reachable" at that granularity. The explicit per-pickup loop
+becomes meaningful, and worth writing, once intra-room verticality exists.
 
 **P2 (headroom) is now fully covered.** `compile::things::place_things` checks
 every room's headroom against the player's own height once per room,
@@ -71,17 +76,22 @@ secret room was added — each change adds sidedefs, and the orphan count stays
 at exactly two throughout, still `armory`'s own two end-to-end-consumed walls,
 unaffected by either change).
 
-**A drop over one step is one-way, and nothing checks the map is still
-finishable.** `P_TryMove` caps the climb (`tmfloorz - thing->z >
+**A drop over one step is one-way, and P7's flood now checks the map is
+still finishable.** `P_TryMove` caps the climb (`tmfloorz - thing->z >
 24*FRACUNIT`) and leaves falling unrestricted, so a room reachable only by
 falling into it cannot be left the same way. The retired P1 forbade this
 by accident; the replacement
 (`CompileError::PortalNoHeadroom`) deliberately allows it, because 37.77% of
 passable two-sided lines across DOOM, DOOM2, TNT, and PLUTONIA exceed the old
 cap and 62.5% of those are permanent static drops. Verifying the player can
-still finish is **P7**, which needs the key-aware reachability flood this
-project still does not have. Measurement:
-`docs/measurements/verticality-corpus.md`.
+still finish is **P7** (`src/reach.rs`): a forward/backward search over
+states `(sector, keys-held)` rejects both an unfinishable map (no state
+reaches an exit) and a stranding one (a state the player can reach but can no
+longer reach an exit from) at compile time. Measurement:
+`docs/measurements/verticality-corpus.md`. One deliberate hole remains: P7
+runs only when the map has a player 1 start and at least one exit, and passes
+vacuously otherwise — a missing start or exit is a different defect, one this
+rule does not claim to catch.
 
 **P8 has no sky exception.** `r_segs.c` sets `worldtop = worldhigh` when both
 sectors' `ceilingpic == skyflatnum`, so a sky-to-sky boundary draws no upper
@@ -91,6 +101,25 @@ it and the check is deliberately unwritten rather than guessed at. Required
 before sky is added.
 
 ## Decisions that look wrong without their reason
+
+**P24 is stricter than the engine about key kinds, and P7 is not.**
+`EV_VerticalDoor` (pinned `p_doors.c:371-403`) opens a colour's lock for
+either the card or the skull —
+`!p->cards[it_bluecard] && !p->cards[it_blueskull]` rejects the move only if
+*neither* is held. `reach.rs` interns lock classes by colour to match:
+`graph_from_compiled`'s keyed-special lookup is deliberately many-to-one, so
+either key thing of a colour satisfies a `Door` edge's lock. `check_key_lock_coherence`
+(P24) does not — it compares the authored lock string (`Portal::lock`, e.g.
+`"blue_card"`) against placed thing kinds by exact string equality. A map
+that locks a portal `"blue_card"` while placing only a `blue_skull` thing is
+therefore genuinely finishable — the skull opens the door in the engine, and
+P7 passes it — while P24 still fails it, because the string `"blue_card"`
+names a thing that never appears. This is deliberate, not a bug in either
+rule: P24 polices *authored intent* (you named a card, place a card), and P7
+polices the *engine's actual behavior* (either key of the colour works).
+Recorded here so a future "fix" does not make one rule agree with the other
+at the cost of disagreeing with the engine or with the author's stated
+intent.
 
 **The crate's own lints are `warn`, and CI is what makes them fatal.**
 `Cargo.toml` sets `clippy::all` and `clippy::pedantic` to `warn`, not `deny`,
@@ -121,18 +150,21 @@ could have caught it, and the package had no CI at all until the day it became
 its own repository — the first thing CI did was find a bug that had been
 latent since the golden fixtures were introduced.
 
-**Entrada keeps every drop climbable on purpose, because nothing checks that
-it must.** `key_room` sits 16 units below `hub` and `exit_hall` 16 above
-`vault` — both within `max_step_height`, so every descent can be reversed.
-This is a constraint on the *fixture*, not on the compiler: a drop beyond one
-step is legal (see the one-way-drop gap above) and the compiler will happily
-emit one. It matters here because `key_room` is a dead end holding the blue
-card, the only key for the `combat` <-> `vault` door. An earlier revision put
-it at −32, which compiled clean, passed every test, and was **unfinishable** —
-the player drops in, takes the key, and cannot climb the 32 units back out
-(`P_TryMove` rejects a step over 24). Until **P7**'s reachability flood exists,
-nothing but authoring discipline prevents that, so any future height change to
-a dead-end room must be checked by hand against the step limit.
+**Entrada keeps every drop climbable, and the compiler now enforces that it
+must.** `key_room` sits 16 units below `hub` and `exit_hall` 16 above
+`vault` — both within `max_step_height`, so every descent can be reversed. A
+drop beyond one step is still legal in general (see the one-way-drop gap
+above); it matters here because `key_room` is a dead end holding the blue
+card, the only key for the `combat` <-> `vault` door, so any deeper drop would
+strand the player. An earlier revision put it at −32, which compiled clean,
+passed every test, and was **unfinishable** — the player drops in, takes the
+key, and cannot climb the 32 units back out (`P_TryMove` rejects a step over
+24). That shipped defect is exactly what **P7** exists to catch —
+`rules::tests::p7_a_key_in_a_one_way_pit_is_unfinishable_and_names_the_pit`
+regresses it directly — so the constraint on this fixture is now enforced by
+the compiler rather than resting on authoring discipline alone; a future
+height change to a dead-end room fails the build if it strands the player,
+rather than waiting to be caught by hand.
 
 **Entrada's `cache` room is the one place `Room::secret` is exercised.**
 Doom counts secrets by sectors carrying the secret special, so before that
