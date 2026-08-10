@@ -1,11 +1,11 @@
 # crustygen — known gaps and carried decisions
 
 State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD →
-reassembles through crustywad. 195 tests (187 lib + 1 first_map + 6
-golden_textmap, plus one `#[ignore]`d golden-regeneration generator + 1
-walking_skeleton). This file records what is deliberately absent, what is
-known-fragile, and the decisions a future contributor would otherwise have to
-re-derive.
+reassembles through crustywad. 198 tests (190 lib + 1 first_map + 6
+golden_textmap + 1 walking_skeleton), plus a separately-run `#[ignore]`d
+golden-regeneration generator not included in that count. This file records
+what is deliberately absent, what is known-fragile, and the decisions a
+future contributor would otherwise have to re-derive.
 
 ## Not implemented, by design
 
@@ -84,10 +84,10 @@ project still does not have. Measurement:
 
 **P8 has no sky exception.** `r_segs.c` sets `worldtop = worldhigh` when both
 sectors' `ceilingpic == skyflatnum`, so a sky-to-sky boundary draws no upper
-and needs none — 60.3% of the corpus's legitimately-absent uppers are exactly
-this case. crustygen emits no sky flat, so no fixture can reach it and the
-check is deliberately unwritten rather than guessed at. Required before sky
-is added.
+and needs none — 60.3% of the corpus's absent uppers are exactly this
+case — legitimately so. crustygen emits no sky flat, so no fixture can reach
+it and the check is deliberately unwritten rather than guessed at. Required
+before sky is added.
 
 **crustygen runs in no CI.** It declares its own `[workspace]`, so the parent
 repo's `cargo fmt --all` and `cargo clippy --workspace` do not reach it, and
@@ -167,6 +167,34 @@ sourced — see that table's own leading comment)
 (`.superpowers/sdd/2026-08-09-crustygen-compiler/door-redesign-report.md`)
 for the full derivation, worked coordinates, and why "at least" was rejected
 in favor of exact equality.
+
+**A door sector always takes room `a`'s `wall_tex`, never room `b`'s.**
+`compile::doors::emit_doors` copies `room_a.wall_tex` (and its floor/ceiling
+textures) onto the door sector unconditionally, so the lower texture that
+sector's own sidedef paints onto its room-`b`-facing side — the "own texture"
+`heights::apply_height_textures` sources a riser from — is drawn in room
+`a`'s texture, not room `b`'s. This sits alongside, and mildly contradicts,
+the alcove convention one paragraph up: an alcove copies whichever real room
+it *directly borders* (room `b` for the far alcove), while the door sector in
+the middle copies room `a` regardless of which side of the door it faces.
+Invisible while a map uses one theme throughout — every fixture today, since
+the shipped `vocabulary.toml` defines exactly one — and becomes visible the
+moment two rooms sharing a door use different wall textures.
+`rules::tests::a_door_across_a_floor_difference_puts_the_lower_on_the_doors_own_side`
+pins the current (room-`a`-sourced) behavior so a fix does not silently
+change it unnoticed.
+
+**`heights::visible_lower_side`/`visible_upper_side` are the single place the
+drawn-side comparison is made, and nothing re-derives it to keep the two
+callers honest.** `heights::apply_height_textures` (which fills a texture)
+and `rules::check_missing_textures` (P8, which requires one) both call
+through these same two functions rather than each computing "which side is
+visible" itself, specifically so the pass and the rule cannot independently
+drift on the answer. That guarantee rests entirely on both call sites
+continuing to call through the shared functions — nothing checks that they
+still do, so a future edit that inlines or reimplements the comparison at
+either call site would silently break the consistency with no test able to
+catch it.
 
 **`facing_spans` has no distance bound, which can surprise an author moving a
 room away from a fixture that used to be adjacent.** Two walls "face" each
