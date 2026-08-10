@@ -8,8 +8,8 @@
 //! **P1** (step height between connected rooms) has been **retired**: it
 //! capped the floor delta between connected rooms in either direction, but
 //! `P_TryMove` caps only the climb and leaves falling unrestricted, and a
-//! corpus sweep found the majority of vanilla Doom's height changes exceeding
-//! it. See
+//! corpus sweep found the majority of vanilla Doom's height-changing
+//! boundaries — 56.92% of them — exceeding it. See
 //! [`CompileError::PortalNoHeadroom`](crate::compile::CompileError::PortalNoHeadroom)
 //! for what replaced it.
 //!
