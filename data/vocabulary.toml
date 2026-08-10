@@ -251,10 +251,12 @@ ceiling = "CEIL3_5"
 door = "BIGDOOR2"
 door_track = "DOORTRAK"
 switch = "SW1STARG"
-trim = "STARGR2"
+trim = "SUPPORT3"
+switch_width = 128
 source = "Verified against tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad (fetched via `just fetch-fixtures` in the crustywad checkout; not modified). FLOOR4_8 (4096 bytes) and CEIL3_5 (4096 bytes) and DOORTRAK (1104 bytes) confirmed present as raw flat/patch lumps in both WADs via `./target/debug/cwad list <wad>`. STARTAN3, BIGDOOR2, DOORTRAK, and STARGR2 (added for the door-redesign task's trim role) confirmed as composite wall textures (present in the TEXTURE1 lump, 963 entries in each WAD) via crustywad::Wad::texture_set().find(name) returning Some for all four, checked with a throwaway binary against the crustywad path dependency"
+switch_width_source = "MEASURED, not sourced from the engine: the width in pixels of the `switch` texture's TEXTURE1 definition, read via crustywad::Wad::texture_set() from RETAIL/DOOM.WAD, RETAIL/DOOM2.WAD and RETAIL/freedoom2.wad — SW1STARG is 128x128 in all three. `compile::exits` needs it to centre the switch graphic on an exit line narrower than the texture: with no offset a 64-unit line shows texture columns 0..63, the left half, which is what a playtest reported as a mis-centred switch. Centring the TEXTURE (offsetx = (switch_width - width) / 2) rather than the switch graphic itself is deliberate: the graphic's own position inside the texture is an asset detail that varies between IWADs — measured by composing SW1STARG and SW2STARG and diffing, it spans columns 54..=72 (centre 63) in DOOM2.WAD but 55..=64 (centre 60) in freedoom2.wad — whereas the texture width agrees everywhere. Centring the texture puts the graphic within 1 pixel of the line's centre in DOOM2 and within 4 in Freedoom."
 switch_source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, alphSwitchList[]: {\"SW1STARG\", \"SW2STARG\", 1} — the trailing 1 is the episode number, and this table's episode-1 block (the tech-base episode) is where SW1STARG/SW2STARG live, pairing thematically with the STARTAN wall family already used for tech_base. P_ChangeSwitchTexture toggles a placed switch texture to `switchlist[i^1]`, its paired member in this same table, on activation — so the vocabulary only needs the initially-placed (SW1) name; the engine derives the pressed (SW2) counterpart itself via SWITCHES. SW1STARG confirmed present as a composite texture name in both tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad's TEXTURE1 lump via crustywad::Wad::texture_set(), same throwaway-binary method as the row above. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_switch.c"
-trim_source = "NOT sourced from the engine (nothing in linuxdoom-1.10 names a 'trim' texture role) — a compiler-construction choice pairing thematically with tech_base's other textures: STARGR2 ('star grate') sits in the same STARTAN/STARG/SW1STARG 'episode 1' texture family this theme already draws wall/switch from (see the switch_source citation above for that family relationship). Confirmed present as a composite texture name in both tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad's TEXTURE1 lump via crustywad::Wad::texture_set(), same throwaway-binary method as the row above."
+trim_source = "NOT sourced from the engine (nothing in linuxdoom-1.10 names a 'trim' texture role) — a compiler-construction choice, now informed by measurement. SUPPORT3 (64x128) is the standard flanking trim beside a doorway in Doom's own tech maps and sits in the same STARTAN family this theme already draws wall/switch from. It replaces STARGR2 (128x128), which was chosen on thematic grounds alone before any measurement and read as more wall rather than as door trim. Dimensions for SUPPORT3, STARGR2, DOORSTOP (8x128) and DOORTRAK (8x128) were read from the TEXTURE1 definitions of RETAIL/DOOM.WAD, RETAIL/DOOM2.WAD and RETAIL/freedoom2.wad via crustywad::Wad::texture_set(), and agree across all three. SUPPORT3 confirmed present in all three."
 
 # Which texture NAMES read as "a door" to a human mapper. This is deliberately
 # NOT a `source` field — see `curated` below in its place. Every value in
@@ -265,8 +267,17 @@ trim_source = "NOT sourced from the engine (nothing in linuxdoom-1.10 names a 't
 # compiler crate) rejects a theme whose configured `door` texture is not in
 # this list, catching a theme entry that names, say, a wall texture by
 # mistake. Deliberately excludes DOORTRAK (the door's *track*, a distinct
-# role already carried by `[textures.*].door_track`) and DOORSTOP (a small
-# floor prop, not a texture that reads as a door's own panel), and excludes
+# role already carried by `[textures.*].door_track`) and DOORSTOP — an
+# earlier revision of this comment called DOORSTOP "a small floor prop",
+# which is simply wrong: it is an 8x128 composite wall texture present in
+# the TEXTURE1 lump of DOOM.WAD, DOOM2.WAD and freedoom2.wad alike, and it
+# is idiomatic *door trim*. It is excluded because 8 pixels is a vertical
+# strip, not a panel a door's face could wear — the right conclusion for
+# the wrong stated reason. The same width caveat applies to the six
+# DOORBLU/RED/YEL names below, which are 8x128 (plain) and 16x128 (the `2`
+# variants): they are retained here because they read as door names, but
+# their real role is the key trim in `[key_trim]`, not a door's panel.
+# Excludes
 # the `M_*`-prefixed names (`M_BDOOR`, `M_RDOOR`, `M_YDOOR`) that also
 # happen to contain "DOOR" and appear in Freedoom's TEXTURE1 lump — those are
 # menu HUD graphics reusing the texture-definition format, not door panels a
@@ -281,3 +292,32 @@ names = [
   "ZDOORB1", "ZDOORF1", "ZELDOOR", "ICKDOOR1", "TNTDOOR", "EXITDOOR",
 ]
 curated = "NOT sourced from the engine or derivable from it — which texture names read as a door is an asset-naming convention, not an engine constant (see the table's own leading comment above). Hand-curated from the classic id-Software/Freedoom BIGDOOR/DOOR*/SPCDOOR*/ZDOOR* texture-name families that denote a door's own moving panel surface. Every name above confirmed present as a composite texture in both tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad's TEXTURE1 lump via crustywad::Wad::texture_set().find(name), same throwaway-binary method [textures.tech_base].source documents. Deliberately excludes DOORTRAK, DOORSTOP, and the M_*DOOR menu-graphic names — see the table's leading comment for why each is excluded."
+
+# Which texture marks the alcove leading to a locked door, by the key that
+# opens it. Like [door_texture_catalog] this is an asset-naming convention
+# with no engine constant behind it, so it carries `curated` in place of
+# `source` — but unlike that table it is also MEASURED, and the measurement
+# is what settles the card-versus-skull split.
+#
+# Placement: these go on the JAMBS OF A LOCKED PORTAL'S ALCOVES — the trim a
+# player faces walking up to the door — never on the door's own track, which
+# stays `[textures.*].door_track` (DOORTRAK) unconditionally. They are 8x128
+# (plain) and 16x128 (the `2` variants), the same vertical-strip shape as
+# DOORTRAK, and are not door panels.
+#
+# Card versus skull: across DOOM.WAD, DOOM2.WAD, TNT.WAD and PLUTONIA.WAD,
+# restricted to maps containing exactly ONE key of a given colour so the
+# attribution is unambiguous, the plain name accompanies a keycard 117 times
+# against 18 for the `2` variant, and the `2` variant accompanies a skull key
+# 92 times against 26 for the plain name. The split holds in the same
+# direction for all three colours (blue 45/6 vs 8/30, red 38/6 vs 10/34,
+# yellow 34/6 vs 8/28). Not absolute — mappers are not strict, and a map with
+# several doors can mix them — but overwhelmingly one-directional.
+[key_trim]
+blue_card = "DOORBLU"
+blue_skull = "DOORBLU2"
+red_card = "DOORRED"
+red_skull = "DOORRED2"
+yellow_card = "DOORYEL"
+yellow_skull = "DOORYEL2"
+curated = "Asset-naming convention, not an engine constant — nothing in linuxdoom-1.10 associates a texture name with a key. The colour-to-name mapping is self-evident from the names; the card-versus-skull mapping is the measured convention described in the comment above, counted over the four id/Final Doom IWADs in RETAIL/ by correlating each map's key things (doomednums 5/6/13 card and 40/39/38 skull, per this file's [things] table) against the key-door textures its sidedefs carry. All six confirmed present in the TEXTURE1 lump of DOOM.WAD, DOOM2.WAD and freedoom2.wad, at 8x128 (plain) and 16x128 (`2`), via crustywad::Wad::texture_set()."

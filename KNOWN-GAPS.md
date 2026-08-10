@@ -1,7 +1,7 @@
 # crustygen — known gaps and carried decisions
 
 State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD →
-reassembles through crustywad. 198 tests (190 lib + 1 first_map + 6
+reassembles through crustywad. 207 tests (199 lib + 1 first_map + 6
 golden_textmap + 1 walking_skeleton), plus a separately-run `#[ignore]`d
 golden-regeneration generator not included in that count. This file records
 what is deliberately absent, what is known-fragile, and the decisions a
@@ -139,6 +139,40 @@ left unmarked; there is nothing to conceal there. Note the flag is purely
 cosmetic — nothing about movement, sight, or world rendering changes — and
 `SECRETWALLCOLORS` is itself `#define SECRETWALLCOLORS WALLCOLORS`, so even
 vanilla's cheat-mode branch draws no distinct color.
+
+**A locked door's key trim goes on the ALCOVE jambs, never on the door's own
+track.** `DOORBLU`/`DOORRED`/`DOORYEL` (8x128) and their `2` variants
+(16x128) are vertical trim strips, the same shape as `DOORTRAK` — which is
+exactly why they are easy to misapply to the track. They belong on the trim a
+player faces walking *up* to the door; the door's track stays the theme's
+`door_track` (DOORTRAK) unconditionally, so a custom texture WAD can override
+it as the one intended knob. Card versus skull is a measured convention, not
+a guess: across the four id/Final Doom IWADs, restricted to maps holding
+exactly one key of a colour, the plain name accompanies a keycard 117 times
+to 18, and the `2` variant a skull key 92 to 26, in the same direction for
+all three colours. Full tally and method in `vocabulary.toml`'s `[key_trim]`.
+
+**A locked portal that declares no alcoves gets no key trim at all.** The trim
+has nowhere to live — the door's own track is deliberately excluded (above),
+and a portal with `alcove_near`/`alcove_far` both absent has no other surface
+in its chain. Such a door is functionally correct and visually unmarked. This
+is left as an authoring responsibility rather than a rejection, because
+requiring an alcove would forbid the legal minimum-thickness door the
+wall-thickness model is built around. Worth a playability rule the day one
+exists for "a locked door is visually identifiable".
+
+**Only the exit switch is texture-aligned; nothing else is.**
+`compile::exits` sets the switch sidedef's `offsetx` so the texture is
+centred on the exit line — `(switch_width - width) / 2`, from
+`vocabulary.toml`'s measured `switch_width`. Every other sidedef in the map
+is emitted with `offsetx` unset, i.e. 0. That is fine for a texture whose
+width divides the wall it sits on and wrong in general: Doom derives a
+texture's horizontal position from `offsetx` plus the distance along the line
+from its start vertex, so a run of collinear linedefs (a wall split by a
+portal opening, say) needs offsets that *accumulate* along the run rather
+than restarting at each piece. Proper alignment is a separate piece of work;
+what exists here is the narrowest fix for the one surface a playtest showed
+reading wrong.
 
 **Two map artifacts ship, and only one of them loads in a vanilla engine.**
 `maps/entrada.wad` is the **UDMF** build — `MAP01`, `TEXTMAP`, `ZNODES`,

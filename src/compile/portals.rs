@@ -371,6 +371,7 @@ pub(crate) fn emit_opening(
         upper: String::new(),
         middle: String::new(),
         lower: String::new(),
+        x_offset: 0,
     });
     let back = data.sidedefs.len();
     data.sidedefs.push(SidedefOut {
@@ -378,6 +379,7 @@ pub(crate) fn emit_opening(
         upper: String::new(),
         middle: String::new(),
         lower: String::new(),
+        x_offset: 0,
     });
     data.linedefs.push(LinedefOut {
         v1,
@@ -763,6 +765,7 @@ pub(crate) fn emit_side_wall(
         upper: String::new(),
         middle: texture.to_owned(),
         lower: String::new(),
+        x_offset: 0,
     });
     data.linedefs.push(LinedefOut {
         v1,

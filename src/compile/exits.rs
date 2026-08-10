@@ -209,6 +209,12 @@ pub fn emit_exits(
     let unknown_theme = || CompileError::UnknownTheme {
         theme: ir.theme.clone(),
     };
+    let switch_width =
+        tables
+            .switch_width(&ir.theme)
+            .ok_or_else(|| CompileError::UnknownTheme {
+                theme: ir.theme.clone(),
+            })?;
     let switch_tex = tables
         .texture("switch", &ir.theme)
         .ok_or_else(unknown_theme)?
@@ -235,7 +241,7 @@ pub fn emit_exits(
 
         match exit.trigger {
             ExitTrigger::Switch => {
-                emit_switch_exit(data, &cut, &plan, special, tag, &switch_tex);
+                emit_switch_exit(data, &cut, &plan, special, tag, &switch_tex, switch_width);
             }
             ExitTrigger::Walkover => {
                 emit_walkover_exit(ir, data, &cut, &plan, &exit.room, special, tag)?;
@@ -255,6 +261,7 @@ fn emit_switch_exit(
     special: u16,
     tag: u16,
     switch_tex: &str,
+    switch_width: i32,
 ) {
     let (p1, p2) = if plan.forward {
         (cut.pt(cut.open_lo), cut.pt(cut.open_hi))
@@ -264,6 +271,18 @@ fn emit_switch_exit(
     let line = emit_side_wall(data, p1, p2, plan.room_idx, switch_tex);
     data.linedefs[line].special = special;
     data.linedefs[line].tag = tag;
+
+    // Centre the switch texture on the line. Doom maps texture column
+    // `(offsetx + distance along the line) % width`, so an exit narrower
+    // than its texture shows the texture's left edge with no offset — the
+    // switch graphic then sits off-centre, which a playtest reported.
+    // Centring the *texture* rather than the graphic is deliberate: the
+    // graphic's position inside the texture differs between IWADs, the
+    // texture's width does not. See `vocabulary.toml`'s
+    // `switch_width_source`.
+    let width = cut.open_hi - cut.open_lo;
+    let front = data.linedefs[line].front;
+    data.sidedefs[front].x_offset = ((switch_width - width) / 2).rem_euclid(switch_width);
 }
 
 /// Emits a walkover exit's construction: a new closed alcove sector behind
@@ -479,6 +498,62 @@ mod tests {
         assert_eq!(line.special, tables.exit_switch_special());
         assert_ne!(line.tag, 0, "the exit is tagged uniformly, like a door");
         assert_eq!(data.sidedefs[line.front].middle, "SW1STARG");
+    }
+
+    #[test]
+    fn a_switch_exit_centres_its_texture_on_the_line() {
+        // SW1STARG is 128 wide; a 32-unit exit line with no offset would
+        // show texture columns 0..31 — the far left of the texture, with
+        // the switch graphic (which sits near the middle) off the line
+        // entirely or hard against one edge. Centring puts the line over
+        // columns 48..79, straddling the graphic.
+        let tables = Tables::load().expect("tables");
+        let json = L_ROOM.replace(
+            "\"portals\":[]",
+            r#""exits":[{ "room":"a", "trigger":"switch", "width":32, "at":[256,32] }],
+               "portals":[]"#,
+        );
+        let (_, data) = compiled(&json);
+        let special = tables.exit_switch_special();
+        let line = data
+            .linedefs
+            .iter()
+            .find(|l| l.special == special)
+            .expect("switch exit line");
+        let width = tables.switch_width("tech_base").expect("switch width");
+        assert_eq!(
+            data.sidedefs[line.front].x_offset,
+            (width - 32) / 2,
+            "the switch texture is centred on its line"
+        );
+    }
+
+    #[test]
+    fn a_wider_exit_still_centres_and_never_offsets_negatively() {
+        // A line as wide as the texture needs no shift at all, and the
+        // arithmetic must not produce a negative offset for a line wider
+        // than its texture.
+        let tables = Tables::load().expect("tables");
+        let width = tables.switch_width("tech_base").expect("switch width");
+        // The L's south wall runs x = 0..256 at y = 0, so a 128-wide exit
+        // centred at x = 128 fits inside it.
+        let json = L_ROOM.replace(
+            "\"portals\":[]",
+            r#""exits":[{ "room":"a", "trigger":"switch", "width":128, "at":[128,0] }],
+               "portals":[]"#,
+        );
+        let (_, data) = compiled(&json);
+        let line = data
+            .linedefs
+            .iter()
+            .find(|l| l.special == tables.exit_switch_special())
+            .expect("switch exit line");
+        let off = data.sidedefs[line.front].x_offset;
+        assert_eq!(
+            off, 0,
+            "a line exactly as wide as its texture needs no shift"
+        );
+        assert!((0..width).contains(&off), "offset stays inside the texture");
     }
 
     #[test]

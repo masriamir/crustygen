@@ -163,6 +163,22 @@ pub fn emit_doors(
         let geometry = resolve_portal(ir, portal)?;
         let special = door_special(tables, portal)?;
 
+        // The alcove jambs are the trim a player faces walking up to the
+        // door, so a locked door announces its key there. The door's own
+        // track is never touched — it stays the theme's `door_track`
+        // (DOORTRAK) unconditionally, which is what a custom texture WAD
+        // would override. `key_trim` returns `None` for a key with no trim
+        // of its own, in which case the alcove keeps the plain theme trim
+        // rather than silently losing its texture.
+        //
+        // A locked portal declaring no alcoves has nowhere to carry this,
+        // and gets no key trim — see KNOWN-GAPS.md.
+        let alcove_tex: &str = portal
+            .lock
+            .as_deref()
+            .and_then(|key| tables.key_trim(key))
+            .unwrap_or(&trim_tex);
+
         let door_thickness = portal
             .door_thickness
             .expect("Ir::from_json guarantees every door/locked portal names a door_thickness");
@@ -282,7 +298,7 @@ pub fn emit_doors(
                 a_forward,
             ));
             emit_jambs(
-                data, axis, open_lo, open_hi, a_forward, pos0, pos1, alcove, &trim_tex,
+                data, axis, open_lo, open_hi, a_forward, pos0, pos1, alcove, alcove_tex,
             );
         }
         if let Some(alcove) = far_alcove {
@@ -299,7 +315,7 @@ pub fn emit_doors(
                 !a_forward,
             ));
             emit_jambs(
-                data, axis, open_lo, open_hi, a_forward, pos2, pos3, alcove, &trim_tex,
+                data, axis, open_lo, open_hi, a_forward, pos2, pos3, alcove, alcove_tex,
             );
         }
 
@@ -339,6 +355,104 @@ mod tests {
     use crate::geom::{Pt, contains};
     use crate::ir::Ir;
     use crate::tables::Tables;
+
+    /// A locked door announces its key on the **alcove** jambs — the trim a
+    /// player faces walking up to it — while the door's own track keeps
+    /// `DOORTRAK` unconditionally.
+    ///
+    /// The card/skull split is the measured convention recorded in
+    /// `vocabulary.toml`'s `[key_trim]`: the plain name for a keycard, the
+    /// `2` variant for a skull key. Both are checked here, because a
+    /// mapping that ignored the key's kind would satisfy either one alone.
+    #[test]
+    fn a_locked_door_marks_its_alcove_jambs_with_the_key_trim() {
+        for (lock, expected) in [("blue_card", "DOORBLU"), ("blue_skull", "DOORBLU2")] {
+            let json = format!(
+                r#"{{ "seed":1, "grid":8, "theme":"tech_base",
+                  "rooms":[
+                    {{ "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+                      "floor":0, "ceiling":128, "light":160,
+                      "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }},
+                    {{ "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+                      "floor":0, "ceiling":128, "light":160,
+                      "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
+                  ],
+                  "portals":[{{ "a":"a", "b":"b", "kind":"locked", "lock":"{lock}",
+                                "width":128, "at":[256,128],
+                                "door_thickness":32, "alcove_near":16, "alcove_far":16 }}] }}"#
+            );
+            let ir = Ir::from_json(&json).expect("ir");
+            let tables = Tables::load().expect("tables");
+            let mut data = emit_sectors(&ir).expect("sectors");
+            cut_portals(&ir, &tables, &mut data).expect("portals");
+            let mut tags = TagAllocator::new();
+            emit_doors(&ir, &tables, &mut data, &mut tags).expect("doors");
+
+            // A door sector is the one whose ceiling is snapped to its floor
+            // (closed); an alcove is any other compiler-made sector.
+            let mut alcove_jambs = 0;
+            let mut track_jambs = 0;
+            for line in data.linedefs.iter().filter(|l| l.back.is_none()) {
+                let side = &data.sidedefs[line.front];
+                let sector = &data.sectors[side.sector];
+                if side.sector < ir.rooms.len() {
+                    continue; // a room's own wall, not part of the chain
+                }
+                if sector.ceiling == sector.floor {
+                    track_jambs += 1;
+                    assert_eq!(
+                        side.middle, "DOORTRAK",
+                        "{lock}: the door's own track is never keyed"
+                    );
+                } else {
+                    alcove_jambs += 1;
+                    assert_eq!(
+                        side.middle, expected,
+                        "{lock}: alcove jambs carry the key trim"
+                    );
+                }
+            }
+            assert_eq!(alcove_jambs, 4, "{lock}: two alcoves, two jambs each");
+            assert_eq!(track_jambs, 2, "{lock}: the door has two track jambs");
+        }
+    }
+
+    /// An unlocked door's alcoves keep the theme's plain trim — the key
+    /// texture is tied to the lock, not to being a door.
+    #[test]
+    fn an_unlocked_door_keeps_the_themes_plain_trim() {
+        let json = r#"{ "seed":1, "grid":8, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" },
+            { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128],
+                        "door_thickness":32, "alcove_near":16, "alcove_far":16 }] }"#;
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &tables, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        emit_doors(&ir, &tables, &mut data, &mut tags).expect("doors");
+
+        let trim = tables.texture("trim", "tech_base").expect("trim");
+        let alcove_jambs: Vec<_> = data
+            .linedefs
+            .iter()
+            .filter(|l| l.back.is_none())
+            .map(|l| &data.sidedefs[l.front])
+            .filter(|s| {
+                s.sector >= ir.rooms.len()
+                    && data.sectors[s.sector].ceiling != data.sectors[s.sector].floor
+            })
+            .collect();
+        assert_eq!(alcove_jambs.len(), 4);
+        assert!(alcove_jambs.iter().all(|s| s.middle == trim));
+    }
 
     /// A door into a secret room conceals **every** two-sided line of its
     /// chain on the automap — the door's own two faces and both alcoves'

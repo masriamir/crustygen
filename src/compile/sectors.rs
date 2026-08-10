@@ -85,6 +85,7 @@ pub fn emit_sectors(ir: &Ir) -> Result<MapData, CompileError> {
                 upper: String::new(),
                 middle: room.wall_tex.clone(),
                 lower: String::new(),
+                x_offset: 0,
             });
             data.linedefs.push(LinedefOut {
                 v1,

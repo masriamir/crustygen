@@ -51,6 +51,14 @@ pub struct SidedefOut {
     pub middle: String,
     /// Lower texture; empty for none.
     pub lower: String,
+    /// Horizontal texture offset in pixels (UDMF `offsetx`).
+    ///
+    /// Doom derives a wall texture's horizontal position from this plus the
+    /// distance along the line from its start vertex, so a nonzero value
+    /// shifts which texture column lands at the line's start. Used to centre
+    /// a texture wider than the line it sits on — see
+    /// [`crate::compile::exits`], which centres an exit's switch.
+    pub x_offset: i32,
 }
 
 /// A linedef as it will be emitted.

@@ -301,12 +301,14 @@ mod tests {
                     upper: String::new(),
                     middle: String::new(),
                     lower: String::new(),
+                    x_offset: 0,
                 },
                 SidedefOut {
                     sector: 1,
                     upper: String::new(),
                     middle: String::new(),
                     lower: String::new(),
+                    x_offset: 0,
                 },
             ],
             linedefs: vec![LinedefOut {

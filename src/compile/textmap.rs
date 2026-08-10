@@ -59,6 +59,9 @@ pub fn emit_textmap(data: &MapData, things: &[ThingOut]) -> String {
 
     for sd in &data.sidedefs {
         let _ = write!(s, "sidedef {{ sector = {};", sd.sector);
+        if sd.x_offset != 0 {
+            let _ = write!(s, " offsetx = {};", sd.x_offset);
+        }
         for (key, tex) in [
             ("texturetop", &sd.upper),
             ("texturemiddle", &sd.middle),

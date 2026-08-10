@@ -163,6 +163,10 @@ struct TextureSet {
     /// The texture for a door's optional trim alcove sectors
     /// ([`crate::ir::Portal::alcove_near`]/[`crate::ir::Portal::alcove_far`]).
     trim: String,
+    /// Width in pixels of the `switch` texture's canvas, so an exit line
+    /// narrower than it can centre the texture rather than showing its
+    /// left edge.
+    switch_width: i32,
 }
 
 /// Sector specials keyed by tier name, as used for
@@ -317,12 +321,24 @@ struct DoorTextureCatalog {
     names: Vec<String>,
 }
 
+/// The alcove trim marking a locked door, keyed by the key that opens it.
+#[derive(Debug, Deserialize)]
+struct KeyTrim {
+    blue_card: String,
+    blue_skull: String,
+    red_card: String,
+    red_skull: String,
+    yellow_card: String,
+    yellow_skull: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct Vocabulary {
     things: HashMap<String, toml::Value>,
     specials: Specials,
     textures: HashMap<String, TextureSet>,
     door_texture_catalog: DoorTextureCatalog,
+    key_trim: KeyTrim,
 }
 
 /// Errors raised while loading the data tables.
@@ -639,6 +655,39 @@ impl Tables {
             "door_track" => Some(&set.door_track),
             "switch" => Some(&set.switch),
             "trim" => Some(&set.trim),
+            _ => None,
+        }
+    }
+
+    /// The width in pixels of `theme`'s switch texture, or `None` when the
+    /// theme is unknown.
+    ///
+    /// `compile::exits` centres the switch texture on an exit line narrower
+    /// than the texture; without this an exit shows the texture's left edge
+    /// and the switch graphic reads as off-centre.
+    #[must_use]
+    pub fn switch_width(&self, theme: &str) -> Option<i32> {
+        Some(self.vocabulary.textures.get(theme)?.switch_width)
+    }
+
+    /// The alcove trim texture marking a door locked by `key`, or `None`
+    /// for a key with no trim of its own.
+    ///
+    /// This is the trim on a locked portal's **alcove** jambs — the wall a
+    /// player faces walking up to the door. A door's own track is never
+    /// affected; it stays the theme's `door_track` unconditionally. See
+    /// `vocabulary.toml`'s `[key_trim]` for the card-versus-skull
+    /// convention and the corpus measurement behind it.
+    #[must_use]
+    pub fn key_trim(&self, key: &str) -> Option<&str> {
+        let t = &self.vocabulary.key_trim;
+        match key {
+            "blue_card" => Some(&t.blue_card),
+            "blue_skull" => Some(&t.blue_skull),
+            "red_card" => Some(&t.red_card),
+            "red_skull" => Some(&t.red_skull),
+            "yellow_card" => Some(&t.yellow_card),
+            "yellow_skull" => Some(&t.yellow_skull),
             _ => None,
         }
     }
@@ -1161,12 +1210,41 @@ mod tests {
     /// A door's optional trim alcove sectors need a texture role of their
     /// own, alongside `wall`/`floor`/`ceiling`/`door`/`door_track`/`switch`.
     #[test]
+    fn switch_width_resolves_and_is_unknown_for_an_unknown_theme() {
+        let t = Tables::load().expect("tables load");
+        assert_eq!(
+            t.switch_width("tech_base"),
+            Some(128),
+            "SW1STARG is 128 wide in DOOM.WAD, DOOM2.WAD and freedoom2.wad alike"
+        );
+        assert_eq!(t.switch_width("plaid_theme"), None);
+    }
+
+    #[test]
+    fn key_trim_distinguishes_a_card_from_a_skull() {
+        let t = Tables::load().expect("tables load");
+        // The measured convention: plain name for a keycard, `2` variant for
+        // a skull key. See vocabulary.toml's [key_trim] for the corpus tally.
+        assert_eq!(t.key_trim("blue_card"), Some("DOORBLU"));
+        assert_eq!(t.key_trim("blue_skull"), Some("DOORBLU2"));
+        assert_eq!(t.key_trim("red_card"), Some("DOORRED"));
+        assert_eq!(t.key_trim("red_skull"), Some("DOORRED2"));
+        assert_eq!(t.key_trim("yellow_card"), Some("DOORYEL"));
+        assert_eq!(t.key_trim("yellow_skull"), Some("DOORYEL2"));
+        assert_eq!(
+            t.key_trim("chartreuse_card"),
+            None,
+            "an unknown key has no trim"
+        );
+    }
+
+    #[test]
     fn trim_texture_resolves() {
         let t = Tables::load().expect("tables load");
         assert_eq!(
             t.texture("trim", "tech_base"),
-            Some("STARGR2"),
-            "tech_base has a trim texture"
+            Some("SUPPORT3"),
+            "tech_base's trim is the flanking door trim, not another wall texture"
         );
         assert_eq!(
             t.texture("trim", "plaid_theme"),
