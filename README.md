@@ -22,7 +22,7 @@ Doom. What exists is the geometry core; the map-spec front end does not exist
 yet. See [Known gaps](#known-gaps).
 
 ```bash
-cargo test        # 207 tests
+cargo test        # 239 tests
 cargo run --example ...   # not yet — there is no CLI
 ```
 
@@ -94,9 +94,11 @@ The honest list is [`KNOWN-GAPS.md`](KNOWN-GAPS.md). The headlines:
   JSON; the Markdown front end in `docs/design.md` is designed, not built.
 - **No verifier and no conformance report.** `docs/design.md` §8 specifies
   five verification layers; layers 2 and 4 do not exist.
-- **A reachability check exists.** A drop beyond one step is legal and
-  one-way, so `src/reach.rs` floods `(sector, keys-held)` states to confirm
-  the player can still finish. That is rule P7.
+- **P20 has no per-pickup check, and P7 passes vacuously without a player
+  start or an exit.** The key-aware reachability flood both would need now
+  exists in `src/reach.rs`; P7 uses it to reject unfinishable and stranding
+  maps, but P20's own per-pickup loop is still unwritten, and P7 itself does
+  not run at all on a map missing a start or an exit.
 - **12 of 25 playability rules** are implemented.
 - **Texture alignment is minimal** — only an exit switch is centred; offsets
   do not accumulate across collinear runs.

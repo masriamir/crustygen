@@ -1,7 +1,7 @@
 # crustygen — known gaps and carried decisions
 
 State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD →
-reassembles through crustywad. 207 tests (199 lib + 1 first_map + 6
+reassembles through crustywad. 239 tests (231 lib + 1 first_map + 6
 golden_textmap + 1 walking_skeleton), plus a separately-run `#[ignore]`d
 golden-regeneration generator not included in that count. This file records
 what is deliberately absent, what is known-fragile, and the decisions a
@@ -14,19 +14,23 @@ P3, P4, P7, P8, P9, P11, P13, P14, P19, P24, P25. **P1** is retired — see
 `rules.rs`'s module doc and `CompileError::PortalNoHeadroom`, and the gap
 entry below.
 
-Deliberately absent, deferred to the next stage: **P5** (lifts), **P6** (monster
-mobility), **P10** (clean vertical tiling), **P12** (sky
+Deliberately absent, deferred to the next stage: **P5** (lifts), **P6**
+(monster mobility), **P10** (clean vertical tiling), **P12** (sky
 coherence), **P15** (teleport pairing), **P16**/**P17** (liquids and damage
 survivability), **P18** (secret accounting), **P20** (pickup accessibility),
 **P21** (light sources), **P22** (hanging decorations), **P23** (barrel
 safety).
 
-P20 still needs a per-pickup check. The key-aware reachability flood both
-P7 and P20 were waiting on now exists in `reach.rs`, but at today's geometry
-granularity — things live in rooms, not sub-room positions — P7's coverage
-check (every room forward-reached from the start) already subsumes P20's
-"every pickup is reachable" at that granularity. The explicit per-pickup loop
-becomes meaningful, and worth writing, once intra-room verticality exists.
+P20 still needs a per-pickup check. The key-aware reachability flood both P7
+and P20 were waiting on now exists in `reach.rs`. The subsumption below only
+holds while P7 runs at all — a map with no player start or no exit runs neither
+check. Where it does run, P7's coverage check (every room forward-reached from
+the start) already subsumes P20's "every pickup is reachable": a thing carries
+its own `at` position, but a room compiles to one sector with a single, uniform
+floor, so reaching the room makes every pickup inside it reachable regardless
+of where in the room it sits. The explicit per-pickup loop becomes meaningful,
+and worth writing, once intra-room verticality exists — the day a room stops
+being one flat sector.
 
 **P2 (headroom) is now fully covered.** `compile::things::place_things` checks
 every room's headroom against the player's own height once per room,
@@ -103,23 +107,21 @@ before sky is added.
 ## Decisions that look wrong without their reason
 
 **P24 is stricter than the engine about key kinds, and P7 is not.**
-`EV_VerticalDoor` (pinned `p_doors.c:371-403`) opens a colour's lock for
-either the card or the skull —
-`!p->cards[it_bluecard] && !p->cards[it_blueskull]` rejects the move only if
-*neither* is held. `reach.rs` interns lock classes by colour to match:
-`graph_from_compiled`'s keyed-special lookup is deliberately many-to-one, so
-either key thing of a colour satisfies a `Door` edge's lock. `check_key_lock_coherence`
-(P24) does not — it compares the authored lock string (`Portal::lock`, e.g.
-`"blue_card"`) against placed thing kinds by exact string equality. A map
-that locks a portal `"blue_card"` while placing only a `blue_skull` thing is
-therefore genuinely finishable — the skull opens the door in the engine, and
-P7 passes it — while P24 still fails it, because the string `"blue_card"`
-names a thing that never appears. This is deliberate, not a bug in either
-rule: P24 polices *authored intent* (you named a card, place a card), and P7
-polices the *engine's actual behavior* (either key of the colour works).
-Recorded here so a future "fix" does not make one rule agree with the other
-at the cost of disagreeing with the engine or with the author's stated
-intent.
+`EV_VerticalDoor` (pinned `p_doors.c:371-403`) opens a colour's lock for either
+the card or the skull — `!p->cards[it_bluecard] && !p->cards[it_blueskull]`
+rejects the move only if *neither* is held. `reach.rs` interns lock classes by
+colour to match: `graph_from_compiled`'s keyed-special lookup is deliberately
+many-to-one, so either key thing of a colour satisfies a `Door` edge's lock.
+`check_key_lock_coherence` (P24) does not — it compares the authored lock
+string (`Portal::lock`, e.g. `"blue_card"`) against placed thing kinds by exact
+string equality. A map that locks a portal `"blue_card"` while placing only a
+`blue_skull` thing is therefore genuinely finishable — the skull opens the door
+in the engine, and P7 passes it — while P24 still fails it, because the string
+`"blue_card"` names a thing that never appears. This is deliberate, not a bug
+in either rule: P24 polices *authored intent* (you named a card, place a card),
+and P7 polices the *engine's actual behavior* (either key of the colour works).
+Recorded here so a future "fix" does not make one rule agree with the other at
+the cost of disagreeing with the engine or with the author's stated intent.
 
 **The crate's own lints are `warn`, and CI is what makes them fatal.**
 `Cargo.toml` sets `clippy::all` and `clippy::pedantic` to `warn`, not `deny`,
