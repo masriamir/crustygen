@@ -90,12 +90,36 @@ case — legitimately so. crustygen emits no sky flat, so no fixture can reach
 it and the check is deliberately unwritten rather than guessed at. Required
 before sky is added.
 
-**crustygen runs in no CI.** It declares its own `[workspace]`, so the parent
-repo's `cargo fmt --all` and `cargo clippy --workspace` do not reach it, and
-its lints are `warn` where crustywad uses `-D warnings`. Wire this up at
-repository-promotion time.
-
 ## Decisions that look wrong without their reason
+
+**The crate's own lints are `warn`, and CI is what makes them fatal.**
+`Cargo.toml` sets `clippy::all` and `clippy::pedantic` to `warn`, not `deny`,
+so a local `cargo clippy` stays readable while you work. The strictness lives
+in `.github/workflows/ci.yml` as `cargo clippy --all-targets -- -D warnings`,
+on the invocation rather than in a global `RUSTFLAGS` — a global flag would
+apply to everything cargo compiles on the way here, not just this crate. The
+same split is why `cargo doc` runs under `RUSTDOCFLAGS: -D warnings` in CI and
+plainly in local use.
+
+This entry replaces a former gap reading "crustygen runs in no CI", which was
+true only while the package lived as a subdirectory of the crustywad worktree,
+where the parent's `cargo fmt --all` and `cargo clippy --workspace` could not
+reach it because it declares its own `[workspace]`.
+
+**Golden fixtures are pinned to LF, and they have to be.**
+`.gitattributes` marks `*.textmap` and `*.json` as `-text` and `*.wad` as
+`binary`. `emit_textmap` writes `\n` unconditionally, and both
+`tests/golden_textmap.rs` and `tests/first_map.rs` compare compiler output to
+a committed artifact **byte for byte** — so any newline translation on
+checkout breaks the comparison, and the WAD drift guard would compare
+corrupted bytes.
+
+This is not hypothetical. The repository's very first CI run failed three
+tests at once on `windows-latest` for exactly this reason: git checked the
+goldens out as CRLF while the compiler emitted LF. Nothing on Linux or macOS
+could have caught it, and the package had no CI at all until the day it became
+its own repository — the first thing CI did was find a bug that had been
+latent since the golden fixtures were introduced.
 
 **Entrada keeps every drop climbable on purpose, because nothing checks that
 it must.** `key_room` sits 16 units below `hub` and `exit_hall` 16 above
