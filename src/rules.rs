@@ -268,9 +268,9 @@ mod tests {
     }
 
     /// Two rooms joined by a door portal, with independently tunable
-    /// ceilings so the P4 boundary can be pinned without perturbing P1
-    /// (both floors are 0) or P3 (width is well above the player's
-    /// diameter).
+    /// ceilings so the P4 boundary can be pinned without perturbing P8
+    /// (both floors are 0, so no floor difference is ever introduced) or P3
+    /// (width is well above the player's diameter).
     fn door_ir(ceiling_a: i32, ceiling_b: i32) -> String {
         format!(
             r#"{{ "seed":1, "grid":64, "theme":"tech_base",
