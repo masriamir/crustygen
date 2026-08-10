@@ -64,11 +64,12 @@ fires when an opening consumes a wall end to end, so the reusable sidedef
 reaches it twice — its `armory` room is only 128 units tall along the wall its
 `start`-facing portal opens (`width: 128` against a wall exactly 128 units
 long), so the portal consumes that whole wall and leaves `armory`'s original
-sidedef record unreferenced. Confirmed directly: the compiled map carries 93
-sidedef records but only 91 are ever named by a linedef's `front`/`back` (up
-from 81/79 before the door-thickness/alcove redesign added more sidedefs to
-the map's two door chains — the two orphaned records are still exactly
-`armory`'s own two end-to-end-consumed walls, unaffected by that change).
+sidedef record unreferenced. Confirmed directly: the compiled map carries 105
+sidedef records but only 103 are ever named by a linedef's `front`/`back`
+(81/79 before the door-thickness/alcove redesign, 93/91 before the `cache`
+secret room was added — each change adds sidedefs, and the orphan count stays
+at exactly two throughout, still `armory`'s own two end-to-end-consumed walls,
+unaffected by either change).
 
 **A drop over one step is one-way, and nothing checks the map is still
 finishable.** `P_TryMove` caps the climb (`tmfloorz - thing->z >
@@ -95,6 +96,28 @@ its lints are `warn` where crustywad uses `-D warnings`. Wire this up at
 repository-promotion time.
 
 ## Decisions that look wrong without their reason
+
+**Entrada keeps every drop climbable on purpose, because nothing checks that
+it must.** `key_room` sits 16 units below `hub` and `exit_hall` 16 above
+`vault` — both within `max_step_height`, so every descent can be reversed.
+This is a constraint on the *fixture*, not on the compiler: a drop beyond one
+step is legal (see the one-way-drop gap above) and the compiler will happily
+emit one. It matters here because `key_room` is a dead end holding the blue
+card, the only key for the `combat` <-> `vault` door. An earlier revision put
+it at −32, which compiled clean, passed every test, and was **unfinishable** —
+the player drops in, takes the key, and cannot climb the 32 units back out
+(`P_TryMove` rejects a step over 24). Until **P7**'s reachability flood exists,
+nothing but authoring discipline prevents that, so any future height change to
+a dead-end room must be checked by hand against the step limit.
+
+**Entrada's `cache` room is the one place `Room::secret` is exercised.**
+Doom counts secrets by sectors carrying the secret special, so before that
+room existed the map reported "secrets 0%" at the intermission no matter how
+it was played — correct behavior with nothing to find, but indistinguishable
+from a broken secret mechanism. The room is optional, off `combat`'s north
+wall, and `tests/first_map.rs` pins that exactly one emitted sector carries
+`Tables::secret_sector_special`. This exercises P18's *mechanism*; P18's
+counting rule still does not exist (see above).
 
 **Two map artifacts ship, and only one of them loads in a vanilla engine.**
 `maps/entrada.wad` is the **UDMF** build — `MAP01`, `TEXTMAP`, `ZNODES`,

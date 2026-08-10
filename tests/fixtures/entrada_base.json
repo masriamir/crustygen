@@ -53,7 +53,7 @@
     {
       "id": "key_room",
       "footprint": [[704, -256], [704, -64], [960, -64], [960, -256]],
-      "floor": -32,
+      "floor": -16,
       "ceiling": 160,
       "light": 160,
       "floor_tex": "FLOOR4_8",
@@ -100,6 +100,20 @@
       ]
     },
     {
+      "id": "cache",
+      "footprint": [[1088, 320], [1088, 512], [1280, 512], [1280, 320]],
+      "floor": 0,
+      "ceiling": 128,
+      "light": 160,
+      "floor_tex": "FLOOR4_8",
+      "ceil_tex": "CEIL3_5",
+      "wall_tex": "STARTAN3",
+      "secret": true,
+      "things": [
+        { "kind": "soulsphere", "at": [1184, 416], "angle": 180 }
+      ]
+    },
+    {
       "id": "exit_hall",
       "footprint": [[1728, 0], [1728, 256], [1984, 256], [1984, 0]],
       "floor": 16,
@@ -121,6 +135,7 @@
       "door_thickness": 16, "alcove_near": 16, "alcove_far": 32 },
     { "a": "hub", "b": "key_room", "kind": "plain", "width": 128, "at": [832, 0] },
     { "a": "hub", "b": "combat", "kind": "plain", "width": 128, "at": [960, 96] },
+    { "a": "combat", "b": "cache", "kind": "plain", "width": 128, "at": [1184, 256] },
     { "a": "combat", "b": "vault", "kind": "locked", "lock": "blue_card", "width": 128, "at": [1344, 128],
       "door_thickness": 32, "alcove_near": 32 },
     { "a": "vault", "b": "exit_hall", "kind": "plain", "width": 128, "at": [1664, 128] }
