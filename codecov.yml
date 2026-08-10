@@ -1,0 +1,15 @@
+# Thresholds are advisory gates on the checks; the working review gate is the
+# codecov PR comment's missing-lines table, which reports uncovered changed
+# lines even when the thresholded checks pass.
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: 80%
+comment:
+  layout: "reach, diff, files"
+  require_changes: true
