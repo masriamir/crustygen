@@ -144,6 +144,10 @@ pub struct Findings {
     /// even if another arrival could have been. Doomed states of a node the
     /// report has already named are folded into that one entry, so the list is
     /// a set of rooms to fix rather than an enumeration of key combinations.
+    /// Degenerate case: when `unfinishable` is set the backward search has no
+    /// goal to seed from, so *every* visited node lands here — the rules layer
+    /// filters on exactly that rather than reporting a map that was never
+    /// finishable as a map full of softlocks.
     pub stranded: Vec<(NodeIdx, KeyMask)>,
     /// Nodes never visited in any state, ascending.
     pub unreachable: Vec<NodeIdx>,
@@ -573,11 +577,11 @@ mod tests {
     }
 
     #[test]
-    fn a_node_safe_on_one_walk_is_not_reported_stranded() {
+    fn a_doomed_branch_does_not_taint_its_sibling() {
         // Two branches off the start: a safe descent (floor, then a level
         // goal) and a 40-unit pocket whose only edge climbs back out — over
-        // the step cap, so the pocket is doomed. Nodes on the safe branch
-        // must NOT be reported merely because a doomed state exists elsewhere.
+        // the step cap, so the pocket is doomed. Nodes on the safe branch must
+        // NOT be reported merely because the other branch dead-ends.
         let g = graph(
             vec![
                 node(0, 200, 0),    // 0 start
@@ -592,5 +596,40 @@ mod tests {
         let f = check(&g, &LIMITS);
         assert!(!f.unfinishable);
         assert_eq!(f.stranded, vec![(3, 0)], "only the pocket is doomed");
+    }
+
+    #[test]
+    fn a_pit_survivable_only_with_the_key_still_strands_the_keyless() {
+        // The central semantic: a node is stranded when SOME arrival is
+        // doomed, not when every one is. Node 2 is a 100-unit pit whose only
+        // way on is a door locked to the key in node 1, so it is survivable as
+        // (2, 0b1) and fatal as (2, 0) — the player who dives in before
+        // detouring for the key is softlocked, and that is the state reported.
+        // Requiring all arrivals to be doomed would report nothing here and
+        // silently gut the rule.
+        //
+        // nodes: 0 start, 1 key(class 0), 2 pit 100 below start,
+        //        3 exit behind the pit's locked door.
+        let g = graph(
+            vec![
+                node(0, 128, 0),
+                node(0, 128, 0b1),
+                node(-100, 128, 0),
+                node(-100, 128, 0),
+            ],
+            vec![open(0, 1), open(0, 2), door(2, 3, Some(0))],
+            0,
+            vec![3],
+        );
+        let f = check(&g, &LIMITS);
+        assert!(
+            !f.unfinishable,
+            "grab the key first and the exit is reachable"
+        );
+        assert_eq!(
+            f.stranded,
+            vec![(2, 0)],
+            "entering the pit keyless is the softlock"
+        );
     }
 }
