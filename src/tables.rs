@@ -782,7 +782,7 @@ mod tests {
     }
 
     /// Every name the compiler, the playability rules, or the design's
-    /// template frontmatter (`docs/superpowers/specs/2026-08-09-crustygen-map-spec-design.md`
+    /// template frontmatter (`docs/design.md`
     /// section 5) references for exits, lifts, teleports, secrets, and
     /// liquid damage must resolve through `Tables` — and a name that is not
     /// in either table must fail loudly (`None`), never fall back to a

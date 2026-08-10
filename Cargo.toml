@@ -7,6 +7,11 @@ edition = "2024"
 rust-version = "1.94.0"
 publish = false
 description = "Generates playable Doom maps from a room-graph IR"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/masriamir/crustygen"
+readme = "README.md"
+keywords = ["doom", "wad", "udmf", "level-generation"]
+categories = ["game-development"]
 
 [dependencies]
 crustywad = { version = "0.9.4", features = ["write", "nodebuild"] }

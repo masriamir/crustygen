@@ -81,7 +81,7 @@ passable two-sided lines across DOOM, DOOM2, TNT, and PLUTONIA exceed the old
 cap and 62.5% of those are permanent static drops. Verifying the player can
 still finish is **P7**, which needs the key-aware reachability flood this
 project still does not have. Measurement:
-`.superpowers/sdd/2026-08-09-crustygen-compiler/verticality-corpus-report.md`.
+`docs/measurements/verticality-corpus.md`.
 
 **P8 has no sky exception.** `r_segs.c` sets `worldtop = worldhigh` when both
 sectors' `ceilingpic == skyflatnum`, so a sky-to-sky boundary draws no upper
@@ -225,8 +225,7 @@ touched. Swapping `a` and `b` on a portal no longer physically relocates
 anything — the gap is filled identically regardless of which room is named
 first — though `at`'s convention (anchored to room `a`'s wall) still means
 the two labels are not *interchangeable* without also updating `at`. See
-`ir::Portal`'s doc comment and the wall-thickness report
-(`.superpowers/sdd/2026-08-09-crustygen-compiler/wall-thickness-report.md`)
+`ir::Portal`'s doc comment and `docs/geometry.md`
 for the full derivation and worked coordinates. A door portal fills the same
 gap differently — see the next entry.
 
@@ -265,8 +264,7 @@ stay lower-unpegged unconditionally, since that setting only ever governed
 the track. `compile::doors::validate_door_texture` additionally rejects a
 theme whose `door` texture is not in `vocabulary.toml`'s curated (not
 sourced — see that table's own leading comment)
-`[door_texture_catalog]`. See the door-redesign report
-(`.superpowers/sdd/2026-08-09-crustygen-compiler/door-redesign-report.md`)
+`[door_texture_catalog]`. See `docs/geometry.md`
 for the full derivation, worked coordinates, and why "at least" was rejected
 in favor of exact equality.
 
