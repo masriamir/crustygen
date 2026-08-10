@@ -7,6 +7,7 @@ use crustywad::map::Map;
 use crustywad::{Wad, WadBuilder, WadKind};
 
 const TWO_ROOM: &str = include_str!("golden/two_room.json");
+const STEPPED: &str = include_str!("golden/stepped_rooms.json");
 
 #[test]
 fn compiler_output_matches_the_golden_fixture() {
@@ -252,4 +253,33 @@ fn a_diagonally_shaped_room_assembles_through_crustywad() {
         "eight walls, four of them diagonal"
     );
     assert_eq!(map.things().len(), 1, "the player start");
+}
+
+#[test]
+fn stepped_output_matches_the_golden_fixture() {
+    let ir = Ir::from_json(STEPPED).expect("ir");
+    let tables = Tables::load().expect("tables");
+    let out = compile(&ir, &tables).expect("compiles");
+    let golden = include_str!("golden/stepped_rooms.textmap");
+    assert_eq!(
+        out.textmap, golden,
+        "compiler output drifted from the stepped golden fixture"
+    );
+}
+
+/// Rewrites `tests/golden/stepped_rooms.textmap` from the current compiler.
+///
+/// Ignored by default so a drifting compiler fails the test above rather than
+/// silently rewriting its own expectation. Run deliberately with
+/// `cargo test --test golden_textmap regenerate -- --ignored`, then read the
+/// diff before committing it.
+#[test]
+#[ignore = "regenerates a golden fixture; run explicitly"]
+fn regenerate_stepped_golden() {
+    let ir = Ir::from_json(STEPPED).expect("ir");
+    let tables = Tables::load().expect("tables");
+    let out = compile(&ir, &tables).expect("compiles");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/stepped_rooms.textmap");
+    std::fs::write(path, &out.textmap).expect("write golden");
 }

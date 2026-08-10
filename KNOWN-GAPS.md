@@ -1,15 +1,18 @@
 # crustygen — known gaps and carried decisions
 
 State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD →
-reassembles through crustywad. 184 tests (177 lib + 1 first_map + 5
-golden_textmap + 1 walking_skeleton). This file records what is deliberately
-absent, what is known-fragile, and the decisions a future contributor would
-otherwise have to re-derive.
+reassembles through crustywad. 195 tests (187 lib + 1 first_map + 6
+golden_textmap, plus one `#[ignore]`d golden-regeneration generator + 1
+walking_skeleton). This file records what is deliberately absent, what is
+known-fragile, and the decisions a future contributor would otherwise have to
+re-derive.
 
 ## Not implemented, by design
 
-The compiler covers structural invariants S1–S6 and playability rules P1, P2,
-P3, P4, P8, P9, P11, P13, P14, P19, P24, P25.
+The compiler covers structural invariants S1–S6 and playability rules P2,
+P3, P4, P8, P9, P11, P13, P14, P19, P24, P25. **P1** is retired — see
+`rules.rs`'s module doc and `CompileError::PortalNoHeadroom`, and the gap
+entry below.
 
 Deliberately absent, deferred to the next stage: **P5** (lifts), **P6** (monster
 mobility), **P7** (no softlock), **P10** (clean vertical tiling), **P12** (sky
@@ -67,30 +70,24 @@ from 81/79 before the door-thickness/alcove redesign added more sidedefs to
 the map's two door chains — the two orphaned records are still exactly
 `armory`'s own two end-to-end-consumed walls, unaffected by that change).
 
-**Every map is flat, and two rules are known-wrong about why.**
-`compile::portals::emit_opening` creates both of a threshold's sidedefs with
-empty `upper`/`middle`/`lower` and nothing fills them in, so **P8** rejects any
-authored floor or ceiling difference. **P1** independently rejects a floor
-delta over `max_step_height` in *either* direction. A corpus measurement over
-DOOM, DOOM2, TNT, and PLUTONIA (132 maps, 154,365 linedefs, 67,256 two-sided,
-zero assembly failures) shows both rules are wrong about vanilla Doom:
-
-- **37.77%** of passable two-sided lines exceed the 24-unit cap (24,604 of
-  65,134); **56.92%** of those that have any height change. **62.5%** of the
-  over-step lines border no tagged sector, so they are permanent static drops,
-  not lifts caught lowered. The largest is 2,200 units. The engine agrees:
-  `P_TryMove`'s `tmfloorz - thing->z > 24*FRACUNIT` caps the *climb*, and
-  falling is unrestricted — P1's symmetric `abs()` conflates the two.
-- Where floors differ, real maps texture the side `r_segs.c` actually draws
-  **98.6%** of the time and the hidden side only **10.5%**; P8 demands both,
-  so it would reject roughly nine of every ten of vanilla Doom's own
-  height-change boundaries.
-
-Measured practice, not engine fact — it belongs in neither `engine.toml` nor
-`vocabulary.toml`. Method, per-WAD breakdown, and the preserved program:
+**A drop over one step is one-way, and nothing checks the map is still
+finishable.** `P_TryMove` caps the climb (`tmfloorz - thing->z >
+24*FRACUNIT`) and leaves falling unrestricted, so a room reachable only by
+falling into it cannot be left the same way. The retired P1 forbade this
+by accident; the replacement
+(`CompileError::PortalNoHeadroom`) deliberately allows it, because 37.77% of
+passable two-sided lines across DOOM, DOOM2, TNT, and PLUTONIA exceed the old
+cap and 62.5% of those are permanent static drops. Verifying the player can
+still finish is **P7**, which needs the key-aware reachability flood this
+project still does not have. Measurement:
 `.superpowers/sdd/2026-08-09-crustygen-compiler/verticality-corpus-report.md`.
-The design that acts on it:
-`docs/superpowers/specs/2026-08-09-crustygen-verticality-design.md`.
+
+**P8 has no sky exception.** `r_segs.c` sets `worldtop = worldhigh` when both
+sectors' `ceilingpic == skyflatnum`, so a sky-to-sky boundary draws no upper
+and needs none — 60.3% of the corpus's legitimately-absent uppers are exactly
+this case. crustygen emits no sky flat, so no fixture can reach it and the
+check is deliberately unwritten rather than guessed at. Required before sky
+is added.
 
 **crustygen runs in no CI.** It declares its own `[workspace]`, so the parent
 repo's `cargo fmt --all` and `cargo clippy --workspace` do not reach it, and

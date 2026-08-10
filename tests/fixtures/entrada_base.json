@@ -53,8 +53,8 @@
     {
       "id": "key_room",
       "footprint": [[704, -256], [704, -64], [960, -64], [960, -256]],
-      "floor": 0,
-      "ceiling": 128,
+      "floor": -32,
+      "ceiling": 160,
       "light": 160,
       "floor_tex": "FLOOR4_8",
       "ceil_tex": "CEIL3_5",
@@ -102,8 +102,8 @@
     {
       "id": "exit_hall",
       "footprint": [[1728, 0], [1728, 256], [1984, 256], [1984, 0]],
-      "floor": 0,
-      "ceiling": 128,
+      "floor": 16,
+      "ceiling": 144,
       "light": 160,
       "floor_tex": "FLOOR4_8",
       "ceil_tex": "CEIL3_5",
