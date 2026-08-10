@@ -486,6 +486,22 @@ mod tests {
             .expect("room a borders the passage sector directly")
     }
 
+    /// The mirror of `room_a_passage_boundary` for the *far* threshold: the
+    /// (front, back) sidedef indices of the linedef joining room `b`
+    /// (sector 1) and the passage (sector 2). Also fixed by construction:
+    /// `compile::portals::emit_segment`'s far threshold always calls
+    /// `emit_opening` with the far room as `sector_a`, and `emit_opening`
+    /// always makes `sector_a` the linedef's front — so room `b`'s own
+    /// sidedef is always `front` here, regardless of orientation.
+    fn room_b_passage_boundary(out: &crate::compile::Compiled) -> (usize, usize) {
+        out.data
+            .linedefs
+            .iter()
+            .filter_map(|l| l.back.map(|b| (l.front, b)))
+            .find(|(f, b)| out.data.sidedefs[*f].sector == 1 && out.data.sidedefs[*b].sector == 2)
+            .expect("room b borders the passage sector directly")
+    }
+
     #[test]
     fn p8_fires_when_the_drawn_side_loses_its_lower_texture() {
         // The compiler now fills this in, so the rule can only be exercised
@@ -527,6 +543,53 @@ mod tests {
         let (_front, back) = room_a_passage_boundary(&out);
         assert!(
             out.data.sidedefs[back].lower.is_empty(),
+            "the unsampled side is left bare, and that is legal"
+        );
+        assert!(check_all(&ir, &tables, &out).iter().all(|v| v.rule != "P8"));
+    }
+
+    #[test]
+    fn p8_fires_when_the_drawn_side_loses_its_upper_texture() {
+        // The mirror of `p8_fires_when_the_drawn_side_loses_its_lower_texture`,
+        // isolating the *ceiling* branch: this was the gap a mutation pass
+        // found in `check_missing_textures` — deleting its upper branch
+        // entirely left all tests green, because no test cleared a filled
+        // upper and re-checked P8. `portal_ir`'s floors are equal here (both
+        // 0), so only the ceiling branch can fire, mirroring how
+        // `p8_fires_when_the_drawn_side_loses_its_lower_texture` isolates the
+        // floor branch by holding the ceilings equal instead.
+        let ir = Ir::from_json(&portal_ir(0, 160, 128)).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (mut out, found) = compile_reporting(&ir, &tables).expect("compiles");
+        assert!(
+            !found.iter().any(|v| v.rule == "P8"),
+            "a compiled ceiling difference is textured, so P8 is quiet"
+        );
+
+        // Room b's ceiling (160) is above the passage's (128, the min of
+        // the two), so room b's own sidedef — the far boundary's front, by
+        // construction — is the drawn side.
+        let (front, _back) = room_b_passage_boundary(&out);
+        out.data.sidedefs[front].upper.clear();
+
+        let violations = check_all(&ir, &tables, &out);
+        assert!(violations.iter().any(|v| v.rule == "P8"));
+    }
+
+    #[test]
+    fn p8_ignores_a_bare_upper_the_renderer_never_samples() {
+        // The other half of the ceiling branch: vanilla leaves the
+        // unsampled side bare 89.5% of the time (see
+        // `check_missing_textures`'s own doc comment), so a bare hidden
+        // upper must not be a violation either. As above, which side is
+        // hidden (the passage's own sidedef, the far boundary's back) is a
+        // fixed expectation, not recomputed.
+        let ir = Ir::from_json(&portal_ir(0, 160, 128)).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (out, _) = compile_reporting(&ir, &tables).expect("compiles");
+        let (_front, back) = room_b_passage_boundary(&out);
+        assert!(
+            out.data.sidedefs[back].upper.is_empty(),
             "the unsampled side is left bare, and that is legal"
         );
         assert!(check_all(&ir, &tables, &out).iter().all(|v| v.rule != "P8"));
