@@ -18,7 +18,7 @@ implementation, and `KNOWN-GAPS.md` records authoring discipline as the only gua
 
 ## The finding that shapes the design
 
-**The flood issue #4 literally asks for cannot catch the bug that motivates it.** A
+**The flood that issue #4 literally asks for cannot catch the bug that motivates it.** A
 set-union flood — accumulate reachable rooms, unlock doors as their keys become
 reachable, iterate to fixpoint — passes the shipped `key_room` map: the room is
 reachable (drop in), so the blue card counts as obtained, so the locked door opens, so

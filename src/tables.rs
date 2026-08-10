@@ -490,9 +490,12 @@ impl Tables {
     /// Every `(key kind, keyed-door special)` pair in the vocabulary,
     /// sorted by kind name.
     ///
-    /// Sorted because the backing table is a `HashMap` and the P7 flood
-    /// interns key classes from this list — unsorted iteration would make
-    /// class numbering, and therefore report wording, nondeterministic.
+    /// Sorted because the backing table is a `HashMap`. Class *numbering* is
+    /// made deterministic downstream — [`crate::reach::graph_from_compiled`]
+    /// sorts and dedups the specials themselves — but the per-class key-kind
+    /// *names* (`class_names`, and so P7's report wording) inherit their
+    /// order from this list, and unsorted iteration would make that wording
+    /// nondeterministic.
     #[must_use]
     pub fn locked_door_kinds(&self) -> Vec<(String, u16)> {
         let mut kinds: Vec<(String, u16)> = self
