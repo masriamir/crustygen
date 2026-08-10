@@ -2,6 +2,7 @@
 
 pub mod doors;
 pub mod exits;
+pub mod heights;
 pub mod portals;
 pub mod sectors;
 pub mod tags;
@@ -452,18 +453,23 @@ pub struct Compiled {
 ///    gap sectors from unrelated portals crossing each other. Must run after
 ///    every sector-emitting pass (steps 1, 3, 4, 5) and before anything that
 ///    trusts the geometry is sound, which is everything from here on.
-/// 7. [`things::place_things`] places every thing, measuring clearance and
+/// 7. [`heights::apply_height_textures`] writes the upper and lower textures
+///    every height difference exposes, on the one side `r_segs.c` draws.
+///    Runs after every sector-emitting pass because it reads final floor and
+///    ceiling heights, and after the overlap check because it trusts the
+///    geometry it walks.
+/// 8. [`things::place_things`] places every thing, measuring clearance and
 ///    headroom against the geometry emitted by steps 1–5 — not the IR's
 ///    declared footprints, which an exit alcove can still make stale even
 ///    though a door no longer does — so it must run after doors and exits
 ///    are carved, not before.
-/// 8. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
+/// 9. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
 ///    at tag 0, which would match every untagged sector in-engine.
-/// 9. [`textmap::emit_textmap`] renders the final, validated geometry.
-/// 10. [`crate::rules::check_all`] runs the playability catalog over the
+/// 10. [`textmap::emit_textmap`] renders the final, validated geometry.
+/// 11. [`crate::rules::check_all`] runs the playability catalog over the
 ///     result and fails the compile if anything is violated.
 ///
-/// Step 10 is part of `compile` rather than a separate call the caller may
+/// Step 11 is part of `compile` rather than a separate call the caller may
 /// forget, because the design makes playability violations hard errors: "a
 /// door the player cannot fit through is a broken map, not a missed target".
 /// Leaving `check_all` optional meant every rule in `rules` was inert unless
@@ -508,6 +514,7 @@ pub fn compile_reporting(
     doors::emit_doors(ir, tables, &mut data, &mut tags)?;
     exits::emit_exits(ir, tables, &mut data, &mut tags)?;
     sectors::check_no_sector_overlaps(ir, &data)?;
+    heights::apply_height_textures(&mut data);
     let things = things::place_things(ir, tables, &data)?;
     tags::check_no_action_at_tag_zero(&data)?;
     let textmap = textmap::emit_textmap(&data, &things);

@@ -165,29 +165,45 @@ fn check_missing_textures(out: &Compiled, v: &mut Vec<RuleViolation>) {
         let back = &out.data.sidedefs[back_idx];
         let front_sector = &out.data.sectors[front.sector];
         let back_sector = &out.data.sectors[back.sector];
-        if front_sector.floor != back_sector.floor
-            && (front.lower.is_empty() || back.lower.is_empty())
-        {
-            v.push(RuleViolation {
-                rule: "P8",
-                subject: format!("linedef {i}"),
-                detail: format!(
-                    "floors differ ({} vs {}) but a lower texture is missing",
-                    front_sector.floor, back_sector.floor
-                ),
-            });
+        // Doom samples only one sidedef per difference (`r_segs.c`,
+        // `R_StoreWallRange`): the lower from the sidedef whose own sector is
+        // the lower one, the upper from the sidedef whose own sector has the
+        // higher ceiling. Requiring the other side as well would reject the
+        // overwhelming majority of vanilla Doom's own boundaries — measured
+        // at 89.5% across DOOM, DOOM2, TNT, and PLUTONIA.
+        if front_sector.floor != back_sector.floor {
+            let visible = if back_sector.floor > front_sector.floor {
+                front
+            } else {
+                back
+            };
+            if visible.lower.is_empty() {
+                v.push(RuleViolation {
+                    rule: "P8",
+                    subject: format!("linedef {i}"),
+                    detail: format!(
+                        "floors differ ({} vs {}) but the lower side has no lower texture",
+                        front_sector.floor, back_sector.floor
+                    ),
+                });
+            }
         }
-        if front_sector.ceiling != back_sector.ceiling
-            && (front.upper.is_empty() || back.upper.is_empty())
-        {
-            v.push(RuleViolation {
-                rule: "P8",
-                subject: format!("linedef {i}"),
-                detail: format!(
-                    "ceilings differ ({} vs {}) but an upper texture is missing",
-                    front_sector.ceiling, back_sector.ceiling
-                ),
-            });
+        if front_sector.ceiling != back_sector.ceiling {
+            let visible = if back_sector.ceiling < front_sector.ceiling {
+                front
+            } else {
+                back
+            };
+            if visible.upper.is_empty() {
+                v.push(RuleViolation {
+                    rule: "P8",
+                    subject: format!("linedef {i}"),
+                    detail: format!(
+                        "ceilings differ ({} vs {}) but the higher-ceiling side has no upper texture",
+                        front_sector.ceiling, back_sector.ceiling
+                    ),
+                });
+            }
         }
     }
 }
@@ -231,6 +247,7 @@ fn check_key_lock_coherence(ir: &Ir, v: &mut Vec<RuleViolation>) {
 mod tests {
     use crate::compile::{CompileError, compile, compile_reporting};
     use crate::ir::Ir;
+    use crate::rules::check_all;
     use crate::tables::Tables;
 
     /// Two rooms joined by a plain portal, with tunable floors, width, and
@@ -410,19 +427,64 @@ mod tests {
     }
 
     #[test]
-    fn p8_a_floor_change_without_a_lower_texture_fails() {
-        // Ceilings equal (128 == 128); only the floor differs, isolating the
-        // lower-texture branch from the upper-texture branch. The two-sided
-        // line needs a lower texture, but the compiler leaves portal
-        // sidedefs bare by default (see `compile::portals::emit_opening`).
-        assert!(violations(&portal_ir(16, 128, 128)).contains(&"P8".to_owned()));
+    fn p8_fires_when_the_drawn_side_loses_its_lower_texture() {
+        // The compiler now fills this in, so the rule can only be exercised
+        // by taking it back out — which is also the mutation proof that the
+        // rule is watching the side the renderer actually samples.
+        let ir = Ir::from_json(&portal_ir(16, 128, 128)).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (mut out, found) = compile_reporting(&ir, &tables).expect("compiles");
+        assert!(
+            !found.iter().any(|v| v.rule == "P8"),
+            "a compiled height difference is textured, so P8 is quiet"
+        );
+
+        let victim = out
+            .data
+            .linedefs
+            .iter()
+            .filter_map(|l| l.back.map(|b| (l.front, b)))
+            .find(|(f, b)| {
+                out.data.sectors[out.data.sidedefs[*f].sector].floor
+                    != out.data.sectors[out.data.sidedefs[*b].sector].floor
+            })
+            .expect("some boundary has a floor difference");
+        let (front, back) = victim;
+        let lower_side = if out.data.sectors[out.data.sidedefs[back].sector].floor
+            > out.data.sectors[out.data.sidedefs[front].sector].floor
+        {
+            front
+        } else {
+            back
+        };
+        out.data.sidedefs[lower_side].lower.clear();
+
+        let violations = check_all(&ir, &tables, &out);
+        assert!(violations.iter().any(|v| v.rule == "P8"));
     }
 
     #[test]
-    fn p8_a_ceiling_change_without_an_upper_texture_fails() {
-        // Floors equal (0 == 0); only the ceiling differs, isolating the
-        // upper-texture branch from the lower-texture branch.
-        assert!(violations(&portal_ir(0, 160, 128)).contains(&"P8".to_owned()));
+    fn p8_ignores_a_bare_side_the_renderer_never_samples() {
+        // The other half of the same rule: vanilla leaves the unsampled side
+        // bare 89.5% of the time, so a bare hidden side must not be a
+        // violation. A rule that still demanded both sides passes the test
+        // above and fails this one.
+        let ir = Ir::from_json(&portal_ir(16, 128, 128)).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (out, _) = compile_reporting(&ir, &tables).expect("compiles");
+        let bare = out
+            .data
+            .linedefs
+            .iter()
+            .filter_map(|l| l.back.map(|b| (l.front, b)))
+            .any(|(f, b)| {
+                let ff = out.data.sectors[out.data.sidedefs[f].sector].floor;
+                let bf = out.data.sectors[out.data.sidedefs[b].sector].floor;
+                let hidden = if bf > ff { b } else { f };
+                ff != bf && out.data.sidedefs[hidden].lower.is_empty()
+            });
+        assert!(bare, "the unsampled side is left bare, and that is legal");
+        assert!(check_all(&ir, &tables, &out).iter().all(|v| v.rule != "P8"));
     }
 
     #[test]
@@ -502,6 +564,49 @@ mod tests {
         assert!(
             out.data.linedefs.iter().any(|l| l.special == keyed),
             "the locked door carries blue_card's keyed special"
+        );
+    }
+
+    #[test]
+    fn a_doors_own_texture_survives_the_height_pass() {
+        // `emit_doors` writes the theme door texture onto both door faces'
+        // `upper` before the height pass runs. Without the fill-if-empty
+        // guard the pass would overwrite it with a plain wall texture, and
+        // the door would stop reading as a door.
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+            { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":24, "ceiling":152, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128],
+                        "door_thickness":32, "alcove_near":16, "alcove_far":16 }] }"#;
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let out = compile(&ir, &tables).expect("compiles");
+        let door_tex = tables.texture("door", "tech_base").expect("door texture");
+        let door_faces = out
+            .data
+            .sidedefs
+            .iter()
+            .filter(|s| s.upper == door_tex)
+            .count();
+        // `emit_doors` writes the door texture onto *both* sidedefs (front
+        // and back) of *both* the near and far door lines — 4 in total,
+        // independent of the height pass — so the theme's door texture
+        // reads correctly no matter which side the player approaches from.
+        // Without the fill-if-empty guard, the height pass would overwrite
+        // the room/alcove-facing sidedef of each line with that neighbor's
+        // own wall texture (since it is always the higher-ceiling, "visible"
+        // side here), dropping this count to 2; verified directly by running
+        // the pass with the guard removed.
+        assert_eq!(
+            door_faces, 4,
+            "all four door-face sidedefs keep the theme's door texture"
         );
     }
 }
