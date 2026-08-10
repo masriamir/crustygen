@@ -42,8 +42,11 @@ secret sectors equals `secrets.count`" — since `secrets.count` is a map-spec
 concept with no representation in this IR; that check belongs at the stage
 that reads the map-spec, not here.
 
-Also absent: the packer, the verifier, the conformance report, the blank
-Markdown template, and any authored map. Specials for lifts, teleports, and
+Also absent: the verifier, the conformance report, and the blank Markdown
+template. (The packer — `pack::pack_udmf` and `pack::pack_udmf_with_nodes` —
+and an authored map — `tests/fixtures/entrada_base.json`, built into
+`maps/entrada.wad` — both shipped after this paragraph was first written and
+are no longer absent.) Specials for lifts, teleports, and
 liquid sector effects, monster `spawnhealth`, health/armor pickup amounts and
 caps, the gore prop set, and the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef
 flags are all **sourced and accessible** but nothing emits any of them yet.
@@ -63,6 +66,31 @@ sidedef records but only 91 are ever named by a linedef's `front`/`back` (up
 from 81/79 before the door-thickness/alcove redesign added more sidedefs to
 the map's two door chains — the two orphaned records are still exactly
 `armory`'s own two end-to-end-consumed walls, unaffected by that change).
+
+**Every map is flat, and two rules are known-wrong about why.**
+`compile::portals::emit_opening` creates both of a threshold's sidedefs with
+empty `upper`/`middle`/`lower` and nothing fills them in, so **P8** rejects any
+authored floor or ceiling difference. **P1** independently rejects a floor
+delta over `max_step_height` in *either* direction. A corpus measurement over
+DOOM, DOOM2, TNT, and PLUTONIA (132 maps, 154,365 linedefs, 67,256 two-sided,
+zero assembly failures) shows both rules are wrong about vanilla Doom:
+
+- **37.77%** of passable two-sided lines exceed the 24-unit cap (24,604 of
+  65,134); **56.92%** of those that have any height change. **62.5%** of the
+  over-step lines border no tagged sector, so they are permanent static drops,
+  not lifts caught lowered. The largest is 2,200 units. The engine agrees:
+  `P_TryMove`'s `tmfloorz - thing->z > 24*FRACUNIT` caps the *climb*, and
+  falling is unrestricted — P1's symmetric `abs()` conflates the two.
+- Where floors differ, real maps texture the side `r_segs.c` actually draws
+  **98.6%** of the time and the hidden side only **10.5%**; P8 demands both,
+  so it would reject roughly nine of every ten of vanilla Doom's own
+  height-change boundaries.
+
+Measured practice, not engine fact — it belongs in neither `engine.toml` nor
+`vocabulary.toml`. Method, per-WAD breakdown, and the preserved program:
+`.superpowers/sdd/2026-08-09-crustygen-compiler/verticality-corpus-report.md`.
+The design that acts on it:
+`docs/superpowers/specs/2026-08-09-crustygen-verticality-design.md`.
 
 **crustygen runs in no CI.** It declares its own `[workspace]`, so the parent
 repo's `cargo fmt --all` and `cargo clippy --workspace` do not reach it, and
