@@ -96,6 +96,30 @@ repository-promotion time.
 
 ## Decisions that look wrong without their reason
 
+**Two map artifacts ship, and only one of them loads in a vanilla engine.**
+`maps/entrada.wad` is the **UDMF** build — `MAP01`, `TEXTMAP`, `ZNODES`,
+`ENDMAP` — and needs a ZDoom-family port (GZDoom, Odamex, Eternity).
+`maps/entrada_doom.wad` is the binary **Doom-format** twin, carrying real
+`THINGS` through `BLOCKMAP`, and is the one to load in Chocolate Doom, DOSBox,
+or anything else vanilla-accurate.
+
+Loading the UDMF build in a vanilla port does not report a helpful error; it
+dies with `W_LumpLength: <n> >= numlumps`. The reason is `P_SetupLevel`, which
+addresses a map's data as **fixed offsets from the marker** (`doomdata.h`'s
+`ML_THINGS` = 1 through `ML_BLOCKMAP` = 10) rather than by searching for lump
+names. A UDMF group supplies only three lumps after its marker, so the
+`BLOCKMAP` slot resolves past the end of the directory. Observed directly with
+Chocolate Doom 3.1.1 over `DOOM2.WAD` (2,919 lumps): `MAP01` landed at index
+2919, and the engine asked for 2919 + 10 = **2929** against a `numlumps` of
+2923.
+
+Both artifacts are produced from the same compiled output — `pack::pack_udmf`
+for the un-noded bytes, `pack::pack_udmf_with_nodes` for the UDMF build, and
+`cwad convert --to doom --nodes` on the un-noded twin for the Doom build (see
+`tests/first_map.rs` and the map-generation report). Neither is redundant: the
+UDMF one is the compiler's native output, and the Doom one is the proof that
+output survives a downconvert into the format every engine can read.
+
 **Sector footprints wind clockwise.** A linedef's front (right) sidedef only
 faces the sector interior under clockwise winding. Verified empirically: 2611
 of 2611 sector boundaries across nine Freedoom maps in both IWADs.
