@@ -717,4 +717,53 @@ mod tests {
             "all four door-face sidedefs keep the theme's door texture"
         );
     }
+
+    #[test]
+    fn a_door_across_a_floor_difference_puts_the_lower_on_the_doors_own_side() {
+        // I1: the `back` arm of `heights::visible_lower_side` is not merely
+        // a theoretical possibility exercised by a hand-built `MapData`
+        // (`heights::tests::a_higher_front_floor_and_lower_front_ceiling_textures_the_back_side`)
+        // — a door portal across a floor difference produces it directly
+        // through the real pipeline. `doors::emit_doors` always gives the
+        // door sector `min(floors)`, and `portals::emit_segment`'s far
+        // threshold always puts the far neighbor (here, room b's alcove) on
+        // the front and the door sector on the back, so when the far
+        // neighbor sits higher (room b's floor 24 against room a's 0), the
+        // door sector's own sidedef is the visible lower side of its own
+        // far threshold — reusing the same fixture as
+        // `a_doors_own_texture_survives_the_height_pass` above.
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+            { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":24, "ceiling":152, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128],
+                        "door_thickness":32, "alcove_near":16, "alcove_far":16 }] }"#;
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let out = compile(&ir, &tables).expect("compiles");
+
+        // Only the door's own two faces carry a nonzero tag. Of the two, the
+        // far one is whichever has the higher-floored front sidedef: the
+        // near alcove copies room a's floor (0), the far alcove copies room
+        // b's (24) — `doors::emit_doors`'s own doc comment for why each
+        // alcove copies the room it directly borders.
+        let far_line = out
+            .data
+            .linedefs
+            .iter()
+            .filter(|l| l.tag != 0)
+            .max_by_key(|l| out.data.sectors[out.data.sidedefs[l.front].sector].floor)
+            .expect("the door has two tagged faces");
+        let door_side = far_line.back.expect("a door's faces are two-sided");
+        assert_eq!(
+            out.data.sidedefs[door_side].lower, "STARTAN3",
+            "the door sector's own sidedef carries the lower on its higher-floored far side"
+        );
+    }
 }

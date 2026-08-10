@@ -254,16 +254,23 @@ mod tests {
 
     #[test]
     fn a_higher_front_floor_and_lower_front_ceiling_textures_the_back_side() {
-        // Every fixture above only ever exercises the `front` arm of
-        // `visible_lower_side`/`visible_upper_side`: a plain portal's gap
-        // sector always takes `max(floor)`/`min(ceiling)`, and
-        // `compile::portals::emit_opening` always makes the *room's* own
-        // sidedef the linedef's front — so the compiler itself never
-        // currently emits a linedef whose *back* sidedef is the visible
-        // one. A hand-built `MapData` is the only way to exercise that arm
-        // directly today: two sectors and one two-sided linedef, with
-        // `front`'s own sector given the higher floor and the lower
-        // ceiling, so both the lower and the upper must land on `back`.
+        // The `back` arm of `visible_lower_side`/`visible_upper_side` *is*
+        // reachable through the real compiler — a door portal across a
+        // floor difference produces it directly. The door sector always
+        // takes `min(floors)` (`compile::doors::emit_doors`), and
+        // `compile::portals::emit_segment`'s far threshold puts the far
+        // neighbor (a room or an alcove) on the front and the door sector
+        // on the back; when the far neighbor sits higher, that makes the
+        // door sector's own sidedef the visible `back`.
+        // `rules::tests::a_door_across_a_floor_difference_puts_the_lower_on_the_doors_own_side`
+        // pins exactly this case through `compile`, not a hand-built
+        // `MapData`. What the hand-built fixture below buys instead is
+        // isolation: two sectors and one two-sided linedef, with `front`'s
+        // own sector given the higher floor and the lower ceiling, so both
+        // the lower and the upper must land on `back` with nothing else in
+        // the fixture that could produce that result by accident — that
+        // isolation, not necessity, is why this test exists alongside the
+        // real-pipeline one.
         let mut data = MapData {
             vertices: vec![Pt { x: 0, y: 0 }, Pt { x: 0, y: 64 }],
             sectors: vec![
