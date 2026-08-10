@@ -50,9 +50,47 @@ pub fn cut_portals(ir: &Ir, tables: &Tables, data: &mut MapData) -> Result<(), C
         .collect::<Result<Vec<_>, CompileError>>()?;
 
     check_no_overlapping_openings(&resolved)?;
+    check_headroom(ir, tables, &resolved)?;
 
     for (portal, geometry) in &resolved {
-        cut_one(ir, tables, data, portal, geometry)?;
+        cut_one(ir, data, portal, geometry)?;
+    }
+    Ok(())
+}
+
+/// Rejects a plain portal whose two rooms leave too little headroom in the
+/// passage sector between them.
+///
+/// Runs here, in the pre-emission pass alongside
+/// [`check_no_overlapping_openings`], over every resolved portal before any
+/// wall is split — not inside `cut_one`, which runs after
+/// `split_wall_for_opening` has already mutated `data`. Checking it here is
+/// what makes this module's own doc comment ("every portal is resolved and
+/// cross-checked before anything is emitted") actually true: a rejected map
+/// leaves no partially-cut geometry behind. Only [`PortalKind::Plain`]
+/// portals are checked — see [`CompileError::PortalNoHeadroom`]'s doc
+/// comment for why a door portal is exempt.
+fn check_headroom(
+    ir: &Ir,
+    tables: &Tables,
+    resolved: &[(&Portal, PortalGeometry)],
+) -> Result<(), CompileError> {
+    let need = tables.player().height;
+    for (portal, geometry) in resolved {
+        if portal.kind != PortalKind::Plain {
+            continue;
+        }
+        let room_a = &ir.rooms[geometry.ia];
+        let room_b = &ir.rooms[geometry.ib];
+        let have = room_a.ceiling.min(room_b.ceiling) - room_a.floor.max(room_b.floor);
+        if have < need {
+            return Err(CompileError::PortalNoHeadroom {
+                a: portal.a.clone(),
+                b: portal.b.clone(),
+                have,
+                need,
+            });
+        }
     }
     Ok(())
 }
@@ -98,7 +136,6 @@ fn check_no_overlapping_openings(
 
 fn cut_one(
     ir: &Ir,
-    tables: &Tables,
     data: &mut MapData,
     portal: &Portal,
     geometry: &PortalGeometry,
@@ -133,18 +170,11 @@ fn cut_one(
     if portal.kind == PortalKind::Plain {
         let room_a = &ir.rooms[geometry.ia];
         let room_b = &ir.rooms[geometry.ib];
+        // `check_headroom` has already rejected any plain portal whose
+        // rooms leave too little headroom, before `cut_portals` cut a
+        // single wall — see that function's doc comment.
         let floor = room_a.floor.max(room_b.floor);
         let ceiling = room_a.ceiling.min(room_b.ceiling);
-        let need = tables.player().height;
-        let have = ceiling - floor;
-        if have < need {
-            return Err(CompileError::PortalNoHeadroom {
-                a: portal.a.clone(),
-                b: portal.b.clone(),
-                have,
-                need,
-            });
-        }
         let sector_out = SectorOut {
             floor,
             ceiling,
