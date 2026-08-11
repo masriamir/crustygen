@@ -1183,7 +1183,7 @@ mod tests {
         assert_eq!(
             t.linedef_flag("blocking"),
             Some(1),
-            "ML_BLOCKING is now sourced too, for check::scene's Boundary::blocking (Task 4)"
+            "ML_BLOCKING is now sourced too, for check::scene's Boundary::blocking"
         );
         assert_eq!(
             t.linedef_flag("plaid_flag"),

@@ -174,29 +174,47 @@ fn resolve_index(
     resolved
 }
 
-/// Reads `(two_sided, blocking, lower_unpegged)` off `line.flags` using the
-/// sourced `Tables` bit values, rather than a literal.
-fn linedef_boundary_flags(tables: &Tables, line: &UdmfLinedef) -> (bool, bool, bool) {
-    let two_sided_flag = u32::from(
-        tables
-            .linedef_flag("two_sided")
-            .expect("sourced in engine.toml"),
-    );
-    let blocking_flag = u32::from(
-        tables
-            .linedef_flag("blocking")
-            .expect("sourced in engine.toml"),
-    );
-    let lower_unpegged_flag = u32::from(
-        tables
-            .linedef_flag("lower_unpegged")
-            .expect("sourced in engine.toml"),
-    );
-    (
-        line.flags & two_sided_flag != 0,
-        line.flags & blocking_flag != 0,
-        line.flags & lower_unpegged_flag != 0,
-    )
+/// The sourced `ML_TWOSIDED`/`ML_BLOCKING`/`ML_DONTPEGBOTTOM` bit values,
+/// resolved once per [`Scene::build`] call rather than re-looked-up for
+/// every linedef.
+#[derive(Debug, Clone, Copy)]
+struct BoundaryFlagBits {
+    two_sided: u32,
+    blocking: u32,
+    lower_unpegged: u32,
+}
+
+impl BoundaryFlagBits {
+    /// Resolves all three bits from `tables`. Panics if any is missing —
+    /// they are guaranteed present in `engine.toml`'s `[linedef.flags]`.
+    fn resolve(tables: &Tables) -> Self {
+        Self {
+            two_sided: u32::from(
+                tables
+                    .linedef_flag("two_sided")
+                    .expect("sourced in engine.toml"),
+            ),
+            blocking: u32::from(
+                tables
+                    .linedef_flag("blocking")
+                    .expect("sourced in engine.toml"),
+            ),
+            lower_unpegged: u32::from(
+                tables
+                    .linedef_flag("lower_unpegged")
+                    .expect("sourced in engine.toml"),
+            ),
+        }
+    }
+
+    /// Reads `(two_sided, blocking, lower_unpegged)` off a linedef's `flags`.
+    fn read(self, flags: u32) -> (bool, bool, bool) {
+        (
+            flags & self.two_sided != 0,
+            flags & self.blocking != 0,
+            flags & self.lower_unpegged != 0,
+        )
+    }
 }
 
 /// Validates linedef `i`'s cross-references and, if it is well-formed,
@@ -206,7 +224,7 @@ fn process_linedef(
     i: usize,
     line: &UdmfLinedef,
     map: &UdmfMap,
-    tables: &Tables,
+    flag_bits: BoundaryFlagBits,
     sectors: &mut [SceneSector],
     findings: &mut Vec<Finding>,
 ) {
@@ -259,7 +277,7 @@ fn process_linedef(
         }
     };
 
-    let (two_sided, blocking, lower_unpegged) = linedef_boundary_flags(tables, line);
+    let (two_sided, blocking, lower_unpegged) = flag_bits.read(line.flags);
     if two_sided != back.is_some() {
         findings.push(reference_error(
             i,
@@ -411,6 +429,7 @@ impl Scene {
             .thing_kinds()
             .map(|(name, id)| (id, name.to_owned()))
             .collect();
+        let flag_bits = BoundaryFlagBits::resolve(tables);
 
         let mut sectors: Vec<SceneSector> = map
             .sectors
@@ -443,7 +462,7 @@ impl Scene {
             .collect();
 
         for (i, line) in map.linedefs.iter().enumerate() {
-            process_linedef(i, line, map, tables, &mut sectors, findings);
+            process_linedef(i, line, map, flag_bits, &mut sectors, findings);
         }
 
         for (i, sector) in sectors.iter_mut().enumerate() {
