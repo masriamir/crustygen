@@ -178,12 +178,42 @@ struct DamageTiers {
     heavy: u16,
 }
 
+/// Sector light-effect specials keyed by the template's own name, as used
+/// for `sector.light_effects`. See `engine.toml`'s `[sector.light_effects]`
+/// leading comment for the naming judgment mapping these four names onto
+/// the engine's `P_SpawnSpecials` case comments and spawn-function names.
+#[derive(Debug, Deserialize)]
+struct LightEffects {
+    blink: u16,
+    flicker: u16,
+    glow: u16,
+    strobe_slow: u16,
+}
+
 /// Sector (not linedef) specials: a distinct numeric space from
 /// `vocabulary.toml`'s `[specials]` table.
 #[derive(Debug, Deserialize)]
 struct SectorSpecials {
     secret: u16,
     damage: DamageTiers,
+    light_effects: LightEffects,
+}
+
+/// The engine's hard caps on player spawn spots (`engine.toml`'s
+/// `[starts]` table): `coop_max` bounds `player*_start` things, `dm_max`
+/// bounds `deathmatch_start` things.
+#[derive(Debug, Deserialize)]
+struct Starts {
+    coop_max: u32,
+    dm_max: u32,
+}
+
+/// Engine-wide bounds unrelated to a specific mobj/sector/linedef family
+/// (`engine.toml`'s `[game]` table): currently just the commercial map-slot
+/// ceiling.
+#[derive(Debug, Deserialize)]
+struct Game {
+    commercial_map_slots: u32,
 }
 
 /// Linedef attribute flag bits (`doomdata.h`'s `ML_*` constants), a third
@@ -272,6 +302,8 @@ struct Engine {
     random: RandomLut,
     weapons: Weapons,
     ammo: AmmoTable,
+    starts: Starts,
+    game: Game,
 }
 
 /// The linedef specials for the level exit, keyed by
@@ -571,6 +603,48 @@ impl Tables {
             "heavy" => Some(self.engine.sector.damage.heavy),
             _ => None,
         }
+    }
+
+    /// The sector special for a named light effect (`blink` | `flicker` |
+    /// `glow` | `strobe_slow`, matching the template's own vocabulary), if
+    /// the name is known. See `engine.toml`'s `[sector.light_effects]`
+    /// leading comment for how these four names map onto
+    /// `P_SpawnSpecials`'s own case comments and spawn-function names — the
+    /// mapping is an editorial judgment where the two vocabularies
+    /// disagree, not a mechanical transcription.
+    #[must_use]
+    pub fn light_effect_special(&self, name: &str) -> Option<u16> {
+        let effects = &self.engine.sector.light_effects;
+        match name {
+            "blink" => Some(effects.blink),
+            "flicker" => Some(effects.flicker),
+            "glow" => Some(effects.glow),
+            "strobe_slow" => Some(effects.strobe_slow),
+            _ => None,
+        }
+    }
+
+    /// The maximum number of `player*_start` things the engine reads
+    /// (`playerstarts[MAXPLAYERS]` in the pinned Doom source) — placing more
+    /// than this is inert, not merely redundant.
+    #[must_use]
+    pub fn max_coop_starts(&self) -> u32 {
+        self.engine.starts.coop_max
+    }
+
+    /// The maximum number of `deathmatch_start` things the engine's
+    /// deathmatch spawn array is sized for (`deathmatchstarts[MAX_DM_STARTS]`
+    /// in the pinned Doom source).
+    #[must_use]
+    pub fn max_dm_starts(&self) -> u32 {
+        self.engine.starts.dm_max
+    }
+
+    /// The number of commercial (Doom II) map slots the engine's
+    /// intermission and par-time tables are sized for.
+    #[must_use]
+    pub fn commercial_map_slots(&self) -> u32 {
+        self.engine.game.commercial_map_slots
     }
 
     /// The `doomdata.h` bit value for a named linedef flag (`block_monsters`
@@ -1542,5 +1616,22 @@ mod tests {
             approx_eq(ratio, 17.477_539_062_5),
             "arsenal.ammo.ratio for this synthetic case: got {ratio}"
         );
+    }
+
+    #[test]
+    fn start_maxima_and_map_slot_bound_are_exposed() {
+        let t = Tables::load().unwrap();
+        assert!(t.max_coop_starts() >= 1);
+        assert!(t.max_dm_starts() >= t.max_coop_starts());
+        assert!(t.commercial_map_slots() >= 1);
+    }
+
+    #[test]
+    fn every_template_light_effect_name_resolves_to_a_sector_special() {
+        let t = Tables::load().unwrap();
+        for name in ["blink", "flicker", "glow", "strobe_slow"] {
+            assert!(t.light_effect_special(name).is_some(), "unresolved: {name}");
+        }
+        assert!(t.light_effect_special("disco").is_none());
     }
 }

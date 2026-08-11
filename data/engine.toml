@@ -354,6 +354,64 @@ secret = 32
 sound_block = 64
 source = "id-Software/DOOM linuxdoom-1.10/doomdata.h: '#define ML_BLOCKMONSTERS 2 // Blocks monsters only.', '#define ML_SECRET 32 // In AutoMap: don't map as two sided: IT'S A SECRET!', and '#define ML_SOUNDBLOCK 64 // Sound rendering: dont let sound cross two of these.' Behavior confirmed in linuxdoom-1.10/p_map.c, PIT_CheckLine: 'if ( !tmthing->player && ld->flags & ML_BLOCKMONSTERS ) return false; // block monsters only' — gated on '!tmthing->player', so it never blocks the player, only non-player things — and linuxdoom-1.10/p_enemy.c, P_RecursiveSound (called from P_NoiseAlert): 'if (check->flags & ML_SOUNDBLOCK) { if (!soundblocks) P_RecursiveSound (other, 1); } else P_RecursiveSound (other, soundblocks);' — a line flagged ML_SOUNDBLOCK lets the sound-alert flood cross it exactly once (soundblocks 0->1) before stopping, rather than propagating indefinitely. ML_SECRET's effect is purely cosmetic and purely automap-side, confirmed in linuxdoom-1.10/am_map.c, AM_drawWalls: the else-if chain draws a one-sided line in WALLCOLORS, then 'else if (lines[i].flags & ML_SECRET) { if (cheating) AM_drawMline(&l, SECRETWALLCOLORS + lightlev); else AM_drawMline(&l, WALLCOLORS+lightlev); }' — so a two-sided line carrying it is drawn as solid wall rather than falling through to the FDWALLCOLORS/CDWALLCOLORS branches that reveal a room beyond. Note SECRETWALLCOLORS is itself '#define SECRETWALLCOLORS WALLCOLORS', so even the cheating branch is not a distinct color; nothing in the pinned engine gives a secret *sector* (special 9) any automap treatment, and p_spec.c's P_PlayerInSpecialSector case 9 is only 'player->secretcount++; sector->special = 0;' — no sound, no message. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/doomdata.h, .../p_map.c, .../p_enemy.c, .../am_map.c, and .../p_spec.c"
 
+# The engine's own hard caps on player spawn spots. `starts.coop_max` bounds
+# how many `player*_start` things a map can place before extra ones become
+# useless (the engine only ever reads `playerstarts[0..MAXPLAYERS]`);
+# `starts.dm_max` bounds `deathmatch_start` things the same way.
+[starts]
+coop_max = 4
+dm_max = 10
+source = "id-Software/DOOM linuxdoom-1.10/doomdef.h: '#define MAXPLAYERS		4' — doomstat.h declares the coop spawn array sized exactly to it: 'extern  mapthing_t      playerstarts[MAXPLAYERS];'. doomstat.h also declares the deathmatch spawn array's own, larger, separately-named capacity: '#define MAX_DM_STARTS   10' immediately followed by 'extern  mapthing_t      deathmatchstarts[MAX_DM_STARTS];'. g_game.c's G_DeathMatchSpawnPlayer only ever requires at least 4 populated spots to run ('selections = deathmatch_p - deathmatchstarts; if (selections < 4) I_Error (\"Only %i deathmatch spots, 4 required\", selections);'), but the array itself — and so the number of deathmatch_start things a map can usefully place — is capacitated at 10, not 4. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/doomdef.h, .../doomstat.h, and .../g_game.c"
+
+# The number of Doom II (commercial) map slots the engine's intermission and
+# par-time tables are sized for — a ceiling on which MAPnn a compiled map can
+# target in the commercial IWAD numbering.
+[game]
+commercial_map_slots = 32
+source = "id-Software/DOOM linuxdoom-1.10/wi_stuff.c, WI_loadData, gated on 'if (gamemode == commercial)': 'NUMCMAPS = 32; lnames = (patch_t **) Z_Malloc(sizeof(patch_t*) * NUMCMAPS, PU_STATIC, 0); for (i=0 ; i<NUMCMAPS ; i++) { sprintf(name, \"CWILV%2.2d\", i); ... }' — thirty-two intermission-screen level-name patches, one per commercial map slot. Corroborated by g_game.c's par-time table, sized and commented identically: '// DOOM II Par Times / int cpars[32] = { 30,90,120,120,90,150,120,120,270,90, ... 120,30 };', indexed in G_DoCompleted as 'if ( gamemode == commercial ) wminfo.partime = 35*cpars[gamemap-1];' — a direct `gamemap-1` index, so a `gamemap` beyond 32 reads past the array. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/wi_stuff.c and .../g_game.c"
+
+# Sector light-effect specials for `sector.light_effects` (a fifth numeric
+# space, distinct from `[sector]`/`[sector.damage]` (non-light sector
+# specials) and `[linedef.flags]`/vocabulary.toml's `[specials]` (linedef
+# specials)). Every numeric value below is a `case` in p_spec.c's
+# P_SpawnSpecials sector-special switch, cited by its own comment (or, for
+# `flicker`, the absence of one) and the spawn function it calls — those
+# spawn-function names are themselves the primary evidence, per this
+# project's sourcing rule, since not every case carries a comment.
+#
+# NAMING JUDGMENT (recorded here the way vocabulary.toml's [key_trim] records
+# its card-vs-skull convention): the engine's own comment vocabulary and the
+# template's four names do not line up one-to-one, so the mapping below is an
+# explicit editorial choice, not a mechanical transcription.
+#   - `blink` -> case 1, commented 'FLICKERING LIGHTS', calling
+#     P_SpawnLightFlash. The engine's OWN comment calls this "flickering" —
+#     exactly the collision the brief warned of — but the template reserves
+#     `flicker` for case 17's fire-flicker effect instead, so case 1 (an
+#     irregular on/off light blink, per its P_SpawnLightFlash implementation
+#     being a distinct light-level state machine from the fire flicker one)
+#     is named `blink` here to keep the four template names distinct.
+#   - `flicker` -> case 17, uncommented, calling P_SpawnFireFlicker directly
+#     with no preceding case comment at all. The function name itself
+#     ("fire flicker" — the classic torch/fire guttering effect) is the
+#     evidence, per the brief's instruction to also read spawn-function
+#     names where a case carries no comment of its own.
+#   - `glow` -> case 8, commented 'GLOWING LIGHT', calling
+#     P_SpawnGlowingLight. Unambiguous — the engine's own name matches the
+#     template's.
+#   - `strobe_slow` -> case 3, commented 'STROBE SLOW', calling
+#     P_SpawnStrobeFlash(sector, SLOWDARK, 0). Cases 2/4 ('STROBE FAST') and
+#     12/13 ('SYNC STROBE SLOW'/'SYNC STROBE FAST') are the same function
+#     with different timing/sync arguments, but the template names only one
+#     strobe variant, so the plain (non-synchronized) slow strobe — the one
+#     whose own comment says exactly "STROBE SLOW" — is the match, not the
+#     synchronized case 12 that also reads "SLOW".
+[sector.light_effects]
+blink = 1
+flicker = 17
+glow = 8
+strobe_slow = 3
+source = "id-Software/DOOM linuxdoom-1.10/p_spec.c, P_SpawnSpecials, the sector->special switch: 'case 1: // FLICKERING LIGHTS / P_SpawnLightFlash (sector); break;' (blink); 'case 3: // STROBE SLOW / P_SpawnStrobeFlash(sector,SLOWDARK,0); break;' (strobe_slow); 'case 8: // GLOWING LIGHT / P_SpawnGlowingLight(sector); break;' (glow); 'case 17: / P_SpawnFireFlicker(sector); break;' (flicker — no case comment; P_SpawnFireFlicker's own name is the evidence). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_spec.c"
+
 # Weapon damage — the first COMPUTED values in this file, not read values.
 # Doom weapon damage is randomized per shot (a bullet is
 # `5 * (P_Random()%3 + 1)`; a shotgun fires several such pellets) — there is
