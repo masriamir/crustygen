@@ -2,9 +2,10 @@
 //! that serde's deserialization alone cannot express — range coherence,
 //! vocabulary resolution against [`crate::tables::Tables`], and bounds
 //! sourced from the pinned engine. See `docs/map-spec.md`'s "Always errors"
-//! list for the inventory this module implements; the enforcement-governed
-//! set (internally-visible consistency `constraints.enforcement` toggles
-//! between rejecting and recording) is a later stage's job, not this one's.
+//! list for the inventory `always_errors` checks. This module also holds the
+//! enforcement-governed set (internally-visible consistency that
+//! `constraints.enforcement` toggles between rejecting and recording),
+//! checked by `run`.
 //!
 //! Every check here is a small, independently named function taking the
 //! parts of [`crate::spec::frontmatter::Frontmatter`] it needs (plus
@@ -25,12 +26,12 @@ use crate::tables::Tables;
 /// Runs every always-error rule against a parsed frontmatter and returns
 /// every violation found; an empty vector means the document is clean.
 ///
-/// `body` is accepted but unused here: secret trigger/reward/hint validation
-/// already happens at body-parse time (`spec::body::parse`), so there is
-/// nothing left for this pass to check against it. The parameter stays in
-/// the signature because the enforcement-governed pass a later stage adds
-/// needs it (`secrets.count` versus the number of prose `### Secret`
-/// sections), and because a future always-error rule may too.
+/// `body` is accepted but unused by [`always_errors`]: secret trigger/reward/hint
+/// validation already happens at body-parse time (`spec::body::parse`), so
+/// there is nothing left for that pass to check against it. The parameter
+/// stays in the signature because the enforcement-governed checks (which
+/// [`run`] combines with the always-errors) need it (`secrets.count` versus
+/// the number of prose `### Secret` sections).
 #[must_use]
 pub fn always_errors(fm: &Frontmatter, _body: &Body, tables: &Tables) -> Vec<Violation> {
     let mut v = Vec::new();

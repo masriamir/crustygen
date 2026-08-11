@@ -20,9 +20,9 @@ pub mod frontmatter;
 
 /// Post-deserialize validation: rules a filled template must satisfy that
 /// serde alone cannot express (range coherence, vocabulary resolution,
-/// engine-domain bounds), split into the always-error set
-/// [`validate::always_errors`] checks and the enforcement-governed set a
-/// later stage adds.
+/// engine-domain bounds). The module holds both the always-error set
+/// [`validate::always_errors`] checks and the enforcement-governed set that
+/// [`validate::run`] combines with them under the enforcement mode.
 pub mod validate;
 
 /// A parsed map-spec document: typed frontmatter plus the parsed prose body.

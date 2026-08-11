@@ -72,7 +72,7 @@ accepts only that form.
 ## The API
 
 ```rust
-Spec::from_markdown(&str) -> Result<SpecDocument, SpecError>
+Spec::from_markdown(&str, &Tables) -> Result<SpecDocument, SpecError>
 // SpecDocument { spec: Spec, sacrifices: Vec<Sacrifice> }
 ```
 
@@ -99,8 +99,10 @@ The split:
   `scale.vertical_range`;
 - fractions outside 0..=1: `corridor_ratio`, `hitscanner_ratio`,
   `deaf_ratio`, `outdoor_proportion`, `liquid.coverage`, `peak_position`;
-- non-positive `difficulty.scaling` factors, `identity.grid`, or
-  `arsenal.ammo.ratio`;
+- non-positive `difficulty.scaling` factors, `identity.grid`, `arsenal.ammo.ratio`,
+  `scale.size.width`/`height`, `progression.lifts.max_travel`,
+  `vertical.standard_ceiling`, `vertical.door_opening`, or
+  `vertical.stairs.rise_per_step`/`tread_depth`;
 - `detail_level` outside 1..=5; light levels outside the engine's own domain
   (`Tables::light_range`, sourced);
 - `spec_version` other than 1; `identity.slot` not a valid `MAPnn`;
