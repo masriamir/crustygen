@@ -67,8 +67,9 @@ fn check_min_max<T: PartialOrd + std::fmt::Display>(
 
 /// Every declared range pair, per `docs/map-spec.md`'s "Always errors" list:
 /// `min <= max` for every `MinMax` field in the template plus the two fields
-/// that carry the same rule without the wrapper (`combat.monsters[i]`,
-/// `aesthetics.lighting.{min,max}`, reported at `.min`).
+/// that carry the same rule without the wrapper — `combat.monsters[i]`,
+/// reported at the row path itself, and `aesthetics.lighting.{min,max}`,
+/// reported at `aesthetics.lighting.min`.
 fn check_ranges(fm: &Frontmatter, v: &mut Vec<Violation>) {
     check_min_max(v, "scale.rooms", &fm.scale.rooms.min, &fm.scale.rooms.max);
     check_min_max(
@@ -360,13 +361,33 @@ fn check_priority(fm: &Frontmatter, v: &mut Vec<Violation>) {
             1 => {}
             0 => v.push(Violation {
                 path: "constraints.priority".to_string(),
-                message: format!("missing `{want:?}`"),
+                message: format!("missing `{}`", priority_name(want)),
             }),
             n => v.push(Violation {
                 path: "constraints.priority".to_string(),
-                message: format!("`{want:?}` appears {n} times, must appear exactly once"),
+                message: format!(
+                    "`{}` appears {n} times, must appear exactly once",
+                    priority_name(want)
+                ),
             }),
         }
+    }
+}
+
+/// The `snake_case` document form of a
+/// [`crate::spec::frontmatter::Priority`] variant, matched by hand against
+/// its `#[serde(rename_all = "snake_case")]` mapping so violation messages
+/// speak the document's vocabulary (`progression_correctness`), not Rust's
+/// (`ProgressionCorrectness`).
+fn priority_name(p: crate::spec::frontmatter::Priority) -> &'static str {
+    use crate::spec::frontmatter::Priority;
+    match p {
+        Priority::ProgressionCorrectness => "progression_correctness",
+        Priority::PlayableBalance => "playable_balance",
+        Priority::SectorBudget => "sector_budget",
+        Priority::MonsterCounts => "monster_counts",
+        Priority::DetailLevel => "detail_level",
+        Priority::PlayTime => "play_time",
     }
 }
 
@@ -537,6 +558,21 @@ fn check_props_theme_effects_and_forbid(fm: &Frontmatter, tables: &Tables, v: &m
     }
 }
 
+/// The `snake_case` document form of a
+/// [`crate::spec::frontmatter::Placement`] variant, matched by hand against
+/// its `#[serde(rename_all = "snake_case")]` mapping for the same reason as
+/// [`priority_name`]: violation messages speak the document's vocabulary.
+fn placement_name(p: crate::spec::frontmatter::Placement) -> &'static str {
+    use crate::spec::frontmatter::Placement;
+    match p {
+        Placement::Early => "early",
+        Placement::Mid => "mid",
+        Placement::Late => "late",
+        Placement::SecretOnly => "secret_only",
+        Placement::None => "none",
+    }
+}
+
 /// A powerup's `count == 0` iff its `placement == Placement::None`, and a
 /// weapon's placement must never be `Placement::None` — self-contradictory
 /// documents, not preferences.
@@ -548,8 +584,9 @@ fn check_placement_coherence(fm: &Frontmatter, v: &mut Vec<Violation>) {
             v.push(Violation {
                 path: format!("sustain.powerups[{i}]"),
                 message: format!(
-                    "count ({}) and placement ({:?}) contradict each other: count 0 requires placement none, and vice versa",
-                    p.count, p.placement
+                    "count ({}) and placement ({}) contradict each other: count 0 requires placement none, and vice versa",
+                    p.count,
+                    placement_name(p.placement)
                 ),
             });
         }
