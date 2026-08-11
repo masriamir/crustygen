@@ -210,6 +210,14 @@ pub enum SpecError {
         /// The 1-based line number of the offending line.
         line: usize,
     },
+    /// Content inside `## Secrets` appears before any `### Secret`
+    /// subsection opens, so no secret exists to attribute it to — the
+    /// error names the line instead.
+    #[error("body: line {line} in `## Secrets` belongs to no `### Secret` subsection")]
+    SecretContentOutsideSubsection {
+        /// The 1-based line number of the offending line.
+        line: usize,
+    },
     /// The document fails one or more of [`validate::always_errors`]'s
     /// rules. `Display` renders one violation per line, in the order
     /// `always_errors` found them — thiserror interpolates a computed

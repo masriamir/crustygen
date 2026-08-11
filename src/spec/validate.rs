@@ -334,8 +334,9 @@ fn check_starts(fm: &Frontmatter, tables: &Tables, v: &mut Vec<Violation>) {
     }
 }
 
-/// The six [`crate::spec::frontmatter::Priority`] variants, in the order
-/// `constraints.priority` must contain all of exactly once.
+/// The six [`crate::spec::frontmatter::Priority`] variants that
+/// `constraints.priority` must contain, each exactly once, in any order —
+/// [`check_priority`] accepts every permutation.
 const ALL_PRIORITIES: [crate::spec::frontmatter::Priority; 6] = [
     crate::spec::frontmatter::Priority::ProgressionCorrectness,
     crate::spec::frontmatter::Priority::PlayableBalance,

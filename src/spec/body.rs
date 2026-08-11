@@ -202,7 +202,7 @@ fn parse_secrets(lines: &[(usize, &str)]) -> Result<Vec<SecretEntry>, crate::spe
     let mut secrets = Vec::new();
     let mut current: Option<SecretBuilder> = None;
 
-    for (_, line) in lines {
+    for (line_no, line) in lines {
         if line.trim().is_empty() {
             continue;
         }
@@ -222,12 +222,9 @@ fn parse_secrets(lines: &[(usize, &str)]) -> Result<Vec<SecretEntry>, crate::spe
 
         let bullet = line.trim().to_string();
         let Some(builder) = current.as_mut() else {
-            // Non-blank, non-`### ` content with no secret open yet: v1 has
-            // no name to attribute this to.
-            return Err(crate::spec::SpecError::UnknownSecretBullet {
-                secret: String::new(),
-                bullet,
-            });
+            // Non-blank, non-`### ` content before any secret opens: no
+            // secret exists to attribute it to, so the error names the line.
+            return Err(crate::spec::SpecError::SecretContentOutsideSubsection { line: *line_no });
         };
 
         let key_value = bullet
@@ -428,6 +425,15 @@ mod tests {
         assert!(
             matches!(err, crate::spec::SpecError::SecretMissingField { ref secret, field: "Hint" } if secret == "Cache")
         );
+    }
+
+    #[test]
+    fn content_before_any_secret_subsection_is_rejected_with_its_line() {
+        let b = "## Secrets\n\n- Trigger: walkover\n";
+        assert!(matches!(
+            parse(b).unwrap_err(),
+            crate::spec::SpecError::SecretContentOutsideSubsection { line: 3 }
+        ));
     }
 
     #[test]
