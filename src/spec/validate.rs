@@ -472,7 +472,18 @@ fn check_species(fm: &Frontmatter, tables: &Tables, v: &mut Vec<Violation>) {
 /// against [`Tables`].
 fn check_weapons_ammo_and_powerups(fm: &Frontmatter, tables: &Tables, v: &mut Vec<Violation>) {
     for (i, w) in fm.arsenal.weapons.iter().enumerate() {
-        if tables.thing_id(&w.name).is_none() {
+        // `thing_id` spans the whole `[things]` table — monsters, keys, and
+        // powerups included — so resolving there only proves the name is
+        // placeable, not that it is a weapon. A weapon must also carry a
+        // `[weapons.damage.*]` entry; the chainsaw is the one placeable
+        // weapon deliberately absent from that table (it draws `am_noammo`,
+        // so "damage per unit of ammo" is undefined for it — see the
+        // vocabulary's weapons comment) and is accepted by name. The pistol
+        // falls out naturally: it has damage figures but no pickup thing.
+        let placeable = tables.thing_id(&w.name).is_some();
+        let is_weapon =
+            placeable && (tables.weapon_damage(&w.name).is_some() || w.name == "chainsaw");
+        if !is_weapon {
             v.push(Violation {
                 path: format!("arsenal.weapons[{i}].name"),
                 message: format!("`{}` is not a known weapon", w.name),
@@ -1115,6 +1126,33 @@ mod tests {
             violations_for(&reordered)
                 .iter()
                 .all(|v| !v.path.starts_with("progression.keys"))
+        );
+    }
+
+    #[test]
+    fn a_placeable_non_weapon_and_the_unplaceable_pistol_are_both_rejected_as_weapons() {
+        // `zombieman` resolves in `[things]` but is a monster, not a weapon;
+        // `pistol` has damage figures but no pickup thing. Both must fail;
+        // the chainsaw (placeable, deliberately no damage entry) must pass.
+        for imposter in [
+            "name: zombieman,       placement: mid",
+            "name: pistol,          placement: mid",
+        ] {
+            let y = patched("name: chaingun,        placement: mid", imposter);
+            let v = violations_for(&y);
+            assert!(
+                v.iter().any(|v| v.path == "arsenal.weapons[1].name"),
+                "{imposter}: got {v:?}"
+            );
+        }
+        let chainsaw = patched(
+            "name: chaingun,        placement: mid",
+            "name: chainsaw,        placement: mid",
+        );
+        assert!(
+            violations_for(&chainsaw)
+                .iter()
+                .all(|v| v.path != "arsenal.weapons[1].name")
         );
     }
 
