@@ -52,6 +52,5 @@ fn a_crlf_rendition_of_the_template_parses_identically() {
     let tables = Tables::load().unwrap();
     let a = Spec::from_markdown(lf, &tables).unwrap();
     let b = Spec::from_markdown(&crlf, &tables).unwrap();
-    assert_eq!(a.spec.frontmatter, b.spec.frontmatter);
-    assert_eq!(a.spec.body.secrets.len(), b.spec.body.secrets.len());
+    assert_eq!(a, b);
 }

@@ -621,6 +621,12 @@ pub fn governed(fm: &Frontmatter, body: &Body) -> Vec<Sacrifice> {
     s
 }
 
+/// The mode clause every governed finding's [`Sacrifice`] message ends with
+/// under `target`. [`run`]'s strict arm strips exactly this suffix to
+/// re-phrase the same finding for the mode that actually rejected it — one
+/// shared constant, so the phrasing and the strip can never drift apart.
+const TARGET_SUFFIX: &str = " under `enforcement: target`";
+
 /// `secrets.count` versus the number of prose `### Secret` sections in the
 /// body: a mismatch is sacrificed rather than rejected, since the prose is
 /// the author's real intent and the declared count is a budget hint.
@@ -633,7 +639,7 @@ fn check_secrets_count(fm: &Frontmatter, body: &Body, s: &mut Vec<Sacrifice>) {
             target: count.to_string(),
             actual: format!("{n} prose secret sections"),
             message: format!(
-                "sacrificed `secrets.count` ({count}) to the prose Secrets section ({n} entries) under `enforcement: target`"
+                "sacrificed `secrets.count` ({count}) to the prose Secrets section ({n} entries){TARGET_SUFFIX}"
             ),
         });
     }
@@ -673,7 +679,7 @@ fn check_lighting_band(fm: &Frontmatter, s: &mut Vec<Sacrifice>) {
                 path: path.to_string(),
                 target: format!("within [{}, {}]", l.min, l.max),
                 message: format!(
-                    "sacrificed `{path}` ({actual}) to the declared lighting band [{}, {}] under `enforcement: target`",
+                    "sacrificed `{path}` ({actual}) to the declared lighting band [{}, {}]{TARGET_SUFFIX}",
                     l.min, l.max
                 ),
                 actual,
@@ -693,7 +699,7 @@ fn check_locked_doors(fm: &Frontmatter, s: &mut Vec<Sacrifice>) {
             target: format!(">= {n} (one per lock type)"),
             actual: locked_doors.to_string(),
             message: format!(
-                "sacrificed `progression.locked_doors` ({locked_doors}) to the {n} declared lock types under `enforcement: target`"
+                "sacrificed `progression.locked_doors` ({locked_doors}) to the {n} declared lock types{TARGET_SUFFIX}"
             ),
         });
     }
@@ -716,9 +722,16 @@ pub fn run(fm: &Frontmatter, body: &Body, tables: &Tables) -> Result<Vec<Sacrifi
     let sacrifices = governed(fm, body);
 
     if fm.constraints.enforcement == Enforcement::Strict {
+        // A sacrifice's message is phrased for `target` mode; under
+        // `strict` the same finding is a rejection, so the mode clause is
+        // rewritten rather than cloned — a strict error must not claim the
+        // document ran under `target`.
         violations.extend(sacrifices.iter().map(|s| Violation {
             path: s.path.clone(),
-            message: s.message.clone(),
+            message: format!(
+                "{}, rejected under `enforcement: strict`",
+                s.message.strip_suffix(TARGET_SUFFIX).unwrap_or(&s.message)
+            ),
         }));
     }
 
@@ -1276,7 +1289,19 @@ mod tests {
         let crate::spec::SpecError::Invalid(v) = err else {
             panic!()
         };
-        assert!(v.iter().any(|v| v.path == "secrets.count"));
+        let finding = v.iter().find(|v| v.path == "secrets.count").unwrap();
+        assert!(
+            finding
+                .message
+                .ends_with("rejected under `enforcement: strict`"),
+            "got: {}",
+            finding.message
+        );
+        assert!(
+            !finding.message.contains("`enforcement: target`"),
+            "a strict-mode error must not claim target mode: {}",
+            finding.message
+        );
     }
 
     #[test]
