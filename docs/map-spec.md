@@ -112,7 +112,10 @@ The split:
 - `coop_starts` or `dm_starts` beyond the engine's start-thing maxima, once
   those bounds carry sourced entries (see the sourcing note below);
 - any content name that fails vocabulary resolution (next section);
-- a secret with an unknown trigger or an empty reward or hint.
+- a secret with an unknown trigger or an empty reward or hint;
+- a powerup whose `count` and `placement` contradict each other (`count: 0`
+  without `placement: none`, or vice versa), and a weapon placed `none` —
+  self-contradictory documents, not preferences.
 
 **Enforcement-governed** — internally-visible consistency, where `strict`
 rejects and `target` records a `Sacrifice` against `constraints.priority`:

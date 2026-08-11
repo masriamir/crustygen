@@ -16,6 +16,25 @@ pub mod body;
 /// deserialized from the YAML [`split_frontmatter`] splits off the body.
 pub mod frontmatter;
 
+/// Post-deserialize validation: rules a filled template must satisfy that
+/// serde alone cannot express (range coherence, vocabulary resolution,
+/// engine-domain bounds), split into the always-error set
+/// [`validate::always_errors`] checks and the enforcement-governed set a
+/// later stage adds.
+pub mod validate;
+
+/// One violation [`validate::always_errors`] found: the field path at fault
+/// and a human-readable message. `Display` renders `` `{path}`: {message} ``,
+/// matching [`SpecError::Frontmatter`]'s path-first convention.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("`{path}`: {message}")]
+pub struct Violation {
+    /// The field path where the violation was found, e.g. `scale.rooms`.
+    pub path: String,
+    /// A human-readable description of what is wrong.
+    pub message: String,
+}
+
 /// A defect in a map-spec document. Every variant names its subject —
 /// a field path, a section heading, or a secret's name — per
 /// `docs/design.md` §9.
@@ -107,6 +126,17 @@ pub enum SpecError {
         /// The 1-based line number of the offending line.
         line: usize,
     },
+    /// The document fails one or more of [`validate::always_errors`]'s
+    /// rules. `Display` renders one violation per line, in the order
+    /// `always_errors` found them — thiserror interpolates a computed
+    /// expression rather than a bare field, the same join-in-`#[error]`
+    /// idiom `CompileError::Playability` already uses in `compile/mod.rs`,
+    /// since thiserror cannot join a `Vec` field on its own.
+    #[error(
+        "{}",
+        .0.iter().map(ToString::to_string).collect::<Vec<_>>().join("\n")
+    )]
+    Invalid(Vec<Violation>),
 }
 
 /// Splits a spec document at its `---` fences into `(yaml, body)`.
