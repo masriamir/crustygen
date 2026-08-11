@@ -585,6 +585,26 @@ mod tests {
         always_errors(&fm, &template_body(), &tables)
     }
 
+    /// Replaces `from` with `to` in the template's YAML, asserting the
+    /// replacement actually changed something. A `.replace()` whose `from`
+    /// no longer matches the template (a typo, or drift after an edit to
+    /// `map-spec.template.md`) silently returns the unmodified template —
+    /// exactly the failure mode that turned up in the priority-reordering
+    /// test during this task's own review (a 2-space-indent target against
+    /// the template's real 4-space indent). Every test that patches the
+    /// template string goes through this helper rather than calling
+    /// `template_yaml().replace(..)` directly, so the guard cannot be
+    /// forgotten on a new test.
+    fn patched(from: &str, to: &str) -> String {
+        let y = template_yaml().replace(from, to);
+        assert_ne!(
+            y,
+            template_yaml(),
+            "patch `{from}` -> `{to}` did not change the template"
+        );
+        y
+    }
+
     #[test]
     fn the_shipped_template_has_no_always_errors() {
         assert_eq!(violations_for(&template_yaml()), vec![]);
@@ -592,28 +612,26 @@ mod tests {
 
     #[test]
     fn an_inverted_room_range_fails_naming_scale_rooms() {
-        let y =
-            template_yaml().replace("rooms: { min: 8, max: 14 }", "rooms: { min: 15, max: 14 }");
+        let y = patched("rooms: { min: 8, max: 14 }", "rooms: { min: 15, max: 14 }");
         let v = violations_for(&y);
         assert!(v.iter().any(|v| v.path == "scale.rooms"), "got {v:?}");
     }
 
     #[test]
     fn a_room_range_at_the_threshold_passes() {
-        let y =
-            template_yaml().replace("rooms: { min: 8, max: 14 }", "rooms: { min: 14, max: 14 }");
+        let y = patched("rooms: { min: 8, max: 14 }", "rooms: { min: 14, max: 14 }");
         assert!(violations_for(&y).iter().all(|v| v.path != "scale.rooms"));
     }
 
     #[test]
     fn a_corridor_ratio_just_above_one_fails_and_one_exactly_passes() {
-        let hi = template_yaml().replace("corridor_ratio: 0.3", "corridor_ratio: 1.01");
+        let hi = patched("corridor_ratio: 0.3", "corridor_ratio: 1.01");
         assert!(
             violations_for(&hi)
                 .iter()
                 .any(|v| v.path == "architecture.corridor_ratio")
         );
-        let at = template_yaml().replace("corridor_ratio: 0.3", "corridor_ratio: 1.0");
+        let at = patched("corridor_ratio: 0.3", "corridor_ratio: 1.0");
         assert!(
             violations_for(&at)
                 .iter()
@@ -623,7 +641,7 @@ mod tests {
 
     #[test]
     fn a_lock_type_absent_from_keys_fails_with_its_index() {
-        let y = template_yaml().replace("keys: [blue_card, red_skull]", "keys: [blue_card]");
+        let y = patched("keys: [blue_card, red_skull]", "keys: [blue_card]");
         let v = violations_for(&y);
         assert!(
             v.iter()
@@ -643,7 +661,7 @@ mod tests {
 
     #[test]
     fn an_unknown_species_fails_with_its_row_index() {
-        let y = template_yaml().replace("species: pinky", "species: doggo");
+        let y = patched("species: pinky", "species: doggo");
         let v = violations_for(&y);
         assert!(
             v.iter().any(|v| v.path == "combat.monsters[3].species"),
@@ -653,15 +671,14 @@ mod tests {
 
     #[test]
     fn an_unresolvable_boss_species_fails_at_combat_boss() {
-        let y = template_yaml().replace("boss: none", "boss: plaid_boss");
-        assert_ne!(y, template_yaml());
+        let y = patched("boss: none", "boss: plaid_boss");
         let v = violations_for(&y);
         assert!(v.iter().any(|v| v.path == "combat.boss"), "got {v:?}");
     }
 
     #[test]
     fn a_theme_the_vocabulary_lacks_is_an_error() {
-        let y = template_yaml().replace("theme: tech_base", "theme: hell");
+        let y = patched("theme: tech_base", "theme: hell");
         assert!(
             violations_for(&y)
                 .iter()
@@ -671,7 +688,7 @@ mod tests {
 
     #[test]
     fn a_powerup_count_contradicting_its_placement_is_an_error() {
-        let y = template_yaml().replace(
+        let y = patched(
             "- { name: megasphere,      count: 0, placement: none }",
             "- { name: megasphere,      count: 1, placement: none }",
         );
@@ -693,11 +710,10 @@ mod tests {
 
     #[test]
     fn a_weapon_placed_none_is_an_error() {
-        let y = template_yaml().replace(
+        let y = patched(
             "name: rocket_launcher, placement: secret_only",
             "name: rocket_launcher, placement: none",
         );
-        assert_ne!(y, template_yaml());
         let v = violations_for(&y);
         assert!(
             v.iter().any(|v| v.path == "arsenal.weapons[3].placement"),
@@ -707,11 +723,10 @@ mod tests {
 
     #[test]
     fn a_weapon_placed_late_instead_of_none_passes() {
-        let y = template_yaml().replace(
+        let y = patched(
             "name: rocket_launcher, placement: secret_only",
             "name: rocket_launcher, placement: late",
         );
-        assert_ne!(y, template_yaml());
         assert!(
             violations_for(&y)
                 .iter()
@@ -723,22 +738,22 @@ mod tests {
     fn a_slot_beyond_the_commercial_bound_is_an_error_and_the_bound_passes() {
         let t = Tables::load().unwrap();
         let over = format!("MAP{:02}", t.commercial_map_slots() + 1);
-        let y = template_yaml().replace("slot: MAP01", &format!("slot: {over}"));
+        let y = patched("slot: MAP01", &format!("slot: {over}"));
         assert!(violations_for(&y).iter().any(|v| v.path == "identity.slot"));
         let last = format!("MAP{:02}", t.commercial_map_slots());
-        let y = template_yaml().replace("slot: MAP01", &format!("slot: {last}"));
+        let y = patched("slot: MAP01", &format!("slot: {last}"));
         assert!(violations_for(&y).iter().all(|v| v.path != "identity.slot"));
     }
 
     #[test]
     fn a_scaling_factor_of_zero_fails_and_a_small_positive_one_passes() {
-        let zero = template_yaml().replace("easy: 0.55", "easy: 0.0");
+        let zero = patched("easy: 0.55", "easy: 0.0");
         assert!(
             violations_for(&zero)
                 .iter()
                 .any(|v| v.path == "difficulty.scaling.easy")
         );
-        let small = template_yaml().replace("easy: 0.55", "easy: 0.05");
+        let small = patched("easy: 0.55", "easy: 0.05");
         assert!(
             violations_for(&small)
                 .iter()
@@ -747,14 +762,31 @@ mod tests {
     }
 
     #[test]
+    fn an_identity_grid_of_zero_fails_and_a_positive_value_passes() {
+        // `identity.grid` runs through `check_positive_i32`, distinct from
+        // the f64 path `a_scaling_factor_of_zero_...` exercises above — the
+        // two comparisons are separate functions and neither proves the
+        // other fires.
+        let zero = patched("grid: 64", "grid: 0");
+        let v = violations_for(&zero);
+        assert!(v.iter().any(|v| v.path == "identity.grid"), "got {v:?}");
+        let positive = patched("grid: 64", "grid: 1");
+        assert!(
+            violations_for(&positive)
+                .iter()
+                .all(|v| v.path != "identity.grid")
+        );
+    }
+
+    #[test]
     fn a_detail_level_of_zero_fails_and_one_passes() {
-        let zero = template_yaml().replace("detail_level: 3", "detail_level: 0");
+        let zero = patched("detail_level: 3", "detail_level: 0");
         assert!(
             violations_for(&zero)
                 .iter()
                 .any(|v| v.path == "aesthetics.detail_level")
         );
-        let one = template_yaml().replace("detail_level: 3", "detail_level: 1");
+        let one = patched("detail_level: 3", "detail_level: 1");
         assert!(
             violations_for(&one)
                 .iter()
@@ -764,13 +796,13 @@ mod tests {
 
     #[test]
     fn a_facing_of_360_degrees_fails_and_359_passes() {
-        let over = template_yaml().replace("start_facing: east", "start_facing: 360");
+        let over = patched("start_facing: east", "start_facing: 360");
         assert!(
             violations_for(&over)
                 .iter()
                 .any(|v| v.path == "players.start_facing")
         );
-        let at = template_yaml().replace("start_facing: east", "start_facing: 359");
+        let at = patched("start_facing: east", "start_facing: 359");
         assert!(
             violations_for(&at)
                 .iter()
@@ -782,14 +814,14 @@ mod tests {
     fn a_light_base_beyond_the_engine_domain_fails_and_the_bound_passes() {
         let t = Tables::load().unwrap();
         let over = t.light_range().end() + 1;
-        let y = template_yaml().replace("base: 160", &format!("base: {over}"));
+        let y = patched("base: 160", &format!("base: {over}"));
         assert!(
             violations_for(&y)
                 .iter()
                 .any(|v| v.path == "aesthetics.lighting.base")
         );
         let at = *t.light_range().end();
-        let y = template_yaml().replace("base: 160", &format!("base: {at}"));
+        let y = patched("base: 160", &format!("base: {at}"));
         assert!(
             violations_for(&y)
                 .iter()
@@ -813,7 +845,7 @@ mod tests {
 
     #[test]
     fn spec_version_2_fails_and_1_passes() {
-        let y = template_yaml().replace("spec_version: 1", "spec_version: 2");
+        let y = patched("spec_version: 1", "spec_version: 2");
         assert!(violations_for(&y).iter().any(|v| v.path == "spec_version"));
         assert!(
             violations_for(&template_yaml())
@@ -823,17 +855,40 @@ mod tests {
     }
 
     #[test]
+    fn coop_starts_beyond_the_maximum_fails_and_the_maximum_passes() {
+        // `check_starts` has two independent if-blocks; the dm_starts test
+        // below only exercises one of them.
+        let t = Tables::load().unwrap();
+        let over = t.max_coop_starts() + 1;
+        let y = patched("coop_starts: 4", &format!("coop_starts: {over}"));
+        assert!(
+            violations_for(&y)
+                .iter()
+                .any(|v| v.path == "players.coop_starts")
+        );
+        // The template's own `coop_starts: 4` already sits at
+        // `tables.max_coop_starts()`, so the boundary-passing case is the
+        // unpatched template itself — patching to the same value would be
+        // a no-op the `patched` guard correctly rejects.
+        assert!(
+            violations_for(&template_yaml())
+                .iter()
+                .all(|v| v.path != "players.coop_starts")
+        );
+    }
+
+    #[test]
     fn dm_starts_beyond_the_maximum_fails_and_the_maximum_passes() {
         let t = Tables::load().unwrap();
         let over = t.max_dm_starts() + 1;
-        let y = template_yaml().replace("dm_starts: 0", &format!("dm_starts: {over}"));
+        let y = patched("dm_starts: 0", &format!("dm_starts: {over}"));
         assert!(
             violations_for(&y)
                 .iter()
                 .any(|v| v.path == "players.dm_starts")
         );
         let at = t.max_dm_starts();
-        let y = template_yaml().replace("dm_starts: 0", &format!("dm_starts: {at}"));
+        let y = patched("dm_starts: 0", &format!("dm_starts: {at}"));
         assert!(
             violations_for(&y)
                 .iter()
@@ -843,18 +898,16 @@ mod tests {
 
     #[test]
     fn a_duplicate_priority_entry_fails_and_a_reordering_passes() {
-        let y = template_yaml().replace("    - play_time", "    - monster_counts");
-        assert_ne!(y, template_yaml());
+        let y = patched("    - play_time", "    - monster_counts");
         assert!(
             violations_for(&y)
                 .iter()
                 .any(|v| v.path == "constraints.priority")
         );
-        let reordered = template_yaml().replace(
+        let reordered = patched(
             "    - monster_counts\n    - detail_level\n",
             "    - detail_level\n    - monster_counts\n",
         );
-        assert_ne!(reordered, template_yaml());
         assert!(
             violations_for(&reordered)
                 .iter()
@@ -864,21 +917,19 @@ mod tests {
 
     #[test]
     fn an_unknown_key_name_fails_with_its_index_and_a_reordering_passes() {
-        let y = template_yaml().replace(
+        let y = patched(
             "keys: [blue_card, red_skull]",
             "keys: [blue_card, plaid_key]",
         );
-        assert_ne!(y, template_yaml());
         let v = violations_for(&y);
         assert!(
             v.iter().any(|v| v.path == "progression.keys[1]"),
             "got {v:?}"
         );
-        let reordered = template_yaml().replace(
+        let reordered = patched(
             "keys: [blue_card, red_skull]",
             "keys: [red_skull, blue_card]",
         );
-        assert_ne!(reordered, template_yaml());
         assert!(
             violations_for(&reordered)
                 .iter()
@@ -888,21 +939,19 @@ mod tests {
 
     #[test]
     fn an_unknown_weapon_name_fails_and_a_known_one_passes() {
-        let y = template_yaml().replace(
+        let y = patched(
             "name: chaingun,        placement: mid",
             "name: plaid_gun,       placement: mid",
         );
-        assert_ne!(y, template_yaml());
         let v = violations_for(&y);
         assert!(
             v.iter().any(|v| v.path == "arsenal.weapons[1].name"),
             "got {v:?}"
         );
-        let known = template_yaml().replace(
+        let known = patched(
             "name: chaingun,        placement: mid",
             "name: plasma_rifle,    placement: mid",
         );
-        assert_ne!(known, template_yaml());
         assert!(
             violations_for(&known)
                 .iter()
@@ -912,22 +961,20 @@ mod tests {
 
     #[test]
     fn an_unknown_ammo_pickup_name_fails_and_a_known_one_passes() {
-        let y = template_yaml().replace(
+        let y = patched(
             "pickups: auto            # auto (derived from ratio) | explicit counts per pickup type",
             "pickups: { shells: 4, plaid_ammo: 2 }",
         );
-        assert_ne!(y, template_yaml());
         let v = violations_for(&y);
         assert!(
             v.iter()
                 .any(|v| v.path == "arsenal.ammo.pickups.plaid_ammo"),
             "got {v:?}"
         );
-        let known = template_yaml().replace(
+        let known = patched(
             "pickups: auto            # auto (derived from ratio) | explicit counts per pickup type",
             "pickups: { shells: 4, rocket: 2 }",
         );
-        assert_ne!(known, template_yaml());
         assert!(
             violations_for(&known)
                 .iter()
@@ -937,21 +984,19 @@ mod tests {
 
     #[test]
     fn an_unknown_powerup_name_fails_and_a_known_one_passes() {
-        let y = template_yaml().replace(
+        let y = patched(
             "name: radsuit,         count: 1, placement: mid",
             "name: plaid_power,     count: 1, placement: mid",
         );
-        assert_ne!(y, template_yaml());
         let v = violations_for(&y);
         assert!(
             v.iter().any(|v| v.path == "sustain.powerups[3].name"),
             "got {v:?}"
         );
-        let known = template_yaml().replace(
+        let known = patched(
             "name: radsuit,         count: 1, placement: mid",
             "name: invisibility,    count: 1, placement: mid",
         );
-        assert_ne!(known, template_yaml());
         assert!(
             violations_for(&known)
                 .iter()
@@ -961,21 +1006,19 @@ mod tests {
 
     #[test]
     fn an_unknown_prop_kind_fails_and_a_known_one_passes() {
-        let y = template_yaml().replace(
+        let y = patched(
             "kinds: auto              # auto (theme-derived) | explicit list",
             "kinds: [floor_lamp, plaid_lamp]",
         );
-        assert_ne!(y, template_yaml());
         let v = violations_for(&y);
         assert!(
             v.iter().any(|v| v.path == "scenery.light_sources.kinds[1]"),
             "got {v:?}"
         );
-        let known = template_yaml().replace(
+        let known = patched(
             "kinds: auto              # auto (theme-derived) | explicit list",
             "kinds: [floor_lamp, techno_lamp]",
         );
-        assert_ne!(known, template_yaml());
         assert!(
             violations_for(&known)
                 .iter()
@@ -984,22 +1027,43 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_decoration_kind_fails_and_a_known_one_passes() {
+        // `scenery.light_sources.kinds` and `scenery.decorations.kinds` are
+        // checked by two separate `if let AutoOr::Given(..)` blocks in
+        // `check_props_theme_effects_and_forbid`; the light-sources test
+        // above does not exercise this one.
+        let y = patched("    kinds: auto\n", "    kinds: [candelabra, plaid_deco]\n");
+        let v = violations_for(&y);
+        assert!(
+            v.iter().any(|v| v.path == "scenery.decorations.kinds[1]"),
+            "got {v:?}"
+        );
+        let known = patched(
+            "    kinds: auto\n",
+            "    kinds: [candelabra, techno_lamp]\n",
+        );
+        assert!(
+            violations_for(&known)
+                .iter()
+                .all(|v| !v.path.starts_with("scenery.decorations.kinds"))
+        );
+    }
+
+    #[test]
     fn an_unknown_forbid_entry_fails_and_a_known_species_passes() {
-        let y = template_yaml().replace(
+        let y = patched(
             "forbid: [archvile, crusher, dark_maze, insta_death_pit]",
             "forbid: [plaid_hazard, crusher, dark_maze, insta_death_pit]",
         );
-        assert_ne!(y, template_yaml());
         let v = violations_for(&y);
         assert!(
             v.iter().any(|v| v.path == "constraints.forbid[0]"),
             "got {v:?}"
         );
-        let known = template_yaml().replace(
+        let known = patched(
             "forbid: [archvile, crusher, dark_maze, insta_death_pit]",
             "forbid: [cyberdemon, crusher, dark_maze, insta_death_pit]",
         );
-        assert_ne!(known, template_yaml());
         assert!(
             violations_for(&known)
                 .iter()
