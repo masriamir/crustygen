@@ -1,0 +1,150 @@
+//! Layer-4 verification: re-derives playability from an emitted UDMF map.
+//!
+//! Works on [`crustywad::map::udmf::UdmfMap`] — the assembled artifact, never
+//! the IR — so a compiler bug that satisfies the compiler's own pre-checks is
+//! still caught here (`docs/design.md` §8 layer 4). Reuses [`crate::tables`]
+//! (the sourced-constants authority) and [`crate::reach`]'s search, and
+//! deliberately nothing from `compile/` or `rules.rs`: those are the logic
+//! under cross-examination.
+
+/// How bad a [`Finding`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    /// A broken map (or a broken input): the run fails.
+    Error,
+    /// Suspicious but not provably broken (e.g. an unrecognized special).
+    Warning,
+    /// Informational only.
+    Info,
+}
+
+/// What a [`Finding`] points at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subject {
+    /// A sector, by TEXTMAP declaration index.
+    Sector(usize),
+    /// A linedef, by TEXTMAP declaration index.
+    Linedef(usize),
+    /// A thing, by TEXTMAP declaration index.
+    Thing(usize),
+    /// The map as a whole.
+    Map,
+}
+
+/// Verdict of one [`ConformanceRow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// The actual satisfies the target.
+    Pass,
+    /// The actual violates a range target.
+    Fail,
+    /// Scalar target: reported with its delta, judged by no invented tolerance.
+    Info,
+    /// The parameter cannot be derived from emitted geometry (reason in `actual`).
+    NotDerivable,
+    /// A prerequisite check failed, so this row was not computed.
+    NotRun,
+}
+
+/// One defect or observation, named after the rule it re-derives.
+#[derive(Debug, Clone)]
+pub struct Finding {
+    /// Check id, e.g. `"V-P8"` or `"V-S"`.
+    pub check: &'static str,
+    /// How bad it is.
+    pub severity: Severity,
+    /// What it points at.
+    pub subject: Subject,
+    /// Human-readable detail naming concrete indices and values.
+    pub message: String,
+}
+
+/// One spec-parameter comparison: target vs what the map actually contains.
+#[derive(Debug, Clone)]
+pub struct ConformanceRow {
+    /// Frontmatter path, e.g. `"combat.monsters.imp"`.
+    pub parameter: String,
+    /// The spec's target, rendered as text.
+    pub target: String,
+    /// The measured value, rendered as text.
+    pub actual: String,
+    /// The judgement.
+    pub verdict: Verdict,
+}
+
+/// One tag's resolution: which sectors carry it, which lines reference it.
+#[derive(Debug, Clone)]
+pub struct TagEntry {
+    /// The nonzero tag.
+    pub tag: i32,
+    /// Sectors whose `id` equals the tag, by declaration index.
+    pub sectors: Vec<usize>,
+    /// Action linedefs whose `args[0]` equals the tag, by declaration index.
+    pub lines: Vec<usize>,
+}
+
+/// Summary counts the conformance rows and issue #3's report both read.
+#[derive(Debug, Clone, Default)]
+pub struct MapStats {
+    /// Sector count.
+    pub sectors: usize,
+    /// Linedef count.
+    pub linedefs: usize,
+    /// Sidedef count.
+    pub sidedefs: usize,
+    /// Vertex count.
+    pub vertices: usize,
+    /// Thing count.
+    pub things: usize,
+    /// Sectors carrying the secret special.
+    pub secret_sectors: usize,
+}
+
+/// The verifier's full result, shaped as the conformance report's (#3) input.
+#[derive(Debug)]
+pub struct CheckReport {
+    /// Every defect and observation found.
+    pub findings: Vec<Finding>,
+    /// Spec-vs-actual rows; `Some` iff a spec was supplied.
+    pub conformance: Option<Vec<ConformanceRow>>,
+    /// Every nonzero tag's resolution.
+    pub tag_manifest: Vec<TagEntry>,
+    /// Summary counts.
+    pub stats: MapStats,
+}
+
+impl std::fmt::Display for Finding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let sev = match self.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+            Severity::Info => "info",
+        };
+        let subj = match self.subject {
+            Subject::Sector(i) => format!("sector {i}"),
+            Subject::Linedef(i) => format!("linedef {i}"),
+            Subject::Thing(i) => format!("thing {i}"),
+            Subject::Map => "map".to_owned(),
+        };
+        write!(f, "{} {sev} {subj}: {}", self.check, self.message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_finding_formats_as_check_severity_subject_and_message() {
+        let f = Finding {
+            check: "V-P8",
+            severity: Severity::Error,
+            subject: Subject::Linedef(12),
+            message: "two-sided line needs a lower texture on its front side".to_owned(),
+        };
+        assert_eq!(
+            f.to_string(),
+            "V-P8 error linedef 12: two-sided line needs a lower texture on its front side"
+        );
+    }
+}
