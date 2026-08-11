@@ -1302,6 +1302,75 @@ pub enum Priority {
     PlayTime,
 }
 
+// ---------------------------------------------------------------------
+// The frontmatter root
+// ---------------------------------------------------------------------
+
+/// The full frontmatter of a filled map-spec template: `spec_version` plus
+/// all seventeen groups, per `docs/map-spec.md`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Frontmatter {
+    /// The frontmatter schema version this document was written against.
+    pub spec_version: u32,
+    /// The `identity` group: which map this is and what it targets.
+    pub identity: Identity,
+    /// The `players` group: starts and multiplayer behavior.
+    pub players: Players,
+    /// The `scale` group: the size and count budgets the map should land
+    /// within.
+    pub scale: Scale,
+    /// The `progression` group: how the player moves through the map.
+    pub progression: Progression,
+    /// The `architecture` group: the geometric character of the map's
+    /// rooms.
+    pub architecture: Architecture,
+    /// The `combat` group: encounter design and monster placement.
+    pub combat: Combat,
+    /// The `arsenal` group: weapon placement and ammo economy.
+    pub arsenal: Arsenal,
+    /// The `sustain` group: health, armor, and powerup placement.
+    pub sustain: Sustain,
+    /// The `secrets` group: how many secrets the map has.
+    pub secrets: Secrets,
+    /// The `difficulty` group: skill-level support and scaling.
+    pub difficulty: Difficulty,
+    /// The `aesthetics` group: theme, texturing, and lighting.
+    pub aesthetics: Aesthetics,
+    /// The `flats` group: floor and ceiling flats, and liquid hazards.
+    pub flats: Flats,
+    /// The `vertical` group: stairs and standard vertical dimensions.
+    pub vertical: Vertical,
+    /// The `scenery` group: decoration, light sources, gore, and barrels.
+    pub scenery: Scenery,
+    /// The `pacing` group: how the map's intensity rises and falls.
+    pub pacing: Pacing,
+    /// The `compat` group: source port targeting and metadata emission.
+    pub compat: Compat,
+    /// The `constraints` group: enforcement mode and conflict-resolution
+    /// priorities.
+    pub constraints: Constraints,
+}
+
+/// Parses the YAML frontmatter of a spec document.
+///
+/// Deserialization runs through `serde_path_to_error`, so a type or enum
+/// mistake names the exact field (`progression.doors.lock_types[1]`)
+/// rather than a line number.
+///
+/// # Errors
+///
+/// Returns [`crate::spec::SpecError::Frontmatter`] if `yaml` does not
+/// deserialize into [`Frontmatter`], naming the field path and the inner
+/// serde message.
+pub fn parse(yaml: &str) -> Result<Frontmatter, crate::spec::SpecError> {
+    let de = serde_norway::Deserializer::from_str(yaml);
+    serde_path_to_error::deserialize(de).map_err(|e| crate::spec::SpecError::Frontmatter {
+        path: e.path().to_string(),
+        message: e.inner().to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1930,5 +1999,52 @@ must_include: []
 priority: [speed]
 ";
         assert!(serde_norway::from_str::<Constraints>(y).is_err());
+    }
+
+    #[test]
+    fn the_shipped_template_frontmatter_parses_end_to_end() {
+        let text = include_str!("../../map-spec.template.md");
+        let (yaml, _) = crate::spec::split_frontmatter(text).unwrap();
+        let fm = parse(&yaml).unwrap();
+        assert_eq!(fm.spec_version, 1);
+        assert_eq!(fm.secrets.count, 3);
+        assert_eq!(fm.combat.monsters.len(), 6);
+        assert_eq!(fm.constraints.enforcement, Enforcement::Target);
+    }
+
+    #[test]
+    fn a_type_error_reports_the_exact_field_path() {
+        let text = include_str!("../../map-spec.template.md");
+        let (yaml, _) = crate::spec::split_frontmatter(text).unwrap();
+        let broken = yaml.replace("locked_doors: 2", "locked_doors: two");
+        let err = parse(&broken).unwrap_err();
+        let crate::spec::SpecError::Frontmatter { path, .. } = err else {
+            panic!("expected a Frontmatter error, got {err:?}")
+        };
+        assert_eq!(path, "progression.locked_doors");
+    }
+
+    #[test]
+    fn an_unknown_top_level_group_is_rejected_with_its_name() {
+        let text = include_str!("../../map-spec.template.md");
+        let (yaml, _) = crate::spec::split_frontmatter(text).unwrap();
+        let broken = format!("{yaml}extras:\n  cake: true\n");
+        assert!(parse(&broken).is_err());
+    }
+
+    #[test]
+    fn a_missing_group_is_rejected_naming_the_group() {
+        let text = include_str!("../../map-spec.template.md");
+        let (yaml, _) = crate::spec::split_frontmatter(text).unwrap();
+        let broken: String = yaml
+            .lines()
+            .filter(|l| *l != "secrets:" && !l.starts_with("  count: 3"))
+            .fold(String::new(), |mut acc, l| {
+                acc.push_str(l);
+                acc.push('\n');
+                acc
+            });
+        let err = parse(&broken).unwrap_err();
+        assert!(err.to_string().contains("secrets"), "got: {err}");
     }
 }

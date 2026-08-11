@@ -22,6 +22,15 @@ pub enum SpecError {
     /// The opening fence is never closed by a matching `---` line.
     #[error("the `---` frontmatter fence opened on line 1 is never closed")]
     UnterminatedFrontmatter,
+    /// The frontmatter YAML failed to deserialize into [`frontmatter::Frontmatter`].
+    #[error("frontmatter field `{path}`: {message}")]
+    Frontmatter {
+        /// The field path at which deserialization failed, e.g.
+        /// `progression.doors.lock_types[1]`.
+        path: String,
+        /// The inner serde error message.
+        message: String,
+    },
 }
 
 /// Splits a spec document at its `---` fences into `(yaml, body)`.
