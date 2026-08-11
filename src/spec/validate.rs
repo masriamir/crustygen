@@ -604,7 +604,17 @@ fn check_secrets_count(fm: &Frontmatter, body: &Body, s: &mut Vec<Sacrifice>) {
 /// `[lighting.min, lighting.max]`: one finding per offender.
 fn check_lighting_band(fm: &Frontmatter, s: &mut Vec<Sacrifice>) {
     let l = &fm.aesthetics.lighting;
-    let sum = l.base + l.corridor_delta;
+    // `base` and `corridor_delta` are both unbounded, YAML-supplied `i32`s;
+    // `check_domains` sources `base`'s own domain but never
+    // `corridor_delta`'s, so a hostile document (both near `i32::MAX`) can
+    // make their sum overflow. `saturating_add` rather than bare `+` keeps
+    // this panic-free (the dev profile has overflow-checks on) and
+    // wrap-free (release would otherwise silently wrap to a small, possibly
+    // in-band, number): a saturated sum pins to `i32::MAX`/`i32::MIN`,
+    // which is definitionally outside any sane `[min, max]` light band, so
+    // it is correctly reported as a governed finding rather than either
+    // panicking or silently passing.
+    let sum = l.base.saturating_add(l.corridor_delta);
     let offenders: [(&str, i32, String); 3] = [
         ("aesthetics.lighting.base", l.base, l.base.to_string()),
         (
@@ -1245,6 +1255,26 @@ mod tests {
             governed(&fm, &template_body())
                 .iter()
                 .all(|s| s.path != "aesthetics.lighting.base")
+        );
+    }
+
+    #[test]
+    fn a_base_and_corridor_delta_that_would_overflow_their_sum_is_governed_not_a_panic() {
+        // Both near `i32::MAX`: `base + corridor_delta` overflows a bare
+        // `i32` addition. This must report a governed finding at
+        // `aesthetics.lighting.corridor_delta`, not panic (dev profile has
+        // overflow-checks on) or silently wrap to some other value.
+        let y = template_yaml()
+            .replace("base: 160", "base: 2000000000")
+            .replace("corridor_delta: -16", "corridor_delta: 2000000000");
+        assert_ne!(y, template_yaml());
+        let fm = crate::spec::frontmatter::parse(&y).unwrap();
+        let findings = governed(&fm, &template_body());
+        assert!(
+            findings
+                .iter()
+                .any(|s| s.path == "aesthetics.lighting.corridor_delta"),
+            "got {findings:?}"
         );
     }
 
