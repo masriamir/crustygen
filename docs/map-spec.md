@@ -141,11 +141,32 @@ author fixing a seventeen-group document deserves the full list in one pass.
 Structural enums with a closed value set in the template (`shape`,
 `backtracking`, `encounter_style`, budget tiers, `placement`, `enforcement`,
 the priority entries…) are Rust enums. Content names are **not**: species,
-weapon, powerup, and key names, the theme, the liquid, and light-effect
-names all validate against `data/vocabulary.toml` and `data/engine.toml`
-through `Tables`, which already declare themselves the resolution target for
-the template's fields. A parallel Rust enum would be a second source of truth
+weapon, powerup, and key names, the theme, and light-effect names all
+validate against `data/vocabulary.toml` and `data/engine.toml` through
+`Tables`, which already declare themselves the resolution target for the
+template's fields. A parallel Rust enum would be a second source of truth
 waiting to drift from the sourced one.
+
+A few fields sit in between: their value set is closed and pinned as a Rust
+enum, but the set itself comes from the template's own allowed-values
+comment rather than from either table, because nothing in `engine.toml` or
+`vocabulary.toml` enumerates it — there is no engine fact or asset name to
+cite. `combat.sound.block_sound_at` (`key_doors | arena_entrances`),
+`aesthetics.lighting.effects.forbid_in` (`combat_arenas | secret_rewards`),
+`scenery.barrels.keep_clear_of` (`player_start | key_pickup |
+secret_reward`), and `difficulty.baseline`'s five skill names (`itytd |
+hntr | hmp | uv | nm`) are all compiler-construction vocabulary, pinned
+directly as enum variants rather than resolved through a table.
+`constraints.forbid` mixes both kinds in one field: an entry is either a
+real species name (sourced, resolved through `Tables::species`) or one of
+three fixed mechanic concepts — `crusher`, `dark_maze`, `insta_death_pit` —
+that name compiler behavior rather than a placeable thing, matched literally
+instead of looked up. And `combat.boss`'s `mastermind` short form is a
+template convenience, not a vocabulary key: the parser bridges it to
+`Boss::Species("spider_mastermind")` itself (`frontmatter::Boss`'s own doc
+comment gives the reasoning) rather than adding an alias to
+`vocabulary.toml`, since guessing which of the two forms future code would
+want is exactly the kind of unsourced choice that table avoids.
 
 Consequences worth stating plainly:
 
@@ -157,9 +178,18 @@ Consequences worth stating plainly:
   cited against pinned `a77dfb96`, before the check is written; a bound that
   cannot be sourced leaves the check unwritten and recorded as a gap, never
   guessed.
-- Where a lookup does not exist yet (light-effect names, liquid kinds), the
-  implementation adds the sourced table entry and accessor rather than
-  hardcoding a list in the parser.
+- Where a lookup does not exist yet, the implementation adds the sourced
+  table entry and accessor rather than hardcoding a list in the parser.
+  Light-effect names took exactly this path: `aesthetics.lighting.effects.allowed`'s
+  four variants now resolve through `Tables::light_effect_special`.
+- `flats.liquid.kind` deliberately does not follow it, even though its value
+  set (`none | nukage | blood | lava | slime | water`) is just as closed: it
+  stays a structural Rust enum, not a `Tables`-resolved content name. Turning
+  `nukage` into an actual liquid *flat* name needs the same kind of
+  Freedoom-IWAD flat measurement `vocabulary.toml`'s texture tables already
+  cite for walls — work that belongs to the liquid-emission stage, which
+  does not exist yet (`KNOWN-GAPS.md`'s **P16**/**P17**), not to a parser
+  that only reads the spec.
 
 ## Deliberately deferred
 

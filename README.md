@@ -8,6 +8,8 @@ rooms, portals, doors, things and an exit; it produces watertight geometry,
 allocates tags, and refuses to emit a map a player could not walk through.
 
 ```
+map-spec (Markdown)  →  parse  →  Spec        (not yet wired to the IR)
+
 IR (JSON)  →  validate  →  compile  →  TEXTMAP  →  PWAD
                                           └──────→  Doom-format twin
 ```
@@ -18,8 +20,11 @@ node building, consumed as a pinned published dependency.
 ## Status
 
 The compiler works and its output has been played to completion in Chocolate
-Doom. What exists is the geometry core; the map-spec front end does not exist
-yet. See [Known gaps](#known-gaps).
+Doom. What exists is the geometry core, plus a map-spec parser that turns a
+filled copy of [`map-spec.template.md`](map-spec.template.md) into a typed
+`Spec` (see [`docs/map-spec.md`](docs/map-spec.md)). The two are not yet
+wired together: spec → IR generation does not exist, so the IR below is
+still authored directly as JSON. See [Known gaps](#known-gaps).
 
 ```bash
 cargo test        # 240 tests
@@ -82,6 +87,7 @@ the four id/Final Doom IWADs. See
 |---|---|
 | [`KNOWN-GAPS.md`](KNOWN-GAPS.md) | **Read this first.** Every known gap and every decision that looks wrong without its reason |
 | [`docs/design.md`](docs/design.md) | The map-spec template, the IR, the compiler contract, and the v1 bar |
+| [`docs/map-spec.md`](docs/map-spec.md) | The map-spec document format, the parser's API, and the enforcement split |
 | [`docs/geometry.md`](docs/geometry.md) | Worked coordinates for the gap and door-chain constructions |
 | [`docs/verticality.md`](docs/verticality.md) | Height differences, and the stairs/lifts phases that follow |
 | [`docs/measurements/`](docs/measurements/) | Corpus measurements over the retail IWADs |
@@ -90,8 +96,10 @@ the four id/Final Doom IWADs. See
 
 The honest list is [`KNOWN-GAPS.md`](KNOWN-GAPS.md). The headlines:
 
-- **Nothing reads the map-spec template.** The IR is authored directly as
-  JSON; the Markdown front end in `docs/design.md` is designed, not built.
+- **The map-spec parser reads the template; nothing turns it into an IR
+  yet.** `src/spec` parses a filled `map-spec.template.md` copy into a typed
+  `Spec` (see [`docs/map-spec.md`](docs/map-spec.md)); the IR is still
+  authored directly as JSON, and spec → IR generation does not exist.
 - **No verifier and no conformance report.** `docs/design.md` §8 specifies
   five verification layers; layers 2 and 4 do not exist.
 - **P20 has no per-pickup check, and P7 passes vacuously without a player

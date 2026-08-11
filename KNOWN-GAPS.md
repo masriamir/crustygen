@@ -54,16 +54,30 @@ secret sectors equals `secrets.count`" — since `secrets.count` is a map-spec
 concept with no representation in this IR; that check belongs at the stage
 that reads the map-spec, not here.
 
-Also absent: the verifier, the conformance report, and the blank Markdown
-template. (The packer — `pack::pack_udmf` and `pack::pack_udmf_with_nodes` —
-and an authored map — `tests/fixtures/entrada_base.json`, built into
-`maps/entrada.wad` — both shipped after this paragraph was first written and
-are no longer absent.) Specials for lifts, teleports, and
-liquid sector effects, monster `spawnhealth`, health/armor pickup amounts and
-caps, the gore prop set, and the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef
-flags are all **sourced and accessible** but nothing emits any of them yet.
-Doors, exits (`compile::exits`), and the secret sector special are wired end
-to end.
+Also absent: the verifier and the conformance report. (The packer —
+`pack::pack_udmf` and `pack::pack_udmf_with_nodes` — and an authored map —
+`tests/fixtures/entrada_base.json`, built into `maps/entrada.wad` — both
+shipped after this paragraph was first written and are no longer absent.)
+Specials for lifts, teleports, and liquid sector effects, monster
+`spawnhealth`, health/armor pickup amounts and caps, the gore prop set, and
+the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef flags are all **sourced and
+accessible** but nothing emits any of them yet. Doors, exits
+(`compile::exits`), and the secret sector special are wired end to end.
+
+**The map-spec parser exists now, and deliberately stops at parsing.**
+`src/spec` turns a filled `map-spec.template.md` copy into a typed
+`Spec`/`SpecDocument` (see `docs/map-spec.md`), but it records nothing about
+the deeper conflicts `docs/design.md` §5.1 expects — `hitscanner_ratio`
+feasibility against the per-species min/max ranges, `sectors.max` against
+`detail_level` — because those belong to the resolver and verifier stages
+this section already lists as absent, not to a stage that only reads the
+spec. `Tables::hitscan` already exists and classifies species by hitscan
+behavior, so the feasibility check the verifier will eventually need is
+cheap to write once the verifier exists; the parser just doesn't do it.
+`map-spec.template.md` itself ships **filled**, not blank, for the reasons
+`docs/map-spec.md` gives: a blank template could neither parse nor be
+tested, so the filled one is simultaneously the contract, the
+documentation, and a parseable artifact.
 
 ## Known gaps
 

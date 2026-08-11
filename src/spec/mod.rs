@@ -7,6 +7,8 @@
 
 use thiserror::Error;
 
+use crate::tables::Tables;
+
 /// The prose body: free-text sections, an ordered sequence of events, and
 /// structured secrets, hand-parsed from the Markdown [`split_frontmatter`]
 /// splits off.
@@ -22,6 +24,65 @@ pub mod frontmatter;
 /// [`validate::always_errors`] checks and the enforcement-governed set a
 /// later stage adds.
 pub mod validate;
+
+/// A parsed map-spec document: typed frontmatter plus the parsed prose body.
+///
+/// Produced by [`Spec::from_markdown`], which chains this module's stages —
+/// [`split_frontmatter`], [`frontmatter::parse`], and [`body::parse`] — and
+/// runs [`validate::run`] against the result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Spec {
+    /// The document's typed YAML frontmatter.
+    pub frontmatter: frontmatter::Frontmatter,
+    /// The document's parsed prose body.
+    pub body: body::Body,
+}
+
+impl Spec {
+    /// Parses a complete map-spec document — `---`-fenced YAML frontmatter
+    /// followed by a Markdown body — and validates it against `tables`.
+    ///
+    /// Runs, in order: [`split_frontmatter`], [`frontmatter::parse`],
+    /// [`body::parse`], then [`validate::run`]. Under
+    /// `constraints.enforcement: target`, [`validate::run`]'s
+    /// enforcement-governed findings come back as [`SpecDocument::sacrifices`]
+    /// rather than rejecting; under `strict`, the same findings surface as
+    /// part of the `Err` this returns instead, so `sacrifices` is empty by
+    /// construction on every `Ok` produced under `strict`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SpecError::MissingFrontmatter`] or
+    /// [`SpecError::UnterminatedFrontmatter`] if `text` is not properly
+    /// fenced, [`SpecError::Frontmatter`] if the YAML frontmatter does not
+    /// deserialize, one of the body-grammar variants if the Markdown body is
+    /// malformed, or [`SpecError::Invalid`] if [`validate::run`] finds a
+    /// violation.
+    pub fn from_markdown(text: &str, tables: &Tables) -> Result<SpecDocument, SpecError> {
+        let (yaml, body_text) = split_frontmatter(text)?;
+        let frontmatter = frontmatter::parse(&yaml)?;
+        let body = body::parse(&body_text)?;
+        let sacrifices = validate::run(&frontmatter, &body, tables)?;
+        Ok(SpecDocument {
+            spec: Self { frontmatter, body },
+            sacrifices,
+        })
+    }
+}
+
+/// The result of [`Spec::from_markdown`]: a parsed [`Spec`] plus every
+/// enforcement-governed finding [`validate::governed`] recorded against it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpecDocument {
+    /// The parsed spec: typed frontmatter plus the parsed prose body.
+    pub spec: Spec,
+    /// Enforcement-governed findings recorded rather than rejected, per
+    /// `docs/map-spec.md`'s "Errors and the enforcement split". Empty by
+    /// construction under `constraints.enforcement: strict` — a nonempty
+    /// finding there becomes part of [`Spec::from_markdown`]'s `Err`
+    /// instead.
+    pub sacrifices: Vec<Sacrifice>,
+}
 
 /// One violation [`validate::always_errors`] found: the field path at fault
 /// and a human-readable message. `Display` renders `` `{path}`: {message} ``,
