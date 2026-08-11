@@ -633,9 +633,10 @@ pub fn governed(fm: &Frontmatter, body: &Body) -> Vec<Sacrifice> {
 }
 
 /// The mode clause every governed finding's [`Sacrifice`] message ends with
-/// under `target`. [`run`]'s strict arm strips exactly this suffix to
-/// re-phrase the same finding for the mode that actually rejected it — one
-/// shared constant, so the phrasing and the strip can never drift apart.
+/// under `target` — one shared constant across the three check functions,
+/// so their phrasing cannot drift apart. ([`run`]'s strict arm does not use
+/// the sacrifice message at all; it rebuilds strict violations from the
+/// structured `target`/`actual` fields.)
 const TARGET_SUFFIX: &str = " under `enforcement: target`";
 
 /// `secrets.count` versus the number of prose `### Secret` sections in the
@@ -733,15 +734,16 @@ pub fn run(fm: &Frontmatter, body: &Body, tables: &Tables) -> Result<Vec<Sacrifi
     let sacrifices = governed(fm, body);
 
     if fm.constraints.enforcement == Enforcement::Strict {
-        // A sacrifice's message is phrased for `target` mode; under
-        // `strict` the same finding is a rejection, so the mode clause is
-        // rewritten rather than cloned — a strict error must not claim the
-        // document ran under `target`.
+        // A sacrifice's `message` is phrased for `target` mode ("sacrificed
+        // A to B…"); under `strict` nothing is sacrificed — the finding is a
+        // rejection. Build the violation from the structured fields instead,
+        // in the wanted/got idiom every always-error already uses, so a
+        // strict error never carries target-mode wording.
         violations.extend(sacrifices.iter().map(|s| Violation {
             path: s.path.clone(),
             message: format!(
-                "{}, rejected under `enforcement: strict`",
-                s.message.strip_suffix(TARGET_SUFFIX).unwrap_or(&s.message)
+                "wanted {}, got {}, rejected under `enforcement: strict`",
+                s.target, s.actual
             ),
         }));
     }
@@ -1336,8 +1338,14 @@ mod tests {
             finding.message
         );
         assert!(
-            !finding.message.contains("`enforcement: target`"),
-            "a strict-mode error must not claim target mode: {}",
+            !finding.message.contains("`enforcement: target`")
+                && !finding.message.contains("sacrificed"),
+            "a strict-mode error must carry no target-mode wording: {}",
+            finding.message
+        );
+        assert!(
+            finding.message.starts_with("wanted "),
+            "strict violations use the wanted/got idiom: {}",
             finding.message
         );
     }
