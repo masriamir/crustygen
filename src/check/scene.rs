@@ -4,13 +4,15 @@
 //! cross-references (`v1`/`v2`, `sidefront`, `sideback`, and each referenced
 //! sidedef's `sector`) against the map's own declaration counts rather than
 //! trusting them, and turns each valid linedef into one or two [`Boundary`]
-//! segments filed under the sector(s) it borders. Later tasks (closure,
-//! thing→sector resolution, and the check passes that read this data) build
-//! on top of what this module establishes.
+//! segments filed under the sector(s) it borders. It then closes each
+//! sector's boundary (even-degree check) and resolves each thing to the
+//! first closed sector containing it. Later tasks (the check passes that
+//! read this data) build on top of what this module establishes.
 
 use crate::check::{Finding, Severity, Subject};
 use crate::tables::Tables;
 use crustywad::map::udmf::{UdmfLinedef, UdmfMap};
+use std::collections::HashMap;
 
 /// One directed edge of a sector's boundary, built from one side of a
 /// linedef.
@@ -79,9 +81,9 @@ pub struct SceneSector {
     /// This sector's boundary edges, one per linedef side that fronts or
     /// backs it.
     pub boundary: Vec<Boundary>,
-    /// Whether the boundary closes into simple loop(s).
-    ///
-    /// Always `false` here — Task 3 computes and owns this field.
+    /// Whether the boundary closes into simple loop(s): every vertex
+    /// endpoint's degree, counted across this sector's boundary segments,
+    /// is even.
     pub closed: bool,
 }
 
@@ -98,9 +100,9 @@ pub struct SceneThing {
     pub type_id: i32,
     /// Doom/Boom-MBF-mapped flag bits (see `UdmfThing::flags`).
     pub flags: u32,
-    /// The sector containing this thing.
-    ///
-    /// Always `None` here — Task 3 resolves it.
+    /// Declaration index of the first (declaration order) closed sector
+    /// whose boundary contains this thing, or `None` if no closed sector
+    /// does.
     pub sector: Option<usize>,
     /// The thing's species/kind name.
     ///
@@ -262,6 +264,91 @@ fn process_linedef(
     }
 }
 
+/// Degree (count of boundary-segment endpoints) of each vertex in a
+/// sector's boundary, keyed by the coordinate pair's raw bit pattern
+/// (`f64::to_bits`) rather than by value or with a tolerance.
+///
+/// Every coordinate here was copied verbatim from `map.vertices` in
+/// [`process_linedef`] — never computed — so two boundary endpoints at the
+/// "same" vertex are always bit-identical, and bit-equality sidesteps
+/// picking an arbitrary epsilon.
+fn endpoint_degrees(sector: &SceneSector) -> HashMap<(u64, u64), usize> {
+    let mut degree = HashMap::new();
+    for b in &sector.boundary {
+        *degree
+            .entry((b.a.0.to_bits(), b.a.1.to_bits()))
+            .or_insert(0) += 1;
+        *degree
+            .entry((b.b.0.to_bits(), b.b.1.to_bits()))
+            .or_insert(0) += 1;
+    }
+    degree
+}
+
+/// Whether sector `i`'s boundary closes into simple loop(s): every vertex
+/// endpoint's degree is even. On the first odd-degree vertex found, pushes
+/// a `"V-S"` Error naming the sector and that vertex, and returns `false`.
+fn sector_is_closed(i: usize, sector: &SceneSector, findings: &mut Vec<Finding>) -> bool {
+    for (&(xb, yb), &degree) in &endpoint_degrees(sector) {
+        if degree % 2 != 0 {
+            let (x, y) = (f64::from_bits(xb), f64::from_bits(yb));
+            findings.push(Finding {
+                check: "V-S",
+                severity: Severity::Error,
+                subject: Subject::Sector(i),
+                message: format!(
+                    "boundary does not close: vertex ({x}, {y}) has odd degree {degree}"
+                ),
+            });
+            return false;
+        }
+    }
+    true
+}
+
+/// Even-odd containment of `(x, y)` in `sector`'s boundary segments.
+/// Sound only for a closed boundary; callers gate on `sector.closed`.
+pub(crate) fn sector_contains(sector: &SceneSector, x: f64, y: f64) -> bool {
+    let mut inside = false;
+    for b in &sector.boundary {
+        let (ax, ay) = b.a;
+        let (bx, by) = b.b;
+        if (ay > y) != (by > y) {
+            let cross_x = ax + (y - ay) * (bx - ax) / (by - ay);
+            if x < cross_x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+/// Resolves each thing to the first (declaration order) closed sector
+/// whose boundary contains it, pushing a `"V-S"` Error naming the thing
+/// when none does.
+///
+/// A point sitting exactly on a boundary edge is unspecified by even-odd
+/// containment ([`sector_contains`]) — the compiler never emits a thing
+/// there, so this is not a practical soundness gap.
+fn resolve_things(sectors: &[SceneSector], things: &mut [SceneThing], findings: &mut Vec<Finding>) {
+    for (i, thing) in things.iter_mut().enumerate() {
+        thing.sector = sectors
+            .iter()
+            .position(|s| s.closed && sector_contains(s, thing.x, thing.y));
+        if thing.sector.is_none() {
+            findings.push(Finding {
+                check: "V-S",
+                severity: Severity::Error,
+                subject: Subject::Thing(i),
+                message: format!(
+                    "thing at ({}, {}) is outside every closed sector",
+                    thing.x, thing.y
+                ),
+            });
+        }
+    }
+}
+
 impl Scene {
     /// Builds a [`Scene`] from a parsed UDMF map.
     ///
@@ -272,6 +359,11 @@ impl Scene {
     /// that fails any of these checks contributes no [`Boundary`] to any
     /// sector; each failure pushes exactly one `"V-S"` [`Finding`] onto
     /// `findings`, naming the offending linedef and index.
+    ///
+    /// Once every linedef is processed, closes each sector's boundary
+    /// (`sector_is_closed`) and resolves each thing to the first closed
+    /// sector containing it (`resolve_things`), each pushing its own `"V-S"`
+    /// findings.
     #[must_use]
     pub fn build(map: &UdmfMap, tables: &Tables, findings: &mut Vec<Finding>) -> Self {
         // Not read until Task 4 adds `blocking`/`lower_unpegged`, sourced
@@ -292,7 +384,7 @@ impl Scene {
             })
             .collect();
 
-        let things = map
+        let mut things: Vec<SceneThing> = map
             .things
             .iter()
             .map(|thing| SceneThing {
@@ -309,6 +401,12 @@ impl Scene {
         for (i, line) in map.linedefs.iter().enumerate() {
             process_linedef(i, line, map, &mut sectors, findings);
         }
+
+        for (i, sector) in sectors.iter_mut().enumerate() {
+            sector.closed = sector_is_closed(i, sector, findings);
+        }
+
+        resolve_things(&sectors, &mut things, findings);
 
         Self { sectors, things }
     }
@@ -410,5 +508,81 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
                 .iter()
                 .any(|f| f.check == "V-S" && matches!(f.subject, crate::check::Subject::Linedef(1)))
         );
+    }
+
+    #[test]
+    fn closure_holds_for_both_boxes_and_breaks_when_a_wall_is_removed() {
+        let (scene, _) = scene_of(TWO_BOX);
+        assert!(scene.sectors.iter().all(|s| s.closed));
+        // Drop sector 1's east wall (linedef 4: v1=1,v2=2... pick the line and delete it).
+        let broken = TWO_BOX.replace(
+            "linedef { v1 = 2; v2 = 3; sidefront = 6; blocking = true; }\n",
+            "",
+        );
+        let (scene, findings) = scene_of(&broken);
+        assert!(!scene.sectors[1].closed);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "V-S" && matches!(f.subject, crate::check::Subject::Sector(1)))
+        );
+    }
+
+    #[test]
+    fn a_thing_resolves_to_the_sector_that_contains_it() {
+        let (scene, _) = scene_of(TWO_BOX);
+        assert_eq!(scene.things.len(), 1);
+        assert_eq!(
+            scene.things[0].sector,
+            Some(0),
+            "thing at (32,32) is in the left box"
+        );
+    }
+
+    #[test]
+    fn a_thing_outside_every_sector_is_reported() {
+        let stray = TWO_BOX.replace(
+            "thing { x = 32.000; y = 32.000;",
+            "thing { x = 500.000; y = 500.000;",
+        );
+        let (scene, findings) = scene_of(&stray);
+        assert_eq!(scene.things[0].sector, None);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "V-S" && matches!(f.subject, crate::check::Subject::Thing(0)))
+        );
+    }
+
+    #[test]
+    fn an_l_shaped_sector_contains_its_notch_correctly() {
+        // Non-convex single sector: L-shape. Point in the notch (outside) vs in the leg.
+        // 6-vertex L: (0,0)(96,0)(96,32)(32,32)(32,96)(0,96), all one-sided walls.
+        let l_shape = r#"namespace = "doom";
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 96.000; y = 0.000; }
+vertex { x = 96.000; y = 32.000; }
+vertex { x = 32.000; y = 32.000; }
+vertex { x = 32.000; y = 96.000; }
+vertex { x = 0.000; y = 96.000; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; blocking = true; }
+linedef { v1 = 1; v2 = 2; sidefront = 1; blocking = true; }
+linedef { v1 = 2; v2 = 3; sidefront = 2; blocking = true; }
+linedef { v1 = 3; v2 = 4; sidefront = 3; blocking = true; }
+linedef { v1 = 4; v2 = 5; sidefront = 4; blocking = true; }
+linedef { v1 = 5; v2 = 0; sidefront = 5; blocking = true; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }
+thing { x = 16.000; y = 64.000; type = 1; single = true; }
+thing { x = 64.000; y = 64.000; type = 1; single = true; }
+"#;
+        let (scene, _) = scene_of(l_shape);
+        assert_eq!(scene.things[0].sector, Some(0), "in the vertical leg");
+        assert_eq!(scene.things[1].sector, None, "the notch is outside the L");
     }
 }
