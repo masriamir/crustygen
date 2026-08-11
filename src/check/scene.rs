@@ -23,6 +23,13 @@ use std::collections::HashMap;
 /// edges walking `a` → `b` in its own winding: the front mirror runs `v1` →
 /// `v2`, the back mirror `v2` → `v1`.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool mirrors an independent bit of the engine's `maplinedef_t.flags` \
+              bitfield (two_sided, blocking, lower_unpegged) or an independent structural fact \
+              about which mirror this is (fronts_this) — the same reasoning LinedefOut gives in \
+              compile/mod.rs for the emission side of this exact bitfield"
+)]
 pub struct Boundary {
     /// The edge's start point, world units.
     pub a: (f64, f64),
@@ -33,10 +40,19 @@ pub struct Boundary {
     /// Declaration index of the sector on the other side of the linedef, if
     /// two-sided.
     pub neighbor: Option<usize>,
-    /// Whether the linedef has a back sidedef (UDMF `twosided`, crustywad
-    /// flag bit value 4). Compared here as a literal; Task 4 replaces it
-    /// with the sourced [`Tables`] constant.
+    /// Whether the linedef has a back sidedef (UDMF `twosided`, sourced
+    /// `ML_TWOSIDED` bit — [`Tables::linedef_flag`]`("two_sided")`).
     pub two_sided: bool,
+    /// Whether the linedef is solid (UDMF `blocking`, sourced `ML_BLOCKING`
+    /// bit — [`Tables::linedef_flag`]`("blocking")`). A two-sided line can
+    /// still carry this flag (e.g. a fence the player cannot walk through
+    /// but can see and shoot across), which is why [`Boundary::passable`]
+    /// checks both.
+    pub blocking: bool,
+    /// Whether the linedef's lower texture is unpegged (UDMF `dontpegbottom`,
+    /// sourced `ML_DONTPEGBOTTOM` bit — [`Tables::linedef_flag`]
+    /// `("lower_unpegged")`).
+    pub lower_unpegged: bool,
     /// The linedef's special type.
     pub special: i32,
     /// The linedef's sector tag (`args[0]` in the `doom` namespace).
@@ -54,13 +70,12 @@ impl Boundary {
         (self.b.0 - self.a.0).hypot(self.b.1 - self.a.1)
     }
 
-    /// Whether the player can cross this edge.
-    ///
-    /// `two_sided` only for now; Task 4 tightens this to
-    /// `two_sided && !blocking` once the `blocking` field exists.
+    /// Whether the player can cross this edge: two-sided and not flagged
+    /// solid (`ML_BLOCKING` can be set on a two-sided line, e.g. a fence the
+    /// player can see and shoot across but not walk through).
     #[must_use]
     pub fn passable(&self) -> bool {
-        self.two_sided
+        self.two_sided && !self.blocking
     }
 }
 
@@ -104,9 +119,10 @@ pub struct SceneThing {
     /// whose boundary contains this thing, or `None` if no closed sector
     /// does.
     pub sector: Option<usize>,
-    /// The thing's species/kind name.
-    ///
-    /// Always `None` here — Task 4's reverse lookup resolves it.
+    /// The thing's species/kind name, resolved from `type_id` via
+    /// [`Tables::thing_kinds`]'s reverse map. `None` if `type_id` is
+    /// negative, does not fit a `u16`, or is not a doomednum the vocabulary
+    /// names.
     pub name: Option<String>,
 }
 
@@ -120,11 +136,6 @@ pub struct Scene {
     /// One entry per declared thing, in declaration order.
     pub things: Vec<SceneThing>,
 }
-
-/// Bit value of crustywad's `twosided` flag (`doomdata.h`'s `ML_TWOSIDED`
-/// position). A literal for now; Task 4 replaces it with the sourced
-/// `Tables` constant.
-const TWOSIDED_FLAG: u32 = 4;
 
 /// Builds a [`Finding`] for check `"V-S"` naming `linedef`.
 fn reference_error(linedef: usize, message: String) -> Finding {
@@ -163,6 +174,31 @@ fn resolve_index(
     resolved
 }
 
+/// Reads `(two_sided, blocking, lower_unpegged)` off `line.flags` using the
+/// sourced `Tables` bit values, rather than a literal.
+fn linedef_boundary_flags(tables: &Tables, line: &UdmfLinedef) -> (bool, bool, bool) {
+    let two_sided_flag = u32::from(
+        tables
+            .linedef_flag("two_sided")
+            .expect("sourced in engine.toml"),
+    );
+    let blocking_flag = u32::from(
+        tables
+            .linedef_flag("blocking")
+            .expect("sourced in engine.toml"),
+    );
+    let lower_unpegged_flag = u32::from(
+        tables
+            .linedef_flag("lower_unpegged")
+            .expect("sourced in engine.toml"),
+    );
+    (
+        line.flags & two_sided_flag != 0,
+        line.flags & blocking_flag != 0,
+        line.flags & lower_unpegged_flag != 0,
+    )
+}
+
 /// Validates linedef `i`'s cross-references and, if it is well-formed,
 /// pushes its [`Boundary`] contribution(s) into `sectors`. On any violation,
 /// pushes exactly one `"V-S"` [`Finding`] and contributes no boundary.
@@ -170,6 +206,7 @@ fn process_linedef(
     i: usize,
     line: &UdmfLinedef,
     map: &UdmfMap,
+    tables: &Tables,
     sectors: &mut [SceneSector],
     findings: &mut Vec<Finding>,
 ) {
@@ -222,7 +259,7 @@ fn process_linedef(
         }
     };
 
-    let two_sided = line.flags & TWOSIDED_FLAG != 0;
+    let (two_sided, blocking, lower_unpegged) = linedef_boundary_flags(tables, line);
     if two_sided != back.is_some() {
         findings.push(reference_error(
             i,
@@ -243,6 +280,8 @@ fn process_linedef(
         linedef: i,
         neighbor: back.map(|(_, back_sector)| back_sector),
         two_sided,
+        blocking,
+        lower_unpegged,
         special: line.special,
         tag: line.args[0],
         fronts_this: true,
@@ -256,6 +295,8 @@ fn process_linedef(
             linedef: i,
             neighbor: Some(front_sector),
             two_sided,
+            blocking,
+            lower_unpegged,
             special: line.special,
             tag: line.args[0],
             fronts_this: false,
@@ -366,9 +407,10 @@ impl Scene {
     /// findings.
     #[must_use]
     pub fn build(map: &UdmfMap, tables: &Tables, findings: &mut Vec<Finding>) -> Self {
-        // Not read until Task 4 adds `blocking`/`lower_unpegged`, sourced
-        // from `tables.linedef_flag`.
-        let _ = tables;
+        let kind_names: HashMap<u16, String> = tables
+            .thing_kinds()
+            .map(|(name, id)| (id, name.to_owned()))
+            .collect();
 
         let mut sectors: Vec<SceneSector> = map
             .sectors
@@ -394,12 +436,14 @@ impl Scene {
                 type_id: thing.type_id,
                 flags: thing.flags,
                 sector: None,
-                name: None,
+                name: u16::try_from(thing.type_id)
+                    .ok()
+                    .and_then(|id| kind_names.get(&id).cloned()),
             })
             .collect();
 
         for (i, line) in map.linedefs.iter().enumerate() {
-            process_linedef(i, line, map, &mut sectors, findings);
+            process_linedef(i, line, map, tables, &mut sectors, findings);
         }
 
         for (i, sector) in sectors.iter_mut().enumerate() {
@@ -482,6 +526,36 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
     }
 
     #[test]
+    fn a_twosided_line_flagged_blocking_is_not_passable() {
+        // The shared edge stays two-sided but also carries ML_BLOCKING — a
+        // fence the player can see and shoot across but not walk through.
+        let blocked = TWO_BOX.replace(
+            "linedef { v1 = 1; v2 = 4; sidefront = 0; sideback = 1; twosided = true; }",
+            "linedef { v1 = 1; v2 = 4; sidefront = 0; sideback = 1; twosided = true; blocking = true; }",
+        );
+        let (scene, findings) = scene_of(&blocked);
+        assert!(findings.is_empty(), "clean fixture: {findings:?}");
+        let shared = scene.sectors[0]
+            .boundary
+            .iter()
+            .find(|b| b.linedef == 0)
+            .expect("present");
+        assert!(shared.two_sided, "still two-sided");
+        assert!(
+            shared.blocking,
+            "blocking flag read back off the sourced bit"
+        );
+        assert!(
+            !shared.lower_unpegged,
+            "the fixture never sets dontpegbottom"
+        );
+        assert!(
+            !shared.passable(),
+            "a blocking two-sided line is not passable"
+        );
+    }
+
+    #[test]
     fn a_dangling_sidedef_sector_index_is_reported_and_the_linedef_is_skipped() {
         let broken = TWO_BOX.replace(
             "sidedef { sector = 1; texturemiddle = \"-\"; }",
@@ -551,6 +625,26 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
             findings
                 .iter()
                 .any(|f| f.check == "V-S" && matches!(f.subject, crate::check::Subject::Thing(0)))
+        );
+    }
+
+    #[test]
+    fn a_things_name_resolves_from_the_reverse_thing_lookup() {
+        let (scene, _) = scene_of(TWO_BOX);
+        assert_eq!(
+            scene.things[0].name.as_deref(),
+            Some("player1_start"),
+            "type 1 resolves through Tables::thing_kinds"
+        );
+
+        let unknown = TWO_BOX.replace(
+            "thing { x = 32.000; y = 32.000; type = 1;",
+            "thing { x = 32.000; y = 32.000; type = 31337;",
+        );
+        let (scene, _) = scene_of(&unknown);
+        assert_eq!(
+            scene.things[0].name, None,
+            "a type_id the vocabulary does not name resolves to no name"
         );
     }
 

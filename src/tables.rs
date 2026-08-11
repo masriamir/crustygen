@@ -230,6 +230,9 @@ struct LinedefFlags {
     block_monsters: u16,
     secret: u16,
     sound_block: u16,
+    blocking: u16,
+    two_sided: u16,
+    lower_unpegged: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -500,6 +503,17 @@ impl Tables {
             .ok()
     }
 
+    /// Every `[things]` vocabulary entry, `(name, doomednum)`, skipping the
+    /// `*_source` citation strings (their values are not integers). The reverse
+    /// direction of [`Self::thing_id`], for classifying an emitted thing.
+    pub fn thing_kinds(&self) -> impl Iterator<Item = (&str, u16)> + '_ {
+        self.vocabulary.things.iter().filter_map(|(name, v)| {
+            v.as_integer()
+                .and_then(|i| u16::try_from(i).ok())
+                .map(|id| (name.as_str(), id))
+        })
+    }
+
     /// The linedef special that opens a manual door.
     #[must_use]
     pub fn door_special(&self) -> u16 {
@@ -648,22 +662,32 @@ impl Tables {
     }
 
     /// The `doomdata.h` bit value for a named linedef flag (`block_monsters`
-    /// | `sound_block`), if known. `combat.block_monster_lines` needs
+    /// | `secret` | `sound_block` | `blocking` | `two_sided` |
+    /// `lower_unpegged`), if known. `combat.block_monster_lines` needs
     /// `block_monsters` (`ML_BLOCKMONSTERS`); `combat.sound.block_sound_at`
-    /// needs `sound_block` (`ML_SOUNDBLOCK`).
+    /// needs `sound_block` (`ML_SOUNDBLOCK`). `blocking`, `two_sided`
+    /// (`ML_BLOCKING`, `ML_TWOSIDED`), and `lower_unpegged`
+    /// (`ML_DONTPEGBOTTOM`) are read back by [`crate::check::scene`] to
+    /// re-derive a parsed map's own boundary passability and texture-pegging
+    /// from its linedef `flags` bits, rather than trusting the compiler's
+    /// structural output.
     ///
     /// UDMF's `doom` namespace spells each flag as its own named boolean
     /// field on the linedef object — `blockmonsters` and `blocksound`
     /// respectively — rather than this packed bit; see `emit_textmap`'s
     /// existing `blocking`/`dontpegbottom`/`dontpegtop` output for the
-    /// convention a future emission path should follow. Not wired into any
-    /// emission path yet.
+    /// convention a future emission path should follow. `block_monsters` and
+    /// `sound_block` are sourced and accessible but unemitted; `secret` is
+    /// wired into `compile::portals`.
     #[must_use]
     pub fn linedef_flag(&self, name: &str) -> Option<u16> {
         match name {
             "block_monsters" => Some(self.engine.linedef.flags.block_monsters),
             "secret" => Some(self.engine.linedef.flags.secret),
             "sound_block" => Some(self.engine.linedef.flags.sound_block),
+            "blocking" => Some(self.engine.linedef.flags.blocking),
+            "two_sided" => Some(self.engine.linedef.flags.two_sided),
+            "lower_unpegged" => Some(self.engine.linedef.flags.lower_unpegged),
             _ => None,
         }
     }
@@ -1158,14 +1182,38 @@ mod tests {
         );
         assert_eq!(
             t.linedef_flag("blocking"),
-            None,
-            "ML_BLOCKING is structural (LinedefOut::blocking), not a sourced flag entry"
+            Some(1),
+            "ML_BLOCKING is now sourced too, for check::scene's Boundary::blocking (Task 4)"
         );
         assert_eq!(
             t.linedef_flag("plaid_flag"),
             None,
             "an unknown flag name must fail loudly, not silently fall back"
         );
+    }
+
+    #[test]
+    fn thing_kinds_inverts_thing_id_and_skips_source_entries() {
+        let t = Tables::load().expect("tables");
+        let kinds: std::collections::HashMap<&str, u16> = t.thing_kinds().collect();
+        assert_eq!(kinds.get("imp"), Some(&3001));
+        assert_eq!(kinds.get("player1_start"), Some(&1));
+        assert!(!kinds.contains_key("source"));
+        for (name, id) in t.thing_kinds() {
+            assert_eq!(t.thing_id(name), Some(id));
+        }
+    }
+
+    #[test]
+    fn the_verifier_linedef_flags_and_start_things_are_sourced() {
+        let t = Tables::load().expect("tables");
+        assert_eq!(t.linedef_flag("blocking"), Some(1));
+        assert_eq!(t.linedef_flag("two_sided"), Some(4));
+        assert_eq!(t.linedef_flag("lower_unpegged"), Some(16));
+        assert_eq!(t.thing_id("player2_start"), Some(2));
+        assert_eq!(t.thing_id("player3_start"), Some(3));
+        assert_eq!(t.thing_id("player4_start"), Some(4));
+        assert_eq!(t.thing_id("deathmatch_start"), Some(11));
     }
 
     /// The exploding barrel and every scenery/light-source prop must
