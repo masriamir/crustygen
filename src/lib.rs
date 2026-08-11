@@ -9,4 +9,5 @@ pub mod ir;
 pub mod pack;
 pub mod reach;
 pub mod rules;
+pub mod spec;
 pub mod tables;
