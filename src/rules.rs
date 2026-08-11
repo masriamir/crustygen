@@ -1,9 +1,10 @@
 //! Playability invariants checked against compiled output.
 //!
 //! `check_all` implements a deliberately partial rule catalog: **P3** (passage
-//! width), **P4** (door opening clearance), **P8** (no missing textures),
-//! **P9** (no texture scaling), **P19** (light bounds), and **P24** (key and
-//! lock coherence).
+//! width), **P4** (door opening clearance), **P7** (no softlock), **P8** (no
+//! missing textures), **P9** (no texture scaling), **P19** (light bounds), and
+//! **P24** (key and lock coherence). **P7** floods `(sector, keys-held)`
+//! states over the emitted geometry — see [`crate::reach`].
 //!
 //! **P1** (step height between connected rooms) has been **retired**: it
 //! capped the floor delta between connected rooms in either direction, but
@@ -13,15 +14,17 @@
 //! [`CompileError::PortalNoHeadroom`](crate::compile::CompileError::PortalNoHeadroom)
 //! for what replaced it.
 //!
-//! **P7** (no softlock) and **P20** (pickup accessibility) are deliberately
-//! *not* implemented here — both need a key-aware reachability flood over the
-//! room graph, which is a later-stage concern that belongs with the verifier,
-//! not this stage-one structural pass. Do not read the presence of this
-//! module as covering them.
+//! **P20** (pickup accessibility) is deliberately *not* implemented here. It
+//! needs the same key-aware reachability flood P7 runs, applied to every
+//! pickup rather than to the exit, so it will consume [`crate::reach`] rather
+//! than re-derive anything — but which pickups a map *must* make reachable is
+//! a spec-conformance question this stage-one structural pass does not yet
+//! answer. Do not read the presence of this module as covering it.
 
 use crate::compile::Compiled;
 use crate::compile::heights::{visible_lower_side, visible_upper_side};
 use crate::ir::{Ir, PortalKind};
+use crate::reach;
 use crate::tables::Tables;
 
 /// One failed playability check.
@@ -58,7 +61,73 @@ pub fn check_all(ir: &Ir, tables: &Tables, out: &Compiled) -> Vec<RuleViolation>
     check_no_scaling(out, &mut v);
     check_missing_textures(out, &mut v);
     check_key_lock_coherence(ir, &mut v);
+    check_reachability(ir, tables, out, &mut v);
     v
+}
+
+/// P7: no softlock — the map is finishable, nowhere the player can get to
+/// is a dead end they cannot finish from, and every sector is visitable.
+///
+/// Delegates to [`crate::reach`]: a breadth-first search over
+/// `(sector, keys-held)` states built from the *emitted* geometry. Vacuously
+/// satisfied when the map has no player 1 start or no exit — see
+/// [`crate::reach::graph_from_compiled`].
+fn check_reachability(ir: &Ir, tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>) {
+    let Some(built) = reach::graph_from_compiled(ir, tables, out) else {
+        return;
+    };
+    let limits = reach::Limits {
+        player_height: tables.player().height,
+        max_step: tables.step_height(),
+    };
+    let findings = reach::check(&built.graph, &limits);
+
+    let held = |mask: reach::KeyMask| -> String {
+        let names: Vec<String> = built
+            .class_names
+            .iter()
+            .enumerate()
+            .filter(|&(c, _)| mask & (1 << c) != 0)
+            .map(|(_, kinds)| kinds.join("/"))
+            .collect();
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!(" holding `{}`", names.join(", "))
+        }
+    };
+
+    if findings.unfinishable {
+        v.push(RuleViolation {
+            rule: "P7",
+            subject: reach::node_label(built.graph.start, ir, &built.graph),
+            detail: "no feasible walk from the player start reaches an exit".to_owned(),
+        });
+    }
+    for &(node, mask) in &findings.stranded {
+        // When nothing can finish, every visited state is trivially doomed;
+        // naming them all would bury the signal. The key-collecting sectors
+        // are the likely culprits (the shipped defect was exactly one), so
+        // only they are named in that case.
+        if findings.unfinishable && built.graph.nodes[node].keys == 0 {
+            continue;
+        }
+        v.push(RuleViolation {
+            rule: "P7",
+            subject: reach::node_label(node, ir, &built.graph),
+            detail: format!(
+                "the player can reach this sector{} but can no longer reach an exit from it",
+                held(mask)
+            ),
+        });
+    }
+    for &node in &findings.unreachable {
+        v.push(RuleViolation {
+            rule: "P7",
+            subject: reach::node_label(node, ir, &built.graph),
+            detail: "can never be visited from the player start".to_owned(),
+        });
+    }
 }
 
 /// P4: a door's opening must clear the player.
@@ -245,7 +314,7 @@ fn check_key_lock_coherence(ir: &Ir, v: &mut Vec<RuleViolation>) {
 mod tests {
     use crate::compile::{CompileError, compile, compile_reporting};
     use crate::ir::Ir;
-    use crate::rules::check_all;
+    use crate::rules::{RuleViolation, check_all};
     use crate::tables::Tables;
 
     /// Two rooms joined by a plain portal, with tunable floors, width, and
@@ -311,6 +380,43 @@ mod tests {
               ],
               "portals":[{{ "a":"a", "b":"b", "kind":"plain", "width":{width}, "at":[256,128] }}] }}"#
         )
+    }
+
+    /// The shipped `key_room` defect, reduced to three rooms: the only key
+    /// sits in a dead-end pit `pit_floor` below the hub, and the exit is
+    /// behind the blue door. At -32 the pit is one-way (`P_TryMove` caps the
+    /// climb at 24) and the map is unfinishable; at -16 every drop reverses.
+    fn key_pit_ir(pit_floor: i32) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":64, "theme":"tech_base",
+              "rooms":[
+                {{ "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+                   "things":[{{ "kind":"player1_start", "at":[128,128], "angle":90 }}] }},
+                {{ "id":"pit", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+                   "floor":{pit_floor}, "ceiling":128, "light":160,
+                   "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+                   "things":[{{ "kind":"blue_card", "at":[448,128], "angle":0 }}] }},
+                {{ "id":"vault", "footprint":[[0,320],[0,576],[256,576],[256,320]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }}
+              ],
+              "portals":[
+                {{ "a":"hub", "b":"pit", "kind":"plain", "width":64, "at":[256,128] }},
+                {{ "a":"hub", "b":"vault", "kind":"locked", "lock":"blue_card",
+                   "width":128, "at":[128,256],
+                   "door_thickness":32, "alcove_near":16, "alcove_far":16 }}
+              ],
+              "exits":[{{ "room":"vault", "trigger":"switch", "width":32, "at":[128,576] }}] }}"#
+        )
+    }
+
+    fn p7_violations(json: &str) -> Vec<RuleViolation> {
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (_, violations) = compile_reporting(&ir, &tables).expect("compile");
+        violations.into_iter().filter(|v| v.rule == "P7").collect()
     }
 
     /// The rule ids a fixture violates.
@@ -764,6 +870,258 @@ mod tests {
         assert_eq!(
             out.data.sidedefs[door_side].lower, "STARTAN3",
             "the door sector's own sidedef carries the lower on its higher-floored far side"
+        );
+    }
+
+    /// The regression for the shipped unfinishable map. A set-union flood
+    /// passes this fixture — the pit is reachable, so the key "is obtained",
+    /// so the exit "is reachable" — which is exactly why P7 searches states.
+    #[test]
+    fn p7_a_key_in_a_one_way_pit_is_unfinishable_and_names_the_pit() {
+        let v = p7_violations(&key_pit_ir(-32));
+        assert!(
+            v.iter().any(|x| x.detail.contains("no feasible walk")),
+            "unfinishable is the headline: {v:?}"
+        );
+        let stranded: Vec<_> = v
+            .iter()
+            .filter(|x| x.detail.contains("can no longer reach an exit"))
+            .collect();
+        assert!(
+            stranded.iter().any(|x| x.subject.contains("pit")),
+            "the stranding report names the culprit room: {v:?}"
+        );
+        assert!(
+            stranded.iter().all(|x| x.subject.contains("pit")),
+            "when nothing can finish, only key-collecting sectors are named: {v:?}"
+        );
+        assert!(
+            stranded[0].detail.contains("blue_card/blue_skull"),
+            "and says which keys are held there: {v:?}"
+        );
+    }
+
+    #[test]
+    fn p7_the_same_map_with_a_climbable_pit_is_clean() {
+        assert!(p7_violations(&key_pit_ir(-16)).is_empty());
+    }
+
+    /// The exact boundary: -24 is one step (climbable), -25 is not.
+    #[test]
+    fn p7_the_step_boundary_is_exact() {
+        assert!(
+            p7_violations(&key_pit_ir(-24)).is_empty(),
+            "-24 is one step"
+        );
+        let v = p7_violations(&key_pit_ir(-25));
+        assert!(
+            v.iter().any(|x| x.detail.contains("no feasible walk")),
+            "-25 is a softlock, and unfinishable is the headline (unreachable-only output must not \
+             satisfy this): {v:?}"
+        );
+    }
+
+    /// The vacuous gate, pinned: no exit means P7 does not run — dozens of
+    /// structural fixtures (this file's own `ir()` among them) have no exit
+    /// and must stay green. Same for a map with no player start.
+    #[test]
+    fn p7_is_vacuous_without_an_exit_or_without_a_start() {
+        assert!(
+            p7_violations(&ir(0, 128, 160)).is_empty(),
+            "ir() has no exits"
+        );
+        let no_start = key_pit_ir(-32).replace(
+            r#""things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }]"#,
+            r#""things":[]"#,
+        );
+        assert!(p7_violations(&no_start).is_empty(), "no start: vacuous");
+    }
+
+    /// A pit with nothing required in it is still a softlock — this is the
+    /// fixture that separates "no softlock" from mere finishability. An
+    /// implementation checking only that the exit is reachable passes it
+    /// wrongly.
+    #[test]
+    fn p7_a_bare_pit_strands_even_though_the_map_is_finishable() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+            { "id":"pit", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":-32, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"soulsphere", "at":[448,128], "angle":0 }] }
+          ],
+          "portals":[{ "a":"hub", "b":"pit", "kind":"plain", "width":64, "at":[256,128] }],
+          "exits":[{ "room":"hub", "trigger":"switch", "width":32, "at":[0,128] }] }"#;
+        let v = p7_violations(json);
+        assert!(
+            !v.iter().any(|x| x.detail.contains("no feasible walk")),
+            "the exit is in the hub — finishable: {v:?}"
+        );
+        assert!(
+            v.iter()
+                .any(|x| x.subject.contains("pit")
+                    && x.detail.contains("can no longer reach an exit")),
+            "but the pit strands: {v:?}"
+        );
+        // No key sits in the pit, so `held` contributes no ` holding ...`
+        // segment — pin the exact mask-0 wording, not just a substring, so a
+        // regression that reintroduces a stray space or an empty backtick
+        // pair is caught.
+        let stranded = v
+            .iter()
+            .find(|x| x.subject.contains("pit"))
+            .expect("asserted to exist above");
+        assert_eq!(
+            stranded.detail,
+            "the player can reach this sector but can no longer reach an exit from it",
+            "empty-held-mask wording, exactly: {v:?}"
+        );
+    }
+
+    /// The blue card behind the blue door: no state ever holds the key.
+    #[test]
+    fn p7_a_key_behind_its_own_door_is_unfinishable() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+            { "id":"vault", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"blue_card", "at":[448,128], "angle":0 }] }
+          ],
+          "portals":[{ "a":"hub", "b":"vault", "kind":"locked", "lock":"blue_card",
+                       "width":128, "at":[256,128],
+                       "door_thickness":32, "alcove_near":16, "alcove_far":16 }],
+          "exits":[{ "room":"vault", "trigger":"switch", "width":32, "at":[576,128] }] }"#;
+        let v = p7_violations(json);
+        assert!(
+            v.iter().any(|x| x.detail.contains("no feasible walk")),
+            "{v:?}"
+        );
+        assert!(
+            v.iter()
+                .any(|x| x.subject.contains("vault") && x.detail.contains("never be visited")),
+            "the vault is unreachable too: {v:?}"
+        );
+    }
+
+    /// Red behind the blue door, blue in the open: a two-key ordering chain
+    /// that must pass, exercising multi-key masks end to end.
+    #[test]
+    fn p7_a_two_key_chain_in_order_is_clean() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 },
+                        { "kind":"blue_card", "at":[64,64], "angle":0 }] },
+            { "id":"mid", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"red_card", "at":[448,128], "angle":0 }] },
+            { "id":"vault", "footprint":[[640,0],[640,256],[896,256],[896,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[
+            { "a":"hub", "b":"mid", "kind":"locked", "lock":"blue_card",
+              "width":128, "at":[256,128],
+              "door_thickness":32, "alcove_near":16, "alcove_far":16 },
+            { "a":"mid", "b":"vault", "kind":"locked", "lock":"red_card",
+              "width":128, "at":[576,128],
+              "door_thickness":32, "alcove_near":16, "alcove_far":16 }
+          ],
+          "exits":[{ "room":"vault", "trigger":"switch", "width":32, "at":[896,128] }] }"#;
+        assert!(p7_violations(json).is_empty());
+    }
+
+    /// The engine accepts the skull for a card lock (`EV_VerticalDoor`,
+    /// pinned p_doors.c:371-403), so P7 must too. P24's string-equality
+    /// coherence check fires on this map (lock names `blue_card`, placed key
+    /// is `blue_skull`) — that asymmetry is P24's recorded posture
+    /// (authoring-intent, stricter than the engine), and this test filters
+    /// to P7, which must be clean.
+    #[test]
+    fn p7_a_skull_key_satisfies_a_card_lock() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 },
+                        { "kind":"blue_skull", "at":[64,64], "angle":0 }] },
+            { "id":"vault", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[{ "a":"hub", "b":"vault", "kind":"locked", "lock":"blue_card",
+                       "width":128, "at":[256,128],
+                       "door_thickness":32, "alcove_near":16, "alcove_far":16 }],
+          "exits":[{ "room":"vault", "trigger":"switch", "width":32, "at":[576,128] }] }"#;
+        assert!(p7_violations(json).is_empty());
+    }
+
+    /// A room no portal connects: coverage, not finishability, is what
+    /// catches authored dead content.
+    #[test]
+    fn p7_an_isolated_room_is_flagged_by_coverage() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+            { "id":"island", "footprint":[[320,320],[320,576],[576,576],[576,320]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[],
+          "exits":[{ "room":"hub", "trigger":"switch", "width":32, "at":[0,128] }] }"#;
+        let v = p7_violations(json);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(v[0].subject.contains("island"));
+        assert!(v[0].detail.contains("never be visited"));
+    }
+
+    /// A door across a >24 floor delta is one-way *through the door*: the
+    /// door sector's floor is the min of its rooms, so the step out to the
+    /// higher room is the full delta. The step rule must bind on door
+    /// floors, not just plain portals.
+    #[test]
+    fn p7_a_door_across_a_tall_step_is_one_way() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+            { "id":"high", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":48, "ceiling":176, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[{ "a":"hub", "b":"high", "kind":"door",
+                       "width":128, "at":[256,128],
+                       "door_thickness":32, "alcove_near":16, "alcove_far":16 }],
+          "exits":[{ "room":"high", "trigger":"switch", "width":32, "at":[576,128] }] }"#;
+        let v = p7_violations(json);
+        assert!(
+            v.iter().any(|x| x.detail.contains("no feasible walk")),
+            "{v:?}"
+        );
+        assert!(
+            v.iter()
+                // The room's own entry, not the recess off it: `contains`
+                // would accept either.
+                .any(|x| x.subject == "room `high`" && x.detail.contains("never be visited")),
+            "{v:?}"
         );
     }
 }
