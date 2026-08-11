@@ -2047,4 +2047,16 @@ priority: [speed]
         let err = parse(&broken).unwrap_err();
         assert!(err.to_string().contains("secrets"), "got: {err}");
     }
+
+    #[test]
+    fn a_facing_that_is_neither_string_nor_integer_is_rejected() {
+        let err = serde_norway::from_str::<Facing>("[east]").unwrap_err();
+        assert!(err.to_string().contains("north"), "got: {err}");
+    }
+
+    #[test]
+    fn a_boss_that_is_not_a_string_is_rejected() {
+        let err = serde_norway::from_str::<Boss>("7").unwrap_err();
+        assert!(err.to_string().contains("mastermind"), "got: {err}");
+    }
 }

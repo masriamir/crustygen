@@ -166,6 +166,13 @@ could have caught it, and the package had no CI at all until the day it became
 its own repository — the first thing CI did was find a bug that had been
 latent since the golden fixtures were introduced.
 
+The spec Markdown artifacts (`map-spec.template.md`, `tests/fixtures/*.spec.md`)
+joined the pin for a subtler variant of the same failure, again caught only by
+Windows CI (PR #17): the parser itself is CRLF-tolerant, but the CRLF-identity
+test transforms the `include_str!`'d template with `\n` -> `\r\n`, and on a
+CRLF checkout that doubles into `\r\r\n` — the stray `\r` survives
+`str::lines` and corrupts every YAML key.
+
 **Entrada keeps every drop climbable, and the compiler now enforces that it
 must.** `key_room` sits 16 units below `hub` and `exit_hall` 16 above
 `vault` — both within `max_step_height`, so every descent can be reversed. A

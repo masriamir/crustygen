@@ -8,3 +8,11 @@
 # WADs are binary. `tests/first_map.rs` compares the committed artifact to
 # freshly compiled bytes, so any newline translation would corrupt it.
 *.wad binary
+
+# The spec parser is CRLF-tolerant, but its CRLF-identity test transforms
+# the `include_str!`'d template with `\n` -> `\r\n` — on a CRLF checkout
+# that doubles into `\r\r\n` and the stray `\r` corrupts every line. Pin
+# the spec Markdown artifacts to LF so the transform starts from a known
+# base (caught by Windows CI on PR #17, same class as the golden pin above).
+map-spec.template.md -text
+*.spec.md -text

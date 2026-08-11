@@ -1407,4 +1407,39 @@ mod tests {
         assert!(v.iter().any(|v| v.path == "progression.locked_doors"));
         assert!(v.iter().any(|v| v.path == "architecture.corridor_ratio"));
     }
+
+    #[test]
+    fn every_priority_and_placement_name_matches_its_serde_rename() {
+        // Drift guard for the hand-written snake_case maps: each name must
+        // round-trip through serde back to the variant it was written for.
+        use crate::spec::frontmatter::{Placement, Priority};
+        for p in super::ALL_PRIORITIES {
+            let name = super::priority_name(p);
+            assert_eq!(serde_norway::from_str::<Priority>(name).unwrap(), p);
+        }
+        for p in [
+            Placement::Early,
+            Placement::Mid,
+            Placement::Late,
+            Placement::SecretOnly,
+            Placement::None,
+        ] {
+            let name = super::placement_name(p);
+            assert_eq!(serde_norway::from_str::<Placement>(name).unwrap(), p);
+        }
+    }
+
+    #[test]
+    fn a_lock_type_that_is_no_key_name_at_all_fails_as_unknown() {
+        let y = patched(
+            "lock_types: [blue_card, red_skull]",
+            "lock_types: [plaid_key, red_skull]",
+        );
+        let v = violations_for(&y);
+        assert!(
+            v.iter().any(|v| v.path == "progression.doors.lock_types[0]"
+                && v.message.contains("not a known key name")),
+            "got {v:?}"
+        );
+    }
 }

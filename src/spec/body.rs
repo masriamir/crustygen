@@ -163,13 +163,12 @@ fn parse_sequence(lines: &[(usize, &str)]) -> Result<Vec<String>, crate::spec::S
         if line.starts_with(char::is_whitespace)
             && let Some(last) = items.last_mut()
         {
-            let continuation = line.trim();
-            if !continuation.is_empty() {
-                if !last.is_empty() {
-                    last.push(' ');
-                }
-                last.push_str(continuation);
-            }
+            // Blank lines were filtered at the loop head and an item's text
+            // is never empty (`parse_sequence_item` requires at least one
+            // non-whitespace character), so both sides of the join are
+            // non-empty here: append with a single separating space.
+            last.push(' ');
+            last.push_str(line.trim());
             continue;
         }
         return Err(crate::spec::SpecError::MalformedSequenceItem { line: *line_no });
@@ -488,5 +487,125 @@ mod tests {
                   - Hint: h\n";
         let body = parse(b).unwrap();
         assert_eq!(body.secrets[0].trigger, SecretTrigger::Walkover);
+    }
+
+    #[test]
+    fn content_before_the_first_section_heading_is_rejected() {
+        assert!(matches!(
+            parse("stray prose\n").unwrap_err(),
+            crate::spec::SpecError::ContentOutsideSections { line: 1 }
+        ));
+    }
+
+    #[test]
+    fn an_all_blank_section_yields_empty_text() {
+        let body = parse("## Overview\n\n\n## Notes\n\ntext\n").unwrap();
+        assert_eq!(body.overview, "");
+        assert_eq!(body.notes, "text");
+    }
+
+    #[test]
+    fn an_item_with_two_wrapped_lines_joins_all_three() {
+        let b = "## Sequence of events\n\n1. Start here\n   then continue\n   and finish\n";
+        let body = parse(b).unwrap();
+        assert_eq!(
+            body.sequence_of_events,
+            vec!["Start here then continue and finish"]
+        );
+    }
+
+    #[test]
+    fn a_list_marker_with_no_text_after_the_dot_is_malformed() {
+        let b = "## Sequence of events\n\n1.\n";
+        assert!(matches!(
+            parse(b).unwrap_err(),
+            crate::spec::SpecError::MalformedSequenceItem { line: 3 }
+        ));
+    }
+
+    #[test]
+    fn a_heading_not_of_the_secret_form_is_malformed() {
+        for bad in ["Cache", "Secret — Cache", "Secret 1 — ", "Secret 1 —"] {
+            let b = format!("## Secrets\n\n### {bad}\n");
+            assert!(
+                matches!(
+                    parse(&b).unwrap_err(),
+                    crate::spec::SpecError::MalformedSecretHeading { .. }
+                ),
+                "accepted: {bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_non_bullet_line_inside_a_secret_names_the_secret() {
+        let b = "## Secrets\n\n### Secret 1 — Cache\nstray prose\n";
+        let err = parse(b).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::spec::SpecError::UnknownSecretBullet { ref secret, ref bullet }
+                if secret == "Cache" && bullet == "stray prose"
+        ));
+    }
+
+    #[test]
+    fn each_empty_bullet_value_fails_naming_the_field() {
+        for (bullets, field) in [
+            ("- Trigger:", "Trigger"),
+            ("- Trigger: walkover\n- Reward:", "Reward"),
+            ("- Trigger: walkover\n- Reward: r\n- Hint:", "Hint"),
+        ] {
+            let b = format!("## Secrets\n\n### Secret 1 — Cache\n{bullets}\n");
+            let err = parse(&b).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    crate::spec::SpecError::SecretEmptyField { field: got, .. } if got == field
+                ),
+                "{field}: got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_duplicate_or_unknown_bullet_key_is_rejected() {
+        let dup = "## Secrets\n\n### Secret 1 — Cache\n- Trigger: walkover\n- Trigger: lift\n";
+        assert!(matches!(
+            parse(dup).unwrap_err(),
+            crate::spec::SpecError::UnknownSecretBullet { ref bullet, .. }
+                if bullet == "- Trigger: lift"
+        ));
+        let unk = "## Secrets\n\n### Secret 1 — Cache\n- Color: red\n";
+        assert!(matches!(
+            parse(unk).unwrap_err(),
+            crate::spec::SpecError::UnknownSecretBullet { ref bullet, .. }
+                if bullet == "- Color: red"
+        ));
+    }
+
+    #[test]
+    fn an_empty_secrets_section_parses_to_no_secrets() {
+        let body = parse("## Secrets\n\n").unwrap();
+        assert!(body.secrets.is_empty());
+    }
+
+    #[test]
+    fn a_secret_missing_trigger_or_reward_fails_in_declaration_order() {
+        let no_trigger = "## Secrets\n\n### Secret 1 — Cache\n- Reward: r\n- Hint: h\n";
+        assert!(matches!(
+            parse(no_trigger).unwrap_err(),
+            crate::spec::SpecError::SecretMissingField {
+                field: "Trigger",
+                ..
+            }
+        ));
+        let no_reward = "## Secrets\n\n### Secret 1 — Cache\n- Trigger: walkover\n- Hint: h\n";
+        assert!(matches!(
+            parse(no_reward).unwrap_err(),
+            crate::spec::SpecError::SecretMissingField {
+                field: "Reward",
+                ..
+            }
+        ));
     }
 }
