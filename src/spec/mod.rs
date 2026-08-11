@@ -7,6 +7,11 @@
 
 use thiserror::Error;
 
+/// The prose body: free-text sections, an ordered sequence of events, and
+/// structured secrets, hand-parsed from the Markdown [`split_frontmatter`]
+/// splits off.
+pub mod body;
+
 /// Typed frontmatter groups: the fields of a filled map-spec template,
 /// deserialized from the YAML [`split_frontmatter`] splits off the body.
 pub mod frontmatter;
@@ -30,6 +35,77 @@ pub enum SpecError {
         path: String,
         /// The inner serde error message.
         message: String,
+    },
+    /// A body `## ` heading is not one of the four recognized section
+    /// names.
+    #[error(
+        "body: unknown section heading `## {heading}` (allowed: Overview, Sequence of events, Secrets, Notes)"
+    )]
+    UnknownSection {
+        /// The unrecognized heading text, as written after `## `.
+        heading: String,
+    },
+    /// A body `## ` section heading appears more than once.
+    #[error("body: section `## {heading}` appears more than once")]
+    DuplicateSection {
+        /// The repeated heading's name.
+        heading: String,
+    },
+    /// A line in `## Sequence of events` is not an ordered-list item.
+    #[error("body: line {line} in `## Sequence of events` is not an ordered-list item")]
+    MalformedSequenceItem {
+        /// The 1-based line number of the offending line.
+        line: usize,
+    },
+    /// A `### ` secret subsection heading is not of the form `Secret N —
+    /// <name>`.
+    #[error("body: secret heading `### {heading}` is not of the form `Secret N — <name>`")]
+    MalformedSecretHeading {
+        /// The unrecognized heading text, as written after `### `.
+        heading: String,
+    },
+    /// A secret is missing one of its required `Trigger`/`Reward`/`Hint`
+    /// bullets.
+    #[error("body: secret `{secret}` is missing its `{field}` bullet")]
+    SecretMissingField {
+        /// The secret's name.
+        secret: String,
+        /// The missing bullet's key: `"Trigger"`, `"Reward"`, or `"Hint"`.
+        field: &'static str,
+    },
+    /// A secret's bullet value is empty after trimming.
+    #[error("body: secret `{secret}` has an empty `{field}`")]
+    SecretEmptyField {
+        /// The secret's name.
+        secret: String,
+        /// The empty bullet's key: `"Trigger"`, `"Reward"`, or `"Hint"`.
+        field: &'static str,
+    },
+    /// A secret's `Trigger` bullet names a value outside the fixed set of
+    /// trigger kinds.
+    #[error(
+        "body: secret `{secret}` names unknown trigger `{value}` (allowed: misaligned_texture, shootable, walkover, lift, hidden_switch)"
+    )]
+    UnknownSecretTrigger {
+        /// The secret's name.
+        secret: String,
+        /// The unrecognized trigger value.
+        value: String,
+    },
+    /// A line inside a secret is not a recognized `Trigger`/`Reward`/`Hint`
+    /// bullet.
+    #[error("body: secret `{secret}` has an unexpected `{bullet}` bullet")]
+    UnknownSecretBullet {
+        /// The secret's name.
+        secret: String,
+        /// The offending line's content.
+        bullet: String,
+    },
+    /// Body content appears before the first `## ` heading.
+    #[error("body: content on line {line} belongs to no `##` section")]
+    ContentOutsideSections {
+        /// The 1-based line number of the offending line.
+        line: usize,
     },
 }
 
