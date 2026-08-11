@@ -11,6 +11,7 @@ use crate::spec::Spec;
 use crate::tables::Tables;
 use crustywad::map::udmf::UdmfMap;
 
+pub mod invariants;
 pub mod scene;
 
 /// How bad a [`Finding`] is.
@@ -141,15 +142,22 @@ impl std::fmt::Display for Finding {
 ///
 /// `map_name` and `spec` are accepted now so this signature is final;
 /// `map_name` starts being read once a later task's report needs it, and
-/// `spec` once a conformance pass exists to compare against it. For now, this
-/// builds the [`scene::Scene`] (which contributes reference-validity
-/// findings), fills [`MapStats`] from the map's own declaration counts, and
-/// returns them with `conformance: None` and an empty tag manifest — later
-/// tasks append passes.
+/// `spec` once a conformance pass exists to compare against it. For now,
+/// this builds the [`scene::Scene`] (which contributes reference-validity
+/// findings), runs the texture ([`invariants::check_textures`], V-P8),
+/// scaling ([`invariants::check_scaling`], V-P9), and door-pegging
+/// ([`invariants::check_door_pegging`], V-P11) invariants, fills
+/// [`MapStats`] from the map's own declaration counts, and returns them
+/// with `conformance: None` and an empty tag manifest — later tasks append
+/// more passes.
 #[must_use]
 pub fn run(map: &UdmfMap, _map_name: &str, tables: &Tables, _spec: Option<&Spec>) -> CheckReport {
     let mut findings = Vec::new();
-    let _scene = scene::Scene::build(map, tables, &mut findings);
+    let scene = scene::Scene::build(map, tables, &mut findings);
+
+    invariants::check_textures(map, &scene, &mut findings);
+    invariants::check_scaling(map, &mut findings);
+    invariants::check_door_pegging(&scene, tables, &mut findings);
 
     let stats = MapStats {
         sectors: map.sectors.len(),
