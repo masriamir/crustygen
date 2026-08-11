@@ -591,6 +591,717 @@ pub struct MonsterSpec {
     pub max: u32,
 }
 
+// ---------------------------------------------------------------------
+// Weapons and ammo
+// ---------------------------------------------------------------------
+
+/// The `arsenal` group: weapon placement and ammo economy.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Arsenal {
+    /// Whether the map must stay winnable when the player pistol-starts it.
+    pub pistol_start: PistolStart,
+    /// The weapons the map places, in template order.
+    pub weapons: Vec<WeaponSpec>,
+    /// The map's ammo economy.
+    pub ammo: Ammo,
+}
+
+/// Whether the map must stay winnable from a pistol start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PistolStart {
+    /// The map must be completable with only the starting pistol and
+    /// whatever it places itself.
+    RequiredViable,
+    /// The map may assume carried-over weapons from earlier maps.
+    NotRequired,
+}
+
+/// One weapon the map places.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WeaponSpec {
+    /// The vocabulary weapon name.
+    pub name: String,
+    /// Where in the map's progression the weapon appears.
+    pub placement: Placement,
+}
+
+/// Where in the map's progression something appears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Placement {
+    /// Appears early in the map.
+    Early,
+    /// Appears in the middle of the map.
+    Mid,
+    /// Appears late in the map.
+    Late,
+    /// Appears only in a secret.
+    SecretOnly,
+    /// Does not appear.
+    None,
+}
+
+/// The map's ammo economy.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ammo {
+    /// The overall ammo budget.
+    pub budget: Budget,
+    /// The ratio of placed ammo damage to total baseline monster HP;
+    /// overrides `budget`.
+    pub ratio: f64,
+    /// How placed ammo is spread across the map's progression.
+    pub distribution: Distribution,
+    /// The ammo pickups to place.
+    pub pickups: AmmoPickups,
+    /// The backpack pickup, if any.
+    pub backpack: CountPlacement,
+}
+
+/// An overall resource budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Budget {
+    /// A tight budget, favoring scarcity.
+    Tight,
+    /// A balanced budget.
+    Balanced,
+    /// A generous budget, favoring abundance.
+    Generous,
+}
+
+/// How placed ammo is spread across the map's progression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Distribution {
+    /// Weighted toward the start of the map.
+    FrontLoaded,
+    /// Spread evenly across the map.
+    Even,
+    /// Weighted toward the end of the map.
+    BackLoaded,
+}
+
+/// The ammo pickups to place, either derived from [`Ammo::ratio`] or spelled
+/// out explicitly.
+///
+/// Deserializes to a [`serde_norway::Value`] first and checks for the `auto`
+/// string, mirroring [`AutoOr`]'s shape, but — since the explicit form is
+/// itself a bare map rather than a value nested one level under an
+/// author-chosen field — reports a fixed message naming both allowed forms
+/// on failure rather than forwarding the inner map's own deserialize error.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AmmoPickups {
+    /// The author wrote `auto`: derive pickup counts from [`Ammo::ratio`].
+    Auto,
+    /// Explicit counts per pickup type, keyed by vocabulary pickup name.
+    Explicit(std::collections::BTreeMap<String, u32>),
+}
+
+impl<'de> serde::Deserialize<'de> for AmmoPickups {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        const ALLOWED: &str = "expected `auto` or a map of pickup names to counts";
+        let value = serde_norway::Value::deserialize(d)?;
+        if matches!(&value, serde_norway::Value::String(s) if s == "auto") {
+            return Ok(Self::Auto);
+        }
+        std::collections::BTreeMap::<String, u32>::deserialize(value)
+            .map(Self::Explicit)
+            .map_err(|_| serde::de::Error::custom(ALLOWED))
+    }
+}
+
+/// A pickup count paired with where it appears.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CountPlacement {
+    /// The number of pickups; 0 means deliberately absent.
+    pub count: u32,
+    /// Where in the map's progression the pickups appear.
+    pub placement: Placement,
+}
+
+// ---------------------------------------------------------------------
+// Health, armor, powerups
+// ---------------------------------------------------------------------
+
+/// The `sustain` group: health, armor, and powerup placement.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sustain {
+    /// The overall health budget; explicit counts in [`Sustain::health`]
+    /// override it.
+    pub health_budget: Budget,
+    /// The map's health pickup counts.
+    pub health: Health,
+    /// The map's armor pickup counts.
+    pub armor: Armor,
+    /// The map's powerup placements.
+    pub powerups: Vec<PowerupSpec>,
+}
+
+/// The map's health pickup counts.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Health {
+    /// The number of stimpacks.
+    pub stimpack: u32,
+    /// The number of medikits.
+    pub medikit: u32,
+    /// The number of +1 health bonuses; they matter for a tight budget.
+    pub health_bonus: u32,
+}
+
+/// The map's armor pickup counts.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Armor {
+    /// The number of green armor pickups.
+    pub green: u32,
+    /// The number of blue armor pickups.
+    pub blue: u32,
+    /// The number of +1 armor bonuses.
+    pub armor_bonus: u32,
+}
+
+/// One powerup's placement.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PowerupSpec {
+    /// The vocabulary powerup name.
+    pub name: String,
+    /// The number placed; 0 means deliberately absent.
+    pub count: u32,
+    /// Where in the map's progression the powerup appears.
+    pub placement: Placement,
+}
+
+// ---------------------------------------------------------------------
+// Secrets
+// ---------------------------------------------------------------------
+
+/// The `secrets` group: how many secrets the map has.
+///
+/// Per-secret detail — what each one is and how it is hinted — lives in the
+/// spec's Markdown body, not here.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Secrets {
+    /// The number of secrets.
+    pub count: u32,
+}
+
+// ---------------------------------------------------------------------
+// Difficulty
+// ---------------------------------------------------------------------
+
+/// The `difficulty` group: skill-level support and scaling.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Difficulty {
+    /// Whether to emit real easy/medium/hard thing flags.
+    pub skills_supported: bool,
+    /// The skill the map's other counts describe.
+    pub baseline: SkillName,
+    /// The overall shape of the difficulty curve.
+    pub curve: Curve,
+    /// The scaling factors applied to the baseline counts per skill tier.
+    pub scaling: Scaling,
+}
+
+/// A Doom skill level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillName {
+    /// "I'm too young to die."
+    Itytd,
+    /// "Hey, not too rough."
+    Hntr,
+    /// "Hurt me plenty."
+    Hmp,
+    /// "Ultra-violence."
+    Uv,
+    /// "Nightmare!"
+    Nm,
+}
+
+/// The overall shape of the difficulty curve.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Curve {
+    /// The difficulty rises gradually.
+    Gentle,
+    /// The difficulty rises sharply.
+    Steep,
+    /// The difficulty stays easy until a late spike.
+    LateSpike,
+}
+
+/// The scaling factors applied to the baseline counts per skill tier.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scaling {
+    /// The scaling factor for the easy tier (ITYTD/HNTR).
+    pub easy: f64,
+    /// The scaling factor for the medium tier (HMP).
+    pub medium: f64,
+    /// The scaling factor for the hard tier (UV/NM).
+    pub hard: f64,
+}
+
+// ---------------------------------------------------------------------
+// Aesthetics
+// ---------------------------------------------------------------------
+
+/// The `aesthetics` group: theme, texturing, and lighting.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Aesthetics {
+    /// The map's visual theme, as a vocabulary theme name.
+    pub theme: String,
+    /// The wall texture names to draw from.
+    pub texture_set: AutoOr<Vec<String>>,
+    /// The detail-pass intensity, from 1 to 5.
+    pub detail_level: u8,
+    /// The map's lighting design.
+    pub lighting: Lighting,
+    /// The sky texture.
+    pub sky: AutoOr<String>,
+    /// The music track.
+    pub music: AutoOr<String>,
+    /// Whether wall texture scaling may be emitted.
+    pub texture_scaling: TextureScaling,
+}
+
+/// Whether wall texture scaling may be emitted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextureScaling {
+    /// Never emit `scalex`/`scaley` (see rule P9).
+    Forbidden,
+    /// Texture scaling may be emitted.
+    Allowed,
+}
+
+/// The map's lighting design.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Lighting {
+    /// The overall lighting style.
+    pub style: LightStyle,
+    /// The default sector light level where nothing else applies.
+    pub base: i32,
+    /// The floor for every emitted light level (rule P19).
+    pub min: i32,
+    /// The ceiling for every emitted light level (rule P19).
+    pub max: i32,
+    /// The delta that counts as a deliberate light change (rule P21).
+    pub contrast_step: i32,
+    /// The corridor light level, relative to the rooms a corridor joins.
+    pub corridor_delta: i32,
+    /// The light level for sky-ceilinged sectors.
+    pub outdoor: i32,
+    /// The map's light-effect tuning.
+    pub effects: LightEffectsSpec,
+    /// Whether individual rooms may set their own light level and effect in
+    /// the IR.
+    pub per_room_overrides: bool,
+}
+
+/// The map's overall lighting style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightStyle {
+    /// Uniform lighting throughout.
+    Flat,
+    /// Deliberate light-level contrast between areas.
+    Contrasty,
+    /// Small pools of darkness amid brighter surroundings.
+    PoolsOfDark,
+}
+
+/// The map's light-effect tuning.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LightEffectsSpec {
+    /// The light effects allowed anywhere in the map; empty means none.
+    pub allowed: Vec<LightEffect>,
+    /// How often allowed effects appear.
+    pub density: Density,
+    /// Sites where light effects are forbidden regardless of `allowed`.
+    pub forbid_in: Vec<EffectSite>,
+}
+
+/// A dynamic light effect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightEffect {
+    /// A regular on/off blink.
+    Blink,
+    /// An irregular flicker.
+    Flicker,
+    /// A smooth glow, cycling up and down.
+    Glow,
+    /// A slow strobe.
+    StrobeSlow,
+}
+
+/// How often something appears.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Density {
+    /// Never appears.
+    None,
+    /// Appears rarely.
+    Sparse,
+    /// Appears at a moderate rate.
+    Medium,
+    /// Appears often.
+    Dense,
+}
+
+/// A site where light effects (or other placement) are forbidden.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectSite {
+    /// Combat arenas; no strobing mid-fight.
+    CombatArenas,
+    /// The rooms holding secret rewards.
+    SecretRewards,
+}
+
+// ---------------------------------------------------------------------
+// Flats and liquids
+// ---------------------------------------------------------------------
+
+/// The `flats` group: floor and ceiling flats, and liquid hazards.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Flats {
+    /// The floor flat names to draw from.
+    pub floor: AutoOr<Vec<String>>,
+    /// The ceiling flat names to draw from.
+    pub ceiling: AutoOr<Vec<String>>,
+    /// The fraction of floor area with a sky ceiling.
+    pub outdoor_proportion: f64,
+    /// Whether to use bright ceiling flats beneath light sources.
+    pub light_flats: bool,
+    /// The map's liquid hazard, if any.
+    pub liquid: Liquid,
+}
+
+/// The map's liquid hazard.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Liquid {
+    /// The liquid's kind.
+    pub kind: LiquidKind,
+    /// Whether the liquid pairs a damaging sector special with its flat
+    /// (see rule P16).
+    pub damaging: bool,
+    /// The damage tier, resolved to a sector special via `engine.toml`.
+    pub damage_tier: DamageTier,
+    /// The fraction of floor area the liquid covers.
+    pub coverage: f64,
+    /// Whether the player must cross the liquid to progress.
+    pub crossing_required: bool,
+    /// Whether a radsuit is provided; if `crossing_required`, either this or
+    /// the health budget must cover the crossing (rule P17).
+    pub radsuit_provided: bool,
+}
+
+/// A liquid kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiquidKind {
+    /// No liquid.
+    None,
+    /// Nukage.
+    Nukage,
+    /// Blood.
+    Blood,
+    /// Lava.
+    Lava,
+    /// Slime.
+    Slime,
+    /// Water.
+    Water,
+}
+
+/// A damage tier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DamageTier {
+    /// Light damage.
+    Light,
+    /// Medium damage.
+    Medium,
+    /// Heavy damage.
+    Heavy,
+}
+
+// ---------------------------------------------------------------------
+// Vertical form
+// ---------------------------------------------------------------------
+
+/// The `vertical` group: stairs and standard vertical dimensions.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Vertical {
+    /// The map's stair tuning.
+    pub stairs: Stairs,
+    /// The default room height where the spec says nothing.
+    pub standard_ceiling: i32,
+    /// The nominal door height; the effective opening is derived per rule
+    /// P4.
+    pub door_opening: i32,
+}
+
+/// The map's stair tuning.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Stairs {
+    /// The number of stair flights.
+    pub flights: MinMax<u32>,
+    /// The rise per step, uniform within a flight; must not exceed the
+    /// engine's maximum step height (rule P1).
+    pub rise_per_step: i32,
+    /// The tread depth; must be at least the player's diameter (rule P1).
+    pub tread_depth: i32,
+}
+
+// ---------------------------------------------------------------------
+// Scenery: decoration, light sources, hazards
+// ---------------------------------------------------------------------
+
+/// The `scenery` group: decoration, light sources, gore, and barrels.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Scenery {
+    /// The map's light-source prop tuning.
+    pub light_sources: LightSources,
+    /// The map's decoration prop tuning.
+    pub decorations: Decorations,
+    /// How much gore the map places.
+    pub gore: Gore,
+    /// The map's explosive barrel tuning.
+    pub barrels: Barrels,
+}
+
+/// The map's light-source prop tuning.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LightSources {
+    /// How often light-source props appear.
+    pub density: Density,
+    /// The light-source prop kinds to draw from.
+    pub kinds: AutoOr<Vec<String>>,
+    /// Whether every bright pool gets a visible source (rule P21).
+    pub match_lighting: bool,
+}
+
+/// The map's decoration prop tuning.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Decorations {
+    /// How often decoration props appear.
+    pub density: Density,
+    /// The decoration prop kinds to draw from.
+    pub kinds: AutoOr<Vec<String>>,
+    /// Whether movement-blocking props are allowed, still subject to rule
+    /// P3.
+    pub blocking_allowed: bool,
+    /// Whether ceiling-mounted props are allowed, subject to headroom
+    /// (rule P22).
+    pub hanging_allowed: bool,
+}
+
+/// How much gore the map places: corpses, blood, impaled bodies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Gore {
+    /// No gore.
+    None,
+    /// A light amount of gore.
+    Light,
+    /// A heavy amount of gore.
+    Heavy,
+}
+
+/// The map's explosive barrel tuning.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Barrels {
+    /// The number of barrels.
+    pub count: MinMax<u32>,
+    /// Where barrels are placed.
+    pub placement: BarrelPlacement,
+    /// Whether one barrel's explosion may chain into another's.
+    pub chain_reactions: ChainReactions,
+    /// Sites barrels must be kept clear of (rule P23).
+    pub keep_clear_of: Vec<KeepClearSite>,
+}
+
+/// Where barrels are placed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BarrelPlacement {
+    /// Near encounters, to be used as a weapon.
+    NearEncounters,
+    /// Scattered without regard to encounters.
+    Scattered,
+    /// No barrels are placed.
+    None,
+}
+
+/// Whether one barrel's explosion may chain into another's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainReactions {
+    /// Chain reactions are allowed.
+    Allowed,
+    /// Barrels are placed to avoid chain reactions.
+    Avoided,
+}
+
+/// A site barrels must be kept clear of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepClearSite {
+    /// The player start.
+    PlayerStart,
+    /// A key pickup.
+    KeyPickup,
+    /// A secret's reward.
+    SecretReward,
+}
+
+// ---------------------------------------------------------------------
+// Pacing
+// ---------------------------------------------------------------------
+
+/// The `pacing` group: how the map's intensity rises and falls.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Pacing {
+    /// The number of distinct encounter beats.
+    pub encounter_beats: MinMax<u32>,
+    /// The number of rest areas between encounters.
+    pub rest_areas: MinMax<u32>,
+    /// Where the hardest fight sits, as a fraction of progression.
+    pub peak_position: f64,
+    /// The intensity of the map's opening.
+    pub opening_intensity: Intensity,
+}
+
+/// An intensity level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Intensity {
+    /// Low intensity.
+    Low,
+    /// Medium intensity.
+    Medium,
+    /// High intensity.
+    High,
+}
+
+// ---------------------------------------------------------------------
+// Compatibility and metadata
+// ---------------------------------------------------------------------
+
+/// The `compat` group: source port targeting and metadata emission.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Compat {
+    /// The source port the map targets.
+    pub port: Port,
+    /// Whether to emit a `MAPINFO` lump; v1 otherwise emits no extra lumps.
+    pub emit_mapinfo: bool,
+    /// The par time, in seconds; ignored unless `emit_mapinfo` is true.
+    pub par_time_seconds: u32,
+    /// The map's automap behavior.
+    pub automap: Automap,
+}
+
+/// A source port compatibility target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Port {
+    /// Vanilla Doom's hard engine limits.
+    VanillaLimits,
+    /// A limit-removing port.
+    LimitRemoving,
+    /// Boom or a Boom-compatible port.
+    Boom,
+    /// `ZDoom` or a `ZDoom`-family port.
+    Zdoom,
+}
+
+/// The map's automap behavior.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Automap {
+    /// Whether a secret door is hidden from reading as a door on the
+    /// automap.
+    pub hide_secret_lines: bool,
+    /// Whether map lines are shown before the player discovers them.
+    pub show_map_lines: AutoOr<bool>,
+}
+
+// ---------------------------------------------------------------------
+// Constraints and priorities
+// ---------------------------------------------------------------------
+
+/// The `constraints` group: enforcement mode and conflict-resolution
+/// priorities.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Constraints {
+    /// Whether ranges elsewhere in the spec are hard limits or goals.
+    pub enforcement: Enforcement,
+    /// Vocabulary names (monsters, mechanics) the map must not use.
+    pub forbid: Vec<String>,
+    /// Free-text inspirations guiding generation.
+    pub inspirations: Vec<String>,
+    /// Free-text requirements the map must satisfy.
+    pub must_include: Vec<String>,
+    /// The order, highest first, in which conflicts between everything
+    /// above are resolved.
+    pub priority: Vec<Priority>,
+}
+
+/// Whether ranges elsewhere in the spec are hard limits or goals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Enforcement {
+    /// Ranges are hard limits.
+    Strict,
+    /// Ranges are goals.
+    Target,
+}
+
+/// A conflict-resolution priority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Priority {
+    /// The progression graph must be structurally correct.
+    ProgressionCorrectness,
+    /// The map must be playable and balanced.
+    PlayableBalance,
+    /// The sector count budget.
+    SectorBudget,
+    /// The monster count budgets.
+    MonsterCounts,
+    /// The detail-pass intensity.
+    DetailLevel,
+    /// The expected play time.
+    PlayTime,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -888,5 +1599,336 @@ monsters:
                 max: 18
             }
         );
+    }
+
+    #[test]
+    fn the_arsenal_group_from_the_design_doc_parses() {
+        let y = r"
+pistol_start: required_viable
+weapons:
+  - { name: shotgun,         placement: early }
+  - { name: chaingun,        placement: mid }
+  - { name: super_shotgun,   placement: mid }
+  - { name: rocket_launcher, placement: secret_only }
+ammo:
+  budget: balanced
+  ratio: 1.25
+  distribution: even
+  pickups: auto
+  backpack: { count: 1, placement: mid }
+";
+        let a: Arsenal = serde_norway::from_str(y).unwrap();
+        assert_eq!(a.pistol_start, PistolStart::RequiredViable);
+        assert_eq!(a.weapons.len(), 4);
+        assert_eq!(
+            a.weapons[0],
+            WeaponSpec {
+                name: "shotgun".to_string(),
+                placement: Placement::Early
+            }
+        );
+        assert_eq!(a.ammo.budget, Budget::Balanced);
+        assert!((a.ammo.ratio - 1.25).abs() < f64::EPSILON);
+        assert_eq!(a.ammo.distribution, Distribution::Even);
+        assert_eq!(a.ammo.pickups, AmmoPickups::Auto);
+        assert_eq!(
+            a.ammo.backpack,
+            CountPlacement {
+                count: 1,
+                placement: Placement::Mid
+            }
+        );
+    }
+
+    #[test]
+    fn the_sustain_group_from_the_design_doc_parses() {
+        let y = r"
+health_budget: balanced
+health:
+  stimpack: 6
+  medikit: 4
+  health_bonus: 20
+armor:
+  green: 2
+  blue: 0
+  armor_bonus: 15
+powerups:
+  - { name: berserk,         count: 1, placement: secret_only }
+  - { name: soulsphere,      count: 1, placement: late }
+  - { name: megasphere,      count: 0, placement: none }
+  - { name: radsuit,         count: 1, placement: mid }
+  - { name: invulnerability, count: 0, placement: none }
+  - { name: invisibility,    count: 0, placement: none }
+  - { name: light_amp,       count: 0, placement: none }
+  - { name: computer_map,    count: 1, placement: secret_only }
+";
+        let s: Sustain = serde_norway::from_str(y).unwrap();
+        assert_eq!(s.health_budget, Budget::Balanced);
+        assert_eq!(
+            s.health,
+            Health {
+                stimpack: 6,
+                medikit: 4,
+                health_bonus: 20
+            }
+        );
+        assert_eq!(
+            s.armor,
+            Armor {
+                green: 2,
+                blue: 0,
+                armor_bonus: 15
+            }
+        );
+        assert_eq!(s.powerups.len(), 8);
+        assert_eq!(
+            s.powerups[0],
+            PowerupSpec {
+                name: "berserk".to_string(),
+                count: 1,
+                placement: Placement::SecretOnly
+            }
+        );
+    }
+
+    #[test]
+    fn the_secrets_group_from_the_design_doc_parses() {
+        let secrets: Secrets = serde_norway::from_str("count: 3\n").unwrap();
+        assert_eq!(secrets.count, 3);
+    }
+
+    #[test]
+    fn the_difficulty_group_from_the_design_doc_parses() {
+        let y = r"
+skills_supported: true
+baseline: uv
+curve: gentle
+scaling: { easy: 0.55, medium: 0.75, hard: 1.0 }
+";
+        let d: Difficulty = serde_norway::from_str(y).unwrap();
+        assert!(d.skills_supported);
+        assert_eq!(d.baseline, SkillName::Uv);
+        assert_eq!(d.curve, Curve::Gentle);
+        assert!((d.scaling.easy - 0.55).abs() < f64::EPSILON);
+        assert!((d.scaling.medium - 0.75).abs() < f64::EPSILON);
+        assert!((d.scaling.hard - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_aesthetics_group_from_the_design_doc_parses() {
+        let y = r"
+theme: tech_base
+texture_set: auto
+detail_level: 3
+lighting:
+  style: contrasty
+  base: 160
+  min: 96
+  max: 208
+  contrast_step: 32
+  corridor_delta: -16
+  outdoor: 192
+  effects:
+    allowed: [blink, flicker, glow, strobe_slow]
+    density: sparse
+    forbid_in: [combat_arenas, secret_rewards]
+  per_room_overrides: true
+sky: auto
+music: auto
+texture_scaling: forbidden
+";
+        let a: Aesthetics = serde_norway::from_str(y).unwrap();
+        assert_eq!(a.theme, "tech_base");
+        assert_eq!(a.texture_set, AutoOr::Auto);
+        assert_eq!(a.detail_level, 3);
+        assert_eq!(a.lighting.style, LightStyle::Contrasty);
+        assert_eq!(a.lighting.base, 160);
+        assert_eq!(
+            a.lighting.effects.allowed,
+            vec![
+                LightEffect::Blink,
+                LightEffect::Flicker,
+                LightEffect::Glow,
+                LightEffect::StrobeSlow
+            ]
+        );
+        assert_eq!(a.lighting.effects.density, Density::Sparse);
+        assert_eq!(a.sky, AutoOr::Auto);
+        assert_eq!(a.texture_scaling, TextureScaling::Forbidden);
+    }
+
+    #[test]
+    fn the_flats_group_from_the_design_doc_parses() {
+        let y = r"
+floor: auto
+ceiling: auto
+outdoor_proportion: 0.15
+light_flats: true
+liquid:
+  kind: nukage
+  damaging: true
+  damage_tier: light
+  coverage: 0.08
+  crossing_required: true
+  radsuit_provided: true
+";
+        let f: Flats = serde_norway::from_str(y).unwrap();
+        assert_eq!(f.floor, AutoOr::Auto);
+        assert!(f.light_flats);
+        assert_eq!(f.liquid.kind, LiquidKind::Nukage);
+        assert_eq!(f.liquid.damage_tier, DamageTier::Light);
+        assert!(f.liquid.crossing_required);
+        assert!((f.outdoor_proportion - 0.15).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn the_vertical_group_from_the_design_doc_parses() {
+        let y = r"
+stairs:
+  flights: { min: 1, max: 3 }
+  rise_per_step: 16
+  tread_depth: 32
+standard_ceiling: 128
+door_opening: 128
+";
+        let v: Vertical = serde_norway::from_str(y).unwrap();
+        assert_eq!(v.stairs.flights, MinMax { min: 1, max: 3 });
+        assert_eq!(v.stairs.rise_per_step, 16);
+        assert_eq!(v.standard_ceiling, 128);
+        assert_eq!(v.door_opening, 128);
+    }
+
+    #[test]
+    fn the_scenery_group_from_the_design_doc_parses() {
+        let y = r"
+light_sources:
+  density: medium
+  kinds: auto
+  match_lighting: true
+decorations:
+  density: medium
+  kinds: auto
+  blocking_allowed: true
+  hanging_allowed: true
+gore: light
+barrels:
+  count: { min: 4, max: 10 }
+  placement: near_encounters
+  chain_reactions: allowed
+  keep_clear_of: [player_start, key_pickup, secret_reward]
+";
+        let s: Scenery = serde_norway::from_str(y).unwrap();
+        assert_eq!(s.light_sources.density, Density::Medium);
+        assert_eq!(s.light_sources.kinds, AutoOr::Auto);
+        assert!(s.light_sources.match_lighting);
+        assert_eq!(s.gore, Gore::Light);
+        assert_eq!(s.barrels.count, MinMax { min: 4, max: 10 });
+        assert_eq!(s.barrels.placement, BarrelPlacement::NearEncounters);
+        assert_eq!(
+            s.barrels.keep_clear_of,
+            vec![
+                KeepClearSite::PlayerStart,
+                KeepClearSite::KeyPickup,
+                KeepClearSite::SecretReward
+            ]
+        );
+    }
+
+    #[test]
+    fn the_pacing_group_from_the_design_doc_parses() {
+        let y = r"
+encounter_beats: { min: 5, max: 8 }
+rest_areas: { min: 2, max: 4 }
+peak_position: 0.8
+opening_intensity: low
+";
+        let p: Pacing = serde_norway::from_str(y).unwrap();
+        assert_eq!(p.encounter_beats, MinMax { min: 5, max: 8 });
+        assert_eq!(p.rest_areas, MinMax { min: 2, max: 4 });
+        assert!((p.peak_position - 0.8).abs() < f64::EPSILON);
+        assert_eq!(p.opening_intensity, Intensity::Low);
+    }
+
+    #[test]
+    fn the_compat_group_from_the_design_doc_parses() {
+        let y = r"
+port: limit_removing
+emit_mapinfo: false
+par_time_seconds: 300
+automap:
+  hide_secret_lines: true
+  show_map_lines: auto
+";
+        let c: Compat = serde_norway::from_str(y).unwrap();
+        assert_eq!(c.port, Port::LimitRemoving);
+        assert!(!c.emit_mapinfo);
+        assert_eq!(c.par_time_seconds, 300);
+        assert!(c.automap.hide_secret_lines);
+        assert_eq!(c.automap.show_map_lines, AutoOr::Auto);
+    }
+
+    #[test]
+    fn the_constraints_group_from_the_design_doc_parses() {
+        let y = r#"
+enforcement: target
+forbid: [archvile, crusher, dark_maze, insta_death_pit]
+inspirations:
+  - "pacing like Doom II MAP07"
+  - "texture discipline like Plutonia"
+must_include:
+  - "a window overlooking the final arena, visible from the start"
+priority:
+  - progression_correctness
+  - playable_balance
+  - sector_budget
+  - monster_counts
+  - detail_level
+  - play_time
+"#;
+        let c: Constraints = serde_norway::from_str(y).unwrap();
+        assert_eq!(c.enforcement, Enforcement::Target);
+        assert_eq!(
+            c.forbid,
+            vec![
+                "archvile".to_string(),
+                "crusher".to_string(),
+                "dark_maze".to_string(),
+                "insta_death_pit".to_string()
+            ]
+        );
+        assert_eq!(
+            c.must_include,
+            vec!["a window overlooking the final arena, visible from the start".to_string()]
+        );
+        assert_eq!(c.priority.len(), 6);
+        assert_eq!(c.priority[0], Priority::ProgressionCorrectness);
+        assert_eq!(c.priority[5], Priority::PlayTime);
+    }
+
+    #[test]
+    fn ammo_pickups_auto_and_an_explicit_count_map_both_parse() {
+        assert_eq!(
+            serde_norway::from_str::<AmmoPickups>("auto").unwrap(),
+            AmmoPickups::Auto
+        );
+        let mut expected = std::collections::BTreeMap::new();
+        expected.insert("shells".to_string(), 4);
+        expected.insert("rocket".to_string(), 2);
+        assert_eq!(
+            serde_norway::from_str::<AmmoPickups>("{ shells: 4, rocket: 2 }").unwrap(),
+            AmmoPickups::Explicit(expected)
+        );
+    }
+
+    #[test]
+    fn an_unknown_priority_entry_is_rejected() {
+        let y = r"
+enforcement: target
+forbid: []
+inspirations: []
+must_include: []
+priority: [speed]
+";
+        assert!(serde_norway::from_str::<Constraints>(y).is_err());
     }
 }
