@@ -7,6 +7,12 @@
 //! deliberately nothing from `compile/` or `rules.rs`: those are the logic
 //! under cross-examination.
 
+use crate::spec::Spec;
+use crate::tables::Tables;
+use crustywad::map::udmf::UdmfMap;
+
+pub mod scene;
+
 /// How bad a [`Finding`] is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -127,6 +133,42 @@ impl std::fmt::Display for Finding {
             Subject::Map => "map".to_owned(),
         };
         write!(f, "{} {sev} {subj}: {}", self.check, self.message)
+    }
+}
+
+/// Runs every wired verification pass over `map` and returns the aggregated
+/// report.
+///
+/// `map_name` and `spec` are accepted now so this signature is final;
+/// `map_name` starts being read once a later task's report needs it, and
+/// `spec` once a conformance pass exists to compare against it. For now, this
+/// builds the [`scene::Scene`] (which contributes reference-validity
+/// findings), fills [`MapStats`] from the map's own declaration counts, and
+/// returns them with `conformance: None` and an empty tag manifest — later
+/// tasks append passes.
+#[must_use]
+pub fn run(map: &UdmfMap, _map_name: &str, tables: &Tables, _spec: Option<&Spec>) -> CheckReport {
+    let mut findings = Vec::new();
+    let _scene = scene::Scene::build(map, tables, &mut findings);
+
+    let stats = MapStats {
+        sectors: map.sectors.len(),
+        linedefs: map.linedefs.len(),
+        sidedefs: map.sidedefs.len(),
+        vertices: map.vertices.len(),
+        things: map.things.len(),
+        secret_sectors: map
+            .sectors
+            .iter()
+            .filter(|sector| sector.special == i32::from(tables.secret_sector_special()))
+            .count(),
+    };
+
+    CheckReport {
+        findings,
+        conformance: None,
+        tag_manifest: Vec::new(),
+        stats,
     }
 }
 
