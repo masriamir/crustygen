@@ -27,7 +27,7 @@ wired together: spec → IR generation does not exist, so the IR below is
 still authored directly as JSON. See [Known gaps](#known-gaps).
 
 ```bash
-cargo test        # 329 tests
+cargo test
 cargo run --example ...   # not yet — there is no CLI
 ```
 
