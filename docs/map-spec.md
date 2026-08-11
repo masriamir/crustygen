@@ -43,10 +43,18 @@ allowed forms instead of serde's "did not match any variant".
   (empty): they carry mood for humans, and rejecting a map over a missing
   Notes section would police prose, not correctness.
 - `Sequence of events` — an ordered list, captured as a list of strings.
-  Absent is fine (empty).
+  Absent is fine (empty). An item's text may wrap: a line that is not itself
+  a list marker (`N. `) but is indented and follows an already-open item
+  continues that item, joined onto it with a single space — the shipped
+  template wraps its longer steps this way. An indented line with no item
+  open yet is rejected the same as any other line that is neither blank nor
+  a list marker.
 - `Secrets` — one `### Secret N — <name>` subsection per secret, each with
-  `Trigger`, `Reward`, and `Hint` bullets. These parse into typed entries:
-  the trigger must be one of `misaligned_texture`, `shootable`, `walkover`,
+  `Trigger`, `Reward`, and `Hint` bullets. A bullet's value may carry a
+  trailing `<!-- ... -->` HTML comment — the shipped template's
+  allowed-values annotation on `Trigger` — which is stripped before the
+  value is matched or stored. These parse into typed entries: the trigger
+  must be one of `misaligned_texture`, `shootable`, `walkover`,
   `lift`, `hidden_switch`, and reward and hint must be non-empty. Secrets are
   structured because the verifier needs them as targets (P18's counting rule
   compares emitted secret sectors against `secrets.count`; the per-secret
