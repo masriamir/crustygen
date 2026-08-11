@@ -463,4 +463,24 @@ mod tests {
         assert_eq!(body.overview, "");
         assert!(body.secrets.is_empty());
     }
+
+    #[test]
+    fn a_wrapped_sequence_item_reconstructs_to_the_joined_text() {
+        let b = "## Sequence of events\n\n1. Start in the hub\n   and clear it\n";
+        let body = parse(b).unwrap();
+        assert_eq!(
+            body.sequence_of_events,
+            vec!["Start in the hub and clear it".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_trigger_bullet_with_a_trailing_comment_strips_to_the_bare_value() {
+        let b = "## Secrets\n\n### Secret 1 — Cache\n\
+                  - Trigger: walkover   <!-- misaligned_texture | shootable | walkover | lift | hidden_switch -->\n\
+                  - Reward: r\n\
+                  - Hint: h\n";
+        let body = parse(b).unwrap();
+        assert_eq!(body.secrets[0].trigger, SecretTrigger::Walkover);
+    }
 }
