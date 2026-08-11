@@ -176,9 +176,12 @@ fn parse_sequence(lines: &[(usize, &str)]) -> Result<Vec<String>, crate::spec::S
     Ok(items)
 }
 
-/// Matches `^[0-9]+\.\s+(.*)$` by hand: one or more leading ASCII digits, a
-/// literal `.`, at least one whitespace character, then the captured rest
-/// of the line.
+/// Matches `^[0-9]+\.\s+(\S.*)$` by hand: one or more leading ASCII digits,
+/// a literal `.`, at least one whitespace character, then non-empty item
+/// text. A marker followed only by whitespace (`1.   `) is rejected the
+/// same as a bare `1.` — an item with no text is not an item, and the
+/// continuation join in [`parse_sequence`] relies on item text never being
+/// empty.
 fn parse_sequence_item(line: &str) -> Option<&str> {
     let digits_end = line
         .find(|c: char| !c.is_ascii_digit())
@@ -193,7 +196,11 @@ fn parse_sequence_item(line: &str) -> Option<&str> {
     if ws_end == 0 {
         return None;
     }
-    Some(&after_dot[ws_end..])
+    let text = &after_dot[ws_end..];
+    if text.is_empty() {
+        return None;
+    }
+    Some(text)
 }
 
 /// Parses a `## Secrets` section's lines into secret entries, in order.
@@ -516,11 +523,16 @@ mod tests {
 
     #[test]
     fn a_list_marker_with_no_text_after_the_dot_is_malformed() {
-        let b = "## Sequence of events\n\n1.\n";
-        assert!(matches!(
-            parse(b).unwrap_err(),
-            crate::spec::SpecError::MalformedSequenceItem { line: 3 }
-        ));
+        for bare in ["1.", "1.   "] {
+            let b = format!("## Sequence of events\n\n{bare}\n");
+            assert!(
+                matches!(
+                    parse(&b).unwrap_err(),
+                    crate::spec::SpecError::MalformedSequenceItem { line: 3 }
+                ),
+                "accepted: {bare:?}"
+            );
+        }
     }
 
     #[test]
