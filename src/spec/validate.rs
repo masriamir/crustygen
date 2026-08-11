@@ -15,9 +15,11 @@
 //! collected, not first-error, per `docs/map-spec.md`: an author fixing a
 //! seventeen-group document deserves the full list in one pass.
 
-use crate::spec::Violation;
 use crate::spec::body::Body;
-use crate::spec::frontmatter::{AmmoPickups, AutoOr, Boss, Facing, Frontmatter, LightEffect};
+use crate::spec::frontmatter::{
+    AmmoPickups, AutoOr, Boss, Enforcement, Facing, Frontmatter, LightEffect,
+};
+use crate::spec::{Sacrifice, SpecError, Violation};
 use crate::tables::Tables;
 
 /// Runs every always-error rule against a parsed frontmatter and returns
@@ -561,12 +563,129 @@ fn check_placement_coherence(fm: &Frontmatter, v: &mut Vec<Violation>) {
     }
 }
 
+/// Runs every enforcement-governed rule against a parsed frontmatter and
+/// body, returning every finding as a [`Sacrifice`]; an empty vector means
+/// nothing was sacrificed. Mode-independent: it always computes the full
+/// finding list regardless of `fm.constraints.enforcement`. [`run`]
+/// interprets the result under the document's actual mode — recording it
+/// under `target`, converting it to errors under `strict`.
+///
+/// See `docs/map-spec.md`'s "Errors and the enforcement split" for the
+/// governed set this implements: `secrets.count` versus the prose
+/// `### Secret` sections, the lighting band, and locked-door coherence.
+#[must_use]
+pub fn governed(fm: &Frontmatter, body: &Body) -> Vec<Sacrifice> {
+    let mut s = Vec::new();
+    check_secrets_count(fm, body, &mut s);
+    check_lighting_band(fm, &mut s);
+    check_locked_doors(fm, &mut s);
+    s
+}
+
+/// `secrets.count` versus the number of prose `### Secret` sections in the
+/// body: a mismatch is sacrificed rather than rejected, since the prose is
+/// the author's real intent and the declared count is a budget hint.
+fn check_secrets_count(fm: &Frontmatter, body: &Body, s: &mut Vec<Sacrifice>) {
+    let count = fm.secrets.count;
+    let n = body.secrets.len();
+    if count as usize != n {
+        s.push(Sacrifice {
+            path: "secrets.count".to_string(),
+            target: count.to_string(),
+            actual: format!("{n} prose secret sections"),
+            message: format!(
+                "sacrificed `secrets.count` ({count}) to the prose Secrets section ({n} entries) under `enforcement: target`"
+            ),
+        });
+    }
+}
+
+/// `base`, `outdoor`, and `base + corridor_delta` each within
+/// `[lighting.min, lighting.max]`: one finding per offender.
+fn check_lighting_band(fm: &Frontmatter, s: &mut Vec<Sacrifice>) {
+    let l = &fm.aesthetics.lighting;
+    let sum = l.base + l.corridor_delta;
+    let offenders: [(&str, i32, String); 3] = [
+        ("aesthetics.lighting.base", l.base, l.base.to_string()),
+        (
+            "aesthetics.lighting.outdoor",
+            l.outdoor,
+            l.outdoor.to_string(),
+        ),
+        (
+            "aesthetics.lighting.corridor_delta",
+            sum,
+            format!("base + corridor_delta = {sum}"),
+        ),
+    ];
+    for (path, value, actual) in offenders {
+        if value < l.min || value > l.max {
+            s.push(Sacrifice {
+                path: path.to_string(),
+                target: format!("within [{}, {}]", l.min, l.max),
+                message: format!(
+                    "sacrificed `{path}` ({actual}) to the declared lighting band [{}, {}] under `enforcement: target`",
+                    l.min, l.max
+                ),
+                actual,
+            });
+        }
+    }
+}
+
+/// `locked_doors` versus `lock_types` coherence: fewer locked doors than
+/// declared lock types means some lock type has no door to carry it.
+fn check_locked_doors(fm: &Frontmatter, s: &mut Vec<Sacrifice>) {
+    let locked_doors = fm.progression.locked_doors;
+    let n = fm.progression.doors.lock_types.len();
+    if (locked_doors as usize) < n {
+        s.push(Sacrifice {
+            path: "progression.locked_doors".to_string(),
+            target: format!(">= {n} (one per lock type)"),
+            actual: locked_doors.to_string(),
+            message: format!(
+                "sacrificed `progression.locked_doors` ({locked_doors}) to the {n} declared lock types under `enforcement: target`"
+            ),
+        });
+    }
+}
+
+/// The combining entry point: collects [`always_errors`] and, under
+/// `enforcement: strict`, converts every [`governed`] finding into a
+/// [`Violation`] carrying its `message` too. If any violation exists
+/// (always-error or converted-governed), returns `SpecError::Invalid` with
+/// all of them; otherwise returns the sacrifices — empty under `strict` by
+/// construction, since a nonempty governed finding would have become a
+/// violation and taken the error path instead.
+///
+/// # Errors
+///
+/// Returns `SpecError::Invalid` if any always-error rule fires, or — under
+/// `Enforcement::Strict` — if any enforcement-governed rule fires.
+pub fn run(fm: &Frontmatter, body: &Body, tables: &Tables) -> Result<Vec<Sacrifice>, SpecError> {
+    let mut violations = always_errors(fm, body, tables);
+    let sacrifices = governed(fm, body);
+
+    if fm.constraints.enforcement == Enforcement::Strict {
+        violations.extend(sacrifices.iter().map(|s| Violation {
+            path: s.path.clone(),
+            message: s.message.clone(),
+        }));
+    }
+
+    if violations.is_empty() {
+        Ok(sacrifices)
+    } else {
+        Err(SpecError::Invalid(violations))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::spec::Violation;
     use crate::tables::Tables;
 
-    use super::always_errors;
+    use super::{always_errors, governed, run};
 
     fn template_yaml() -> String {
         let text = include_str!("../../map-spec.template.md");
@@ -1069,5 +1188,91 @@ mod tests {
                 .iter()
                 .all(|v| v.path != "constraints.forbid[0]")
         );
+    }
+
+    #[test]
+    fn the_shipped_template_yields_no_sacrifices() {
+        // template is enforcement: target; a clean doc must produce zero findings
+        let fm = crate::spec::frontmatter::parse(&template_yaml()).unwrap();
+        let tables = Tables::load().unwrap();
+        assert_eq!(run(&fm, &template_body(), &tables).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn a_count_mismatch_under_target_is_a_sacrifice_naming_secrets_count() {
+        let y = patched(
+            "count: 3                   #",
+            "count: 4                   #",
+        );
+        let fm = crate::spec::frontmatter::parse(&y).unwrap();
+        let tables = Tables::load().unwrap();
+        let s = run(&fm, &template_body(), &tables).unwrap();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].path, "secrets.count");
+        assert!(s[0].message.contains("sacrificed"), "got: {}", s[0].message);
+    }
+
+    #[test]
+    fn the_same_mismatch_under_strict_is_an_error() {
+        let y = template_yaml()
+            .replace(
+                "count: 3                   #",
+                "count: 4                   #",
+            )
+            .replace("enforcement: target", "enforcement: strict");
+        assert_ne!(y, template_yaml());
+        let fm = crate::spec::frontmatter::parse(&y).unwrap();
+        let tables = Tables::load().unwrap();
+        let err = run(&fm, &template_body(), &tables).unwrap_err();
+        let crate::spec::SpecError::Invalid(v) = err else {
+            panic!()
+        };
+        assert!(v.iter().any(|v| v.path == "secrets.count"));
+    }
+
+    #[test]
+    fn a_base_light_outside_the_band_is_governed_and_at_the_edge_is_not() {
+        let out = patched("base: 160", "base: 209");
+        let fm = crate::spec::frontmatter::parse(&out).unwrap();
+        assert!(
+            governed(&fm, &template_body())
+                .iter()
+                .any(|s| s.path == "aesthetics.lighting.base")
+        );
+        let edge = patched("base: 160", "base: 208");
+        let fm = crate::spec::frontmatter::parse(&edge).unwrap();
+        assert!(
+            governed(&fm, &template_body())
+                .iter()
+                .all(|s| s.path != "aesthetics.lighting.base")
+        );
+    }
+
+    #[test]
+    fn fewer_locked_doors_than_lock_types_is_governed() {
+        let y = patched("locked_doors: 2", "locked_doors: 1");
+        let fm = crate::spec::frontmatter::parse(&y).unwrap();
+        assert!(
+            governed(&fm, &template_body())
+                .iter()
+                .any(|s| s.path == "progression.locked_doors")
+        );
+    }
+
+    #[test]
+    fn a_governed_finding_and_an_always_error_both_surface_under_strict() {
+        let y = template_yaml()
+            .replace("locked_doors: 2", "locked_doors: 1")
+            .replace("corridor_ratio: 0.3", "corridor_ratio: 1.5")
+            .replace("enforcement: target", "enforcement: strict");
+        assert_ne!(y, template_yaml());
+        let fm = crate::spec::frontmatter::parse(&y).unwrap();
+        let tables = Tables::load().unwrap();
+        let crate::spec::SpecError::Invalid(v) = run(&fm, &template_body(), &tables).unwrap_err()
+        else {
+            panic!()
+        };
+        assert!(v.iter().any(|v| v.path == "progression.locked_doors"));
+        assert!(v.iter().any(|v| v.path == "architecture.corridor_ratio"));
     }
 }

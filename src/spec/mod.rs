@@ -35,6 +35,29 @@ pub struct Violation {
     pub message: String,
 }
 
+/// One finding from [`validate::governed`]: a place where the document's
+/// declared value and its actual content disagree, recorded rather than
+/// rejected under `constraints.enforcement: target`. Carries the field
+/// path, the target the spec asked for, the actual value the document
+/// shows, and a message phrased as which parameter was sacrificed to hold
+/// which — ready for the conformance report to render verbatim, per
+/// `docs/map-spec.md`'s "Errors and the enforcement split". Under
+/// `enforcement: strict` the same finding becomes a [`Violation`] instead
+/// ([`validate::run`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sacrifice {
+    /// The field path where the finding occurred, e.g. `secrets.count`.
+    pub path: String,
+    /// The target the spec asked for, e.g. `"within [96, 208]"`.
+    pub target: String,
+    /// The actual value the document shows, e.g. `"3 prose secret
+    /// sections"`.
+    pub actual: String,
+    /// A human-readable message phrased as which parameter was sacrificed
+    /// to hold which.
+    pub message: String,
+}
+
 /// A defect in a map-spec document. Every variant names its subject —
 /// a field path, a section heading, or a secret's name — per
 /// `docs/design.md` §9.
