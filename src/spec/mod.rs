@@ -7,6 +7,10 @@
 
 use thiserror::Error;
 
+/// Typed frontmatter groups: the fields of a filled map-spec template,
+/// deserialized from the YAML [`split_frontmatter`] splits off the body.
+pub mod frontmatter;
+
 /// A defect in a map-spec document. Every variant names its subject —
 /// a field path, a section heading, or a secret's name — per
 /// `docs/design.md` §9.
