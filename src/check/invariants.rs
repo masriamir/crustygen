@@ -87,6 +87,12 @@ pub fn check_textures(map: &UdmfMap, scene: &Scene, findings: &mut Vec<Finding>)
                 continue;
             };
             let neighbor = &scene.sectors[neighbor_idx];
+            // `b.neighbor.is_some()` (just checked above) only holds for a
+            // `Boundary` `Scene::build` actually emitted, which means
+            // `process_linedef` already validated this linedef's `sideback`
+            // as `Some` and in range — this conversion cannot fail in
+            // practice; the `else` stays as defensive belt-and-braces, not
+            // a reachable case.
             let Some(back_idx) = map.linedefs[b.linedef]
                 .sideback
                 .and_then(|s| usize::try_from(s).ok())
@@ -536,9 +542,9 @@ fn dist_to_segment_f64(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> 
 }
 
 /// V-P25: every player start has full radius clearance from its sector's
-/// walls, and no two starts are close enough to telefrag each other.
-/// (Headroom is covered by [`check_thing_headroom`], since a start is a
-/// thing like any other there.)
+/// walls, does not overlap a blocking thing, and no two starts are close
+/// enough to telefrag each other. (Headroom is covered by
+/// [`check_thing_headroom`], since a start is a thing like any other there.)
 ///
 /// For each of the five `START_KINDS` with a resolved sector: the
 /// distance from `(x, y)` to every **non-passable** boundary segment of
@@ -548,11 +554,29 @@ fn dist_to_segment_f64(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> 
 /// start. A start with no resolved sector (already a `"V-S"` Error from
 /// [`Scene::build`]) is skipped here rather than double-reported.
 ///
-/// Separately, and regardless of sector resolution: every pair of starts —
-/// across all five kinds, not just within one, since a coop start and a
-/// deathmatch start spawning on top of each other still telefrags whichever
-/// mode is in play — closer than twice the player's radius is an Error.
-/// Each pair is reported once, naming the later-declared thing of the pair.
+/// Separately, and independent of sector resolution: every start must clear
+/// every other thing whose name resolves to a [`Tables::prop`] with
+/// `blocks == true` (a barrel, say) by at least the combined radius. This is
+/// `PIT_CheckThing`'s own overlap test (pinned commit
+/// `a77dfb96cb91780ca334d0d4cfd86957558007e0`, `p_map.c:261`):
+/// `blockdist = thing->radius + tmthing->radius;`, followed by an
+/// axis-aligned box rejection at lines 263-264 (`abs(thing->x - tmx) >=
+/// blockdist || abs(thing->y - tmy) >= blockdist`) — two solid things
+/// overlap, and so cannot both occupy the map, whenever the *combined*
+/// radius exceeds the separation on both axes. This check re-derives the
+/// same `blockdist` bound as a Euclidean distance rather than the engine's
+/// own per-axis box (`dist < blockdist` implies both `|dx| < blockdist` and
+/// `|dy| < blockdist`, so this reading is a subset of, and therefore never
+/// falsely triggers beyond, the real box test), matching the Euclidean
+/// convention [`check_prop_embedding`] and this same function's own telefrag
+/// rule below already use for a thing-to-thing distance.
+///
+/// Separately again, and regardless of sector resolution: every pair of
+/// starts — across all five kinds, not just within one, since a coop start
+/// and a deathmatch start spawning on top of each other still telefrags
+/// whichever mode is in play — closer than twice the player's radius is an
+/// Error. Each pair is reported once, naming the later-declared thing of the
+/// pair.
 pub fn check_starts(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
     let radius = f64::from(tables.player().radius);
 
@@ -591,6 +615,39 @@ pub fn check_starts(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>)
                      player radius {radius}"
                 ),
             });
+        }
+    }
+
+    for &i in &starts {
+        let thing = &scene.things[i];
+        for (j, other) in scene.things.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let Some(other_name) = other.name.as_deref() else {
+                continue;
+            };
+            let Some(prop) = tables.prop(other_name) else {
+                continue;
+            };
+            if !prop.blocks {
+                continue;
+            }
+            let blockdist = f64::from(prop.radius) + radius;
+            let dist = (thing.x - other.x).hypot(thing.y - other.y);
+            if dist < blockdist {
+                findings.push(Finding {
+                    check: "V-P25",
+                    severity: Severity::Error,
+                    subject: Subject::Thing(i),
+                    message: format!(
+                        "start is {dist:.3} units from blocking prop {other_name} (thing {j}), \
+                         less than the combined clearance {blockdist} (prop radius {} + player \
+                         radius {radius})",
+                        prop.radius
+                    ),
+                });
+            }
         }
     }
 
@@ -1345,6 +1402,49 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
     }
 
     #[test]
+    fn a_start_clear_of_a_diagonal_wall_by_more_than_its_radius_passes() {
+        // A pentagon room — a square with its bottom-left corner chamfered
+        // at 45 degrees — exercises `sector_contains`'s interpolated
+        // `cross_x` (the start must resolve into the sector across the
+        // diagonal edge) and `dist_to_segment_f64`'s projection-and-clamp
+        // (the diagonal edge, not one of the four axis-aligned ones, is the
+        // nearest wall to the start) in one fixture. No other fixture in
+        // this module borders a non-axis-aligned wall at all.
+        let text = format!(
+            r#"namespace = "doom";
+vertex {{ x = 40.000; y = 0.000; }}
+vertex {{ x = 160.000; y = 0.000; }}
+vertex {{ x = 160.000; y = 160.000; }}
+vertex {{ x = 0.000; y = 160.000; }}
+vertex {{ x = 0.000; y = 40.000; }}
+linedef {{ v1 = 0; v2 = 1; sidefront = 0; blocking = true; }}
+linedef {{ v1 = 1; v2 = 2; sidefront = 1; blocking = true; }}
+linedef {{ v1 = 2; v2 = 3; sidefront = 2; blocking = true; }}
+linedef {{ v1 = 3; v2 = 4; sidefront = 3; blocking = true; }}
+linedef {{ v1 = 4; v2 = 0; sidefront = 4; blocking = true; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }}
+{things}"#,
+            things = thing_at(35.0, 35.0, 1)
+        );
+        let findings = findings_of(&text);
+        // Not an empty-findings assertion: this fixture has no exit line, so
+        // `run_flood`'s own unrelated V-P7 "no exit" finding is expected
+        // (the flood is not what this fixture exercises); only V-S
+        // (resolution) and V-P25 (clearance) bear on the diagonal wall.
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.check != "V-S" && f.check != "V-P25"),
+            "clean pentagon fixture, start well clear of the diagonal wall: {findings:?}"
+        );
+    }
+
+    #[test]
     fn two_coincident_starts_telefrag_each_other() {
         let mut things = thing_at(64.0, 64.0, 1);
         things.push_str(&thing_at(64.0, 64.0, 2));
@@ -1369,6 +1469,42 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         assert!(
             findings.iter().all(|f| f.check != "V-P25"),
             "two starts exactly two radii apart: no telefrag finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_start_exactly_at_blockdist_from_a_barrel_passes() {
+        let t = Tables::load().expect("tables");
+        let barrel_radius = f64::from(t.prop("barrel").expect("barrel prop").radius);
+        let player_radius = f64::from(t.player().radius);
+        let blockdist = barrel_radius + player_radius;
+        let mut things = thing_at(64.0, 64.0, 2035); // barrel
+        things.push_str(&thing_at(64.0 + blockdist, 64.0, 1)); // start
+        let text = room(128, 160, &things);
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P25"),
+            "start exactly at PIT_CheckThing's blockdist from the barrel: no finding: \
+             {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_start_one_unit_inside_blockdist_of_a_barrel_fails() {
+        let t = Tables::load().expect("tables");
+        let barrel_radius = f64::from(t.prop("barrel").expect("barrel prop").radius);
+        let player_radius = f64::from(t.player().radius);
+        let blockdist = barrel_radius + player_radius;
+        let mut things = thing_at(64.0, 64.0, 2035); // barrel
+        things.push_str(&thing_at(64.0 + blockdist - 1.0, 64.0, 1)); // start
+        let text = room(128, 160, &things);
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P25"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Thing(1))
+                && f.message.contains("blocking prop")),
+            "expected a V-P25 blocking-prop error on thing 1 (the start): {findings:?}"
         );
     }
 
