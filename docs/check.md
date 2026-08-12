@@ -138,7 +138,7 @@ prints as `{id} {severity} {subject}: {message}`.
 | `V-P19` | Every sector's `lightlevel` is inside `Tables::light_range()`. Unconditional, spec or no spec. | Error |
 | `V-P20` | **Embedding:** no collectible (pickup, ammo, weapon, `backpack`, key, or one of the eight powerups) sits inside a blocking prop's radius. **Reachability:** every collectible's sector is one the V-P7 flood actually reached; runs only when the flood ran. | Error |
 | `V-P24` | Every locked-door **class** present has at least one key of that colour placed, and every placed key opens at least one door present. Class-level, because `26` is all an emitted linedef retains — it opens to either `blue_card` or `blue_skull`. Doors dedupe by `(door sector, class)`, so one physical door with two faces reports once. | Error |
-| `V-P25` | Every player start clears its sector's **non-passable** walls by at least the player's radius (an open doorway cannot crush you against it); clears every other thing whose name resolves to a blocking prop by `prop.radius + player.radius` (`PIT_CheckThing`'s own `blockdist`); and no two starts of any kind are within telefrag distance (`2 × radius`) of each other. | Error |
+| `V-P25` | Every player start clears its sector's **non-passable** walls by at least the player's radius (an open doorway cannot crush you against it); clears every other thing whose name resolves to a blocking prop on **both axes at once** by `prop.radius + player.radius` (`PIT_CheckThing`'s own axis-aligned `blockdist` box, not a circular distance); and no two starts of any kind are within telefrag distance (`2 × radius`) of each other. | Error |
 
 Severity is a discipline, not a mood. **Error** means the map (or the input)
 is provably broken and the CLI exits 1. **Warning** means suspicious but not
@@ -234,11 +234,12 @@ form. A ratio row over a map with no monsters reads `"no monsters"`, still
 `Info`, never `Fail`.
 
 `Verdict::NotRun` is for a row whose prerequisite failed. `conform::rows`
-itself never produces one; when the map's findings carry a hard `"V-S"`
-`Error`, `check::run` calls `conform::not_run_rows` instead — see "Failure
-containment" below. `tests/check_conformance.rs` asserts a clean run carries
-none, and separately proves the structural-failure path forces every row to
-`NotRun`.
+itself never produces one; when the map's findings carry a geometry-
+corrupting `"V-S"` `Error` (not every `"V-S"` `Error` — see "Failure
+containment" below for exactly which), `check::run` calls
+`conform::not_run_rows` instead. `tests/check_conformance.rs` asserts a
+clean run carries none, and separately proves the structural-failure path
+forces every row to `NotRun`.
 
 **NotDerivable**, with the reason carried in `actual`. Six rows are always
 undecidable:
@@ -294,23 +295,47 @@ stated rather than implied:
 
 ## Failure containment
 
-A structural `"V-S"` `Error` — a dangling cross-reference, a `twosided` flag
-disagreeing with `sideback`'s presence, or a sector boundary that does not
-close — means the `Scene` (`src/check/scene.rs`) itself is data
-`Scene::build` gave up on: a linedef that fails any of those checks
-contributes no `Boundary` to either sector at all. Two consequences follow,
-both deliberate rather than incidental gaps.
+`Scene::build` (`src/check/scene.rs`) produces `"V-S"` `Error` findings from
+three distinct places, only two of which mean the `Scene` itself is data the
+builder gave up on:
 
-**Conformance goes `NotRun`, not `Fail` or a wrong `Pass`.** When `findings`
-carries any `"V-S"` `Error` (the two `"V-S"` *Warning* cases — unrecognized
-vocabulary — do not count; those describe a fully-formed scene, not a corrupt
-one), `check::run` calls `conform::not_run_rows` instead of `conform::rows`:
-the identical row catalog `rows()` would have produced — same `parameter`,
-same `target`, in the same order — with every `verdict` forced to
-`Verdict::NotRun` and `actual` reading `"scene failed structural validation"`.
-Judging a spec against geometry the scene builder itself rejected would
-produce a verdict that looks decided but is not; `NotRun` says plainly that
-it was never computed.
+- **Reference validity** (`process_linedef`, `Subject::Linedef`) — a
+  dangling `v1`/`v2`/`sidefront`/`sideback`/sidedef-`sector` index, or a
+  `twosided` flag disagreeing with `sideback`'s presence. The offending
+  linedef contributes no `Boundary` to either sector at all.
+- **Closure** (`sector_is_closed`, `Subject::Sector`) — a sector boundary
+  whose endpoints do not all have even degree. `sector.closed` stays
+  `false`, so nothing (not even a legitimately-placed thing) can resolve
+  into that sector by even-odd containment.
+- **Misplaced things** (`resolve_things`, `Subject::Thing`) — a thing
+  outside every closed sector. This one is different in kind: it names a
+  single thing's own bad placement, not a hole in the geometry. Every other
+  sector and boundary in the `Scene` is exactly as valid as if that thing
+  did not exist.
+
+**Conformance goes `NotRun`, not `Fail` or a wrong `Pass` — but only for the
+first two.** When `findings` carries a `"V-S"` `Error` naming
+`Subject::Linedef` or `Subject::Sector`, `check::run` calls
+`conform::not_run_rows` instead of `conform::rows`: the identical row
+catalog `rows()` would have produced — same `parameter`, same `target`, in
+the same order — with every `verdict` forced to `Verdict::NotRun` and
+`actual` reading `"scene failed structural validation"`. Judging a spec
+against geometry the scene builder itself rejected would produce a verdict
+that looks decided but is not; `NotRun` says plainly that it was never
+computed.
+
+A `"V-S"` `Error` naming `Subject::Thing` does **not** trip this — deliberately,
+not an oversight. Every conformance row's counts and geometry measurements
+read `scene.sectors`/`scene.things` directly, and `Scene::build` never
+shrinks either vector: a thing that fails to resolve just carries
+`sector: None`, and rows that count things by name (`sustain.health.*`,
+`players.coop_starts`, and the like) still count it correctly regardless.
+The misplaced thing already has its own `"V-S"` finding telling that story;
+forcing every *other* row to `NotRun` over it would be over-cautious, not
+honest. Nor do the two `"V-S"` *Warning* cases (unrecognized vocabulary)
+trip it — filtered out by `Severity::Error` alone, since those describe a
+fully-formed scene the checker merely cannot name a finding's vocabulary
+for, not a corrupt one.
 
 **The flood cascades pessimistically, on purpose.** A linedef that fails
 `Scene::build`'s validation contributes no boundary to either sector, and

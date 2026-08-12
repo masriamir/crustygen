@@ -169,15 +169,20 @@ impl std::fmt::Display for Finding {
 /// slot for the `identity.slot` row; `conformance` is `None` iff `spec` is
 /// `None`.
 ///
-/// **Failure containment.** If `findings` carries any structural `"V-S"`
-/// `Error` (a dangling cross-reference, a `twosided` flag disagreeing with
-/// `sideback`'s presence, or a sector boundary that does not close — not the
-/// two `"V-S"` *Warning* cases for unrecognized vocabulary), `scene` was
-/// built from data `Scene::build` itself gave up on: `conform::not_run_rows`
-/// runs instead of `conform::rows`, producing the identical row catalog with
+/// **Failure containment.** If `findings` carries a geometry-corrupting
+/// `"V-S"` `Error` — a dangling cross-reference or a `twosided` flag
+/// disagreeing with `sideback`'s presence (`Subject::Linedef`), or a sector
+/// boundary that does not close (`Subject::Sector`) — `scene` was built from
+/// data `Scene::build` itself gave up on: `conform::not_run_rows` runs
+/// instead of `conform::rows`, producing the identical row catalog with
 /// every verdict forced to [`Verdict::NotRun`] rather than a verdict that
-/// looks decided but was judged against corrupt geometry
-/// (`docs/check.md`'s "Failure containment" section).
+/// looks decided but was judged against corrupt geometry. **Not** triggered
+/// by a thing outside every closed sector (`"V-S"` `Error`,
+/// `Subject::Thing`) — that thing's own placement already carries its own
+/// finding, and every conformance row still reads intact
+/// `scene.sectors`/`scene.things` data regardless — nor by either `"V-S"`
+/// *Warning* case (unrecognized vocabulary), filtered out by severity alone.
+/// See `docs/check.md`'s "Failure containment" section.
 ///
 /// Returns them with the tag manifest `check_tags` produced.
 #[must_use]
@@ -214,15 +219,31 @@ pub fn run(map: &UdmfMap, map_name: &str, tables: &Tables, spec: Option<&Spec>) 
             .count(),
     };
 
-    // A structural "V-S" Error means `scene` was built from data
-    // `Scene::build` itself could not validate: judging conformance against
-    // it would produce a verdict that looks decided but is not. The two
-    // "V-S" Warning cases (unrecognized vocabulary) do not trigger this —
-    // those are a fully-formed scene the checker merely cannot name a
+    // Narrowed to the two "V-S" Error producers that actually corrupt
+    // geometry: a reference-validity failure (`Scene::build`'s
+    // `process_linedef`, `Subject::Linedef` — a linedef contributes no
+    // `Boundary` at all) and a sector boundary that fails to close
+    // (`sector_is_closed`, `Subject::Sector` — `sector.closed` stays
+    // `false`, so nothing resolves into it). Both mean some sector's
+    // boundary is missing data conformance would otherwise measure.
+    // Deliberately excludes the third "V-S" Error producer — a thing
+    // outside every closed sector (`resolve_things`, `Subject::Thing`,
+    // `KNOWN-GAPS.md`'s scope for this predicate) — because that thing's
+    // own misplacement already carries its own "V-S" finding and does not
+    // corrupt anything conformance reads: every row's counts and geometry
+    // measurements come from `scene.sectors`/`scene.things`, both still
+    // fully populated (`Scene::build` never shrinks either vector; a
+    // misresolved thing just carries `sector: None`), so judging conformance
+    // against a scene whose only defect is one stray thing is still honest.
+    // The two "V-S" *Warning* cases (unrecognized vocabulary) never reach
+    // this filter at all — filtered on `Severity::Error` — since those
+    // describe a fully-formed scene the checker merely cannot name a
     // finding's vocabulary for, not a corrupt one.
-    let structurally_broken = findings
-        .iter()
-        .any(|f| f.check == "V-S" && f.severity == Severity::Error);
+    let structurally_broken = findings.iter().any(|f| {
+        f.check == "V-S"
+            && f.severity == Severity::Error
+            && matches!(f.subject, Subject::Linedef(_) | Subject::Sector(_))
+    });
 
     let conformance = spec.map(|spec| {
         if structurally_broken {

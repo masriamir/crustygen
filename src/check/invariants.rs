@@ -556,20 +556,32 @@ fn dist_to_segment_f64(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> 
 ///
 /// Separately, and independent of sector resolution: every start must clear
 /// every other thing whose name resolves to a [`Tables::prop`] with
-/// `blocks == true` (a barrel, say) by at least the combined radius. This is
-/// `PIT_CheckThing`'s own overlap test (pinned commit
-/// `a77dfb96cb91780ca334d0d4cfd86957558007e0`, `p_map.c:261`):
-/// `blockdist = thing->radius + tmthing->radius;`, followed by an
-/// axis-aligned box rejection at lines 263-264 (`abs(thing->x - tmx) >=
-/// blockdist || abs(thing->y - tmy) >= blockdist`) — two solid things
-/// overlap, and so cannot both occupy the map, whenever the *combined*
-/// radius exceeds the separation on both axes. This check re-derives the
-/// same `blockdist` bound as a Euclidean distance rather than the engine's
-/// own per-axis box (`dist < blockdist` implies both `|dx| < blockdist` and
-/// `|dy| < blockdist`, so this reading is a subset of, and therefore never
-/// falsely triggers beyond, the real box test), matching the Euclidean
-/// convention [`check_prop_embedding`] and this same function's own telefrag
-/// rule below already use for a thing-to-thing distance.
+/// `blocks == true` (a barrel, say) on **both axes at once**. This is
+/// `PIT_CheckThing`'s own overlap test, re-derived exactly rather than
+/// approximated (pinned commit `a77dfb96cb91780ca334d0d4cfd86957558007e0`,
+/// `p_map.c:261`, `:263-264`):
+///
+/// ```c
+/// blockdist = thing->radius + tmthing->radius;
+/// if ( abs(thing->x - tmx) >= blockdist
+///      || abs(thing->y - tmy) >= blockdist )
+/// {
+///     // didn't hit it
+///     return true;
+/// }
+/// ```
+///
+/// Two solid things overlap — and so cannot both occupy the map — iff their
+/// separation is **less than `blockdist` on both axes simultaneously**: an
+/// axis-aligned square test, not a circular one. A Euclidean `distance <
+/// blockdist` reading (the convention [`check_prop_embedding`] and this
+/// function's own telefrag rule below use, where no engine source pins a
+/// box) would silently pass a diagonal overlap the real engine still blocks
+/// — a start at `(dx, dy) = (blockdist - 1, blockdist - 1)` from a barrel is
+/// engine-blocked on both axes but sits `(blockdist - 1) * sqrt(2)` away in
+/// a straight line, which exceeds `blockdist` for any positive `blockdist`
+/// — so this reading is the engine's own two-`abs` comparison, not the
+/// Euclidean shortcut.
 ///
 /// Separately again, and regardless of sector resolution: every pair of
 /// starts — across all five kinds, not just within one, since a coop start
@@ -634,16 +646,17 @@ pub fn check_starts(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>)
                 continue;
             }
             let blockdist = f64::from(prop.radius) + radius;
-            let dist = (thing.x - other.x).hypot(thing.y - other.y);
-            if dist < blockdist {
+            let dx = (thing.x - other.x).abs();
+            let dy = (thing.y - other.y).abs();
+            if dx < blockdist && dy < blockdist {
                 findings.push(Finding {
                     check: "V-P25",
                     severity: Severity::Error,
                     subject: Subject::Thing(i),
                     message: format!(
-                        "start is {dist:.3} units from blocking prop {other_name} (thing {j}), \
-                         less than the combined clearance {blockdist} (prop radius {} + player \
-                         radius {radius})",
+                        "start is {dx:.3} units apart on x and {dy:.3} on y from blocking prop \
+                         {other_name} (thing {j}), within the combined clearance {blockdist} \
+                         (prop radius {} + player radius {radius}) on both axes",
                         prop.radius
                     ),
                 });
@@ -1505,6 +1518,41 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
                 && matches!(f.subject, Subject::Thing(1))
                 && f.message.contains("blocking prop")),
             "expected a V-P25 blocking-prop error on thing 1 (the start): {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_diagonally_placed_start_is_caught_by_the_engines_box_test() {
+        // barrel at (64, 64), start at (84, 84): dx = dy = 20, blockdist =
+        // barrel radius 10 + player radius 16 = 26. `PIT_CheckThing`'s own
+        // test blocks here — |20| < 26 on *both* axes — even though the
+        // Euclidean distance, 20*sqrt(2) ≈ 28.284, is >= 26: a Euclidean
+        // `distance < blockdist` reading would silently pass this diagonal
+        // overlap, which is exactly the regression this fixture pins. (The
+        // two on-axis fixtures above are unaffected by the axis-vs-circle
+        // distinction — on-axis, `dy = 0`, so the two readings agree — and
+        // are left unchanged.)
+        let t = Tables::load().expect("tables");
+        let barrel_radius = f64::from(t.prop("barrel").expect("barrel prop").radius);
+        let player_radius = f64::from(t.player().radius);
+        let blockdist = barrel_radius + player_radius;
+        assert!(
+            (20.0_f64).hypot(20.0) >= blockdist,
+            "fixture assumption: the diagonal distance must be Euclidean-clear \
+             ({blockdist} expected): got {}",
+            (20.0_f64).hypot(20.0)
+        );
+        let mut things = thing_at(64.0, 64.0, 2035); // barrel
+        things.push_str(&thing_at(84.0, 84.0, 1)); // start, dx = dy = 20
+        let text = room(128, 160, &things);
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P25"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Thing(1))
+                && f.message.contains("blocking prop")),
+            "expected a V-P25 blocking-prop error on thing 1 (the start), engine-blocked on \
+             both axes despite being Euclidean-clear: {findings:?}"
         );
     }
 

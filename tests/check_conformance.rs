@@ -159,3 +159,66 @@ fn a_structurally_broken_scene_marks_every_conformance_row_not_run() {
         "the NotRun row parameter list must equal the healthy run's own list"
     );
 }
+
+/// A single valid, closed 128x128 sector — geometry entirely clean — holding
+/// a `player1_start` (thing 0) and one barrel (thing 1) placed at (5000,
+/// 5000), far outside the sector's boundary: a "V-S" Error naming
+/// `Subject::Thing(1)` (`Scene::build`'s `resolve_things`), and the *only*
+/// `"V-S"` finding this fixture raises — no dangling reference, no unclosed
+/// boundary.
+const MISPLACED_THING_MAP: &str = r#"namespace = "doom";
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 128.000; y = 0.000; }
+vertex { x = 128.000; y = 128.000; }
+vertex { x = 0.000; y = 128.000; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; blocking = true; }
+linedef { v1 = 1; v2 = 2; sidefront = 1; blocking = true; }
+linedef { v1 = 2; v2 = 3; sidefront = 2; blocking = true; }
+linedef { v1 = 3; v2 = 0; sidefront = 3; blocking = true; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }
+thing { x = 64.000; y = 64.000; type = 1; single = true; }
+thing { x = 5000.000; y = 5000.000; type = 2035; single = true; }
+"#;
+
+/// Failure containment must NOT trip on a misplaced-thing "V-S" Error
+/// (`Subject::Thing`): that finding names one thing's own bad placement, not
+/// a hole in the geometry conformance reads, so it must not force every
+/// conformance row to `NotRun` the way a reference-validity or closure
+/// failure does (the test above). This is the negative case pinning
+/// `check::run`'s narrowed `structurally_broken` predicate: a subject-based
+/// filter on `"V-S"` Errors (`Subject::Linedef`/`Subject::Sector` only), not
+/// every `"V-S"` Error indiscriminately.
+#[test]
+fn a_misplaced_thing_v_s_error_does_not_trigger_containment() {
+    let tables = Tables::load().expect("tables");
+    let map = parse_udmf(MISPLACED_THING_MAP, Limits::default()).expect("fixture parses");
+    let doc = Spec::from_markdown(ENTRADA_SPEC, &tables).expect("spec parses");
+
+    let report = run(&map, "MAP01", &tables, Some(&doc.spec));
+
+    assert!(
+        report.findings.iter().any(|f| f.check == "V-S"
+            && f.severity == Severity::Error
+            && matches!(f.subject, Subject::Thing(1))),
+        "expected a V-S error naming the misplaced thing (1): {:?}",
+        report.findings
+    );
+    assert!(
+        report.findings.iter().all(|f| !(f.check == "V-S"
+            && f.severity == Severity::Error
+            && matches!(f.subject, Subject::Linedef(_) | Subject::Sector(_)))),
+        "this fixture's geometry must stay entirely clean — only the thing is misplaced: {:?}",
+        report.findings
+    );
+
+    let rows = report.conformance.expect("spec supplied");
+    assert!(
+        rows.iter().all(|r| r.verdict != Verdict::NotRun),
+        "a misplaced-thing V-S error must not trip containment: no row should be NotRun: \
+         {rows:?}"
+    );
+}

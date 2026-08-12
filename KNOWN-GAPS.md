@@ -2,8 +2,8 @@
 
 State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD →
 reassembles through crustywad, plus the layer-4 verifier that re-checks the
-emitted map (`src/check`, `crustygen-check` — see `docs/check.md`). 431 tests
-(407 lib + 7 check_adversarial + 3 check_cli + 3 check_conformance + 1
+emitted map (`src/check`, `crustygen-check` — see `docs/check.md`). 433 tests
+(408 lib + 7 check_adversarial + 3 check_cli + 4 check_conformance + 1
 first_map + 6 golden_textmap + 3 spec_documents + 1 walking_skeleton), plus a
 separately-run `#[ignore]`d golden-regeneration generator not included in that
 count. This file records what is deliberately absent, what is known-fragile,

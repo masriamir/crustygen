@@ -6,8 +6,9 @@
 //! every frontmatter parameter [`crate::spec::Spec`] declares.** A parameter
 //! with no sourced geometric definition, or nothing emitted to measure it
 //! against, gets an explicit [`Verdict::NotDerivable`] row instead of being
-//! silently absent — three rows are always `NotDerivable` (`identity.grid`,
-//! `combat.encounter_style`, `combat.sound.propagation`), and several more
+//! silently absent — six rows are always `NotDerivable` (`identity.grid`,
+//! `scale.rooms`, `scale.play_time_minutes`, `combat.encounter_style`,
+//! `combat.sound.propagation`, `combat.max_simultaneous`), and several more
 //! become `NotDerivable` only when the map itself gives [`rows`] nothing to
 //! measure; `docs/check.md`'s "Conformance" section has the full list. Unlike
 //! `scene.rs`/`invariants.rs`/`flood.rs`, nothing here re-derives a
