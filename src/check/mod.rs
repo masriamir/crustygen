@@ -167,7 +167,19 @@ impl std::fmt::Display for Finding {
 /// `spec`, when `Some`, is judged against the built [`scene::Scene`] and
 /// [`MapStats`] by [`conform::rows`], naming `map_name` as the actual map
 /// slot for the `identity.slot` row; `conformance` is `None` iff `spec` is
-/// `None`. Returns them with the tag manifest `check_tags` produced.
+/// `None`.
+///
+/// **Failure containment.** If `findings` carries any structural `"V-S"`
+/// `Error` (a dangling cross-reference, a `twosided` flag disagreeing with
+/// `sideback`'s presence, or a sector boundary that does not close — not the
+/// two `"V-S"` *Warning* cases for unrecognized vocabulary), `scene` was
+/// built from data `Scene::build` itself gave up on: `conform::not_run_rows`
+/// runs instead of `conform::rows`, producing the identical row catalog with
+/// every verdict forced to [`Verdict::NotRun`] rather than a verdict that
+/// looks decided but was judged against corrupt geometry
+/// (`docs/check.md`'s "Failure containment" section).
+///
+/// Returns them with the tag manifest `check_tags` produced.
 #[must_use]
 pub fn run(map: &UdmfMap, map_name: &str, tables: &Tables, spec: Option<&Spec>) -> CheckReport {
     let mut findings = Vec::new();
@@ -202,7 +214,23 @@ pub fn run(map: &UdmfMap, map_name: &str, tables: &Tables, spec: Option<&Spec>) 
             .count(),
     };
 
-    let conformance = spec.map(|spec| conform::rows(&scene, &stats, map_name, spec, tables));
+    // A structural "V-S" Error means `scene` was built from data
+    // `Scene::build` itself could not validate: judging conformance against
+    // it would produce a verdict that looks decided but is not. The two
+    // "V-S" Warning cases (unrecognized vocabulary) do not trigger this —
+    // those are a fully-formed scene the checker merely cannot name a
+    // finding's vocabulary for, not a corrupt one.
+    let structurally_broken = findings
+        .iter()
+        .any(|f| f.check == "V-S" && f.severity == Severity::Error);
+
+    let conformance = spec.map(|spec| {
+        if structurally_broken {
+            conform::not_run_rows(&scene, &stats, map_name, spec, tables)
+        } else {
+            conform::rows(&scene, &stats, map_name, spec, tables)
+        }
+    });
 
     CheckReport {
         findings,

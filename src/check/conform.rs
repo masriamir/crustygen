@@ -1095,6 +1095,38 @@ pub fn rows(
     rows
 }
 
+/// Judges nothing: maps [`rows`]'s own output onto the identical row
+/// catalog — same `parameter`, same `target` (every `target` value is
+/// spec-derived, never scene-derived, so it stays meaningful even when
+/// `scene` is corrupt) — with every `verdict` forced to [`Verdict::NotRun`]
+/// and `actual` replaced with `"scene failed structural validation"`.
+///
+/// Used by [`crate::check::run`] when the findings list carries a hard
+/// `"V-S"` `Error` (a dangling cross-reference or an unclosed sector
+/// boundary): `scene` is then built from data `Scene::build` itself gave up
+/// on, so judging a spec against it would produce a verdict that looks
+/// decided but is not. Building on [`rows`]'s own output, rather than
+/// re-deriving the parameter catalog a second time, is what guarantees the
+/// row *shape* (which parameters appear, and in what order) never drifts
+/// between the healthy and structurally-broken paths.
+#[must_use]
+pub fn not_run_rows(
+    scene: &Scene,
+    stats: &MapStats,
+    map_name: &str,
+    spec: &Spec,
+    tables: &Tables,
+) -> Vec<ConformanceRow> {
+    rows(scene, stats, map_name, spec, tables)
+        .into_iter()
+        .map(|row| ConformanceRow {
+            actual: "scene failed structural validation".to_owned(),
+            verdict: Verdict::NotRun,
+            ..row
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1399,5 +1431,37 @@ thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
         // stays Pass, pinning the non-regressed side too.
         let clean = fixture_rows();
         assert_eq!(row(&clean, "scale.vertical_range").verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn not_run_rows_keeps_the_parameter_list_and_forces_every_verdict_to_not_run() {
+        let tables = Tables::load().expect("tables");
+        let map = parse_udmf(FIXTURE_MAP, Limits::default()).expect("fixture parses");
+        let mut findings = Vec::new();
+        let scene = Scene::build(&map, &tables, &mut findings);
+        let stats = MapStats {
+            sectors: map.sectors.len(),
+            linedefs: map.linedefs.len(),
+            sidedefs: map.sidedefs.len(),
+            vertices: map.vertices.len(),
+            things: map.things.len(),
+            secret_sectors: 0,
+        };
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+
+        let healthy = rows(&scene, &stats, "MAP01", &doc.spec, &tables);
+        let not_run = not_run_rows(&scene, &stats, "MAP01", &doc.spec, &tables);
+
+        assert_eq!(
+            healthy.len(),
+            not_run.len(),
+            "not_run_rows must not add or drop rows"
+        );
+        for (h, nr) in healthy.iter().zip(not_run.iter()) {
+            assert_eq!(h.parameter, nr.parameter, "row order/identity drifted");
+            assert_eq!(h.target, nr.target, "target must survive unchanged");
+            assert_eq!(nr.verdict, Verdict::NotRun);
+            assert_eq!(nr.actual, "scene failed structural validation");
+        }
     }
 }
