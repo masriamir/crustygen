@@ -3,6 +3,15 @@
 //! (with real nodes, via crustywad's one-shot builder), and a raw
 //! TEXTMAP-wrapping helper.
 
+// Each `tests/*.rs` file that does `mod common;` compiles this module into
+// its own independent integration-test crate, and no single consumer uses
+// every fixture below (e.g. `lift_cli.rs` never calls `wad_with_textmap`;
+// `check_cli.rs`/`vanilla_wad.rs` never call
+// `binary_entrada_wad_with_broken_second_map`). Per-crate `dead_code` is
+// therefore a false positive here, not a real unused-code signal — allow it
+// file-wide rather than chasing it fixture-by-fixture as consumers change.
+#![allow(dead_code)]
+
 use crustygen::compile::compile;
 use crustygen::ir::Ir;
 use crustygen::pack::pack_udmf;
