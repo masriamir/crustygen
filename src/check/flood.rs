@@ -29,7 +29,7 @@
 //! whose boundary entry has [`Boundary::fronts_this`](crate::check::scene::Boundary::fronts_this)
 //! true for that linedef.
 //!
-//! A walkover exit (`P_CrossSpecialLine`, pinned `p_spec.c`) has **no such
+//! A walkover exit (`P_CrossSpecialLine`, pinned `p_spec.c`) has **no side
 //! gate** — unlike the teleport special (97), which is also walkover-
 //! triggered yet deliberately checks `side == 1` in `EV_Teleport` to stay
 //! front-only (`data/vocabulary.toml`'s `[specials.teleport]` `source` field
@@ -42,11 +42,41 @@
 //! sector's own boundary list, names that sector a goal" without needing to
 //! know which mirror is "front".
 //!
+//! **But only when the line is actually crossable.** `P_CrossSpecialLine`
+//! only ever runs from `P_TryMove`'s `spechit` bookkeeping, reached solely
+//! after a move that same function accepted — and `PIT_CheckLine` rejects a
+//! blocking two-sided line for any non-missile before that bookkeeping is
+//! ever reached (pinned `p_map.c:214-217`, the same fact "Edges" below
+//! cites for walls in general; `KNOWN-GAPS.md`'s note on a walkover exit's
+//! carved alcove already records this consequence: a solid-walled crossing
+//! never fires). A walkover boundary that fails
+//! [`Boundary::passable`](crate::check::scene::Boundary::passable) is
+//! therefore not a goal from either side — the exit line itself would never
+//! fire in the real engine, not merely "not yet reached". A switch exit
+//! needs no such gate: `P_UseSpecialLine` fires from a raycast the player
+//! aims, not a crossing, so its solid one-sided wall is not an obstacle to
+//! triggering it.
+//!
 //! This is a strictly more conservative (never falsely-unfinishable) goal
 //! set than [`reach::graph_from_compiled`]'s "only the recess" convention:
 //! every recess this compiler ever emits is still a goal here, plus the host
 //! room, which is sound for a checker that cannot assume a `TEXTMAP` it did
 //! not compile keeps the same front/back convention.
+//!
+//! # Edges
+//!
+//! One [`reach::Edge`] per `fronts_this` boundary with a resolved neighbor.
+//! `PIT_CheckLine` (pinned `p_map.c:214-217`) rejects `ML_BLOCKING` for any
+//! non-missile *before* `P_LineOpening` or any door state is even
+//! consulted, so a boundary that fails
+//! [`Boundary::passable`](crate::check::scene::Boundary::passable) — not
+//! two-sided, or two-sided but flagged blocking — contributes no edge at
+//! all, full stop: a blocking two-sided line is a wall to the flood
+//! regardless of what special it carries, door included. Only once that
+//! filter passes does the special matter: [`Tables::door_special`] or a
+//! locked special from [`Tables::locked_door_kinds`] becomes
+//! [`reach::EdgeKind::Door`]; anything else becomes
+//! [`reach::EdgeKind::Open`].
 //!
 //! # Key classes
 //!
@@ -71,6 +101,7 @@ use crate::check::scene::Scene;
 use crate::check::{Finding, Severity, Subject};
 use crate::reach::{self, Edge, EdgeKind, KeyClass, KeyMask, Limits, Node, ReachGraph};
 use crate::tables::Tables;
+use std::collections::BTreeSet;
 
 /// Interns the vocabulary's locked-door specials into key classes: sorted,
 /// deduped `special` values alongside the key-kind names each class covers
@@ -178,9 +209,12 @@ fn resolve_start(scene: &Scene, findings: &mut Vec<Finding>) -> Option<usize> {
 
 /// Resolves the flood's `goals`: sectors bordering a boundary that carries
 /// one of the four exit specials, per "Exit goals" above (switch specials
-/// only from `fronts_this`, walkover specials from either mirror). Sorted
-/// and deduped. `None`, with the finding already pushed, when the map
-/// carries no exit at all.
+/// only from `fronts_this`; walkover specials from either mirror, but only
+/// when the boundary is actually crossable — `PIT_CheckLine` rejects a
+/// blocking line before `P_CrossSpecialLine`'s `spechit` bookkeeping is ever
+/// reached, so an uncrossable walkover line never fires). Sorted and
+/// deduped. `None`, with the finding already pushed, when the map carries no
+/// exit at all.
 fn resolve_goals(
     scene: &Scene,
     tables: &Tables,
@@ -200,7 +234,7 @@ fn resolve_goals(
             let Ok(special) = u16::try_from(b.special) else {
                 continue;
             };
-            if walkover_specials.contains(&special)
+            if (walkover_specials.contains(&special) && b.passable())
                 || (switch_specials.contains(&special) && b.fronts_this)
             {
                 goals.push(i);
@@ -249,11 +283,19 @@ fn build_nodes(scene: &Scene, specials: &[u16], kinds: &[(String, u16)]) -> Vec<
     nodes
 }
 
-/// Builds one [`Edge`] per `fronts_this` boundary with a resolved neighbor:
-/// a door-special boundary (plain or locked, per "Edges" above) becomes
-/// [`EdgeKind::Door`]; otherwise a [`Boundary::passable`](crate::check::scene::Boundary::passable)
-/// one becomes [`EdgeKind::Open`]; otherwise no edge at all — a blocking
-/// two-sided line is a wall to the flood.
+/// Builds one [`Edge`] per `fronts_this` boundary with a resolved neighbor,
+/// per "Edges" above: a boundary that fails
+/// [`Boundary::passable`](crate::check::scene::Boundary::passable) —
+/// one-sided (already excluded by `neighbor` being `None`) or flagged
+/// blocking — contributes no edge at all, *before* its special is even
+/// read; `PIT_CheckLine` (pinned `p_map.c:214-217`) rejects a blocking line
+/// for any non-missile ahead of `P_LineOpening`, door state notwithstanding,
+/// so an open door on a blocking line still cannot be crossed. Once that
+/// filter passes: [`Tables::door_special`] becomes
+/// [`EdgeKind::Door`]`{ lock: None }`; a special that interns to a lock
+/// class ([`Tables::locked_door_kinds`]) becomes
+/// [`EdgeKind::Door`]`{ lock: Some(class) }`; anything else becomes
+/// [`EdgeKind::Open`].
 fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16]) -> Vec<Edge> {
     let plain_door = tables.door_special();
     let mut edges = Vec::new();
@@ -265,34 +307,36 @@ fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16]) -> Vec<Edge> {
             let Some(neighbor) = b.neighbor else {
                 continue;
             };
+            // A blocking two-sided line is a wall to the flood regardless
+            // of its special, door included — see the doc comment above.
+            if !b.passable() {
+                continue;
+            }
             let special = u16::try_from(b.special).ok();
             let kind = if special == Some(plain_door) {
-                Some(EdgeKind::Door { lock: None })
+                EdgeKind::Door { lock: None }
             } else if let Some(class) = special.and_then(|s| class_of(specials, s)) {
-                Some(EdgeKind::Door { lock: Some(class) })
-            } else if b.passable() {
-                Some(EdgeKind::Open)
+                EdgeKind::Door { lock: Some(class) }
             } else {
-                None
+                EdgeKind::Open
             };
-            if let Some(kind) = kind {
-                edges.push(Edge {
-                    a: i,
-                    b: neighbor,
-                    kind,
-                });
-            }
+            edges.push(Edge {
+                a: i,
+                b: neighbor,
+                kind,
+            });
         }
     }
     edges
 }
 
-/// Maps a completed [`reach::Findings`] onto [`Finding`]s, per "Findings
-/// mapping" in [`run_flood`]'s own doc: unfinishable is one Map-subject
-/// Error; stranded entries are reported only when finishable (an
-/// unfinishable map's stranded list is the degenerate "every visited state"
-/// case, which is the unfinishable finding's story, not a fresh one per
-/// node); every unreachable sector is its own Error.
+/// Maps a completed [`reach::Findings`] onto [`Finding`]s: `unfinishable` is
+/// one `Subject::Map` Error; `stranded` entries are reported only when
+/// finishable (an unfinishable map's stranded list is the degenerate "every
+/// visited state" case — that fact is already the unfinishable finding's
+/// story, not a fresh one per node), each naming its sector and the key
+/// classes held, in words, via [`keys_in_words`]; every `unreachable` sector
+/// is its own `Subject::Sector` Error.
 fn push_flood_findings(
     result: &reach::Findings,
     class_names: &[Vec<String>],
@@ -417,28 +461,43 @@ pub fn check_key_lock_coherence(scene: &Scene, tables: &Tables, findings: &mut V
         }
     }
 
+    // A door is identified by its own (back) sector, the same convention
+    // `check_door_openings` (V-P4) uses: a `fronts_this` boundary's
+    // `neighbor` is the sector `EV_VerticalDoor`/`EV_DoDoor` actually act
+    // on. A single physical door can front two rooms on two separate
+    // linedefs that share that one back sector (a thin door sector between
+    // two rooms) — deduping by `(door sector, class)` rather than by
+    // linedef is what keeps such a door from reporting its own keyless lock
+    // twice.
+    let mut door_locks: BTreeSet<(usize, KeyClass)> = BTreeSet::new();
     for sector in &scene.sectors {
         for b in &sector.boundary {
             if !b.fronts_this {
                 continue;
             }
+            let Some(neighbor) = b.neighbor else {
+                continue;
+            };
             let Some(class) = u16::try_from(b.special)
                 .ok()
                 .and_then(|s| class_of(&specials, s))
             else {
                 continue;
             };
-            if !key_present[class as usize] {
-                findings.push(Finding {
-                    check: "V-P24",
-                    severity: Severity::Error,
-                    subject: Subject::Linedef(b.linedef),
-                    message: format!(
-                        "door locked to `{}`, but no such key is placed anywhere in the map",
-                        class_names[class as usize].join("/")
-                    ),
-                });
-            }
+            door_locks.insert((neighbor, class));
+        }
+    }
+    for &(door_sector, class) in &door_locks {
+        if !key_present[class as usize] {
+            findings.push(Finding {
+                check: "V-P24",
+                severity: Severity::Error,
+                subject: Subject::Sector(door_sector),
+                message: format!(
+                    "door locked to `{}`, but no such key is placed anywhere in the map",
+                    class_names[class as usize].join("/")
+                ),
+            });
         }
     }
 
@@ -494,12 +553,10 @@ mod tests {
     /// Room-row layout: each room is `SIZE` map units square.
     const SIZE: f64 = 128.0;
 
-    /// Declaration index of room `i`'s bottom-row vertex, in an `n`-room row.
-    fn bottom_vertex(i: usize) -> usize {
-        i
-    }
-
     /// Declaration index of room `i`'s top-row vertex, in an `n`-room row.
+    /// Room `i`'s *bottom*-row vertex is declared first and is simply `i`
+    /// itself — every call site below uses the bare index rather than a
+    /// same-named identity function.
     fn top_vertex(n: usize, i: usize) -> usize {
         n + 1 + i
     }
@@ -554,7 +611,7 @@ mod tests {
             "linedef {{ v1 = {}; v2 = {}; sidefront = {}; sideback = {}; \
              twosided = true;{extra}{blocking_s} }}",
             top_vertex(n, i + 1),
-            bottom_vertex(i + 1),
+            i + 1,
             next_sidedef,
             *next_sidedef + 1
         );
@@ -602,13 +659,7 @@ mod tests {
             }
             _ => String::new(),
         };
-        wall(
-            bottom_vertex(i),
-            bottom_vertex(i + 1),
-            &bottom_extra,
-            linedefs,
-            sidedefs,
-        );
+        wall(i, i + 1, &bottom_extra, linedefs, sidedefs);
         wall(
             top_vertex(n, i + 1),
             top_vertex(n, i),
@@ -617,10 +668,10 @@ mod tests {
             sidedefs,
         );
         if i == 0 {
-            wall(top_vertex(n, 0), bottom_vertex(0), "", linedefs, sidedefs);
+            wall(top_vertex(n, 0), 0, "", linedefs, sidedefs);
         }
         if i == n - 1 {
-            wall(bottom_vertex(n), top_vertex(n, n), "", linedefs, sidedefs);
+            wall(n, top_vertex(n, n), "", linedefs, sidedefs);
         }
     }
 
@@ -838,10 +889,12 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
     fn a_pit_the_player_cannot_climb_out_of_is_stranding() {
         let tables = Tables::load().expect("tables");
         let start_id = tables.thing_id("player1_start").expect("player1_start id");
+        let card_id = tables.thing_id("blue_card").expect("blue_card id");
         let exit_special = tables.exit_switch_special();
         let pit_floor = -(tables.step_height() + 8);
 
-        let things = thing_at(64.0, 64.0, start_id); // start room also hosts the exit
+        let mut things = thing_at(64.0, 64.0, start_id); // start room also hosts the exit
+        things += &thing_at(192.0, 64.0, card_id); // a key in the pit itself (room 1)
         let text = room_chain(
             &[(0, 128, 160), (pit_floor, 128, 160)],
             &[(0, 0, false)],
@@ -857,11 +910,63 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
                 .all(|f| !(f.check == "V-P7" && f.message.contains("no feasible walk"))),
             "the exit is right there in the start room: {findings:?}"
         );
+
+        // The pit must read as forward-*reachable but doomed* (stranded),
+        // not merely absent from the graph the way a genuinely unreachable
+        // sector would be — a mutation that drops the open edge into the
+        // pit would turn this into an "unreachable" finding on the same
+        // sector, which a subject-only assertion cannot tell apart from the
+        // intended "stranded" finding.
+        let reached = reached.expect("checked above");
         assert!(
-            findings.iter().any(|f| f.check == "V-P7"
-                && f.severity == Severity::Error
-                && matches!(f.subject, Subject::Sector(1))),
-            "expected a stranding finding naming the pit (sector 1): {findings:?}"
+            reached[1],
+            "the pit is forward-reachable (you can walk into it); it is doomed, not unvisited"
+        );
+        let stranding = findings
+            .iter()
+            .find(|f| f.check == "V-P7" && matches!(f.subject, Subject::Sector(1)))
+            .unwrap_or_else(|| panic!("expected a V-P7 finding naming the pit: {findings:?}"));
+        assert!(
+            stranding
+                .message
+                .contains("no walk from there reaches an exit"),
+            "expected the stranded wording, not the unreachable one: {stranding:?}"
+        );
+        // The pit holds a blue_card: keys_in_words must render the class's
+        // full kind list, not just the placed kind, pinning the same
+        // card-or-skull wording `a_locked_door_edge_and_the_matching_key_
+        // share_a_colour_class` pins at the `reach.rs` layer.
+        assert!(
+            stranding.message.contains("blue_card/blue_skull"),
+            "expected the colour class's full kind list in the stranded wording: {stranding:?}"
+        );
+    }
+
+    #[test]
+    fn a_clean_two_room_map_is_fully_reached_with_no_findings() {
+        // The plain positive case for `reached[]` and edge classification:
+        // two level rooms joined by an ordinary open boundary, exit in the
+        // far room. Both sectors reached, nothing to report.
+        let tables = Tables::load().expect("tables");
+        let start_id = tables.thing_id("player1_start").expect("player1_start id");
+        let exit_special = tables.exit_switch_special();
+        let things = thing_at(64.0, 64.0, start_id);
+        let text = room_chain(
+            &[(0, 128, 160), (0, 128, 160)],
+            &[(0, 0, false)],
+            Some((1, exit_special, 0)),
+            &things,
+        );
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings);
+        assert!(
+            findings.is_empty(),
+            "clean map: no findings at all: {findings:?}"
+        );
+        assert_eq!(
+            reached,
+            Some(vec![true, true]),
+            "both sectors are forward-reachable"
         );
     }
 
@@ -897,16 +1002,23 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         let tables = Tables::load().expect("tables");
         let start_id = tables.thing_id("player1_start").expect("player1_start id");
         let walkover = tables.exit_walkover_special();
+        // More than the step cap higher than the back room: climbing from
+        // the back room to the front is blocked, even though the shared
+        // line is a genuinely open (non-blocking) two-sided boundary — an
+        // uncrossable line would never fire `P_CrossSpecialLine` in the
+        // real engine, so this exit must actually be crossable both ways.
+        let front_floor = tables.step_height() + 8;
 
-        // The shared line is flagged blocking, so it contributes no Open
-        // edge at all: the two rooms are otherwise fully disconnected. The
-        // start sits in room 0, the line's "front" side — not the "recess"
-        // side `reach::graph_from_compiled` alone would treat as the goal —
-        // so this is finishable only if fronting the exit is itself enough.
-        let things = thing_at(64.0, 64.0, start_id);
+        // Start in the BACK room (room 1) — the side
+        // `reach::graph_from_compiled`'s "recess only" convention, or a
+        // front-only bug, would *not* treat as a goal. The only way this
+        // reads finishable is if the start's own room is already a goal:
+        // climbing to the front room is blocked by the step cap, so a
+        // front-only goal set would report this map unfinishable.
+        let things = thing_at(192.0, 64.0, start_id);
         let text = room_chain(
-            &[(0, 128, 160), (0, 128, 160)],
-            &[(i32::from(walkover), 0, true)],
+            &[(front_floor, front_floor + 128, 160), (0, 128, 160)],
+            &[(i32::from(walkover), 0, false)],
             None,
             &things,
         );
@@ -917,8 +1029,8 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
             findings
                 .iter()
                 .all(|f| !(f.check == "V-P7" && f.message.contains("no feasible walk"))),
-            "a walkover exit fires from either crossing side, so the start's own room, \
-             fronting the line, is already a goal: {findings:?}"
+            "a walkover exit fires from either crossing side, so the start's own room (the \
+             back room, unable to climb to the front) is already a goal: {findings:?}"
         );
     }
 
@@ -975,9 +1087,9 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         assert!(
             coherence.iter().any(|f| f.check == "V-P24"
                 && f.severity == Severity::Error
-                && matches!(f.subject, Subject::Linedef(0))
+                && matches!(f.subject, Subject::Sector(1))
                 && f.message.contains("yellow")),
-            "expected a keyless-lock error naming the yellow-locked linedef: {coherence:?}"
+            "expected a keyless-lock error naming the door's own (back) sector, 1: {coherence:?}"
         );
         assert!(
             coherence.iter().any(|f| f.check == "V-P24"
@@ -989,6 +1101,126 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
             coherence.len(),
             2,
             "exactly these two defects, no more: {coherence:?}"
+        );
+    }
+
+    #[test]
+    fn a_two_faced_locked_door_reports_the_keyless_lock_once() {
+        // Two linedefs, each fronting its own room, both backing onto the
+        // SAME door sector (sector 1) — the shape `check_door_openings`
+        // (V-P4) fixtures as `door_chain`: a real door has two faces. Dedup
+        // must key on the door's own sector, not the linedef, or this
+        // reports the identical keyless lock twice.
+        let tables = Tables::load().expect("tables");
+        let locked = tables
+            .locked_door_special("yellow_card")
+            .expect("yellow_card has a locked-door special");
+        let text = format!(
+            r#"namespace = "doom";
+vertex {{ x = 0.000; y = 0.000; }}
+vertex {{ x = 64.000; y = 0.000; }}
+vertex {{ x = 96.000; y = 0.000; }}
+vertex {{ x = 160.000; y = 0.000; }}
+vertex {{ x = 160.000; y = 64.000; }}
+vertex {{ x = 96.000; y = 64.000; }}
+vertex {{ x = 64.000; y = 64.000; }}
+vertex {{ x = 0.000; y = 64.000; }}
+linedef {{ v1 = 1; v2 = 6; sidefront = 0; sideback = 1; twosided = true; special = {locked}; }}
+linedef {{ v1 = 2; v2 = 5; sidefront = 2; sideback = 3; twosided = true; special = {locked}; }}
+linedef {{ v1 = 0; v2 = 1; sidefront = 4; blocking = true; }}
+linedef {{ v1 = 7; v2 = 0; sidefront = 5; blocking = true; }}
+linedef {{ v1 = 6; v2 = 7; sidefront = 6; blocking = true; }}
+linedef {{ v1 = 1; v2 = 2; sidefront = 7; blocking = true; }}
+linedef {{ v1 = 6; v2 = 5; sidefront = 8; blocking = true; }}
+linedef {{ v1 = 2; v2 = 3; sidefront = 9; blocking = true; }}
+linedef {{ v1 = 3; v2 = 4; sidefront = 10; blocking = true; }}
+linedef {{ v1 = 4; v2 = 5; sidefront = 11; blocking = true; }}
+sidedef {{ sector = 0; texturemiddle = "-"; }}
+sidedef {{ sector = 1; texturemiddle = "-"; }}
+sidedef {{ sector = 2; texturemiddle = "-"; }}
+sidedef {{ sector = 1; texturemiddle = "-"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 2; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 2; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 2; texturemiddle = "STARTAN2"; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 0; lightlevel = 160; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }}
+"#
+        );
+        let (scene, _) = scene_of(&text, &tables);
+        let mut coherence = Vec::new();
+        check_key_lock_coherence(&scene, &tables, &mut coherence);
+        let keyless: Vec<_> = coherence
+            .iter()
+            .filter(|f| f.check == "V-P24" && matches!(f.subject, Subject::Sector(1)))
+            .collect();
+        assert_eq!(
+            keyless.len(),
+            1,
+            "the door sector's keyless lock is one defect, not one per face: {coherence:?}"
+        );
+    }
+
+    #[test]
+    fn an_l_shaped_room_in_the_chain_is_flooded_correctly() {
+        // Fixture-diversity check: every other fixture in this module is a
+        // row of rectangles. This one borders a non-convex L-shaped sector
+        // (the same shape `check::scene`'s own `an_l_shaped_sector_contains_
+        // its_notch_correctly` test uses) against an ordinary box via an
+        // open boundary on one of the L's own segments, exercising boundary
+        // iteration over a sector with more than four segments.
+        let tables = Tables::load().expect("tables");
+        let start_id = tables.thing_id("player1_start").expect("player1_start id");
+        let exit_special = tables.exit_switch_special();
+        let text = format!(
+            r#"namespace = "doom";
+vertex {{ x = 0.000; y = 0.000; }}
+vertex {{ x = 96.000; y = 0.000; }}
+vertex {{ x = 96.000; y = 32.000; }}
+vertex {{ x = 32.000; y = 32.000; }}
+vertex {{ x = 32.000; y = 96.000; }}
+vertex {{ x = 0.000; y = 96.000; }}
+vertex {{ x = 224.000; y = 0.000; }}
+vertex {{ x = 224.000; y = 32.000; }}
+linedef {{ v1 = 0; v2 = 1; sidefront = 0; blocking = true; }}
+linedef {{ v1 = 1; v2 = 2; sidefront = 1; sideback = 2; twosided = true; }}
+linedef {{ v1 = 2; v2 = 3; sidefront = 3; blocking = true; }}
+linedef {{ v1 = 3; v2 = 4; sidefront = 4; blocking = true; }}
+linedef {{ v1 = 4; v2 = 5; sidefront = 5; blocking = true; }}
+linedef {{ v1 = 5; v2 = 0; sidefront = 6; blocking = true; }}
+linedef {{ v1 = 2; v2 = 7; sidefront = 7; blocking = true; }}
+linedef {{ v1 = 7; v2 = 6; sidefront = 8; special = {exit_special}; arg0 = 0; blocking = true; }}
+linedef {{ v1 = 6; v2 = 1; sidefront = 9; blocking = true; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "-"; texturetop = "STARTAN2"; texturebottom = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "-"; texturetop = "STARTAN2"; texturebottom = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }}
+thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
+"#
+        );
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P7"),
+            "clean L-shaped map: no V-P7 findings: {findings:?}"
+        );
+        assert_eq!(
+            reached,
+            Some(vec![true, true]),
+            "both the L-shaped room and the box are forward-reachable"
         );
     }
 }
