@@ -10,6 +10,8 @@ use crustygen::pack::pack_udmf;
 use crustygen::tables::Tables;
 use crustywad::{WadBuilder, WadKind};
 
+mod common;
+
 const ENTRADA: &str = include_str!("fixtures/entrada_base.json");
 const ENTRADA_SPEC_PATH: &str = "tests/fixtures/entrada.spec.md";
 
@@ -31,18 +33,6 @@ fn write_temp(bytes: &[u8], label: &str) -> PathBuf {
     ));
     std::fs::write(&path, bytes).expect("write temp file");
     path
-}
-
-/// A minimal one-map UDMF `PWAD`: a `MAP01` marker, a `TEXTMAP` lump holding
-/// `textmap` verbatim, and an `ENDMAP` terminator — the same three-lump shape
-/// `crustywad::map::group`'s own UDMF detection requires.
-fn wad_with_textmap(textmap: impl Into<Vec<u8>>) -> Vec<u8> {
-    WadBuilder::new(WadKind::Pwad)
-        .add_lump("MAP01", Vec::new())
-        .add_lump("TEXTMAP", textmap)
-        .add_lump("ENDMAP", Vec::new())
-        .build()
-        .expect("builds")
 }
 
 #[test]
@@ -195,7 +185,7 @@ fn a_wad_with_no_map_groups_exits_2() {
 
 #[test]
 fn a_textmap_lump_with_invalid_utf8_exits_2() {
-    let bytes = wad_with_textmap(vec![0xFF, 0xFE, 0x00]);
+    let bytes = common::wad_with_textmap(vec![0xFF, 0xFE, 0x00]);
     let path = write_temp(&bytes, "invalid-utf8");
     let out = bin().arg(&path).output().expect("runs");
     std::fs::remove_file(&path).ok();
@@ -324,7 +314,7 @@ sidedef { sector = 0; texturemiddle = "STARTAN2"; }
 sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }
 thing { x = 32.000; y = 32.000; type = 1; single = true; }
 "#;
-    let bytes = wad_with_textmap(DANGLING_SIDEDEF_TEXTMAP);
+    let bytes = common::wad_with_textmap(DANGLING_SIDEDEF_TEXTMAP);
     let path = write_temp(&bytes, "structurally-broken");
     let out = bin()
         .arg(&path)
@@ -337,5 +327,54 @@ thing { x = 32.000; y = 32.000; type = 1; single = true; }
     assert!(
         stdout.contains(": not-run "),
         "expected at least one not-run conformance row: {stdout}"
+    );
+}
+
+#[test]
+fn a_binary_format_entrada_checks_with_an_origin_label() {
+    let path = write_temp(&common::binary_entrada_wad(), "binary-entrada");
+    let out = bin().arg(&path).output().expect("runs");
+    std::fs::remove_file(&path).ok();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout
+            .trim_end()
+            .ends_with(", assembled from binary format"),
+        "summary lacks the origin label: {stdout}"
+    );
+}
+
+#[test]
+fn binary_and_udmf_runs_agree_on_findings() {
+    let binary = write_temp(&common::binary_entrada_wad(), "parity-binary");
+    let udmf = write_temp(&common::udmf_entrada_wad(), "parity-udmf");
+    let bin_out = bin().arg(&binary).output().expect("runs");
+    let udmf_out = bin().arg(&udmf).output().expect("runs");
+    std::fs::remove_file(&binary).ok();
+    std::fs::remove_file(&udmf).ok();
+
+    assert_eq!(bin_out.status.code(), udmf_out.status.code());
+    let bin_lines: Vec<&str> = std::str::from_utf8(&bin_out.stdout)
+        .expect("utf8")
+        .lines()
+        .collect();
+    let udmf_lines: Vec<&str> = std::str::from_utf8(&udmf_out.stdout)
+        .expect("utf8")
+        .lines()
+        .collect();
+    // Every finding line agrees; only the trailing summary differs, and
+    // only by the origin suffix.
+    let (bin_summary, bin_findings) = bin_lines.split_last().expect("summary");
+    let (udmf_summary, udmf_findings) = udmf_lines.split_last().expect("summary");
+    assert_eq!(bin_findings, udmf_findings);
+    assert_eq!(
+        bin_summary.strip_suffix(", assembled from binary format"),
+        Some(*udmf_summary)
     );
 }

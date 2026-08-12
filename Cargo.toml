@@ -14,7 +14,7 @@ keywords = ["doom", "wad", "udmf", "level-generation"]
 categories = ["game-development"]
 
 [dependencies]
-crustywad = { version = "0.9.4", features = ["write", "nodebuild"] }
+crustywad = { version = "0.9.5", features = ["write", "nodebuild"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 serde_norway = "0.9.42"

@@ -31,7 +31,7 @@ spec → IR generation does not exist, so the IR below is still authored
 directly as JSON. See [Known gaps](#known-gaps).
 
 ```bash
-cargo test                                   # 475 tests
+cargo test                                   # 495 tests
 cargo run --bin crustygen-check -- maps/entrada.wad \
     --spec tests/fixtures/entrada.spec.md
 ```
@@ -71,10 +71,12 @@ cannot fit through is a broken map, not a missed target.
 
 Those checks run against the IR, before a coordinate exists — so a compiler
 bug that satisfies them still ships. `src/check` and its `crustygen-check`
-binary are verification layer 4 (`docs/design.md` §8): they parse the
-`TEXTMAP` back out of a built PWAD and re-derive the same invariants from the
-emitted geometry, reusing the sourced tables and the reachability core but
-nothing from `compile/` or `rules.rs` — the logic under cross-examination.
+binary are verification layer 4 (`docs/design.md` §8): they read a built
+PWAD's map group — a UDMF `TEXTMAP`, or a classic Doom binary-format group
+assembled and rendered to the same form — and re-derive the same invariants
+from the emitted geometry, reusing the sourced tables and the reachability
+core but nothing from `compile/` or `rules.rs` — the logic under
+cross-examination.
 Fourteen checks, from dangling cross-references to a key-aware flood that
 proves the map can still be finished. Given a map-spec it also grades a fixed
 catalog of frontmatter parameters against their actual values — a parameter
@@ -82,6 +84,15 @@ with no sourced geometric meaning is an explicit not-derivable row rather than
 a silent gap, and a structurally broken map marks every row not-run rather
 than judging one against corrupt geometry. Exit 0 clean, 1 on a defect, 2 on
 bad input. See [`docs/check.md`](docs/check.md).
+
+## Surveying a WAD
+
+`crustygen-lift` is the first stage of decompiling a WAD's geometry back into
+a map-spec. Today it only surveys: reading a WAD's maps through the same
+shared ingest path `crustygen-check` uses, and reporting raw element counts
+and linedef/sector/thing-type histograms per map, human-readable or as
+`--json`. It interprets nothing yet — no table lookups, no spec emission. See
+[`docs/lift.md`](docs/lift.md).
 
 ## The data tables are the highest-stakes part
 
@@ -110,6 +121,7 @@ the four id/Final Doom IWADs. See
 | [`docs/design.md`](docs/design.md) | The map-spec template, the IR, the compiler contract, and the v1 bar |
 | [`docs/map-spec.md`](docs/map-spec.md) | The map-spec document format, the parser's API, and the enforcement split |
 | [`docs/check.md`](docs/check.md) | The layer-4 verifier: the check catalog, the flood's construction rules, conformance verdicts, and the CLI contract |
+| [`docs/lift.md`](docs/lift.md) | The lifter's charter, its telemetry-skeleton scope, and the `crustygen-lift` CLI contract |
 | [`docs/geometry.md`](docs/geometry.md) | Worked coordinates for the gap and door-chain constructions |
 | [`docs/verticality.md`](docs/verticality.md) | Height differences, and the stairs/lifts phases that follow |
 | [`docs/measurements/`](docs/measurements/) | Corpus measurements over the retail IWADs |
