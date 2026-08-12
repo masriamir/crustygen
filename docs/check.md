@@ -60,8 +60,12 @@ different hat. What it is allowed to reuse, and why:
 Off-limits: **`compile/` and `rules.rs`**, in full. Those are the logic under
 cross-examination; calling into them would make the verifier agree with the
 compiler by construction. `src/check/invariants.rs`'s module doc states this
-at the top of the file, and each check's own doc comment names the
-compile-side function it deliberately does not call.
+at the top of the file, and the five checks that have a compile-side
+counterpart name it in their own doc comments as the function they
+deliberately do not call: V-P8 (`heights::visible_lower_side`/
+`visible_upper_side`), V-P13/P14 (`compile::tags::check_no_action_at_tag_zero`),
+V-P3 and V-P4 (`rules.rs`'s `check_passage_width` and `check_door_clearance`),
+and V-P24 (`rules.rs`'s own `check_key_lock_coherence`).
 
 `crate::geom` is a near miss worth recording: it already has
 `dist_to_segment`, but typed over `geom::Pt`, the grid **integer** coordinates
@@ -124,7 +128,7 @@ prints as `{id} {severity} {subject}: {message}`.
 | `V-S` | **Structural:** a linedef whose `v1`/`v2`/`sidefront`/`sideback`/sidedef-`sector` reference is out of range; a `twosided` flag disagreeing with `sideback`'s presence; a sector boundary that does not close; a thing inside no closed sector. **Unknown vocabulary:** a thing whose `type_id` names nothing (`unknown thing type {n}`); a linedef special this checker does not model. | Error for the four structural cases; Warning for the two unknown-vocabulary cases |
 | `V-P2` | A thing's sector has `ceiling - floor` at least the thing's required height: a monster species' own height, else a blocking/hanging prop's, else the player's height for the five start kinds. Pickups, keys and ammo pin no requirement. **No door-sector exemption** — a door sector's emitted heights are its *closed* state, and something standing in one is unplayable exactly as reported. | Error |
 | `V-P3` | Every passable boundary is at least `2 × player radius` long. Door faces are exempt (their clear width is V-P4's business); one visit per linedef. | Error |
-| `V-P4` | For each door sector — found structurally, as the `neighbor` of a door-special boundary — `min(neighbor ceilings across its own door boundaries) − door_clearance_allowance − its own floor` is at least the player's height. Measures the *emitted* door floor, not `rules.rs`'s pre-layout `max(a.floor, b.floor)` proxy. | Error |
+| `V-P4` | For each door sector — found structurally, as the `neighbor` of a `fronts_this` door-special boundary, i.e. the line's **back** sector, which is what `EV_DoDoor` operates on — `min(neighbor ceilings across its own door boundaries) − door_clearance_allowance − its own floor` is at least the player's height. Measures the *emitted* door floor, not `rules.rs`'s pre-layout `max(a.floor, b.floor)` proxy. | Error |
 | `V-P7` | The key-aware flood: no player 1 start; an extra player 1 start; a start in no sector; no exit line; more lock classes than a `KeyMask` holds; the map is unfinishable; a reachable `(sector, keys)` state can no longer reach an exit; a sector no walk reaches. | Error |
 | `V-P8` | A one-sided line's front `texturemiddle` is not `"-"`; two sectors with differing floors give the **lower-floor** side a `texturebottom`; differing ceilings give the **higher-ceiling** side a `texturetop`. Re-derived from `r_segs.c`'s `R_StoreWallRange` (lines 570 and 589), not from the compile-side `visible_*_side` pair. | Error |
 | `V-P9` | No sidedef carries a `scalex*`/`scaley*` UDMF extension — vanilla's renderer has no per-sidedef scaling, so their presence means a source-port-only effect. Named by the first linedef referencing the sidedef, else by the map (an orphan sidedef). | Error |
@@ -305,18 +309,28 @@ report, and grading a spec violation as a build failure is
 
 ## What the verifier deliberately does not check
 
-- **Lifts, teleports, liquids, sky.** The specials are sourced and reachable
-  through `Tables`, but this compiler emits none of them and neither
+- **Lifts and teleports.** Their linedef specials (62/88 and 97) are sourced
+  and reachable through `Tables`, but this compiler emits neither and neither
   `invariants.rs` nor `flood.rs` models their traversal semantics. They are
   therefore kept **out** of the recognized-special set on purpose: a map
   carrying one draws a `V-S` warning saying this checker does not model that
   special and the flood cannot vouch for its effect on traversal, instead of a
-  silent pass. Recognizing them without understanding
-  them would make the flood optimistic — it could call a map finishable that a
-  player diverted or blocked by that line could not finish. Likewise V-P8 has
-  no sky exception: `r_segs.c` legitimately needs no upper between two sky
-  ceilings, but crustygen emits no sky flat, so the branch is unwritten rather
-  than guessed at.
+  silent pass. Recognizing them without understanding them would make the
+  flood optimistic — it could call a map finishable that a player diverted or
+  blocked by that line could not finish.
+- **Sector specials, liquids included — and these *do* pass silently.** The
+  warning above is a *linedef*-special check: `check_recognized_specials`
+  reads `Boundary::special`, and a damaging floor is a **sector** special
+  (`data/engine.toml`'s `[sector.damage]`, a numerically distinct space, as
+  that table's own neighbouring comment spells out).
+  Nothing in `src/check/` reads `SceneSector::special` at all beyond counting
+  the secret special for `MapStats`, so a nukage sector this checker has never
+  heard of draws neither a finding nor a warning. That is honest only while
+  the compiler emits no liquids; the day it does, sector specials need their
+  own recognized set, and P16/P17 need V- ids.
+- **Sky.** V-P8 has no sky exception: `r_segs.c` legitimately needs no upper
+  between two sky ceilings, but crustygen emits no sky flat, so the branch is
+  unwritten rather than guessed at.
 - **Door track pegging.** The IR's `Portal::track_lower_unpegged` opt-out
   governs a door's *track* sidedefs, and a track is not a concept a
   `TEXTMAP` names — a `Boundary` cannot even address it. V-P11 judges door
@@ -345,8 +359,13 @@ report, and grading a spec violation as a build failure is
   through `parse_udmf`, and check the resulting map — the same path the CLI
   takes, so a fixture cannot accidentally bypass the parser.
 - `tests/check_adversarial.rs` is the layer-4 proof: compile entrada clean,
-  break **exactly one** property on the parsed map, assert the specific
-  finding. Each test re-establishes the zero baseline for its check id before
+  break **exactly one** property on the parsed map — or, for V-P9, on the
+  emitted text before parsing: a scale factor has no field to set
+  (`UdmfSidedef`/`UdmfAssignment` are `#[non_exhaustive]` and cannot be
+  constructed outside crustywad), so it is spliced into the `TEXTMAP` and
+  re-parsed, which is also how a ZDoom-aware editor re-saving the file would
+  introduce one — then assert the specific finding. Each test re-establishes
+  the zero baseline for its check id before
   mutating, so a pass proves the mutation caused the finding rather than the
   property already being broken. It includes the historical −32 `key_room`
   pit — the map that actually shipped unfinishable — caught as stranding.

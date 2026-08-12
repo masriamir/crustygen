@@ -29,18 +29,21 @@ compiler-side only; the verifier covers it, below), **P21** (light sources),
 `check::invariants::check_prop_embedding` measures every collectible against
 every blocking prop's radius, and `check_pickup_reachability` requires each
 collectible's sector to be one the verifier's own key-aware flood actually
-reached — the two halves of P20 that neither the compiler nor its P7 covers.
-The compiler still has no P20 pass of its own; it rests on the subsumption
-below, which holds only while P7 runs at all — a map with no player start or no
-exit runs neither check compile-side (the verifier has no such hole, see the
-P7 entry). Where it does run, P7's coverage check (every room forward-reached
-from the start) subsumes P20's "every pickup is reachable": a thing carries its
-own `at` position, but a room compiles to one sector with a single, uniform
-floor, so reaching the room makes every pickup inside it reachable regardless
-of where in the room it sits. That argument is also what the verifier's
-reachability half rests on, and it is what stops holding once intra-room
-verticality exists — the day a room stops being one flat sector, both layers
-need the position and not just the sector.
+reached. The two halves land differently against the compiler, which still has
+no P20 pass of its own: the **embedding** half it covers nowhere at all, while
+the **reachability** half it covers only while its own P7 runs — a map with no
+player start or no exit runs neither check compile-side. The verifier has no
+such hole: its flood either runs or reports a hard `V-P7` finding (see the P7
+entry), so the gap never becomes silence there.
+
+Where P7 does run, its coverage check (every room forward-reached from the
+start) subsumes P20's "every pickup is reachable": a thing carries its own `at`
+position, but a room compiles to one sector with a single, uniform floor, so
+reaching the room makes every pickup inside it reachable regardless of where in
+the room it sits. That argument is also what the verifier's own reachability
+half rests on — it judges sectors, not positions — and it is what stops holding
+once intra-room verticality exists: the day a room stops being one flat sector,
+both layers need the position and not just the sector.
 
 **P2 (headroom) is now fully covered.** `compile::things::place_things` checks
 every room's headroom against the player's own height once per room,
