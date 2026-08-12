@@ -567,3 +567,69 @@ shells = 4
 cells = 20
 rockets = 1
 source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_BPAK: if (!player->backpack) { for (i=0 ; i<NUMAMMO ; i++) player->maxammo[i] *= 2; player->backpack = true; } for (i=0 ; i<NUMAMMO ; i++) P_GiveAmmo (player, i, 1);' — unlike every other ammo pickup, a backpack grants one full clipammo load of all four types at once (1*clipammo[am_clip]=10 bullets, 1*clipammo[am_shell]=4 shells, 1*clipammo[am_cell]=20 cells, 1*clipammo[am_misl]=1 rocket) and, on first pickup only, permanently doubles every maxammo ceiling — the ceiling doubling is a sustained-capacity effect, not a one-time damage grant, and is not represented in this table. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c"
+
+# How much ammo a placed WEAPON pickup itself grants when first picked up —
+# distinct from `[ammo.pickups.*]` above (ammo-only pickups): every weapon
+# that draws ammo grants some on pickup too, via P_GiveWeapon, a different
+# function with its own num-of-clip-loads convention. `arsenal.ammo.ratio`'s
+# "per-weapon pickup grants" component needs this. The pistol and chainsaw
+# are absent: no `pistol` doomednum exists (the player always starts with
+# it), and the chainsaw draws `am_noammo`, so P_GiveAmmo's own
+# `if (ammo == am_noammo) return false;` guard grants nothing for it.
+#
+# P_GiveWeapon, quoted in full here (every sibling entry below cites this
+# comment rather than repeating the quote):
+# 'boolean P_GiveWeapon (player_t* player, weapontype_t weapon, boolean dropped)
+#  { if (netgame && (deathmatch!=2) && !dropped) { if (player->weaponowned[weapon])
+#      return false; player->bonuscount += BONUSADD; player->weaponowned[weapon] = true;
+#      if (deathmatch) P_GiveAmmo (player, weaponinfo[weapon].ammo, 5);
+#      else P_GiveAmmo (player, weaponinfo[weapon].ammo, 2);
+#      player->pendingweapon = weapon; ... return false; }
+#    if (weaponinfo[weapon].ammo != am_noammo) {
+#      if (dropped) gaveammo = P_GiveAmmo (player, weaponinfo[weapon].ammo, 1);
+#      else gaveammo = P_GiveAmmo (player, weaponinfo[weapon].ammo, 2); }
+#    ... }'
+# The netgame branch (deathmatch: 5 clip loads; coop: 2, same as
+# single-player) never runs outside a netgame — `netgame` is false in
+# single-player, so this compiler's own placements always fall through to
+# the general path below it. There, `dropped` picks 1 clip load (dropped) or
+# 2 (found): p_inter.c's P_KillMobj is the ONLY place that sets MF_DROPPED
+# on a weapon (the zombieman/shotgun-guy/chaingunner death-drop case,
+# 'mo->flags |= MF_DROPPED; // special versions of items'), never on a
+# WAD-placed thing, so a level-authored weapon pickup is always the
+# 2-clip-load, undropped case. Every figure below is that case: 2 *
+# clipammo[ammo_type] (clipammo[] quoted in full at [ammo.pickups.clip]:
+# {10, 4, 20, 1} for {am_clip, am_shell, am_cell, am_misl}), mirroring
+# `[ammo.pickups.*]`'s own "undropped, standard skill tier" convention
+# (P_GiveAmmo doubles every figure on sk_baby/sk_nightmare, not modeled
+# here).
+# https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c
+[ammo.weapon_grant.chaingun]
+amount = 20
+ammo_type = "bullets"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_MGUN: if (!P_GiveWeapon (player, wp_chaingun, special->flags&MF_DROPPED) ) return;'. d_items.c, weaponinfo[wp_chaingun]: ammo = am_clip. Undropped (see this table's header comment): 2*clipammo[am_clip] = 2*10 = 20 bullets. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c and .../d_items.c"
+
+[ammo.weapon_grant.shotgun]
+amount = 8
+ammo_type = "shells"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_SHOT: if (!P_GiveWeapon (player, wp_shotgun, special->flags&MF_DROPPED ) ) return;'. d_items.c, weaponinfo[wp_shotgun]: ammo = am_shell. Undropped (see this table's header comment): 2*clipammo[am_shell] = 2*4 = 8 shells. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c and .../d_items.c"
+
+[ammo.weapon_grant.super_shotgun]
+amount = 8
+ammo_type = "shells"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_SGN2: if (!P_GiveWeapon (player, wp_supershotgun, special->flags&MF_DROPPED ) ) return;'. d_items.c, weaponinfo[wp_supershotgun]: ammo = am_shell. Undropped (see this table's header comment): 2*clipammo[am_shell] = 2*4 = 8 shells — the same grant as the single-barrel shotgun, both drawing the `shells` pool. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c and .../d_items.c"
+
+[ammo.weapon_grant.rocket_launcher]
+amount = 2
+ammo_type = "rockets"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_LAUN: if (!P_GiveWeapon (player, wp_missile, false) ) return;' — `dropped` is hardcoded false for this weapon. d_items.c, weaponinfo[wp_missile]: ammo = am_misl. 2*clipammo[am_misl] = 2*1 = 2 rockets. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c and .../d_items.c"
+
+[ammo.weapon_grant.plasma_rifle]
+amount = 40
+ammo_type = "cells"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_PLAS: if (!P_GiveWeapon (player, wp_plasma, false) ) return;' — `dropped` hardcoded false. d_items.c, weaponinfo[wp_plasma]: ammo = am_cell. 2*clipammo[am_cell] = 2*20 = 40 cells. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c and .../d_items.c"
+
+[ammo.weapon_grant.bfg9000]
+amount = 40
+ammo_type = "cells"
+source = "id-Software/DOOM linuxdoom-1.10/p_inter.c, P_TouchSpecialThing: 'case SPR_BFUG: if (!P_GiveWeapon (player, wp_bfg, false) ) return;' — `dropped` hardcoded false. d_items.c, weaponinfo[wp_bfg]: ammo = am_cell. 2*clipammo[am_cell] = 2*20 = 40 cells — the same grant as the plasma rifle, both drawing the `cells` pool. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_inter.c and .../d_items.c"

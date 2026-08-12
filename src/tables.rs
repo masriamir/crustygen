@@ -287,9 +287,25 @@ struct AmmoPickups {
     backpack: BackpackGrant,
 }
 
+/// How much ammo a placed weapon pickup itself grants on first pickup
+/// (`engine.toml`'s `[ammo.weapon_grant.*]` table) — distinct from
+/// [`AmmoPickups`], which covers ammo-only pickups. The pistol (never a
+/// placed pickup thing) and chainsaw (draws no ammo) are deliberately
+/// absent; see that table's header comment.
+#[derive(Debug, Deserialize)]
+struct WeaponGrant {
+    chaingun: AmmoPickup,
+    shotgun: AmmoPickup,
+    super_shotgun: AmmoPickup,
+    rocket_launcher: AmmoPickup,
+    plasma_rifle: AmmoPickup,
+    bfg9000: AmmoPickup,
+}
+
 #[derive(Debug, Deserialize)]
 struct AmmoTable {
     pickups: AmmoPickups,
+    weapon_grant: WeaponGrant,
 }
 
 #[derive(Debug, Deserialize)]
@@ -762,6 +778,27 @@ impl Tables {
     #[must_use]
     pub fn ammo_backpack_grant(&self) -> BackpackGrant {
         self.engine.ammo.pickups.backpack
+    }
+
+    /// A named weapon's ammo grant from the weapon pickup itself (`chaingun`
+    /// | `shotgun` | `super_shotgun` | `rocket_launcher` | `plasma_rifle` |
+    /// `bfg9000`), if listed — distinct from [`Self::ammo_pickup`], which
+    /// covers ammo-only pickups. The pistol (never a placed pickup thing)
+    /// and chainsaw (draws no ammo) are deliberately absent from the
+    /// vocabulary this covers; see `engine.toml`'s `[ammo.weapon_grant.*]`
+    /// header comment.
+    #[must_use]
+    pub fn weapon_ammo_grant(&self, name: &str) -> Option<AmmoPickup> {
+        let grant = &self.engine.ammo.weapon_grant;
+        match name {
+            "chaingun" => Some(grant.chaingun),
+            "shotgun" => Some(grant.shotgun),
+            "super_shotgun" => Some(grant.super_shotgun),
+            "rocket_launcher" => Some(grant.rocket_launcher),
+            "plasma_rifle" => Some(grant.plasma_rifle),
+            "bfg9000" => Some(grant.bfg9000),
+            _ => None,
+        }
     }
 
     /// The texture for a role (`wall`, `floor`, `ceiling`, `door`,
