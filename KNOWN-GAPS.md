@@ -4,9 +4,9 @@ State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD 
 reassembles through crustywad, plus the layer-4 verifier that re-checks the
 emitted map (`src/check`, `crustygen-check` — see `docs/check.md`), plus the
 shared `crustygen::ingest` path and the `crustygen-lift` telemetry skeleton
-(`src/lift`, `src/ingest.rs` — see `docs/lift.md`). 490 tests (443 lib + 7
+(`src/lift`, `src/ingest.rs` — see `docs/lift.md`). 495 tests (443 lib + 7
 check_adversarial + 16 check_cli + 4 check_conformance + 1 first_map + 6
-golden_textmap + 5 lift_cli + 3 spec_documents + 4 vanilla_wad + 1
+golden_textmap + 10 lift_cli + 3 spec_documents + 4 vanilla_wad + 1
 walking_skeleton), plus a separately-run `#[ignore]`d golden-regeneration
 generator not included in that count. This file records what is deliberately
 absent, what is known-fragile, and the decisions a future contributor would

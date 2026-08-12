@@ -97,6 +97,10 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
     for group in &groups {
         match ingest::load_map(&wad, group) {
             Ok(loaded) => {
+                // COVERAGE: the loop body is unreachable today — under strict
+                // `WriteOptions` the only warning a Doom-format binary map can
+                // produce is `NamespaceDefaulted`, which `ingest` filters out.
+                // Future-proofing for warnings a later crustywad could surface.
                 for note in &loaded.notes {
                     eprintln!("crustygen-lift: note: map `{}`: {note}", group.name);
                 }

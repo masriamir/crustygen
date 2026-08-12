@@ -97,6 +97,10 @@ fn check_wad(args: &Args) -> Result<i32, String> {
     let group = select_group(&wad, args.map_name.as_deref(), &args.wad_path)?;
     let loaded =
         ingest::load_map(&wad, &group).map_err(|err| format!("map `{}`: {err}", group.name))?;
+    // COVERAGE: the loop body is unreachable today — under strict
+    // `WriteOptions` the only warning a Doom-format binary map can produce is
+    // `NamespaceDefaulted`, which `ingest` filters out. Future-proofing for
+    // warnings a later crustywad could surface.
     for note in &loaded.notes {
         eprintln!("crustygen-check: note: map `{}`: {note}", group.name);
     }

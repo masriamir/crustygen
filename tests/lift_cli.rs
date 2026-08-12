@@ -93,3 +93,80 @@ fn a_partly_broken_wad_surveys_survivors_and_exits_1() {
     assert!(stdout.starts_with("MAP01: "), "survivor missing: {stdout}");
     assert!(stderr.contains("MAP02"), "failure not named: {stderr}");
 }
+
+#[test]
+fn an_extra_positional_argument_exits_2() {
+    let out = bin().args(["a.wad", "b.wad"]).output().expect("runs");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unexpected extra argument"),
+        "got: {stderr}"
+    );
+}
+
+#[test]
+fn map_selection_surveys_only_the_named_group() {
+    let path = write_temp(&common::binary_entrada_wad(), "map-select");
+    let out = bin()
+        .args([path.to_str().expect("utf8 path"), "--map", "MAP01"])
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).starts_with("MAP01: "));
+}
+
+#[test]
+fn a_nonexistent_map_name_exits_2() {
+    let path = write_temp(&common::binary_entrada_wad(), "map-missing");
+    let out = bin()
+        .args([path.to_str().expect("utf8 path"), "--map", "NOPE"])
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no map group named `NOPE`"),
+        "got: {stderr}"
+    );
+}
+
+#[test]
+fn a_wad_with_no_map_groups_exits_2() {
+    let bytes = crustywad::WadBuilder::new(crustywad::WadKind::Pwad)
+        .add_lump("DUMMY", b"not a map".to_vec())
+        .build()
+        .expect("builds");
+    let path = write_temp(&bytes, "no-map-groups");
+    let out = bin().arg(&path).output().expect("runs");
+    std::fs::remove_file(&path).ok();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("contains no map groups"), "got: {stderr}");
+}
+
+#[test]
+fn a_udmf_wad_surveys_without_the_binary_origin_note() {
+    let path = write_temp(&common::udmf_entrada_wad(), "udmf-survey");
+    let out = bin().arg(&path).output().expect("runs");
+    std::fs::remove_file(&path).ok();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.starts_with("MAP01: "), "got: {stdout}");
+    assert!(
+        !stdout.contains("assembled from binary format"),
+        "UDMF survey must not carry the binary-origin note: {stdout}"
+    );
+}
