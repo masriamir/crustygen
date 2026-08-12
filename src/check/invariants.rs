@@ -62,10 +62,11 @@ fn texture_error(linedef: usize, message: String) -> Finding {
 /// `texturetop` on the higher-ceiling side.
 ///
 /// No sky exception: `r_segs.c` skips the upper texture when both sectors'
-/// `ceilingpic == skyflatnum` (`worldtop = worldhigh`, same file, just above
-/// line 526). crustygen never emits a sky flat, so no fixture can reach
-/// that case — deliberately unwritten rather than guessed at
-/// (`KNOWN-GAPS.md`, "P8 has no sky exception").
+/// `ceilingpic == skyflatnum` (`worldtop = worldhigh`, same file, a few
+/// lines below the `worldhigh`/`worldlow` assignment above, at line 533).
+/// crustygen never emits a sky flat, so no fixture can reach that case —
+/// deliberately unwritten rather than guessed at (`KNOWN-GAPS.md`, "P8 has
+/// no sky exception").
 pub fn check_textures(map: &UdmfMap, scene: &Scene, findings: &mut Vec<Finding>) {
     for sector in &scene.sectors {
         for b in &sector.boundary {
@@ -181,23 +182,43 @@ pub fn check_scaling(map: &UdmfMap, findings: &mut Vec<Finding>) {
     }
 }
 
-/// V-P11: every door-special boundary is lower-unpegged.
+/// V-P11: no door-special boundary carries either unpegged flag on its own
+/// face.
 ///
-/// A door sector's ceiling animates open while its floor stays put;
-/// lower-unpegging (`ML_DONTPEGBOTTOM`, `Boundary::lower_unpegged`, sourced
-/// via [`Tables::linedef_flag`]`("lower_unpegged")`) anchors the door face
-/// texture's bottom edge to the floor instead of letting it slide with the
-/// moving ceiling. `compile::doors::emit_doors` sets it unconditionally on a
-/// door's own two faces — never conditionally on `Portal::track_lower_unpegged`,
-/// which "only ever governed the track" (`KNOWN-GAPS.md`) — so this check
-/// judges door **faces** only: the boundaries actually carrying the door
-/// special. A door's jamb ("track") sidedefs are a separate, unindexed
-/// concept a [`crate::check::scene::Boundary`] cannot even name, so the IR's
-/// track opt-out is invisible here by construction, not by an explicit skip.
+/// **This pins the project's authoring convention, not an engine
+/// requirement** — unlike V-P8/V-P9, nothing here is a source-verified
+/// playability fact, which is why its severity is [`Severity::Warning`],
+/// not Error (the same downgrade `docs/design.md` §9 gives P10: "a badly
+/// tiled wall is ugly, not broken" — a convention violation, not a broken
+/// map). `ML_DONTPEGBOTTOM` only repositions the *lower* texture
+/// (`r_segs.c`, `R_StoreWallRange`, the branch this crate already read for
+/// V-P8: `if (worldlow > worldbottom) { ... if (linedef->flags &
+/// ML_DONTPEGBOTTOM) { rw_bottomtexturemid = worldtop; } else
+/// rw_bottomtexturemid = worldlow; }`, lines 589-601). On a typical door
+/// face — floors level on both sides, only the ceiling differs while
+/// closed — that branch's own guard (`worldlow > worldbottom`, i.e.
+/// `backsector->floorheight > frontsector->floorheight`) never fires, so no
+/// lower texture is even selected: `ML_DONTPEGBOTTOM` is inert there. The
+/// door's own visible texture instead lives in the *upper* texture slot
+/// (the sibling `worldhigh < worldtop` branch, lines 570-588), governed by
+/// `ML_DONTPEGTOP`, a different bit. Measured against `DOOM2.WAD`: 247 of
+/// 255 door-special lines carry neither flag, so this rule mostly confirms
+/// an existing near-universal authoring practice.
 ///
-/// Each linedef is visited once (`fronts_this` only): `special` and
-/// `lower_unpegged` are linedef-wide, so both mirrors of a two-sided door
-/// line would otherwise report the identical defect twice.
+/// The ruling this check enforces: neither flag belongs on a door's own
+/// **faces** — only its jamb ("track") sidedefs should be lower-unpegged,
+/// so the track's texture stays anchored to the floor as the door's
+/// ceiling animates open. A door's track is a separate, unindexed concept a
+/// [`crate::check::scene::Boundary`] cannot even name, so the IR's
+/// `Portal::track_lower_unpegged` opt-out (which only ever governed the
+/// track, per `KNOWN-GAPS.md`) is invisible here by construction, not by an
+/// explicit skip — this check judges faces only because faces are all it
+/// can see.
+///
+/// Each linedef is visited once (`fronts_this` only): `special`,
+/// `upper_unpegged`, and `lower_unpegged` are all linedef-wide, so both
+/// mirrors of a two-sided door line would otherwise report the identical
+/// defect twice.
 pub fn check_door_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
     let door = i32::from(tables.door_special());
     let locked: Vec<i32> = tables
@@ -208,15 +229,19 @@ pub fn check_door_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Fin
 
     for sector in &scene.sectors {
         for b in &sector.boundary {
-            if !b.fronts_this || b.lower_unpegged {
+            if !b.fronts_this || !(b.upper_unpegged || b.lower_unpegged) {
                 continue;
             }
             if b.special == door || locked.contains(&b.special) {
                 findings.push(Finding {
                     check: "V-P11",
-                    severity: Severity::Error,
+                    severity: Severity::Warning,
                     subject: Subject::Linedef(b.linedef),
-                    message: format!("door special {} is missing dontpegbottom", b.special),
+                    message: format!(
+                        "door special {} carries an unpegged flag on its own face \
+                         (dontpegtop={}, dontpegbottom={}) — only the track should be pegged",
+                        b.special, b.upper_unpegged, b.lower_unpegged
+                    ),
                 });
             }
         }
@@ -327,15 +352,15 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
 
     /// [`TWO_BOX_STEPPED`] with the shared line turned into a manual door
     /// (`special = 1`, `arg0 = 5`) and sector 1 tagged to match (`id = 5`).
-    /// `dontpegbottom` is left to the caller.
-    fn door_fixture(pegged: bool) -> String {
-        let peg = if pegged { " dontpegbottom = true;" } else { "" };
+    /// `extra_flags` is spliced verbatim into the linedef block (e.g.
+    /// `" dontpegbottom = true;"`), empty for the clean case.
+    fn door_fixture(extra_flags: &str) -> String {
         TWO_BOX_STEPPED
             .replace(
                 "linedef { v1 = 1; v2 = 4; sidefront = 0; sideback = 1; twosided = true; }",
                 &format!(
                     "linedef {{ v1 = 1; v2 = 4; sidefront = 0; sideback = 1; twosided = true; \
-                     special = 1; arg0 = 5;{peg} }}"
+                     special = 1; arg0 = 5;{extra_flags} }}"
                 ),
             )
             .replace(
@@ -345,19 +370,30 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
     }
 
     #[test]
-    fn a_door_face_without_dontpegbottom_is_a_p11_error() {
-        let findings = findings_of(&door_fixture(false));
+    fn a_door_face_with_dontpegbottom_is_a_p11_warning() {
+        let findings = findings_of(&door_fixture(" dontpegbottom = true;"));
         assert!(
             findings.iter().any(|f| f.check == "V-P11"
-                && f.severity == Severity::Error
+                && f.severity == Severity::Warning
                 && matches!(f.subject, Subject::Linedef(0))),
-            "expected a V-P11 error on linedef 0: {findings:?}"
+            "expected a V-P11 warning on linedef 0: {findings:?}"
         );
     }
 
     #[test]
-    fn a_door_face_with_dontpegbottom_raises_no_p11_finding() {
-        let findings = findings_of(&door_fixture(true));
+    fn a_door_face_with_dontpegtop_is_a_p11_warning() {
+        let findings = findings_of(&door_fixture(" dontpegtop = true;"));
+        assert!(
+            findings.iter().any(|f| f.check == "V-P11"
+                && f.severity == Severity::Warning
+                && matches!(f.subject, Subject::Linedef(0))),
+            "expected a V-P11 warning on linedef 0: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_door_face_with_neither_unpegged_flag_raises_no_p11_finding() {
+        let findings = findings_of(&door_fixture(""));
         assert!(
             findings.iter().all(|f| f.check != "V-P11"),
             "clean fixture: {findings:?}"

@@ -232,6 +232,7 @@ struct LinedefFlags {
     sound_block: u16,
     blocking: u16,
     two_sided: u16,
+    upper_unpegged: u16,
     lower_unpegged: u16,
 }
 
@@ -663,14 +664,14 @@ impl Tables {
 
     /// The `doomdata.h` bit value for a named linedef flag (`block_monsters`
     /// | `secret` | `sound_block` | `blocking` | `two_sided` |
-    /// `lower_unpegged`), if known. `combat.block_monster_lines` needs
-    /// `block_monsters` (`ML_BLOCKMONSTERS`); `combat.sound.block_sound_at`
+    /// `upper_unpegged` | `lower_unpegged`), if known. `combat.block_monster_lines`
+    /// needs `block_monsters` (`ML_BLOCKMONSTERS`); `combat.sound.block_sound_at`
     /// needs `sound_block` (`ML_SOUNDBLOCK`). `blocking`, `two_sided`
-    /// (`ML_BLOCKING`, `ML_TWOSIDED`), and `lower_unpegged`
-    /// (`ML_DONTPEGBOTTOM`) are read back by [`crate::check::scene`] to
-    /// re-derive a parsed map's own boundary passability and texture-pegging
-    /// from its linedef `flags` bits, rather than trusting the compiler's
-    /// structural output.
+    /// (`ML_BLOCKING`, `ML_TWOSIDED`), `upper_unpegged`
+    /// (`ML_DONTPEGTOP`), and `lower_unpegged` (`ML_DONTPEGBOTTOM`) are read
+    /// back by [`crate::check::scene`] to re-derive a parsed map's own
+    /// boundary passability and texture-pegging from its linedef `flags`
+    /// bits, rather than trusting the compiler's structural output.
     ///
     /// UDMF's `doom` namespace spells each flag as its own named boolean
     /// field on the linedef object — `blockmonsters` and `blocksound`
@@ -687,6 +688,7 @@ impl Tables {
             "sound_block" => Some(self.engine.linedef.flags.sound_block),
             "blocking" => Some(self.engine.linedef.flags.blocking),
             "two_sided" => Some(self.engine.linedef.flags.two_sided),
+            "upper_unpegged" => Some(self.engine.linedef.flags.upper_unpegged),
             "lower_unpegged" => Some(self.engine.linedef.flags.lower_unpegged),
             _ => None,
         }
@@ -1209,6 +1211,7 @@ mod tests {
         let t = Tables::load().expect("tables");
         assert_eq!(t.linedef_flag("blocking"), Some(1));
         assert_eq!(t.linedef_flag("two_sided"), Some(4));
+        assert_eq!(t.linedef_flag("upper_unpegged"), Some(8));
         assert_eq!(t.linedef_flag("lower_unpegged"), Some(16));
         assert_eq!(t.thing_id("player2_start"), Some(2));
         assert_eq!(t.thing_id("player3_start"), Some(3));

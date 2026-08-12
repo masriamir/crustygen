@@ -26,9 +26,9 @@ use std::collections::HashMap;
 #[expect(
     clippy::struct_excessive_bools,
     reason = "each bool mirrors an independent bit of the engine's `maplinedef_t.flags` \
-              bitfield (two_sided, blocking, lower_unpegged) or an independent structural fact \
-              about which mirror this is (fronts_this) — the same reasoning LinedefOut gives in \
-              compile/mod.rs for the emission side of this exact bitfield"
+              bitfield (two_sided, blocking, upper_unpegged, lower_unpegged) or an independent \
+              structural fact about which mirror this is (fronts_this) — the same reasoning \
+              LinedefOut gives in compile/mod.rs for the emission side of this exact bitfield"
 )]
 pub struct Boundary {
     /// The edge's start point, world units.
@@ -49,6 +49,10 @@ pub struct Boundary {
     /// but can see and shoot across), which is why [`Boundary::passable`]
     /// checks both.
     pub blocking: bool,
+    /// Whether the linedef's upper texture is unpegged (UDMF `dontpegtop`,
+    /// sourced `ML_DONTPEGTOP` bit — [`Tables::linedef_flag`]
+    /// `("upper_unpegged")`).
+    pub upper_unpegged: bool,
     /// Whether the linedef's lower texture is unpegged (UDMF `dontpegbottom`,
     /// sourced `ML_DONTPEGBOTTOM` bit — [`Tables::linedef_flag`]
     /// `("lower_unpegged")`).
@@ -174,18 +178,19 @@ fn resolve_index(
     resolved
 }
 
-/// The sourced `ML_TWOSIDED`/`ML_BLOCKING`/`ML_DONTPEGBOTTOM` bit values,
-/// resolved once per [`Scene::build`] call rather than re-looked-up for
-/// every linedef.
+/// The sourced `ML_TWOSIDED`/`ML_BLOCKING`/`ML_DONTPEGTOP`/`ML_DONTPEGBOTTOM`
+/// bit values, resolved once per [`Scene::build`] call rather than
+/// re-looked-up for every linedef.
 #[derive(Debug, Clone, Copy)]
 struct BoundaryFlagBits {
     two_sided: u32,
     blocking: u32,
+    upper_unpegged: u32,
     lower_unpegged: u32,
 }
 
 impl BoundaryFlagBits {
-    /// Resolves all three bits from `tables`. Panics if any is missing —
+    /// Resolves all four bits from `tables`. Panics if any is missing —
     /// they are guaranteed present in `engine.toml`'s `[linedef.flags]`.
     fn resolve(tables: &Tables) -> Self {
         Self {
@@ -199,6 +204,11 @@ impl BoundaryFlagBits {
                     .linedef_flag("blocking")
                     .expect("sourced in engine.toml"),
             ),
+            upper_unpegged: u32::from(
+                tables
+                    .linedef_flag("upper_unpegged")
+                    .expect("sourced in engine.toml"),
+            ),
             lower_unpegged: u32::from(
                 tables
                     .linedef_flag("lower_unpegged")
@@ -207,11 +217,13 @@ impl BoundaryFlagBits {
         }
     }
 
-    /// Reads `(two_sided, blocking, lower_unpegged)` off a linedef's `flags`.
-    fn read(self, flags: u32) -> (bool, bool, bool) {
+    /// Reads `(two_sided, blocking, upper_unpegged, lower_unpegged)` off a
+    /// linedef's `flags`.
+    fn read(self, flags: u32) -> (bool, bool, bool, bool) {
         (
             flags & self.two_sided != 0,
             flags & self.blocking != 0,
+            flags & self.upper_unpegged != 0,
             flags & self.lower_unpegged != 0,
         )
     }
@@ -277,7 +289,7 @@ fn process_linedef(
         }
     };
 
-    let (two_sided, blocking, lower_unpegged) = flag_bits.read(line.flags);
+    let (two_sided, blocking, upper_unpegged, lower_unpegged) = flag_bits.read(line.flags);
     if two_sided != back.is_some() {
         findings.push(reference_error(
             i,
@@ -299,6 +311,7 @@ fn process_linedef(
         neighbor: back.map(|(_, back_sector)| back_sector),
         two_sided,
         blocking,
+        upper_unpegged,
         lower_unpegged,
         special: line.special,
         tag: line.args[0],
@@ -314,6 +327,7 @@ fn process_linedef(
             neighbor: Some(front_sector),
             two_sided,
             blocking,
+            upper_unpegged,
             lower_unpegged,
             special: line.special,
             tag: line.args[0],
