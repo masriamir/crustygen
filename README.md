@@ -31,7 +31,7 @@ spec → IR generation does not exist, so the IR below is still authored
 directly as JSON. See [Known gaps](#known-gaps).
 
 ```bash
-cargo test                                   # 423 tests
+cargo test                                   # 431 tests
 cargo run --bin crustygen-check -- maps/entrada.wad \
     --spec tests/fixtures/entrada.spec.md
 ```
@@ -76,9 +76,12 @@ binary are verification layer 4 (`docs/design.md` §8): they parse the
 emitted geometry, reusing the sourced tables and the reachability core but
 nothing from `compile/` or `rules.rs` — the logic under cross-examination.
 Fourteen checks, from dangling cross-references to a key-aware flood that
-proves the map can still be finished. Given a map-spec it also reports every
-frontmatter parameter against its actual value. Exit 0 clean, 1 on a defect,
-2 on bad input. See [`docs/check.md`](docs/check.md).
+proves the map can still be finished. Given a map-spec it also grades a fixed
+catalog of frontmatter parameters against their actual values — a parameter
+with no sourced geometric meaning is an explicit not-derivable row rather than
+a silent gap, and a structurally broken map marks every row not-run rather
+than judging one against corrupt geometry. Exit 0 clean, 1 on a defect, 2 on
+bad input. See [`docs/check.md`](docs/check.md).
 
 ## The data tables are the highest-stakes part
 

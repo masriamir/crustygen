@@ -138,7 +138,7 @@ prints as `{id} {severity} {subject}: {message}`.
 | `V-P19` | Every sector's `lightlevel` is inside `Tables::light_range()`. Unconditional, spec or no spec. | Error |
 | `V-P20` | **Embedding:** no collectible (pickup, ammo, weapon, `backpack`, key, or one of the eight powerups) sits inside a blocking prop's radius. **Reachability:** every collectible's sector is one the V-P7 flood actually reached; runs only when the flood ran. | Error |
 | `V-P24` | Every locked-door **class** present has at least one key of that colour placed, and every placed key opens at least one door present. Class-level, because `26` is all an emitted linedef retains — it opens to either `blue_card` or `blue_skull`. Doors dedupe by `(door sector, class)`, so one physical door with two faces reports once. | Error |
-| `V-P25` | Every player start clears its sector's **non-passable** walls by at least the player's radius (an open doorway cannot crush you against it), and no two starts of any kind are within telefrag distance (`2 × radius`) of each other. | Error |
+| `V-P25` | Every player start clears its sector's **non-passable** walls by at least the player's radius (an open doorway cannot crush you against it); clears every other thing whose name resolves to a blocking prop by `prop.radius + player.radius` (`PIT_CheckThing`'s own `blockdist`); and no two starts of any kind are within telefrag distance (`2 × radius`) of each other. | Error |
 
 Severity is a discipline, not a mood. **Error** means the map (or the input)
 is provably broken and the CLI exits 1. **Warning** means suspicious but not
@@ -202,16 +202,24 @@ all.
 ## Conformance
 
 Supplied a `Spec`, `conform::rows` (`src/check/conform.rs`) produces one row
-per frontmatter parameter: `parameter`, `target`, `actual`, `verdict`. Unlike
-the rest of the module, nothing here re-derives a playability rule — every row
-is a target-vs-actual comparison, so the only sourcing burden is the ammo
-ratio's damage figures and the two thing-flag bits (`MTF_AMBUSH` = 8;
-multiplayer-only = 16, which the pinned source writes as a raw literal with no
-named constant).
+per parameter in its fixed catalog — `parameter`, `target`, `actual`,
+`verdict` — plus one row per spec monster species, one per placed species the
+spec never names, and one per `sustain.powerups[]` entry. **This is not one
+row per frontmatter parameter declared** — a parameter with no sourced
+geometric definition, or nothing emitted to measure it against, is instead one
+of the explicit `NotDerivable` rows below, not a silent omission, and several
+frontmatter fields (`identity.title`/`.author`/`.iwad`/`.outputs`/`.seed`,
+most of `combat`'s administrative fields, `progression.doors`'s
+speed/behavior settings, and others) have no row at all: nothing this checker
+does turns on their value. Unlike the rest of the module, nothing here
+re-derives a playability rule — every row is a target-vs-actual comparison, so
+the only sourcing burden is the ammo ratio's damage figures and the two
+thing-flag bits (`MTF_AMBUSH` = 8; multiplayer-only = 16, which the pinned
+source writes as a raw literal with no named constant).
 
-Thirty-two rows are fixed, plus one per spec monster species, one per placed
+Thirty-five rows are fixed, plus one per spec monster species, one per placed
 species the spec never names (always `Fail`, target `absent`), and one per
-`sustain.powerups[]` entry. Entrada against its paired spec produces 45.
+`sustain.powerups[]` entry. Entrada against its paired spec produces 48.
 
 **Verdict discipline.** A range (`MinMax`) or exact-count or boolean target is
 `Pass`/`Fail` — those are decidable. A **scalar continuous** target
@@ -225,17 +233,23 @@ right owner of. Reporting the delta and declining to grade it is the honest
 form. A ratio row over a map with no monsters reads `"no monsters"`, still
 `Info`, never `Fail`.
 
-`Verdict::NotRun` exists on the type for a row whose prerequisite failed;
-`conform::rows` produces none today, and `tests/check_conformance.rs` asserts
-their absence as a broken-scene canary.
+`Verdict::NotRun` is for a row whose prerequisite failed. `conform::rows`
+itself never produces one; when the map's findings carry a hard `"V-S"`
+`Error`, `check::run` calls `conform::not_run_rows` instead — see "Failure
+containment" below. `tests/check_conformance.rs` asserts a clean run carries
+none, and separately proves the structural-failure path forces every row to
+`NotRun`.
 
-**NotDerivable**, with the reason carried in `actual`. Three rows are always
+**NotDerivable**, with the reason carried in `actual`. Six rows are always
 undecidable:
 
 | Row | Reason |
 |---|---|
+| `identity.grid` | `portal width/at are exempt from the grid rule, so a vertex-grid check false-positives on every opening` |
 | `scale.rooms` | `rooms are an IR concept; emitted sectors include passages/doors/alcoves` |
 | `scale.play_time_minutes` | `runtime property` |
+| `combat.encounter_style` | `no sourced geometric definition exists` |
+| `combat.sound.propagation` | `no sourced geometric definition exists` |
 | `combat.max_simultaneous` | `runtime property` |
 
 Five more become `NotDerivable` only when the map gives them nothing to
@@ -278,6 +292,38 @@ stated rather than implied:
 - **Denominator.** The sum of `spawnhealth` over every placed monster. Zero
   reads `"no monsters"` rather than dividing by an invented baseline.
 
+## Failure containment
+
+A structural `"V-S"` `Error` — a dangling cross-reference, a `twosided` flag
+disagreeing with `sideback`'s presence, or a sector boundary that does not
+close — means the `Scene` (`src/check/scene.rs`) itself is data
+`Scene::build` gave up on: a linedef that fails any of those checks
+contributes no `Boundary` to either sector at all. Two consequences follow,
+both deliberate rather than incidental gaps.
+
+**Conformance goes `NotRun`, not `Fail` or a wrong `Pass`.** When `findings`
+carries any `"V-S"` `Error` (the two `"V-S"` *Warning* cases — unrecognized
+vocabulary — do not count; those describe a fully-formed scene, not a corrupt
+one), `check::run` calls `conform::not_run_rows` instead of `conform::rows`:
+the identical row catalog `rows()` would have produced — same `parameter`,
+same `target`, in the same order — with every `verdict` forced to
+`Verdict::NotRun` and `actual` reading `"scene failed structural validation"`.
+Judging a spec against geometry the scene builder itself rejected would
+produce a verdict that looks decided but is not; `NotRun` says plainly that
+it was never computed.
+
+**The flood cascades pessimistically, on purpose.** A linedef that fails
+`Scene::build`'s validation contributes no boundary to either sector, and
+`flood.rs` builds one `reach::Edge` per `fronts_this` boundary — so a dropped
+linedef is a wall to the flood, not a hole cut for it to ignore. A `"V-S"`
+reference error on a linedef that would otherwise have joined two rooms can
+therefore cascade into a `V-P7` "never reached" finding on the far side of it.
+This is intentional, the same conservative posture `Boundary::passable()`
+already takes for a flagged-blocking line: the flood has no notion of "trust
+this edge anyway" for a cross-reference the scene itself gave up on, so
+treating it as impassable is the reading that can only ever be too
+pessimistic, never falsely reachable.
+
 ## The CLI contract
 
 ```
@@ -291,7 +337,7 @@ every conformance row as `{parameter}: {verdict} (target {target}, actual
 then a one-line summary:
 
 ```
-0 blocking, 0 warning(s), 45 conformance row(s), 3 tag(s)
+0 blocking, 0 warning(s), 48 conformance row(s), 3 tag(s)
 ```
 
 Exit codes:
@@ -323,11 +369,13 @@ report, and grading a spec violation as a build failure is
   reads `Boundary::special`, and a damaging floor is a **sector** special
   (`data/engine.toml`'s `[sector.damage]`, a numerically distinct space, as
   that table's own neighbouring comment spells out).
-  Nothing in `src/check/` reads `SceneSector::special` at all beyond counting
-  the secret special for `MapStats`, so a nukage sector this checker has never
-  heard of draws neither a finding nor a warning. That is honest only while
-  the compiler emits no liquids; the day it does, sector specials need their
-  own recognized set, and P16/P17 need V- ids.
+  `SceneSector::special` is populated by `Scene::build` but read nowhere in
+  `src/check/` — the secret-sector count in `MapStats` reads the raw
+  `UdmfMap`'s own `sector.special` directly (`check/mod.rs`), not the
+  `Scene`'s copy of it. So a nukage sector this checker has never heard of
+  draws neither a finding nor a warning. That is honest only while the
+  compiler emits no liquids; the day it does, sector specials need their own
+  recognized set, and P16/P17 need V- ids.
 - **Sky.** V-P8 has no sky exception: `r_segs.c` legitimately needs no upper
   between two sky ceilings, but crustygen emits no sky flat, so the branch is
   unwritten rather than guessed at.
@@ -371,5 +419,8 @@ report, and grading a spec violation as a build failure is
   pit — the map that actually shipped unfinishable — caught as stranding.
 - `tests/check_conformance.rs` runs the rows end to end against entrada and
   its hand-paired spec, whose derivable numbers were set to entrada's own
-  actuals, so a clean run must show zero `Fail` rows.
+  actuals, so a clean run must show zero `Fail` rows. It also proves failure
+  containment end to end: a dangling sidedef->sector index against a real
+  spec must produce a `"V-S"` `Error` and a conformance row list that is
+  entirely `NotRun`, with the same parameter list the healthy run produces.
 - `tests/check_cli.rs` covers the three exit codes and the output shape.
