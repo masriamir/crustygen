@@ -443,6 +443,16 @@ pub fn run_flood(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) ->
 /// more lock classes than a [`KeyMask`] can hold — [`run_flood`] is the one
 /// that reports that as its own hard finding, and it always runs first in
 /// [`crate::check::run`]'s wiring.
+///
+/// A key thing with `thing.sector == None` — outside every closed sector —
+/// counts toward neither half: it cannot satisfy a lock's keyless-lock check
+/// (a key nobody can pick up does not make the lock openable) and it gets no
+/// orphan-key analysis of its own (its placement is already invalid
+/// geometry, reported once as its own `"V-S"` Error by
+/// [`Scene::build`](crate::check::scene::Scene::build)). This mirrors
+/// `build_nodes`, which already excludes such a thing from a node's key
+/// bits for the same reason — only a key the player can actually reach and
+/// pick up should ever count as "present".
 pub fn check_key_lock_coherence(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
     let Some((specials, class_names)) = intern_lock_classes(tables) else {
         // Silent here, not a gap: `run_flood` reports this same overflow as
@@ -454,6 +464,9 @@ pub fn check_key_lock_coherence(scene: &Scene, tables: &Tables, findings: &mut V
 
     let mut key_present = vec![false; specials.len()];
     for thing in &scene.things {
+        if thing.sector.is_none() {
+            continue;
+        }
         let Some(name) = thing.name.as_deref() else {
             continue;
         };
@@ -517,6 +530,9 @@ pub fn check_key_lock_coherence(scene: &Scene, tables: &Tables, findings: &mut V
     }
 
     for (i, thing) in scene.things.iter().enumerate() {
+        if thing.sector.is_none() {
+            continue;
+        }
         let Some(name) = thing.name.as_deref() else {
             continue;
         };
@@ -1146,6 +1162,79 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
             coherence.len(),
             2,
             "exactly these two defects, no more: {coherence:?}"
+        );
+    }
+
+    #[test]
+    fn a_misplaced_only_key_does_not_suppress_the_keyless_lock_error() {
+        // The blue_card sits far outside both rooms' geometry — outside
+        // every closed sector, already its own `V-S` Error from
+        // `Scene::build` — and it is the map's ONLY blue key. Before the
+        // fix, `key_present` counted every key thing regardless of
+        // `thing.sector`, so this misplaced card silently satisfied the
+        // blue-locked door's keyless-lock check even though the flood
+        // correctly treats the door as unopenable (nobody can ever reach
+        // the card to pick it up).
+        let tables = Tables::load().expect("tables");
+        let card_id = tables.thing_id("blue_card").expect("blue_card id");
+        let locked = tables
+            .locked_door_special("blue_card")
+            .expect("blue_card has a locked-door special");
+
+        // room 0 -- blue-locked door --> room 1.
+        let things = thing_at(9000.0, 9000.0, card_id);
+        let text = room_chain(
+            &[(0, 128, 160), (0, 128, 160)],
+            &[(i32::from(locked), 0, false)],
+            None,
+            &things,
+        );
+        let (scene, scene_findings) = scene_of(&text, &tables);
+        assert!(
+            scene_findings.iter().any(|f| f.check == "V-S"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Thing(0))),
+            "the misplaced card is its own V-S Error: {scene_findings:?}"
+        );
+
+        let mut coherence = Vec::new();
+        check_key_lock_coherence(&scene, &tables, &mut coherence);
+        assert!(
+            coherence.iter().any(|f| f.check == "V-P24"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Sector(1))
+                && f.message.contains("blue")),
+            "a key nobody can reach must not satisfy the lock: expected the keyless-lock error \
+             to still fire: {coherence:?}"
+        );
+    }
+
+    #[test]
+    fn a_misplaced_key_that_opens_no_door_is_not_reported_as_orphan() {
+        // The red_skull sits far outside the map's one room — already its
+        // own `V-S` Error — and no red-locked door exists anywhere in the
+        // map. Before the fix, the orphan-key half ignored `thing.sector`,
+        // so this misplaced key would also earn its own V-P24 orphan
+        // finding on top of the V-S one it already has.
+        let tables = Tables::load().expect("tables");
+        let skull_id = tables.thing_id("red_skull").expect("red_skull id");
+
+        let things = thing_at(9000.0, 9000.0, skull_id);
+        let text = room_chain(&[(0, 128, 160)], &[], None, &things);
+        let (scene, scene_findings) = scene_of(&text, &tables);
+        assert!(
+            scene_findings.iter().any(|f| f.check == "V-S"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Thing(0))),
+            "the misplaced skull is its own V-S Error: {scene_findings:?}"
+        );
+
+        let mut coherence = Vec::new();
+        check_key_lock_coherence(&scene, &tables, &mut coherence);
+        assert!(
+            coherence.is_empty(),
+            "a key nobody can reach gets no orphan analysis of its own — only the geometry \
+             error: {coherence:?}"
         );
     }
 
