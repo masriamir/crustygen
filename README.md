@@ -71,10 +71,12 @@ cannot fit through is a broken map, not a missed target.
 
 Those checks run against the IR, before a coordinate exists — so a compiler
 bug that satisfies them still ships. `src/check` and its `crustygen-check`
-binary are verification layer 4 (`docs/design.md` §8): they parse the
-`TEXTMAP` back out of a built PWAD and re-derive the same invariants from the
-emitted geometry, reusing the sourced tables and the reachability core but
-nothing from `compile/` or `rules.rs` — the logic under cross-examination.
+binary are verification layer 4 (`docs/design.md` §8): they read a built
+PWAD's map group — a UDMF `TEXTMAP`, or a classic Doom binary-format group
+assembled and rendered to the same form — and re-derive the same invariants
+from the emitted geometry, reusing the sourced tables and the reachability
+core but nothing from `compile/` or `rules.rs` — the logic under
+cross-examination.
 Fourteen checks, from dangling cross-references to a key-aware flood that
 proves the map can still be finished. Given a map-spec it also grades a fixed
 catalog of frontmatter parameters against their actual values — a parameter

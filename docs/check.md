@@ -1,12 +1,14 @@
 # The layer-4 verifier and its CLI
 
 `crustygen-check` is verification layer 4 (`docs/design.md` §8). It reads an
-**assembled** map — a `TEXTMAP` lump out of a built PWAD — and re-derives the
-playability invariants from the geometry that actually shipped. That is what
-makes it more than a restatement of layer 1: the compiler's own pre-checks
+**assembled** map — a UDMF `TEXTMAP` lump out of a built PWAD, or a classic
+Doom binary-format map group assembled and rendered to the same UDMF form
+(see "Binary-format input", below) — and re-derives the playability
+invariants from the geometry that actually shipped. That is what makes it
+more than a restatement of layer 1: the compiler's own pre-checks
 (`src/rules.rs`) run against the IR, before any coordinate exists, so a
-compiler bug that satisfies them still produces a broken map. This stage never
-sees the IR at all.
+compiler bug that satisfies them still produces a broken map. This stage
+never sees the IR at all.
 
 The distinction is not theoretical for this project.
 `heights::visible_lower_side`/`visible_upper_side` are the single place the
@@ -29,9 +31,14 @@ is `Some` exactly when it was supplied.
 
 **CLI.** `crustygen-check <wad> [--map NAME] [--spec FILE]`
 (`src/bin/crustygen-check.rs`). It reads the WAD, selects a map group
-(`--map NAME` by exact match, else the WAD's first), finds that group's
-`TEXTMAP` lump, parses it, loads `Tables`, optionally parses `--spec` through
-`Spec::from_markdown`, and calls the same `check::run`.
+(`--map NAME` by exact match, else the WAD's first), and loads it through
+`crustygen::ingest::load_map`, which accepts either on-disk format: a UDMF
+group's `TEXTMAP` lump parses directly, while a classic Doom binary group is
+assembled via crustywad's `Map::assemble`, rendered to UDMF text, and
+re-parsed — the same `UdmfMap` either way, so `check::run` never sees which
+path ran. It then loads `Tables`, optionally parses `--spec` through
+`Spec::from_markdown`, and calls the same `check::run`. See "Binary-format
+input", below, for why the round trip is sound.
 
 A `CheckReport` carries four things: the `findings` (defects and
 observations), the optional `conformance` rows, the `tag_manifest` (one entry
@@ -371,12 +378,33 @@ Exit codes:
 |---|---|
 | 0 | No finding carried `Severity::Error` |
 | 1 | At least one `Error` finding |
-| 2 | Usage, I/O, or parse failure — bad flag, missing `<wad>`, unreadable file, not a WAD, no such map group, no `TEXTMAP` lump, non-UTF-8 `TEXTMAP`, unloadable tables, or an unparseable `--spec`. Every one names what failed on stderr. |
+| 2 | Usage, I/O, or parse failure — bad flag, missing `<wad>`, unreadable file, not a WAD, no such map group, unassemblable binary map, unsupported binary format (Hexen, Doom 64), non-UTF-8 `TEXTMAP`, unloadable tables, or an unparseable `--spec`. Every one names what failed on stderr. |
 
 **Warnings do not change the exit code, and neither do conformance verdicts.**
 A map with ten `Fail` rows and no `Error` finding exits 0: the rows are a
 report, and grading a spec violation as a build failure is
 `constraints.enforcement`'s decision to make (§9), not this binary's.
+
+### Binary-format input (issue #21)
+
+`crustygen-check` accepts a classic Doom binary-format map group, not just a
+UDMF one. `crustygen::ingest::load_map` assembles it via crustywad's
+`Map::assemble`, renders the result to UDMF text (`write_udmf`), and
+re-parses that text into the same `UdmfMap` type the checker always
+consumes — no check in the catalog above runs any differently. The round
+trip is sound because a binary Doom-format map already carries
+doom-namespace semantics: the special and tag numbering every check here
+models. Hexen and Doom 64 groups are refused by name
+(`IngestError::UnsupportedBinaryFormat`) — Hexen-style specials are a
+different numbering the checks do not model.
+
+Checking vanilla retail content this way can legitimately surface documented
+authoring-convention warnings, which are expected, not defects: V-P11 flags
+a door face carrying an unpegged flag, and a small minority of `DOOM2.WAD`'s
+own door-special lines do — this document's own V-P11 entry (above) already
+measures it, at 247 of 255 carrying neither. A binary-sourced map drawing
+that warning is the checker doing its job on real content, not a false
+positive.
 
 ## What the verifier deliberately does not check
 
