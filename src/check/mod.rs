@@ -11,6 +11,7 @@ use crate::spec::Spec;
 use crate::tables::Tables;
 use crustywad::map::udmf::UdmfMap;
 
+pub mod conform;
 pub mod flood;
 pub mod invariants;
 pub mod scene;
@@ -141,10 +142,7 @@ impl std::fmt::Display for Finding {
 /// Runs every wired verification pass over `map` and returns the aggregated
 /// report.
 ///
-/// `map_name` and `spec` are accepted now so this signature is final;
-/// `map_name` starts being read once a later task's report needs it, and
-/// `spec` once a conformance pass exists to compare against it. For now,
-/// this builds the [`scene::Scene`] (which contributes reference-validity
+/// This builds the [`scene::Scene`] (which contributes reference-validity
 /// findings), runs the texture ([`invariants::check_textures`], V-P8),
 /// scaling ([`invariants::check_scaling`], V-P9), door-pegging
 /// ([`invariants::check_door_pegging`], V-P11), tag
@@ -160,11 +158,14 @@ impl std::fmt::Display for Finding {
 /// ([`flood::run_flood`], V-P7) and, when it ran, the reachability half of
 /// pickup accessibility over its result (`invariants::check_pickup_reachability`,
 /// V-P20), runs key/lock coherence ([`flood::check_key_lock_coherence`],
-/// V-P24), fills [`MapStats`] from the map's own declaration counts, and
-/// returns them with `conformance: None` and the tag manifest `check_tags`
-/// produced — later tasks append more passes.
+/// V-P24), and fills [`MapStats`] from the map's own declaration counts.
+///
+/// `spec`, when `Some`, is judged against the built [`scene::Scene`] and
+/// [`MapStats`] by [`conform::rows`], naming `map_name` as the actual map
+/// slot for the `identity.slot` row; `conformance` is `None` iff `spec` is
+/// `None`. Returns them with the tag manifest `check_tags` produced.
 #[must_use]
-pub fn run(map: &UdmfMap, _map_name: &str, tables: &Tables, _spec: Option<&Spec>) -> CheckReport {
+pub fn run(map: &UdmfMap, map_name: &str, tables: &Tables, spec: Option<&Spec>) -> CheckReport {
     let mut findings = Vec::new();
     let scene = scene::Scene::build(map, tables, &mut findings);
 
@@ -197,9 +198,11 @@ pub fn run(map: &UdmfMap, _map_name: &str, tables: &Tables, _spec: Option<&Spec>
             .count(),
     };
 
+    let conformance = spec.map(|spec| conform::rows(&scene, &stats, map_name, spec, tables));
+
     CheckReport {
         findings,
-        conformance: None,
+        conformance,
         tag_manifest,
         stats,
     }
