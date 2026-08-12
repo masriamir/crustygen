@@ -338,9 +338,14 @@ jambs) use the theme's new `trim` texture role (`STARGR2` for `tech_base`);
 the door's own jambs — "the track" — use `door_track` (`DOORTRAK`) as
 before, and are lower-unpegged by default so the texture stays anchored to
 the floor as the door sector's ceiling animates open, now with an explicit
-opt-out (`Portal::track_lower_unpegged: false`) — the door's own two faces
-stay lower-unpegged unconditionally, since that setting only ever governed
-the track. `compile::doors::validate_door_texture` additionally rejects a
+opt-out (`Portal::track_lower_unpegged: false`). The door's own two faces
+carry **neither** pegging flag: `ML_DONTPEGBOTTOM` never affects
+upper-texture rendering (`r_segs.c`, pinned commit a77dfb96), which is what
+a face's visible texture is, and 247/255 door-special lines in DOOM2.WAD
+ship unflagged — an earlier revision set `lower_unpegged` on the faces too,
+which `check::invariants::check_door_pegging` (V-P11) now flags as a
+defect if it recurs. `compile::doors::validate_door_texture` additionally
+rejects a
 theme whose `door` texture is not in `vocabulary.toml`'s curated (not
 sourced — see that table's own leading comment)
 `[door_texture_catalog]`. See `docs/geometry.md`
