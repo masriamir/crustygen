@@ -414,16 +414,23 @@ fn required_height(tables: &Tables, name: &str) -> Option<i32> {
 /// sector identically — which is what makes that guarantee possible.
 ///
 /// A thing whose `type_id` names nothing in the vocabulary (`name` is
-/// `None`) gets a `Warning` (`"unknown thing type {type_id}"`) here, once,
-/// rather than in every check that would otherwise skip it silently —
+/// `None`) gets a `"V-S"` `Warning` (`"unknown thing type {type_id}"`) here,
+/// once, rather than in every check that would otherwise skip it silently —
 /// [`check_starts`] and [`check_prop_embedding`] both filter on `name`
 /// being recognized, so an unnamed thing is invisible to them, and this is
-/// the one place that fact gets surfaced.
+/// the one place that fact gets surfaced. It carries `"V-S"`, not this
+/// function's own `"V-P2"`: an unrecognized thing type is the same "the map
+/// declares something this checker cannot interpret" concern
+/// [`crate::check::scene::Scene::build`]'s own `"V-S"` findings raise for a
+/// dangling reference or a thing outside every sector — it is not itself a
+/// headroom violation, this pass is just where the fact happens to surface,
+/// `Scene::build` having no name-resolution step of its own to report it
+/// from.
 pub fn check_thing_headroom(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
     for (i, thing) in scene.things.iter().enumerate() {
         let Some(name) = thing.name.as_deref() else {
             findings.push(Finding {
-                check: "V-P2",
+                check: "V-S",
                 severity: Severity::Warning,
                 subject: Subject::Thing(i),
                 message: format!("unknown thing type {}", thing.type_id),
@@ -825,18 +832,29 @@ fn recognized_specials(tables: &Tables) -> Vec<i32> {
     specials
 }
 
-/// V-P7 (soundness precondition): every boundary special is one this
-/// checker actually models.
+/// V-S (unclassifiable input): every boundary special is one this checker
+/// actually models.
 ///
-/// The reachability flood (`flood.rs`, the rest of V-P7) is sound only if
-/// every traversal-affecting special is represented in its graph — an
-/// unrecognized special is one the flood would silently treat as inert,
-/// which can only ever make the flood's verdict *optimistic* (it might call
-/// a map finishable that a real player, blocked or diverted by that
-/// special, could not finish). This check is the flood's precondition
-/// rather than a traversal check in its own right, so its severity is
-/// [`Severity::Warning`]: an unrecognized special is not proof the map is
-/// broken, only proof this checker cannot vouch for it.
+/// This is not itself a playability rule — it is the same "can this checker
+/// make sense of what the map declares" concern
+/// [`crate::check::scene::Scene::build`]'s own `"V-S"` findings raise for a
+/// dangling reference or an unclosed sector, just raised here for a linedef
+/// special this checker has never heard of rather than a corrupt
+/// cross-reference, which is why it carries `"V-S"` rather than a `"V-Pn"`
+/// id of its own.
+///
+/// **Why the check exists at all:** the reachability flood (`flood.rs`,
+/// V-P7) is sound only if every traversal-affecting special is represented
+/// in its graph — an unrecognized special is one the flood would silently
+/// treat as inert, which can only ever make the flood's verdict
+/// *optimistic* (it might call a map finishable that a real player,
+/// blocked or diverted by that special, could not finish). Filing this
+/// under `"V-S"` rather than `"V-P7"` also keeps this precondition check
+/// from being read as one of Task 9's own flood-produced findings — the
+/// design catalog's `"V-P7"` row names the flood computation itself,
+/// downstream of this pass, not the completeness of its input vocabulary.
+/// Severity stays [`Severity::Warning`]: an unrecognized special is not
+/// proof the map is broken, only proof this checker cannot vouch for it.
 ///
 /// **Lift and teleport specials are deliberately not in the recognized
 /// set.** `Tables::lift_switch_special`, `lift_walkover_special`, and
@@ -860,7 +878,7 @@ pub fn check_recognized_specials(scene: &Scene, tables: &Tables, findings: &mut 
                 continue;
             }
             findings.push(Finding {
-                check: "V-P7",
+                check: "V-S",
                 severity: Severity::Warning,
                 subject: Subject::Linedef(b.linedef),
                 message: format!(
@@ -1155,18 +1173,18 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
     }
 
     #[test]
-    fn an_unrecognized_thing_type_is_a_p2_warning_and_nothing_else_flags_it() {
+    fn an_unrecognized_thing_type_is_a_v_s_warning_and_nothing_else_flags_it() {
         let t = Tables::load().expect("tables");
         let text = room(128, 160, &thing_at(64.0, 64.0, 31337));
         let findings = findings_of(&text);
         let warnings: Vec<_> = findings
             .iter()
-            .filter(|f| f.check == "V-P2" && matches!(f.subject, Subject::Thing(0)))
+            .filter(|f| f.check == "V-S" && matches!(f.subject, Subject::Thing(0)))
             .collect();
         assert_eq!(
             warnings.len(),
             1,
-            "exactly one V-P2 finding for the unknown thing: {findings:?}"
+            "exactly one V-S finding for the unknown thing: {findings:?}"
         );
         assert_eq!(warnings[0].severity, Severity::Warning);
         assert_eq!(warnings[0].message, "unknown thing type 31337");
@@ -1345,11 +1363,80 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         );
     }
 
+    /// Three sectors in a row (0-1-2), both links the same length: link 0
+    /// (sector 0 ↔ sector 1) is a door face (`special = 1`, exempt from
+    /// V-P3); link 1 (sector 1 ↔ sector 2) is an ordinary two-sided line
+    /// with no special at all. Proves [`check_passage_width`]'s door
+    /// exemption is scoped to the boundary's own `special`, not to "any
+    /// boundary of a sector that also happens to touch a door" — sector 1
+    /// touches both links, but only link 0 carries the special that exempts
+    /// it.
+    fn door_then_narrow_passage(edge_len: f64) -> String {
+        format!(
+            r#"namespace = "doom";
+vertex {{ x = 0.000; y = 0.000; }}
+vertex {{ x = 64.000; y = 0.000; }}
+vertex {{ x = 96.000; y = 0.000; }}
+vertex {{ x = 160.000; y = 0.000; }}
+vertex {{ x = 160.000; y = {edge_len:.3}; }}
+vertex {{ x = 96.000; y = {edge_len:.3}; }}
+vertex {{ x = 64.000; y = {edge_len:.3}; }}
+vertex {{ x = 0.000; y = {edge_len:.3}; }}
+linedef {{ v1 = 1; v2 = 6; sidefront = 0; sideback = 1; twosided = true; special = 1; arg0 = 5; }}
+linedef {{ v1 = 2; v2 = 5; sidefront = 2; sideback = 3; twosided = true; }}
+linedef {{ v1 = 0; v2 = 1; sidefront = 4; blocking = true; }}
+linedef {{ v1 = 7; v2 = 0; sidefront = 5; blocking = true; }}
+linedef {{ v1 = 6; v2 = 7; sidefront = 6; blocking = true; }}
+linedef {{ v1 = 1; v2 = 2; sidefront = 7; blocking = true; }}
+linedef {{ v1 = 6; v2 = 5; sidefront = 8; blocking = true; }}
+linedef {{ v1 = 2; v2 = 3; sidefront = 9; blocking = true; }}
+linedef {{ v1 = 3; v2 = 4; sidefront = 10; blocking = true; }}
+linedef {{ v1 = 4; v2 = 5; sidefront = 11; blocking = true; }}
+sidedef {{ sector = 0; texturemiddle = "-"; }}
+sidedef {{ sector = 1; texturemiddle = "-"; }}
+sidedef {{ sector = 2; texturemiddle = "-"; }}
+sidedef {{ sector = 1; texturemiddle = "-"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 2; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 2; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 2; texturemiddle = "STARTAN2"; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; id = 5; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }}
+"#
+        )
+    }
+
     #[test]
-    fn an_unrecognized_special_is_a_warning() {
+    fn a_narrow_ordinary_passage_next_to_a_narrow_door_face_is_still_flagged() {
+        let t = Tables::load().expect("tables");
+        let need = f64::from(t.player().radius * 2);
+        let findings = findings_of(&door_then_narrow_passage(need / 2.0));
+        assert!(
+            findings.iter().any(|f| f.check == "V-P3"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Linedef(1))),
+            "the ordinary link (not a door) must still be flagged even though it sits right \
+             next to an equally narrow, exempt door face: {findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.check == "V-P3" && matches!(f.subject, Subject::Linedef(0))),
+            "the door face itself stays exempt, so the exemption did not simply vanish: \
+             {findings:?}"
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_special_is_a_v_s_warning() {
         let findings = findings_of(&two_box(64.0, " special = 999; arg0 = 5;", " id = 5;"));
         assert!(
-            findings.iter().any(|f| f.check == "V-P7"
+            findings.iter().any(|f| f.check == "V-S"
                 && f.severity == Severity::Warning
                 && matches!(f.subject, Subject::Linedef(0))
                 && f.message.contains("999")),
@@ -1358,10 +1445,10 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
     }
 
     #[test]
-    fn a_recognized_special_raises_no_v_p7_warning() {
+    fn a_recognized_special_raises_no_v_s_warning() {
         let findings = findings_of(&two_box(64.0, " special = 1; arg0 = 5;", " id = 5;"));
         assert!(
-            findings.iter().all(|f| f.check != "V-P7"),
+            findings.iter().all(|f| f.check != "V-S"),
             "the door special is recognized: no finding: {findings:?}"
         );
     }
@@ -1431,11 +1518,20 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         let t = Tables::load().expect("tables");
         let need = t.player().height + t.door_clearance_allowance();
         let findings = findings_of(&door_chain(need - 1));
+        let errors: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == "V-P4" && f.severity == Severity::Error)
+            .collect();
+        assert_eq!(
+            errors.len(),
+            1,
+            "expected exactly one V-P4 error — the door sector is found twice (once via each \
+             of its two door-special boundaries) but must be reported once, not once per \
+             boundary: {findings:?}"
+        );
         assert!(
-            findings.iter().any(|f| f.check == "V-P4"
-                && f.severity == Severity::Error
-                && matches!(f.subject, Subject::Sector(1))),
-            "expected a V-P4 error on sector 1 (the door sector): {findings:?}"
+            matches!(errors[0].subject, Subject::Sector(1)),
+            "expected the V-P4 error on sector 1 (the door sector): {findings:?}"
         );
     }
 
