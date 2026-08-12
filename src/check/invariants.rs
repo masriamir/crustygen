@@ -356,6 +356,315 @@ pub fn check_tags(map: &UdmfMap, findings: &mut Vec<Finding>) -> Vec<TagEntry> {
     manifest.into_values().collect()
 }
 
+/// The five thing kinds the engine reads as a player spawn point
+/// (`playerstarts[MAXPLAYERS]`/`deathmatchstarts` in the pinned Doom
+/// source): the four coop starts and the single deathmatch-start kind.
+/// Shared by [`check_thing_headroom`] (a start's required height is the
+/// player's, not a species') and [`check_starts`] (which starts to check
+/// clearance and telefrag distance for).
+const START_KINDS: [&str; 5] = [
+    "player1_start",
+    "player2_start",
+    "player3_start",
+    "player4_start",
+    "deathmatch_start",
+];
+
+/// The required headroom for a named thing, or `None` if the vocabulary
+/// pins no height requirement for it.
+///
+/// Tries, in order: a monster species' own height, a blocking/hanging
+/// prop's own height, and — only for the five `START_KINDS` — the
+/// player's height (a start is not itself a species or a prop, but the
+/// player who spawns there needs to fit). Everything else (pickups, keys,
+/// ammo, decorative non-blocking props) returns `None`: nothing occupies
+/// or must pass through the space above a pickup, so no height is worth
+/// pinning for it.
+fn required_height(tables: &Tables, name: &str) -> Option<i32> {
+    if let Some(dims) = tables.species(name) {
+        return Some(dims.height);
+    }
+    if let Some(dims) = tables.prop(name) {
+        return Some(dims.height);
+    }
+    if START_KINDS.contains(&name) {
+        return Some(tables.player().height);
+    }
+    None
+}
+
+/// V-P2: a thing's sector has enough headroom for it to stand (or, for a
+/// start, spawn) there.
+///
+/// For each thing with a resolved name and a resolved sector, the required
+/// height is `required_height`: a monster species' height, else a
+/// blocking/hanging prop's height, else the player's height for the five
+/// start kinds, else no requirement at all (see `required_height`'s doc
+/// comment for why pickups and keys are skipped). `ceiling - floor` less
+/// than that requirement is an Error naming the thing.
+///
+/// **Deliberately no door-sector exemption.** A door sector's `TEXTMAP`
+/// heights are its *closed* state (`docs/design.md` §7.1: "ceiling snapped
+/// to its floor") — a thing placed inside one has zero static headroom by
+/// construction, which reads as tempting to wave off as "it's a door, it
+/// opens." It is not waved off here: a thing genuinely standing in a closed
+/// door's sector is unplayable exactly as reported, whether by an authoring
+/// mistake or a compiler bug placing something there it should not have.
+/// This check has no notion of "door sector" at all — it treats every
+/// sector identically — which is what makes that guarantee possible.
+///
+/// A thing whose `type_id` names nothing in the vocabulary (`name` is
+/// `None`) gets a `Warning` (`"unknown thing type {type_id}"`) here, once,
+/// rather than in every check that would otherwise skip it silently —
+/// [`check_starts`] and [`check_prop_embedding`] both filter on `name`
+/// being recognized, so an unnamed thing is invisible to them, and this is
+/// the one place that fact gets surfaced.
+pub fn check_thing_headroom(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    for (i, thing) in scene.things.iter().enumerate() {
+        let Some(name) = thing.name.as_deref() else {
+            findings.push(Finding {
+                check: "V-P2",
+                severity: Severity::Warning,
+                subject: Subject::Thing(i),
+                message: format!("unknown thing type {}", thing.type_id),
+            });
+            continue;
+        };
+        let Some(required) = required_height(tables, name) else {
+            continue;
+        };
+        let Some(sector_idx) = thing.sector else {
+            continue;
+        };
+        let sector = &scene.sectors[sector_idx];
+        let headroom = sector.ceiling - sector.floor;
+        if headroom < required {
+            findings.push(Finding {
+                check: "V-P2",
+                severity: Severity::Error,
+                subject: Subject::Thing(i),
+                message: format!(
+                    "{name} needs {required} units of headroom but its sector (floor {}, \
+                     ceiling {}) has only {headroom}",
+                    sector.floor, sector.ceiling
+                ),
+            });
+        }
+    }
+}
+
+/// V-P19: every sector's light level lies within the engine's valid range.
+///
+/// Unconditional — every sector is checked, spec or no spec (the spec's own
+/// narrower `min`/`max` bound, if one exists, is a conformance-report
+/// concern, not this structural one).
+pub fn check_light_bounds(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    let range = tables.light_range();
+    for (i, sector) in scene.sectors.iter().enumerate() {
+        if !range.contains(&sector.light) {
+            findings.push(Finding {
+                check: "V-P19",
+                severity: Severity::Error,
+                subject: Subject::Sector(i),
+                message: format!(
+                    "light level {} is outside the valid range {}..={}",
+                    sector.light,
+                    range.start(),
+                    range.end()
+                ),
+            });
+        }
+    }
+}
+
+/// The distance from a point to a line segment, in continuous world
+/// coordinates.
+///
+/// [`crate::geom::dist_to_segment`] exists already but takes
+/// [`crate::geom::Pt`], grid-integer coordinates the compiler's own
+/// footprints are built from. A [`crate::check::scene::Boundary`]'s
+/// endpoints are `f64` — copied verbatim from `UdmfVertex.x`/`.y`, which
+/// UDMF itself types as floating point — and a thing's `(x, y)` is `f64`
+/// too, so reusing the integer twin would mean rounding both back to `Pt`
+/// first and losing precision this check has no reason to discard. Same
+/// projection-and-clamp algorithm as the integer version, just without the
+/// `Pt` roundtrip.
+fn dist_to_segment_f64(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64 {
+    let (dx, dy) = (bx - ax, by - ay);
+    let len2 = dx.mul_add(dx, dy * dy);
+    if len2 == 0.0 {
+        return (px - ax).hypot(py - ay);
+    }
+    let t = (((px - ax) * dx + (py - ay) * dy) / len2).clamp(0.0, 1.0);
+    (px - dx.mul_add(t, ax)).hypot(py - dy.mul_add(t, ay))
+}
+
+/// V-P25: every player start has full radius clearance from its sector's
+/// walls, and no two starts are close enough to telefrag each other.
+/// (Headroom is covered by [`check_thing_headroom`], since a start is a
+/// thing like any other there.)
+///
+/// For each of the five `START_KINDS` with a resolved sector: the
+/// distance from `(x, y)` to every **non-passable** boundary segment of
+/// that sector (an open doorway cannot crush the player against it, so only
+/// [`crate::check::scene::Boundary::passable`]`() == false` segments count)
+/// must be at least [`Tables::player`]'s radius, else an Error naming the
+/// start. A start with no resolved sector (already a `"V-S"` Error from
+/// [`Scene::build`]) is skipped here rather than double-reported.
+///
+/// Separately, and regardless of sector resolution: every pair of starts —
+/// across all five kinds, not just within one, since a coop start and a
+/// deathmatch start spawning on top of each other still telefrags whichever
+/// mode is in play — closer than twice the player's radius is an Error.
+/// Each pair is reported once, naming the later-declared thing of the pair.
+pub fn check_starts(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    let radius = f64::from(tables.player().radius);
+
+    let starts: Vec<usize> = scene
+        .things
+        .iter()
+        .enumerate()
+        .filter(|(_, thing)| {
+            thing
+                .name
+                .as_deref()
+                .is_some_and(|name| START_KINDS.contains(&name))
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    for &i in &starts {
+        let thing = &scene.things[i];
+        let Some(sector_idx) = thing.sector else {
+            continue;
+        };
+        let sector = &scene.sectors[sector_idx];
+        let clearance = sector
+            .boundary
+            .iter()
+            .filter(|b| !b.passable())
+            .map(|b| dist_to_segment_f64(thing.x, thing.y, b.a.0, b.a.1, b.b.0, b.b.1))
+            .fold(f64::INFINITY, f64::min);
+        if clearance < radius {
+            findings.push(Finding {
+                check: "V-P25",
+                severity: Severity::Error,
+                subject: Subject::Thing(i),
+                message: format!(
+                    "start is {clearance:.3} units from the nearest wall, less than the \
+                     player radius {radius}"
+                ),
+            });
+        }
+    }
+
+    for (pos, &i) in starts.iter().enumerate() {
+        for &j in &starts[pos + 1..] {
+            let (a, b) = (&scene.things[i], &scene.things[j]);
+            let dist = (a.x - b.x).hypot(a.y - b.y);
+            if dist < 2.0 * radius {
+                findings.push(Finding {
+                    check: "V-P25",
+                    severity: Severity::Error,
+                    subject: Subject::Thing(j),
+                    message: format!(
+                        "start is {dist:.3} units from start {i}, within the telefrag \
+                         distance {}",
+                        2.0 * radius
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// The powerup names `sustain.powerups[].name` can carry (`docs/design.md`
+/// §5), matching `engine.toml`/`vocabulary.toml`'s doomednum entries
+/// exactly. A vocabulary convention mirroring the map-spec frontmatter's
+/// `PowerupSpec` name domain, not an engine fact — nothing in the pinned
+/// Doom source groups these eight under one heading, so this list cannot be
+/// cited to a `source` field the way a `[props.*]` or `[species.*]` entry
+/// is.
+const POWERUPS: [&str; 8] = [
+    "berserk",
+    "soulsphere",
+    "megasphere",
+    "invulnerability",
+    "invisibility",
+    "radsuit",
+    "light_amp",
+    "computer_map",
+];
+
+/// Whether a named thing is a collectible: something the static half of
+/// V-P20 cares about not seeing embedded in a blocking prop. A weapon,
+/// ammo pickup, health/armor pickup, `backpack`, a key ([`Tables::locked_door_kinds`]
+/// name), or one of the eight [`POWERUPS`].
+fn is_collectible(tables: &Tables, name: &str) -> bool {
+    tables.pickup(name).is_some()
+        || tables.ammo_pickup(name).is_some()
+        || tables.weapon_damage(name).is_some()
+        || name == "backpack"
+        || tables
+            .locked_door_kinds()
+            .iter()
+            .any(|(key, _)| key == name)
+        || POWERUPS.contains(&name)
+}
+
+/// V-P20 (static half): no collectible sits inside a blocking prop's
+/// radius.
+///
+/// The full P20 also requires reachability (the P7 flood already proves
+/// that, per `KNOWN-GAPS.md`'s subsumption note) and radius clearance from
+/// walls (a thing's own placement already gets that from the compiler, and
+/// this check does not re-derive it) — this is only the piece neither of
+/// those covers: a pickup a prop physically obstructs even though the room
+/// itself is reachable and the pickup is not touching a wall.
+///
+/// For each thing whose name `is_collectible` returns true for, compares its distance to
+/// every *other* thing whose name resolves to a [`Tables::prop`] with
+/// `blocks == true`; a distance less than that prop's radius is an Error
+/// naming the collectible (not the prop — the prop is the obstruction,
+/// but the pickup is the thing that cannot be reached).
+pub fn check_prop_embedding(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    for (i, thing) in scene.things.iter().enumerate() {
+        let Some(name) = thing.name.as_deref() else {
+            continue;
+        };
+        if !is_collectible(tables, name) {
+            continue;
+        }
+        for (j, other) in scene.things.iter().enumerate() {
+            if i == j {
+                continue;
+            }
+            let Some(other_name) = other.name.as_deref() else {
+                continue;
+            };
+            let Some(prop) = tables.prop(other_name) else {
+                continue;
+            };
+            if !prop.blocks {
+                continue;
+            }
+            let dist = (thing.x - other.x).hypot(thing.y - other.y);
+            if dist < f64::from(prop.radius) {
+                findings.push(Finding {
+                    check: "V-P20",
+                    severity: Severity::Error,
+                    subject: Subject::Thing(i),
+                    message: format!(
+                        "{name} is {dist:.3} units from blocking prop {other_name} (thing \
+                         {j}), inside its radius {}",
+                        prop.radius
+                    ),
+                });
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -573,6 +882,199 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
                 && f.severity == Severity::Warning
                 && matches!(f.subject, Subject::Sector(1))),
             "expected a V-P13 warning on sector 1: {findings:?}"
+        );
+    }
+
+    // --- Task 7: V-P2 thing headroom, V-P19 light bounds, V-P25 start
+    // clearance/telefrag, and the V-P20 static prop-embedding check. ---
+
+    /// A single 128x128 closed sector, one-sided walls on every side,
+    /// floor 0, and a configurable ceiling height and light level.
+    /// `things` is spliced in verbatim (zero or more `thing { ... }`
+    /// blocks), so callers build their own fixtures without repeating this
+    /// boilerplate room shell.
+    fn room(heightceiling: i32, lightlevel: i32, things: &str) -> String {
+        format!(
+            r#"namespace = "doom";
+vertex {{ x = 0.000; y = 0.000; }}
+vertex {{ x = 128.000; y = 0.000; }}
+vertex {{ x = 128.000; y = 128.000; }}
+vertex {{ x = 0.000; y = 128.000; }}
+linedef {{ v1 = 0; v2 = 1; sidefront = 0; blocking = true; }}
+linedef {{ v1 = 1; v2 = 2; sidefront = 1; blocking = true; }}
+linedef {{ v1 = 2; v2 = 3; sidefront = 2; blocking = true; }}
+linedef {{ v1 = 3; v2 = 0; sidefront = 3; blocking = true; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = {heightceiling}; lightlevel = {lightlevel}; }}
+{things}"#
+        )
+    }
+
+    /// One `thing` block at `(x, y)`, `type_id`, flagged `single` only —
+    /// matching the minimal shape `check::scene`'s own `l_shape` fixture
+    /// uses.
+    fn thing_at(x: f64, y: f64, type_id: u16) -> String {
+        format!("thing {{ x = {x:.3}; y = {y:.3}; type = {type_id}; single = true; }}\n")
+    }
+
+    #[test]
+    fn an_imp_exactly_at_its_species_height_passes_headroom() {
+        let t = Tables::load().expect("tables");
+        let imp_height = t.species("imp").expect("imp species").height;
+        let text = room(imp_height, 160, &thing_at(64.0, 64.0, 3001));
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P2"),
+            "ceiling exactly at species height: no headroom finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn an_imp_one_unit_below_its_species_height_fails_headroom() {
+        let t = Tables::load().expect("tables");
+        let imp_height = t.species("imp").expect("imp species").height;
+        let text = room(imp_height - 1, 160, &thing_at(64.0, 64.0, 3001));
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P2"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Thing(0))),
+            "expected a V-P2 error on thing 0: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_thing_type_is_a_p2_warning_and_nothing_else_flags_it() {
+        let t = Tables::load().expect("tables");
+        let text = room(128, 160, &thing_at(64.0, 64.0, 31337));
+        let findings = findings_of(&text);
+        let warnings: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == "V-P2" && matches!(f.subject, Subject::Thing(0)))
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "exactly one V-P2 finding for the unknown thing: {findings:?}"
+        );
+        assert_eq!(warnings[0].severity, Severity::Warning);
+        assert_eq!(warnings[0].message, "unknown thing type 31337");
+        assert!(
+            t.thing_kinds().all(|(_, id)| id != 31337),
+            "31337 really is unrecognized"
+        );
+    }
+
+    #[test]
+    fn light_level_at_the_max_bound_passes() {
+        let t = Tables::load().expect("tables");
+        let max = *t.light_range().end();
+        let text = room(128, max, "");
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P19"),
+            "light level at the max bound: no finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn light_level_one_above_the_max_bound_fails() {
+        let t = Tables::load().expect("tables");
+        let max = *t.light_range().end();
+        let text = room(128, max + 1, "");
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P19"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Sector(0))),
+            "expected a V-P19 error on sector 0: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_start_exactly_at_radius_clearance_from_a_wall_passes() {
+        let t = Tables::load().expect("tables");
+        let radius = f64::from(t.player().radius);
+        let text = room(128, 160, &thing_at(radius, 64.0, 1));
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P25"),
+            "start exactly at radius clearance from the west wall: no finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_start_one_unit_closer_than_radius_to_a_wall_fails() {
+        let t = Tables::load().expect("tables");
+        let radius = f64::from(t.player().radius);
+        let text = room(128, 160, &thing_at(radius - 1.0, 64.0, 1));
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P25"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Thing(0))),
+            "expected a V-P25 error on thing 0: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn two_coincident_starts_telefrag_each_other() {
+        let mut things = thing_at(64.0, 64.0, 1);
+        things.push_str(&thing_at(64.0, 64.0, 2));
+        let text = room(128, 160, &things);
+        let findings = findings_of(&text);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "V-P25" && f.severity == Severity::Error),
+            "expected a V-P25 error for the coincident starts: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn two_starts_exactly_two_radii_apart_pass() {
+        let t = Tables::load().expect("tables");
+        let radius = f64::from(t.player().radius);
+        let mut things = thing_at(64.0 - radius, 64.0, 1);
+        things.push_str(&thing_at(64.0 + radius, 64.0, 2));
+        let text = room(128, 160, &things);
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P25"),
+            "two starts exactly two radii apart: no telefrag finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_stimpack_exactly_at_a_barrels_radius_passes_embedding() {
+        let t = Tables::load().expect("tables");
+        let barrel_radius = f64::from(t.prop("barrel").expect("barrel prop").radius);
+        let mut things = thing_at(64.0, 64.0, 2035); // barrel
+        things.push_str(&thing_at(64.0 + barrel_radius, 64.0, 2011)); // stimpack
+        let text = room(128, 160, &things);
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P20"),
+            "stimpack exactly at the barrel's radius: no finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_stimpack_inside_a_barrels_radius_fails_embedding() {
+        let t = Tables::load().expect("tables");
+        let barrel_radius = f64::from(t.prop("barrel").expect("barrel prop").radius);
+        let mut things = thing_at(64.0, 64.0, 2035); // barrel
+        things.push_str(&thing_at(64.0 + barrel_radius - 2.0, 64.0, 2011)); // stimpack
+        let text = room(128, 160, &things);
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P20"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Thing(1))),
+            "expected a V-P20 error on thing 1 (the stimpack): {findings:?}"
         );
     }
 }
