@@ -150,11 +150,14 @@ impl std::fmt::Display for Finding {
 /// ([`invariants::check_tags`], V-P13/P14), thing-headroom
 /// ([`invariants::check_thing_headroom`], V-P2), light-bounds
 /// ([`invariants::check_light_bounds`], V-P19), start-clearance
-/// ([`invariants::check_starts`], V-P25), and prop-embedding
-/// ([`invariants::check_prop_embedding`], the static half of V-P20)
-/// invariants, fills [`MapStats`] from the map's own declaration counts,
-/// and returns them with `conformance: None` and the tag manifest
-/// `check_tags` produced — later tasks append more passes.
+/// ([`invariants::check_starts`], V-P25), prop-embedding
+/// ([`invariants::check_prop_embedding`], the static half of V-P20),
+/// passage-width ([`invariants::check_passage_width`], V-P3), door-opening
+/// ([`invariants::check_door_openings`], V-P4), and recognized-special
+/// ([`invariants::check_recognized_specials`], the flood's soundness
+/// precondition) invariants, fills [`MapStats`] from the map's own
+/// declaration counts, and returns them with `conformance: None` and the tag
+/// manifest `check_tags` produced — later tasks append more passes.
 #[must_use]
 pub fn run(map: &UdmfMap, _map_name: &str, tables: &Tables, _spec: Option<&Spec>) -> CheckReport {
     let mut findings = Vec::new();
@@ -168,6 +171,9 @@ pub fn run(map: &UdmfMap, _map_name: &str, tables: &Tables, _spec: Option<&Spec>
     invariants::check_light_bounds(&scene, tables, &mut findings);
     invariants::check_starts(&scene, tables, &mut findings);
     invariants::check_prop_embedding(&scene, tables, &mut findings);
+    invariants::check_passage_width(&scene, tables, &mut findings);
+    invariants::check_door_openings(&scene, tables, &mut findings);
+    invariants::check_recognized_specials(&scene, tables, &mut findings);
 
     let stats = MapStats {
         sectors: map.sectors.len(),

@@ -665,6 +665,214 @@ pub fn check_prop_embedding(scene: &Scene, tables: &Tables, findings: &mut Vec<F
     }
 }
 
+/// Every linedef special this compiler treats as a door — a manual door
+/// ([`Tables::door_special`]) plus each of [`Tables::locked_door_kinds`]'s
+/// three keyed specials — as `i32`, matching
+/// [`crate::check::scene::Boundary::special`]'s type. Shared by
+/// [`check_passage_width`] (which exempts a door's own faces from the flat
+/// passage-width bound) and [`check_door_openings`] (which needs the same
+/// membership test to find a door's boundaries in the first place).
+fn door_specials(tables: &Tables) -> Vec<i32> {
+    let mut specials = vec![i32::from(tables.door_special())];
+    specials.extend(
+        tables
+            .locked_door_kinds()
+            .into_iter()
+            .map(|(_, special)| i32::from(special)),
+    );
+    specials
+}
+
+/// V-P3: every passable boundary is wide enough for the player to fit
+/// through.
+///
+/// `len() < 2 * Tables::player().radius` — the exact bound `rules.rs`'s own
+/// `check_passage_width` applies to a portal's declared `width` before this
+/// compiler ever lays out geometry (confirmed: no separate margin constant
+/// exists in `engine.toml`; both checks read the same `[player]` table, but
+/// independently — this one re-measures the *emitted* boundary segment
+/// rather than trusting the IR's `Portal::width` field the way `rules.rs`
+/// does).
+///
+/// **Per-linedef limitation.** This compiler never splits one opening into
+/// several collinear boundary segments, so visiting each linedef once
+/// (`fronts_this` only, so a two-sided line is not double-reported) is sound
+/// today. A hypothetical future compiler change that *did* tile a wide
+/// opening across several short collinear lines would false-positive this
+/// check — each piece would read as narrower than the whole even though the
+/// combined opening is wide enough. Nothing today does that, so this is
+/// recorded as a documented limitation rather than guarded against.
+///
+/// **Door faces are exempt.** A boundary carrying a door special (manual or
+/// any of the three locked kinds, `door_specials`) is a door's own face,
+/// not an open passage: its clear width is governed by
+/// [`check_door_openings`] (V-P4), which measures the door's *opening*
+/// against the neighboring ceilings, not this check's flat "twice the
+/// radius" bound. A door built to spec can be exactly as wide as the
+/// corridor it interrupts and no wider — without this exemption, every
+/// ordinary door in a map narrower than twice the player's radius would
+/// double-report as a V-P3 error on top of whatever V-P4 says about it.
+pub fn check_passage_width(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    let door = door_specials(tables);
+    let need = f64::from(tables.player().radius * 2);
+
+    for sector in &scene.sectors {
+        for b in &sector.boundary {
+            if !b.fronts_this || !b.passable() || door.contains(&b.special) {
+                continue;
+            }
+            let len = b.len();
+            if len < need {
+                findings.push(Finding {
+                    check: "V-P3",
+                    severity: Severity::Error,
+                    subject: Subject::Linedef(b.linedef),
+                    message: format!(
+                        "passage is {len:.3} units wide, narrower than the {need} the player \
+                         needs to fit through"
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// V-P4: a door's usable opening — not its nominal room height — clears the
+/// player.
+///
+/// A **door sector** is identified structurally, not by any sector-level
+/// flag: it is the back sector of any boundary carrying a door special
+/// (manual door or any locked kind, `door_specials`) — the vanilla
+/// engine's manual-door action (`EV_DoDoor`, `p_doors.c`) always operates on
+/// `line->backsector`, and [`crate::check::scene::Boundary`]'s own mirroring
+/// convention (documented on its `neighbor` field) makes the front mirror's
+/// `neighbor` exactly that back sector.
+///
+/// For each distinct door sector found this way, the opening is the minimum
+/// ceiling among the sectors reached across one of the door sector's own
+/// door-special boundaries, minus [`Tables::door_clearance_allowance`],
+/// minus the door sector's own floor. An opening less than
+/// [`Tables::player`]'s height is an Error naming the door sector.
+///
+/// **This deliberately reads the door sector's own emitted floor, not
+/// `rules.rs`'s IR-level proxy for it.** `rules.rs`'s `check_door_clearance`
+/// runs before this compiler lays out any geometry, so it approximates the
+/// door's floor as `max(a.floor, b.floor)` — the higher of the two rooms a
+/// door portal joins, on the reasoning that the player standing on the
+/// higher floor has the least headroom. This check runs *after* the door
+/// sector exists in the emitted map, so it measures the real thing directly
+/// instead of re-deriving the same approximation: an independent
+/// measurement, not a restatement of the IR-level one.
+pub fn check_door_openings(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    let door = door_specials(tables);
+
+    let mut door_sectors: HashSet<usize> = HashSet::new();
+    for sector in &scene.sectors {
+        for b in &sector.boundary {
+            if b.fronts_this
+                && door.contains(&b.special)
+                && let Some(neighbor) = b.neighbor
+            {
+                door_sectors.insert(neighbor);
+            }
+        }
+    }
+    let mut door_sectors: Vec<usize> = door_sectors.into_iter().collect();
+    door_sectors.sort_unstable();
+
+    let player_height = tables.player().height;
+    let allowance = tables.door_clearance_allowance();
+
+    for d in door_sectors {
+        let door_sector = &scene.sectors[d];
+        let min_ceiling = door_sector
+            .boundary
+            .iter()
+            .filter(|b| door.contains(&b.special))
+            .filter_map(|b| b.neighbor)
+            .map(|n| scene.sectors[n].ceiling)
+            .min();
+        let Some(min_ceiling) = min_ceiling else {
+            continue;
+        };
+        let opening = min_ceiling - allowance - door_sector.floor;
+        if opening < player_height {
+            findings.push(Finding {
+                check: "V-P4",
+                severity: Severity::Error,
+                subject: Subject::Sector(d),
+                message: format!(
+                    "door opening {opening} (min neighbor ceiling {min_ceiling} minus \
+                     clearance allowance {allowance} minus floor {}) is below player height \
+                     {player_height}",
+                    door_sector.floor
+                ),
+            });
+        }
+    }
+}
+
+/// The linedef specials this checker recognizes as modeled: `0` (no
+/// special), a manual or locked door ([`door_specials`]), and the four exit
+/// specials (switch/walkover crossed with normal/secret).
+fn recognized_specials(tables: &Tables) -> Vec<i32> {
+    let mut specials = door_specials(tables);
+    specials.push(0);
+    specials.push(i32::from(tables.exit_switch_special()));
+    specials.push(i32::from(tables.exit_walkover_special()));
+    specials.push(i32::from(tables.secret_exit_switch_special()));
+    specials.push(i32::from(tables.secret_exit_walkover_special()));
+    specials
+}
+
+/// V-P7 (soundness precondition): every boundary special is one this
+/// checker actually models.
+///
+/// The reachability flood (`flood.rs`, the rest of V-P7) is sound only if
+/// every traversal-affecting special is represented in its graph — an
+/// unrecognized special is one the flood would silently treat as inert,
+/// which can only ever make the flood's verdict *optimistic* (it might call
+/// a map finishable that a real player, blocked or diverted by that
+/// special, could not finish). This check is the flood's precondition
+/// rather than a traversal check in its own right, so its severity is
+/// [`Severity::Warning`]: an unrecognized special is not proof the map is
+/// broken, only proof this checker cannot vouch for it.
+///
+/// **Lift and teleport specials are deliberately not in the recognized
+/// set.** `Tables::lift_switch_special`, `lift_walkover_special`, and
+/// `teleport_special` all exist in the sourced tables — but this compiler
+/// does not emit lifts or teleporters yet (`KNOWN-GAPS.md`), and neither
+/// this module nor `flood.rs` models their traversal semantics. Recognizing
+/// them here without the flood actually understanding them would be
+/// dishonest: a map that somehow carried one would get a silent pass
+/// instead of the warning that correctly says "this checker does not know
+/// what this line does."
+///
+/// Each linedef is visited once (`fronts_this` only): `special` is
+/// linedef-wide, so both mirrors of a two-sided line would otherwise report
+/// the identical special twice.
+pub fn check_recognized_specials(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    let recognized = recognized_specials(tables);
+
+    for sector in &scene.sectors {
+        for b in &sector.boundary {
+            if !b.fronts_this || recognized.contains(&b.special) {
+                continue;
+            }
+            findings.push(Finding {
+                check: "V-P7",
+                severity: Severity::Warning,
+                subject: Subject::Linedef(b.linedef),
+                message: format!(
+                    "linedef carries special {}, which this checker does not model — the \
+                     reachability flood cannot vouch for its effect on traversal",
+                    b.special
+                ),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1059,6 +1267,175 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         assert!(
             findings.iter().all(|f| f.check != "V-P20"),
             "stimpack exactly at the barrel's radius: no finding: {findings:?}"
+        );
+    }
+
+    // --- Task 8: V-P3 passage width, V-P4 door opening, and the
+    // recognized-specials soundness precondition. ---
+
+    /// `check::scene`'s own `TWO_BOX` shape, but with the shared edge's
+    /// length parameterized (`edge_len`, replacing the fixed `64.000` on the
+    /// three vertices that bound it) and with `linedef_extra`/
+    /// `sector1_extra` spliced verbatim into the shared linedef and sector 1
+    /// declarations, so passage-width and recognized-special fixtures can be
+    /// built without repeating this boilerplate. No `thing` — these checks
+    /// never read `scene.things`.
+    fn two_box(edge_len: f64, linedef_extra: &str, sector1_extra: &str) -> String {
+        format!(
+            r#"namespace = "doom";
+vertex {{ x = 0.000; y = 0.000; }}
+vertex {{ x = 64.000; y = 0.000; }}
+vertex {{ x = 128.000; y = 0.000; }}
+vertex {{ x = 128.000; y = {edge_len:.3}; }}
+vertex {{ x = 64.000; y = {edge_len:.3}; }}
+vertex {{ x = 0.000; y = {edge_len:.3}; }}
+linedef {{ v1 = 1; v2 = 4; sidefront = 0; sideback = 1; twosided = true;{linedef_extra} }}
+linedef {{ v1 = 0; v2 = 1; sidefront = 2; blocking = true; }}
+linedef {{ v1 = 4; v2 = 5; sidefront = 3; blocking = true; }}
+linedef {{ v1 = 5; v2 = 0; sidefront = 4; blocking = true; }}
+linedef {{ v1 = 1; v2 = 2; sidefront = 5; blocking = true; }}
+linedef {{ v1 = 2; v2 = 3; sidefront = 6; blocking = true; }}
+linedef {{ v1 = 3; v2 = 4; sidefront = 7; blocking = true; }}
+sidedef {{ sector = 0; texturemiddle = "-"; }}
+sidedef {{ sector = 1; texturemiddle = "-"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160;{sector1_extra} }}
+"#
+        )
+    }
+
+    #[test]
+    fn a_shared_edge_narrower_than_twice_player_radius_is_a_p3_error() {
+        let t = Tables::load().expect("tables");
+        let need = f64::from(t.player().radius * 2);
+        let findings = findings_of(&two_box(need - 2.0, "", ""));
+        assert!(
+            findings.iter().any(|f| f.check == "V-P3"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Linedef(0))),
+            "expected a V-P3 error on linedef 0: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_shared_edge_exactly_twice_player_radius_raises_no_p3_finding() {
+        let t = Tables::load().expect("tables");
+        let need = f64::from(t.player().radius * 2);
+        let findings = findings_of(&two_box(need, "", ""));
+        assert!(
+            findings.iter().all(|f| f.check != "V-P3"),
+            "edge exactly at the width threshold: no finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_narrow_door_face_is_exempt_from_p3() {
+        let t = Tables::load().expect("tables");
+        let need = f64::from(t.player().radius * 2);
+        let findings = findings_of(&two_box(need / 2.0, " special = 1; arg0 = 5;", " id = 5;"));
+        assert!(
+            findings.iter().all(|f| f.check != "V-P3"),
+            "a door face's own width is governed by V-P4, not V-P3: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn an_unrecognized_special_is_a_warning() {
+        let findings = findings_of(&two_box(64.0, " special = 999; arg0 = 5;", " id = 5;"));
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && f.severity == Severity::Warning
+                && matches!(f.subject, Subject::Linedef(0))
+                && f.message.contains("999")),
+            "expected a warning naming special 999: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_recognized_special_raises_no_v_p7_warning() {
+        let findings = findings_of(&two_box(64.0, " special = 1; arg0 = 5;", " id = 5;"));
+        assert!(
+            findings.iter().all(|f| f.check != "V-P7"),
+            "the door special is recognized: no finding: {findings:?}"
+        );
+    }
+
+    /// Three-sector door chain: left room (sector 0) / thin door sector
+    /// (sector 1, closed: floor 0, `id = 5`) / right room (sector 2),
+    /// joined by two door-special linedefs (`special = 1`, `arg0 = 5`)
+    /// whose back side is the door sector on both ends — matching a manual
+    /// door's own convention (the vanilla engine's `EV_DoDoor` acts on
+    /// `line->backsector`). Both rooms share `neighbor_ceiling`, so
+    /// `check_door_openings`'s `min(adjacent ceilings) -
+    /// door_clearance_allowance() - door floor` reduces to
+    /// `neighbor_ceiling - door_clearance_allowance()`.
+    fn door_chain(neighbor_ceiling: i32) -> String {
+        format!(
+            r#"namespace = "doom";
+vertex {{ x = 0.000; y = 0.000; }}
+vertex {{ x = 64.000; y = 0.000; }}
+vertex {{ x = 96.000; y = 0.000; }}
+vertex {{ x = 160.000; y = 0.000; }}
+vertex {{ x = 160.000; y = 64.000; }}
+vertex {{ x = 96.000; y = 64.000; }}
+vertex {{ x = 64.000; y = 64.000; }}
+vertex {{ x = 0.000; y = 64.000; }}
+linedef {{ v1 = 1; v2 = 6; sidefront = 0; sideback = 1; twosided = true; special = 1; arg0 = 5; }}
+linedef {{ v1 = 2; v2 = 5; sidefront = 2; sideback = 3; twosided = true; special = 1; arg0 = 5; }}
+linedef {{ v1 = 0; v2 = 1; sidefront = 4; blocking = true; }}
+linedef {{ v1 = 7; v2 = 0; sidefront = 5; blocking = true; }}
+linedef {{ v1 = 6; v2 = 7; sidefront = 6; blocking = true; }}
+linedef {{ v1 = 1; v2 = 2; sidefront = 7; blocking = true; }}
+linedef {{ v1 = 6; v2 = 5; sidefront = 8; blocking = true; }}
+linedef {{ v1 = 2; v2 = 3; sidefront = 9; blocking = true; }}
+linedef {{ v1 = 3; v2 = 4; sidefront = 10; blocking = true; }}
+linedef {{ v1 = 4; v2 = 5; sidefront = 11; blocking = true; }}
+sidedef {{ sector = 0; texturemiddle = "-"; }}
+sidedef {{ sector = 1; texturemiddle = "-"; }}
+sidedef {{ sector = 2; texturemiddle = "-"; }}
+sidedef {{ sector = 1; texturemiddle = "-"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 0; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 1; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 2; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 2; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = 2; texturemiddle = "STARTAN2"; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = {neighbor_ceiling}; lightlevel = 160; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 0; lightlevel = 160; id = 5; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = {neighbor_ceiling}; lightlevel = 160; }}
+"#
+        )
+    }
+
+    #[test]
+    fn a_door_opening_exactly_at_player_height_passes() {
+        let t = Tables::load().expect("tables");
+        let need = t.player().height + t.door_clearance_allowance();
+        let findings = findings_of(&door_chain(need));
+        assert!(
+            findings.iter().all(|f| f.check != "V-P4"),
+            "opening exactly at player height: no finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_door_opening_one_unit_short_of_player_height_fails() {
+        let t = Tables::load().expect("tables");
+        let need = t.player().height + t.door_clearance_allowance();
+        let findings = findings_of(&door_chain(need - 1));
+        assert!(
+            findings.iter().any(|f| f.check == "V-P4"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Sector(1))),
+            "expected a V-P4 error on sector 1 (the door sector): {findings:?}"
         );
     }
 
