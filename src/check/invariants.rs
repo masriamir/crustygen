@@ -672,6 +672,51 @@ pub fn check_prop_embedding(scene: &Scene, tables: &Tables, findings: &mut Vec<F
     }
 }
 
+/// V-P20 (reachability half): every collectible sits somewhere the
+/// key-aware flood ([`crate::check::flood::run_flood`]) actually reaches.
+///
+/// `reached[s]` is per-sector forward reachability from the player 1 start,
+/// as [`crate::check::flood::run_flood`] returns it — a room compiles to one
+/// sector with a single uniform floor, so a pickup's exact position inside a
+/// reached sector never matters (`KNOWN-GAPS.md`'s P20 subsumption note).
+/// For each thing whose name `is_collectible`, with a resolved sector `s`,
+/// `!reached[s]` is an Error naming the thing. A thing with no resolved
+/// sector is skipped (already a `"V-S"` finding from [`Scene::build`]).
+///
+/// Callers only run this when [`crate::check::flood::run_flood`] returned
+/// `Some` — a map with no player start or exit already has its own V-P7
+/// finding telling that story, and every sector would otherwise read as
+/// unreached for a reason this check has nothing to add to.
+pub fn check_pickup_reachability(
+    scene: &Scene,
+    tables: &Tables,
+    reached: &[bool],
+    findings: &mut Vec<Finding>,
+) {
+    for (i, thing) in scene.things.iter().enumerate() {
+        let Some(name) = thing.name.as_deref() else {
+            continue;
+        };
+        if !is_collectible(tables, name) {
+            continue;
+        }
+        let Some(sector) = thing.sector else {
+            continue;
+        };
+        if !reached[sector] {
+            findings.push(Finding {
+                check: "V-P20",
+                severity: Severity::Error,
+                subject: Subject::Thing(i),
+                message: format!(
+                    "{name} is never reachable — no walk from the player start reaches its \
+                     sector"
+                ),
+            });
+        }
+    }
+}
+
 /// Every linedef special this compiler treats as a door — a manual door
 /// ([`Tables::door_special`]) plus each of [`Tables::locked_door_kinds`]'s
 /// three keyed specials — as `i32`, matching
@@ -1548,6 +1593,47 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
                 && f.severity == Severity::Error
                 && matches!(f.subject, Subject::Thing(1))),
             "expected a V-P20 error on thing 1 (the stimpack): {findings:?}"
+        );
+    }
+
+    // --- Task 9: `check_pickup_reachability`, the reachability half of
+    // V-P20 that consumes `flood::run_flood`'s `reached` vector. ---
+
+    /// Builds the [`Scene`] for a single 128×128 room holding one stimpack
+    /// (`type = 2011`).
+    fn one_stimpack_scene(tables: &Tables) -> Scene {
+        let map = parse_udmf(
+            &room(128, 160, &thing_at(64.0, 64.0, 2011)),
+            Limits::default(),
+        )
+        .expect("fixture parses");
+        let mut findings = Vec::new();
+        Scene::build(&map, tables, &mut findings)
+    }
+
+    #[test]
+    fn a_collectible_in_a_reached_sector_raises_no_p20_finding() {
+        let t = Tables::load().expect("tables");
+        let scene = one_stimpack_scene(&t);
+        let mut findings = Vec::new();
+        check_pickup_reachability(&scene, &t, &[true], &mut findings);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P20"),
+            "the stimpack's sector is reached: no finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_collectible_in_an_unreached_sector_is_a_p20_error() {
+        let t = Tables::load().expect("tables");
+        let scene = one_stimpack_scene(&t);
+        let mut findings = Vec::new();
+        check_pickup_reachability(&scene, &t, &[false], &mut findings);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P20"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Thing(0))),
+            "expected a V-P20 error on thing 0 (the stimpack): {findings:?}"
         );
     }
 }

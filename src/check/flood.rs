@@ -1,0 +1,994 @@
+//! V-P7 (no softlock), V-P24 (key/lock coherence), and the reachability half
+//! of V-P20 (pickup accessibility): the flood re-derived over *parsed*
+//! geometry rather than the compiler's own IR.
+//!
+//! [`run_flood`] builds a [`reach::ReachGraph`] straight from a [`Scene`] and
+//! runs [`reach::check`] over it **untouched** — the same core `reach.rs`'s
+//! own module doc records as verifier-grade for exactly this reuse. It
+//! deliberately does not call [`reach::graph_from_compiled`]: that builder
+//! reads `Ir`/`Compiled`, structures this checker exists to cross-examine
+//! (`check/mod.rs`'s module doc), and it also encodes a compile-time fact a
+//! `TEXTMAP` alone cannot recover — which side of a two-sided line the
+//! compiler *intended* as a walkover exit's "host room" versus its carved
+//! "recess". This module knows only what the emitted linedef says: a special
+//! number and two bordering sectors. See "Exit goals" below for what that
+//! forces.
+//!
+//! The two passability rules ([`reach::check`]'s step-up and crossing-window
+//! math) are entirely `reach.rs`'s concern and are not restated here; this
+//! module's own job is narrower — turning [`Scene`] boundaries into
+//! [`reach::Edge`]s and [`Scene`] things into [`reach::Node`] keys/goals/
+//! start, then turning [`reach::Findings`] back into [`Finding`]s a report
+//! can print.
+//!
+//! # Exit goals
+//!
+//! A switch exit (`P_UseSpecialLine`, pinned `p_switch.c`) fires only from a
+//! line's front side ("Only the front sides of lines are usable" —
+//! `KNOWN-GAPS.md`'s "two engine facts" note), so its goal is the sector
+//! whose boundary entry has [`Boundary::fronts_this`](crate::check::scene::Boundary::fronts_this)
+//! true for that linedef.
+//!
+//! A walkover exit (`P_CrossSpecialLine`, pinned `p_spec.c`) has **no such
+//! gate** — unlike the teleport special (97), which is also walkover-
+//! triggered yet deliberately checks `side == 1` in `EV_Teleport` to stay
+//! front-only (`data/vocabulary.toml`'s `[specials.teleport]` `source` field
+//! records this exact contrast: "`EV_Teleport`... gates activation to the
+//! line's front side despite being walkover-triggered"). A walkover exit
+//! carries no such override, so crossing it from *either* side fires
+//! `G_ExitLevel`/`G_SecretExitLevel`. Both sectors bordering the line are
+//! therefore goals here — both mirrors [`Scene`] files under their own
+//! sector, so this falls out of "any boundary carrying the special, in any
+//! sector's own boundary list, names that sector a goal" without needing to
+//! know which mirror is "front".
+//!
+//! This is a strictly more conservative (never falsely-unfinishable) goal
+//! set than [`reach::graph_from_compiled`]'s "only the recess" convention:
+//! every recess this compiler ever emits is still a goal here, plus the host
+//! room, which is sound for a checker that cannot assume a `TEXTMAP` it did
+//! not compile keeps the same front/back convention.
+//!
+//! # Key classes
+//!
+//! Interned the same way [`reach::graph_from_compiled`] does: by the locked
+//! special a key opens ([`Tables::locked_door_kinds`]), not by key-thing
+//! name, so a card and skull of one colour share a class (`EV_VerticalDoor`,
+//! pinned `p_doors.c:371-403`, accepts either). [`run_flood`] reports a hard
+//! finding rather than panicking when the vocabulary ever lists more classes
+//! than a [`reach::KeyMask`] can hold — this module runs on arbitrary input,
+//! unlike `graph_from_compiled`'s `assert!` over a vocabulary this crate
+//! itself controls.
+//!
+//! # The vacuous-pass hole this module closes
+//!
+//! `reach::graph_from_compiled` returns `None` — a vacuous pass — for a map
+//! with no player 1 start or no exit, on the reasoning that "no exit" is a
+//! spec-conformance concern belonging elsewhere. This module has no such
+//! elsewhere: a `TEXTMAP` with neither is a hard `V-P7` finding here (see
+//! the design doc's verifier catalog), not a silent pass.
+
+use crate::check::scene::Scene;
+use crate::check::{Finding, Severity, Subject};
+use crate::reach::{self, Edge, EdgeKind, KeyClass, KeyMask, Limits, Node, ReachGraph};
+use crate::tables::Tables;
+
+/// Interns the vocabulary's locked-door specials into key classes: sorted,
+/// deduped `special` values alongside the key-kind names each class covers
+/// (mirrors [`reach::graph_from_compiled`]'s own interning, computed
+/// independently per this module's doc). `class_names[c]` is every key kind
+/// sharing class `c`'s special, e.g. `["blue_card", "blue_skull"]`.
+///
+/// Returns `None` — pushing no finding itself, since callers react
+/// differently to it — when the vocabulary lists more classes than a
+/// [`KeyMask`] can represent.
+fn intern_lock_classes(tables: &Tables) -> Option<(Vec<u16>, Vec<Vec<String>>)> {
+    let kinds = tables.locked_door_kinds();
+    let mut specials: Vec<u16> = kinds.iter().map(|&(_, s)| s).collect();
+    specials.sort_unstable();
+    specials.dedup();
+    if specials.len() > KeyMask::BITS as usize {
+        return None;
+    }
+    let class_names: Vec<Vec<String>> = specials
+        .iter()
+        .map(|&s| {
+            kinds
+                .iter()
+                .filter(|&&(_, ks)| ks == s)
+                .map(|(k, _)| k.clone())
+                .collect()
+        })
+        .collect();
+    Some((specials, class_names))
+}
+
+/// The [`KeyClass`] `special` interns to under `specials` (as built by
+/// [`intern_lock_classes`]), if any.
+fn class_of(specials: &[u16], special: u16) -> Option<KeyClass> {
+    specials
+        .iter()
+        .position(|&s| s == special)
+        .and_then(|i| KeyClass::try_from(i).ok())
+}
+
+/// Renders a [`KeyMask`] as the key-kind names it holds, comma-joined (a
+/// colour class with more than one kind joins those with `/`, matching
+/// `rules.rs`'s own `check_reachability` wording), or `"no keys"` for an
+/// empty mask.
+fn keys_in_words(mask: KeyMask, class_names: &[Vec<String>]) -> String {
+    let names: Vec<String> = class_names
+        .iter()
+        .enumerate()
+        .filter(|&(c, _)| mask & (1 << c) != 0)
+        .map(|(_, kinds)| kinds.join("/"))
+        .collect();
+    if names.is_empty() {
+        "no keys".to_owned()
+    } else {
+        names.join(", ")
+    }
+}
+
+/// Resolves the flood's `start` node: which `player1_start` thing to use
+/// (reporting every extra one as its own `V-P7` error — the flood traces
+/// only the first, in declaration order, but every extra is still a defect
+/// worth naming) and which sector it resolved to. `None`, with the finding
+/// already pushed, covers both "no start at all" and "the first start
+/// resolved to no sector" (already a `"V-S"` finding from [`Scene::build`])
+/// — both are the same "the flood cannot run" story, worded slightly
+/// differently for which is true.
+fn resolve_start(scene: &Scene, findings: &mut Vec<Finding>) -> Option<usize> {
+    let starts: Vec<usize> = scene
+        .things
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.name.as_deref() == Some("player1_start"))
+        .map(|(i, _)| i)
+        .collect();
+    let Some(&first) = starts.first() else {
+        findings.push(Finding {
+            check: "V-P7",
+            severity: Severity::Error,
+            subject: Subject::Map,
+            message: "no player 1 start — the flood cannot run".to_owned(),
+        });
+        return None;
+    };
+    for &extra in &starts[1..] {
+        findings.push(Finding {
+            check: "V-P7",
+            severity: Severity::Error,
+            subject: Subject::Thing(extra),
+            message: "extra player 1 start; the flood traces only the first".to_owned(),
+        });
+    }
+    let Some(start) = scene.things[first].sector else {
+        findings.push(Finding {
+            check: "V-P7",
+            severity: Severity::Error,
+            subject: Subject::Map,
+            message: "the player 1 start could not be located in any sector — the flood \
+                      cannot run"
+                .to_owned(),
+        });
+        return None;
+    };
+    Some(start)
+}
+
+/// Resolves the flood's `goals`: sectors bordering a boundary that carries
+/// one of the four exit specials, per "Exit goals" above (switch specials
+/// only from `fronts_this`, walkover specials from either mirror). Sorted
+/// and deduped. `None`, with the finding already pushed, when the map
+/// carries no exit at all.
+fn resolve_goals(
+    scene: &Scene,
+    tables: &Tables,
+    findings: &mut Vec<Finding>,
+) -> Option<Vec<usize>> {
+    let switch_specials = [
+        tables.exit_switch_special(),
+        tables.secret_exit_switch_special(),
+    ];
+    let walkover_specials = [
+        tables.exit_walkover_special(),
+        tables.secret_exit_walkover_special(),
+    ];
+    let mut goals = Vec::new();
+    for (i, sector) in scene.sectors.iter().enumerate() {
+        for b in &sector.boundary {
+            let Ok(special) = u16::try_from(b.special) else {
+                continue;
+            };
+            if walkover_specials.contains(&special)
+                || (switch_specials.contains(&special) && b.fronts_this)
+            {
+                goals.push(i);
+            }
+        }
+    }
+    if goals.is_empty() {
+        findings.push(Finding {
+            check: "V-P7",
+            severity: Severity::Error,
+            subject: Subject::Map,
+            message: "no exit line — the flood cannot run".to_owned(),
+        });
+        return None;
+    }
+    goals.sort_unstable();
+    goals.dedup();
+    Some(goals)
+}
+
+/// Builds one [`Node`] per scene sector: floor/ceiling verbatim, `keys` set
+/// from every thing whose name is a key kind ([`Tables::locked_door_kinds`])
+/// with a resolved sector, unioned bit by interned [`KeyClass`].
+fn build_nodes(scene: &Scene, specials: &[u16], kinds: &[(String, u16)]) -> Vec<Node> {
+    let mut nodes: Vec<Node> = scene
+        .sectors
+        .iter()
+        .map(|s| Node {
+            floor: s.floor,
+            ceiling: s.ceiling,
+            keys: 0,
+        })
+        .collect();
+    for thing in &scene.things {
+        let Some(name) = thing.name.as_deref() else {
+            continue;
+        };
+        let Some(&(_, special)) = kinds.iter().find(|(k, _)| k == name) else {
+            continue;
+        };
+        let (Some(class), Some(sector)) = (class_of(specials, special), thing.sector) else {
+            continue;
+        };
+        nodes[sector].keys |= 1 << class;
+    }
+    nodes
+}
+
+/// Builds one [`Edge`] per `fronts_this` boundary with a resolved neighbor:
+/// a door-special boundary (plain or locked, per "Edges" above) becomes
+/// [`EdgeKind::Door`]; otherwise a [`Boundary::passable`](crate::check::scene::Boundary::passable)
+/// one becomes [`EdgeKind::Open`]; otherwise no edge at all — a blocking
+/// two-sided line is a wall to the flood.
+fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16]) -> Vec<Edge> {
+    let plain_door = tables.door_special();
+    let mut edges = Vec::new();
+    for (i, sector) in scene.sectors.iter().enumerate() {
+        for b in &sector.boundary {
+            if !b.fronts_this {
+                continue;
+            }
+            let Some(neighbor) = b.neighbor else {
+                continue;
+            };
+            let special = u16::try_from(b.special).ok();
+            let kind = if special == Some(plain_door) {
+                Some(EdgeKind::Door { lock: None })
+            } else if let Some(class) = special.and_then(|s| class_of(specials, s)) {
+                Some(EdgeKind::Door { lock: Some(class) })
+            } else if b.passable() {
+                Some(EdgeKind::Open)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                edges.push(Edge {
+                    a: i,
+                    b: neighbor,
+                    kind,
+                });
+            }
+        }
+    }
+    edges
+}
+
+/// Maps a completed [`reach::Findings`] onto [`Finding`]s, per "Findings
+/// mapping" in [`run_flood`]'s own doc: unfinishable is one Map-subject
+/// Error; stranded entries are reported only when finishable (an
+/// unfinishable map's stranded list is the degenerate "every visited state"
+/// case, which is the unfinishable finding's story, not a fresh one per
+/// node); every unreachable sector is its own Error.
+fn push_flood_findings(
+    result: &reach::Findings,
+    class_names: &[Vec<String>],
+    findings: &mut Vec<Finding>,
+) {
+    if result.unfinishable {
+        findings.push(Finding {
+            check: "V-P7",
+            severity: Severity::Error,
+            subject: Subject::Map,
+            message: "no feasible walk from the start reaches any exit".to_owned(),
+        });
+    } else {
+        for &(node, mask) in &result.stranded {
+            findings.push(Finding {
+                check: "V-P7",
+                severity: Severity::Error,
+                subject: Subject::Sector(node),
+                message: format!(
+                    "reachable holding {}, but no walk from there reaches an exit",
+                    keys_in_words(mask, class_names)
+                ),
+            });
+        }
+    }
+    for &node in &result.unreachable {
+        findings.push(Finding {
+            check: "V-P7",
+            severity: Severity::Error,
+            subject: Subject::Sector(node),
+            message: "never reached by any walk from the player start".to_owned(),
+        });
+    }
+}
+
+/// Runs the V-P7 flood over `scene` and pushes its findings.
+///
+/// Returns `Some(reached)` — one entry per scene sector, `reached[i]` true
+/// iff sector `i` is forward-reachable from the player 1 start — when the
+/// flood ran at all, for [`crate::check::invariants::check_pickup_reachability`]
+/// (V-P20) to consume. Returns `None`, the reason already pushed as a
+/// [`Finding`] by `resolve_start` or `resolve_goals`, when it could not
+/// run: no `player1_start` thing, the first start resolved to no sector, no
+/// exit line, or (below) more locked-door classes than a [`KeyMask`] can
+/// represent.
+#[must_use]
+pub fn run_flood(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) -> Option<Vec<bool>> {
+    let start = resolve_start(scene, findings)?;
+    let goals = resolve_goals(scene, tables, findings)?;
+    let Some((specials, class_names)) = intern_lock_classes(tables) else {
+        findings.push(Finding {
+            check: "V-P7",
+            severity: Severity::Error,
+            subject: Subject::Map,
+            message: format!(
+                "the vocabulary lists more than {} distinct lock classes, which a KeyMask \
+                 cannot represent — the flood cannot run",
+                KeyMask::BITS
+            ),
+        });
+        return None;
+    };
+
+    let kinds = tables.locked_door_kinds();
+    let nodes = build_nodes(scene, &specials, &kinds);
+    let edges = build_edges(scene, tables, &specials);
+
+    let graph = ReachGraph {
+        nodes,
+        edges,
+        start,
+        goals,
+    };
+    let limits = Limits {
+        player_height: tables.player().height,
+        max_step: tables.step_height(),
+    };
+    let result = reach::check(&graph, &limits);
+    push_flood_findings(&result, &class_names, findings);
+
+    let mut reached = vec![true; scene.sectors.len()];
+    for &node in &result.unreachable {
+        reached[node] = false;
+    }
+    Some(reached)
+}
+
+/// V-P24 (engine form): every locked-door special present has at least one
+/// key thing of its colour class placed, and every placed key thing opens
+/// at least one door present.
+///
+/// Re-derived at the class level, not the specific key-kind level
+/// `rules.rs`'s IR-side `check_key_lock_coherence` uses, because a class is
+/// all an emitted linedef's `special` retains — `26` opens to *either*
+/// `blue_card` or `blue_skull` ([`Tables::locked_door_kinds`]), not
+/// whichever one the room's author had in mind. The ordering half of P24
+/// ("every locked door has its key reachable before it") is [`run_flood`]'s
+/// job, not this one's — an unfinishable finding from a key trapped behind
+/// its own lock is a `V-P7` finding, not a `V-P24` one (`docs/design.md`
+/// §7.3's P24 entry: "which the P7 flood proves rather than assumes").
+///
+/// Independent of [`run_flood`]: runs (and can find defects) even on a map
+/// with no start or exit. Silently reports nothing for a vocabulary with
+/// more lock classes than a [`KeyMask`] can hold — [`run_flood`] is the one
+/// that reports that as its own hard finding, and it always runs first in
+/// [`crate::check::run`]'s wiring.
+pub fn check_key_lock_coherence(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    let Some((specials, class_names)) = intern_lock_classes(tables) else {
+        return;
+    };
+    let kinds = tables.locked_door_kinds();
+
+    let mut key_present = vec![false; specials.len()];
+    for thing in &scene.things {
+        let Some(name) = thing.name.as_deref() else {
+            continue;
+        };
+        if let Some(&(_, special)) = kinds.iter().find(|(k, _)| k == name)
+            && let Some(class) = class_of(&specials, special)
+        {
+            key_present[class as usize] = true;
+        }
+    }
+
+    for sector in &scene.sectors {
+        for b in &sector.boundary {
+            if !b.fronts_this {
+                continue;
+            }
+            let Some(class) = u16::try_from(b.special)
+                .ok()
+                .and_then(|s| class_of(&specials, s))
+            else {
+                continue;
+            };
+            if !key_present[class as usize] {
+                findings.push(Finding {
+                    check: "V-P24",
+                    severity: Severity::Error,
+                    subject: Subject::Linedef(b.linedef),
+                    message: format!(
+                        "door locked to `{}`, but no such key is placed anywhere in the map",
+                        class_names[class as usize].join("/")
+                    ),
+                });
+            }
+        }
+    }
+
+    let mut lock_present = vec![false; specials.len()];
+    for sector in &scene.sectors {
+        for b in &sector.boundary {
+            if let Some(class) = u16::try_from(b.special)
+                .ok()
+                .and_then(|s| class_of(&specials, s))
+            {
+                lock_present[class as usize] = true;
+            }
+        }
+    }
+
+    for (i, thing) in scene.things.iter().enumerate() {
+        let Some(name) = thing.name.as_deref() else {
+            continue;
+        };
+        let Some(&(_, special)) = kinds.iter().find(|(k, _)| k == name) else {
+            continue;
+        };
+        let Some(class) = class_of(&specials, special) else {
+            continue;
+        };
+        if !lock_present[class as usize] {
+            findings.push(Finding {
+                check: "V-P24",
+                severity: Severity::Error,
+                subject: Subject::Thing(i),
+                message: format!("{name} is placed but opens no door in this map"),
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crustywad::map::udmf::parse_udmf;
+
+    /// A [`room_chain_ex`] fixture's text, plus the next unused
+    /// vertex/sidedef/sector index — so a caller needing to append more
+    /// geometry (an isolated sector, say) can keep its own indices
+    /// consistent without re-deriving the numbering scheme by hand.
+    struct Chain {
+        text: String,
+        next_vertex: usize,
+        next_sidedef: usize,
+        next_sector: usize,
+    }
+
+    /// Room-row layout: each room is `SIZE` map units square.
+    const SIZE: f64 = 128.0;
+
+    /// Declaration index of room `i`'s bottom-row vertex, in an `n`-room row.
+    fn bottom_vertex(i: usize) -> usize {
+        i
+    }
+
+    /// Declaration index of room `i`'s top-row vertex, in an `n`-room row.
+    fn top_vertex(n: usize, i: usize) -> usize {
+        n + 1 + i
+    }
+
+    /// The `2*(n+1)` vertex declarations for an `n`-room row: bottom row
+    /// left to right, then top row left to right.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "room-row fixtures never exceed a handful of rooms, far under f64's 52-bit \
+                  mantissa"
+    )]
+    fn chain_vertices(n: usize) -> String {
+        use std::fmt::Write as _;
+        let mut vertices = String::new();
+        for i in 0..=n {
+            let _ = writeln!(
+                vertices,
+                "vertex {{ x = {:.3}; y = 0.000; }}",
+                i as f64 * SIZE
+            );
+        }
+        for i in 0..=n {
+            let _ = writeln!(
+                vertices,
+                "vertex {{ x = {:.3}; y = {SIZE:.3}; }}",
+                i as f64 * SIZE
+            );
+        }
+        vertices
+    }
+
+    /// The shared two-sided linedef (plus its two sidedefs) between room `i`
+    /// and room `i + 1`, appending to `linedefs`/`sidedefs` and advancing
+    /// `next_sidedef` by 2.
+    fn write_link(
+        n: usize,
+        i: usize,
+        (special, tag, blocking): (i32, i32, bool),
+        linedefs: &mut String,
+        sidedefs: &mut String,
+        next_sidedef: &mut usize,
+    ) {
+        use std::fmt::Write as _;
+        let extra = if special == 0 {
+            String::new()
+        } else {
+            format!(" special = {special}; arg0 = {tag};")
+        };
+        let blocking_s = if blocking { " blocking = true;" } else { "" };
+        let _ = writeln!(
+            linedefs,
+            "linedef {{ v1 = {}; v2 = {}; sidefront = {}; sideback = {}; \
+             twosided = true;{extra}{blocking_s} }}",
+            top_vertex(n, i + 1),
+            bottom_vertex(i + 1),
+            next_sidedef,
+            *next_sidedef + 1
+        );
+        for sector in [i, i + 1] {
+            let _ = writeln!(
+                sidedefs,
+                "sidedef {{ sector = {sector}; texturemiddle = \"-\"; texturetop = \"STARTAN2\"; \
+                 texturebottom = \"STARTAN2\"; }}"
+            );
+        }
+        *next_sidedef += 2;
+    }
+
+    /// Room `i`'s own four (or two, for an interior room) perimeter walls —
+    /// bottom and top always, plus a left wall if `i == 0` and a right wall
+    /// if `i == n - 1` — appending to `linedefs`/`sidedefs` and advancing
+    /// `next_sidedef`. `exit`, if it names room `i`, adds `special`/`arg0`
+    /// to the bottom wall.
+    fn write_perimeter(
+        n: usize,
+        i: usize,
+        exit: Option<(usize, u16, i32)>,
+        linedefs: &mut String,
+        sidedefs: &mut String,
+        next_sidedef: &mut usize,
+    ) {
+        use std::fmt::Write as _;
+        let mut wall =
+            |v1: usize, v2: usize, extra: &str, linedefs: &mut String, sidedefs: &mut String| {
+                let _ = writeln!(
+                    linedefs,
+                    "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {next_sidedef};{extra} \
+                 blocking = true; }}"
+                );
+                let _ = writeln!(
+                    sidedefs,
+                    "sidedef {{ sector = {i}; texturemiddle = \"STARTAN2\"; }}"
+                );
+                *next_sidedef += 1;
+            };
+
+        let bottom_extra = match exit {
+            Some((room, special, tag)) if room == i => {
+                format!(" special = {special}; arg0 = {tag};")
+            }
+            _ => String::new(),
+        };
+        wall(
+            bottom_vertex(i),
+            bottom_vertex(i + 1),
+            &bottom_extra,
+            linedefs,
+            sidedefs,
+        );
+        wall(
+            top_vertex(n, i + 1),
+            top_vertex(n, i),
+            "",
+            linedefs,
+            sidedefs,
+        );
+        if i == 0 {
+            wall(top_vertex(n, 0), bottom_vertex(0), "", linedefs, sidedefs);
+        }
+        if i == n - 1 {
+            wall(bottom_vertex(n), top_vertex(n, n), "", linedefs, sidedefs);
+        }
+    }
+
+    /// A row of `rooms.len()` 128×128 boxes, room `i` spanning
+    /// `x ∈ [i*128, (i+1)*128]`, `y ∈ [0, 128]`, each adjacent pair sharing
+    /// a two-sided vertical linedef. `links[i]` is `(special, tag,
+    /// blocking)` for the boundary between room `i` and room `i+1`
+    /// (`links.len() == rooms.len() - 1`) — `special = 0` for a plain open
+    /// boundary. `exit`, if present, is `(room, special, tag)`: adds
+    /// `special`/`arg0` to that room's own one-sided *bottom* wall, the
+    /// switch-exit shape (`P_UseSpecialLine` fires from a raycast, not a
+    /// crossing, so the exit line stays a normal solid one-sided wall —
+    /// `KNOWN-GAPS.md`). `things` is spliced in verbatim; callers place
+    /// things at `x ∈ [i*128, (i+1)*128]` for room `i`.
+    fn room_chain_ex(
+        rooms: &[(i32, i32, i32)],
+        links: &[(i32, i32, bool)],
+        exit: Option<(usize, u16, i32)>,
+        things: &str,
+    ) -> Chain {
+        use std::fmt::Write as _;
+
+        let n = rooms.len();
+        assert_eq!(
+            links.len(),
+            n - 1,
+            "one link between each pair of adjacent rooms"
+        );
+
+        let vertices = chain_vertices(n);
+
+        let mut linedefs = String::new();
+        let mut sidedefs = String::new();
+        let mut next_sidedef = 0usize;
+        for (i, &link) in links.iter().enumerate() {
+            write_link(n, i, link, &mut linedefs, &mut sidedefs, &mut next_sidedef);
+        }
+        for i in 0..n {
+            write_perimeter(n, i, exit, &mut linedefs, &mut sidedefs, &mut next_sidedef);
+        }
+
+        let mut sectors = String::new();
+        for &(floor, ceiling, light) in rooms {
+            let _ = writeln!(
+                sectors,
+                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; \
+                 heightfloor = {floor}; heightceiling = {ceiling}; lightlevel = {light}; }}"
+            );
+        }
+
+        Chain {
+            text: format!("namespace = \"doom\";\n{vertices}{linedefs}{sidedefs}{sectors}{things}"),
+            next_vertex: 2 * (n + 1),
+            next_sidedef,
+            next_sector: n,
+        }
+    }
+
+    fn room_chain(
+        rooms: &[(i32, i32, i32)],
+        links: &[(i32, i32, bool)],
+        exit: Option<(usize, u16, i32)>,
+        things: &str,
+    ) -> String {
+        room_chain_ex(rooms, links, exit, things).text
+    }
+
+    /// A closed, one-sided 128×128 box with no linedef connecting it to
+    /// anything else, at `vbase`/`sbase`/`sector_idx` — the indices
+    /// [`Chain::next_vertex`]/[`Chain::next_sidedef`]/[`Chain::next_sector`]
+    /// give, so it appends cleanly after a [`room_chain_ex`] fixture with no
+    /// index collisions. Placed far in `x` so it cannot coincide with the
+    /// chain's own geometry.
+    fn isolated_box(vbase: usize, sbase: usize, sector_idx: usize) -> String {
+        format!(
+            r#"vertex {{ x = 4000.000; y = 0.000; }}
+vertex {{ x = 4128.000; y = 0.000; }}
+vertex {{ x = 4128.000; y = 128.000; }}
+vertex {{ x = 4000.000; y = 128.000; }}
+linedef {{ v1 = {v0}; v2 = {v1}; sidefront = {s0}; blocking = true; }}
+linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {s1}; blocking = true; }}
+linedef {{ v1 = {v2}; v2 = {v3}; sidefront = {s2}; blocking = true; }}
+linedef {{ v1 = {v3}; v2 = {v0}; sidefront = {s3}; blocking = true; }}
+sidedef {{ sector = {sector_idx}; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = {sector_idx}; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = {sector_idx}; texturemiddle = "STARTAN2"; }}
+sidedef {{ sector = {sector_idx}; texturemiddle = "STARTAN2"; }}
+sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }}
+"#,
+            v0 = vbase,
+            v1 = vbase + 1,
+            v2 = vbase + 2,
+            v3 = vbase + 3,
+            s0 = sbase,
+            s1 = sbase + 1,
+            s2 = sbase + 2,
+            s3 = sbase + 3,
+        )
+    }
+
+    /// One `thing` block, flagged `single` only.
+    fn thing_at(x: f64, y: f64, type_id: u16) -> String {
+        format!("thing {{ x = {x:.3}; y = {y:.3}; type = {type_id}; single = true; }}\n")
+    }
+
+    /// Parses `text` and builds the [`Scene`] it resolves to, returning both
+    /// it and whatever `"V-S"` findings `Scene::build` raised.
+    fn scene_of(text: &str, tables: &Tables) -> (Scene, Vec<Finding>) {
+        let map = parse_udmf(text, crustywad::Limits::default()).expect("fixture parses");
+        let mut findings = Vec::new();
+        let scene = Scene::build(&map, tables, &mut findings);
+        (scene, findings)
+    }
+
+    #[test]
+    fn a_map_with_no_player_start_is_a_hard_error_not_a_vacuous_pass() {
+        let tables = Tables::load().expect("tables");
+        let exit_special = tables.exit_switch_special();
+        let text = room_chain(&[(0, 128, 160)], &[], Some((0, exit_special, 0)), "");
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings);
+        assert!(reached.is_none(), "no start: the flood cannot run");
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Map)
+                && f.message.contains("no player 1 start")),
+            "expected a V-P7 Map error naming the missing start: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_map_with_no_exit_is_a_hard_error_not_a_vacuous_pass() {
+        let tables = Tables::load().expect("tables");
+        let start_id = tables.thing_id("player1_start").expect("player1_start id");
+        let things = thing_at(64.0, 64.0, start_id);
+        let text = room_chain(&[(0, 128, 160)], &[], None, &things);
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings);
+        assert!(reached.is_none(), "no exit: the flood cannot run");
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Map)
+                && f.message.contains("no exit")),
+            "expected a V-P7 Map error naming the missing exit: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_key_behind_its_own_locked_door_is_unfinishable() {
+        let tables = Tables::load().expect("tables");
+        let start_id = tables.thing_id("player1_start").expect("player1_start id");
+        let card_id = tables.thing_id("blue_card").expect("blue_card id");
+        let locked = tables
+            .locked_door_special("blue_card")
+            .expect("blue_card has a locked-door special");
+        let exit_special = tables.exit_switch_special();
+
+        let mut things = thing_at(64.0, 64.0, start_id); // start room (0)
+        things += &thing_at(192.0, 64.0, card_id); // the card room (1), behind the lock
+
+        let text = room_chain(
+            &[(0, 128, 160), (0, 128, 160)],
+            &[(i32::from(locked), 0, false)],
+            Some((1, exit_special, 0)),
+            &things,
+        );
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings);
+        assert!(
+            reached.is_some(),
+            "start, exit, and class count are all fine — only the walk fails: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Map)
+                && f.message.contains("no feasible walk")),
+            "the only card is behind the door it opens: expected unfinishable: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_skull_key_satisfies_a_card_locked_door() {
+        let tables = Tables::load().expect("tables");
+        let start_id = tables.thing_id("player1_start").expect("player1_start id");
+        let skull_id = tables.thing_id("blue_skull").expect("blue_skull id");
+        let locked = tables
+            .locked_door_special("blue_card")
+            .expect("blue_card has a locked-door special");
+        let exit_special = tables.exit_switch_special();
+
+        // Same shape as the unfinishable fixture, but the skull sits in the
+        // START room instead of behind the door.
+        let mut things = thing_at(32.0, 64.0, start_id);
+        things += &thing_at(96.0, 64.0, skull_id);
+
+        let text = room_chain(
+            &[(0, 128, 160), (0, 128, 160)],
+            &[(i32::from(locked), 0, false)],
+            Some((1, exit_special, 0)),
+            &things,
+        );
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings);
+        assert!(reached.is_some());
+        assert!(
+            findings.iter().all(|f| f.check != "V-P7"),
+            "the skull opens the card's lock: no finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_pit_the_player_cannot_climb_out_of_is_stranding() {
+        let tables = Tables::load().expect("tables");
+        let start_id = tables.thing_id("player1_start").expect("player1_start id");
+        let exit_special = tables.exit_switch_special();
+        let pit_floor = -(tables.step_height() + 8);
+
+        let things = thing_at(64.0, 64.0, start_id); // start room also hosts the exit
+        let text = room_chain(
+            &[(0, 128, 160), (pit_floor, 128, 160)],
+            &[(0, 0, false)],
+            Some((0, exit_special, 0)),
+            &things,
+        );
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings);
+        assert!(reached.is_some());
+        assert!(
+            findings
+                .iter()
+                .all(|f| !(f.check == "V-P7" && f.message.contains("no feasible walk"))),
+            "the exit is right there in the start room: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Sector(1))),
+            "expected a stranding finding naming the pit (sector 1): {findings:?}"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_sector_is_reported() {
+        let tables = Tables::load().expect("tables");
+        let start_id = tables.thing_id("player1_start").expect("player1_start id");
+        let exit_special = tables.exit_switch_special();
+        let things = thing_at(64.0, 64.0, start_id);
+        let chain = room_chain_ex(
+            &[(0, 128, 160), (0, 128, 160)],
+            &[(0, 0, false)],
+            Some((0, exit_special, 0)),
+            &things,
+        );
+        let text =
+            chain.text + &isolated_box(chain.next_vertex, chain.next_sidedef, chain.next_sector);
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings);
+        assert!(reached.is_some());
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Sector(2))),
+            "expected the isolated third sector (2) reported unreachable: {findings:?}"
+        );
+        let reached = reached.expect("checked above");
+        assert!(!reached[2], "the isolated sector is not forward-reachable");
+    }
+
+    #[test]
+    fn a_walkover_exit_is_a_goal_from_both_sides() {
+        let tables = Tables::load().expect("tables");
+        let start_id = tables.thing_id("player1_start").expect("player1_start id");
+        let walkover = tables.exit_walkover_special();
+
+        // The shared line is flagged blocking, so it contributes no Open
+        // edge at all: the two rooms are otherwise fully disconnected. The
+        // start sits in room 0, the line's "front" side — not the "recess"
+        // side `reach::graph_from_compiled` alone would treat as the goal —
+        // so this is finishable only if fronting the exit is itself enough.
+        let things = thing_at(64.0, 64.0, start_id);
+        let text = room_chain(
+            &[(0, 128, 160), (0, 128, 160)],
+            &[(i32::from(walkover), 0, true)],
+            None,
+            &things,
+        );
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings);
+        assert!(reached.is_some());
+        assert!(
+            findings
+                .iter()
+                .all(|f| !(f.check == "V-P7" && f.message.contains("no feasible walk"))),
+            "a walkover exit fires from either crossing side, so the start's own room, \
+             fronting the line, is already a goal: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn an_extra_player_start_is_reported_but_the_flood_still_runs_on_the_first() {
+        let tables = Tables::load().expect("tables");
+        let start_id = tables.thing_id("player1_start").expect("player1_start id");
+        let exit_special = tables.exit_switch_special();
+        let mut things = thing_at(32.0, 64.0, start_id); // thing 0, the first start
+        things += &thing_at(96.0, 64.0, start_id); // thing 1, the extra start
+        let text = room_chain(&[(0, 128, 160)], &[], Some((0, exit_special, 0)), &things);
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings);
+        assert!(
+            reached.is_some(),
+            "an extra start does not stop the flood from running: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Thing(1))),
+            "expected a V-P7 error naming the extra start (thing 1): {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|f| !(f.check == "V-P7" && f.message.contains("no feasible walk"))),
+            "the first start still reaches the exit: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn an_orphan_key_and_a_keyless_lock_are_both_p24_errors() {
+        let tables = Tables::load().expect("tables");
+        let yellow_locked = tables
+            .locked_door_special("yellow_card")
+            .expect("yellow_card has a locked-door special");
+        let red_skull_id = tables.thing_id("red_skull").expect("red_skull id");
+
+        // room 0 -- yellow-locked door --> room 1 -- open --> room 2.
+        // No yellow key anywhere (keyless lock); a red_skull placed in room
+        // 2, with no red-locked door anywhere (orphan key).
+        let things = thing_at(320.0, 64.0, red_skull_id);
+        let text = room_chain(
+            &[(0, 128, 160), (0, 128, 160), (0, 128, 160)],
+            &[(i32::from(yellow_locked), 0, false), (0, 0, false)],
+            None,
+            &things,
+        );
+        let (scene, _) = scene_of(&text, &tables);
+        let mut coherence = Vec::new();
+        check_key_lock_coherence(&scene, &tables, &mut coherence);
+
+        assert!(
+            coherence.iter().any(|f| f.check == "V-P24"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Linedef(0))
+                && f.message.contains("yellow")),
+            "expected a keyless-lock error naming the yellow-locked linedef: {coherence:?}"
+        );
+        assert!(
+            coherence.iter().any(|f| f.check == "V-P24"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Thing(0))),
+            "expected an orphan-key error naming the red_skull thing: {coherence:?}"
+        );
+        assert_eq!(
+            coherence.len(),
+            2,
+            "exactly these two defects, no more: {coherence:?}"
+        );
+    }
+}

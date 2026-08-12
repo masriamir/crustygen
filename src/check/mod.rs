@@ -11,6 +11,7 @@ use crate::spec::Spec;
 use crate::tables::Tables;
 use crustywad::map::udmf::UdmfMap;
 
+pub mod flood;
 pub mod invariants;
 pub mod scene;
 
@@ -155,9 +156,13 @@ impl std::fmt::Display for Finding {
 /// passage-width ([`invariants::check_passage_width`], V-P3), door-opening
 /// ([`invariants::check_door_openings`], V-P4), and recognized-special
 /// ([`invariants::check_recognized_specials`], the flood's soundness
-/// precondition) invariants, fills [`MapStats`] from the map's own
-/// declaration counts, and returns them with `conformance: None` and the tag
-/// manifest `check_tags` produced — later tasks append more passes.
+/// precondition) invariants, runs the key-aware reachability flood
+/// ([`flood::run_flood`], V-P7) and, when it ran, the reachability half of
+/// pickup accessibility over its result (`invariants::check_pickup_reachability`,
+/// V-P20), runs key/lock coherence ([`flood::check_key_lock_coherence`],
+/// V-P24), fills [`MapStats`] from the map's own declaration counts, and
+/// returns them with `conformance: None` and the tag manifest `check_tags`
+/// produced — later tasks append more passes.
 #[must_use]
 pub fn run(map: &UdmfMap, _map_name: &str, tables: &Tables, _spec: Option<&Spec>) -> CheckReport {
     let mut findings = Vec::new();
@@ -174,6 +179,10 @@ pub fn run(map: &UdmfMap, _map_name: &str, tables: &Tables, _spec: Option<&Spec>
     invariants::check_passage_width(&scene, tables, &mut findings);
     invariants::check_door_openings(&scene, tables, &mut findings);
     invariants::check_recognized_specials(&scene, tables, &mut findings);
+    if let Some(reached) = flood::run_flood(&scene, tables, &mut findings) {
+        invariants::check_pickup_reachability(&scene, tables, &reached, &mut findings);
+    }
+    flood::check_key_lock_coherence(&scene, tables, &mut findings);
 
     let stats = MapStats {
         sectors: map.sectors.len(),
