@@ -712,4 +712,77 @@ thing { x = 64.000; y = 64.000; type = 1; single = true; }
         assert_eq!(scene.things[0].sector, Some(0), "in the vertical leg");
         assert_eq!(scene.things[1].sector, None, "the notch is outside the L");
     }
+
+    #[test]
+    fn a_sector_in_sector_ring_resolves_a_thing_in_its_inner_sector() {
+        // Sector 0 is a "ring": a single sector whose boundary is TWO
+        // disjoint loops — the outer 160x160 square, plus a second,
+        // independent loop around a 40x40 hole in the middle (both filed
+        // under sector 0, one-sided walls, so no shared linedef ties them
+        // together). Sector 1 is a wholly separate room filling that same
+        // hole. No other fixture in this module gives one sector a
+        // multi-loop boundary, so `sector_contains`'s even-odd rule has
+        // never been exercised against a hole before: a bug that dropped
+        // the hole loop's contribution would make the ring wrongly claim
+        // the hole (and, since sector 0 is declared first, `resolve_things`
+        // would resolve a thing in the hole to the ring instead of the
+        // nested inner sector).
+        let ring = r#"namespace = "doom";
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 160.000; y = 0.000; }
+vertex { x = 160.000; y = 160.000; }
+vertex { x = 0.000; y = 160.000; }
+vertex { x = 60.000; y = 60.000; }
+vertex { x = 100.000; y = 60.000; }
+vertex { x = 100.000; y = 100.000; }
+vertex { x = 60.000; y = 100.000; }
+vertex { x = 60.000; y = 60.000; }
+vertex { x = 100.000; y = 60.000; }
+vertex { x = 100.000; y = 100.000; }
+vertex { x = 60.000; y = 100.000; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; blocking = true; }
+linedef { v1 = 1; v2 = 2; sidefront = 1; blocking = true; }
+linedef { v1 = 2; v2 = 3; sidefront = 2; blocking = true; }
+linedef { v1 = 3; v2 = 0; sidefront = 3; blocking = true; }
+linedef { v1 = 4; v2 = 5; sidefront = 4; blocking = true; }
+linedef { v1 = 5; v2 = 6; sidefront = 5; blocking = true; }
+linedef { v1 = 6; v2 = 7; sidefront = 6; blocking = true; }
+linedef { v1 = 7; v2 = 4; sidefront = 7; blocking = true; }
+linedef { v1 = 8; v2 = 9; sidefront = 8; blocking = true; }
+linedef { v1 = 9; v2 = 10; sidefront = 9; blocking = true; }
+linedef { v1 = 10; v2 = 11; sidefront = 10; blocking = true; }
+linedef { v1 = 11; v2 = 8; sidefront = 11; blocking = true; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }
+thing { x = 20.000; y = 20.000; type = 1; single = true; }
+thing { x = 80.000; y = 80.000; type = 1; single = true; }
+"#;
+        let (scene, findings) = scene_of(ring);
+        assert!(findings.is_empty(), "clean ring fixture: {findings:?}");
+        assert!(scene.sectors[0].closed, "the ring's two loops both close");
+        assert!(scene.sectors[1].closed, "the inner room closes");
+        assert_eq!(
+            scene.things[0].sector,
+            Some(0),
+            "(20, 20) is in the ring, well clear of the hole"
+        );
+        assert_eq!(
+            scene.things[1].sector,
+            Some(1),
+            "(80, 80) sits in the hole: the ring's hole loop must exclude it, and it must \
+             resolve to the nested inner sector instead"
+        );
+    }
 }

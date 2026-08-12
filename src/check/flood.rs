@@ -445,6 +445,9 @@ pub fn run_flood(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) ->
 /// [`crate::check::run`]'s wiring.
 pub fn check_key_lock_coherence(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
     let Some((specials, class_names)) = intern_lock_classes(tables) else {
+        // Silent here, not a gap: `run_flood` reports this same overflow as
+        // its own hard `V-P7` finding, and `check::run` always calls it
+        // first, so this pass need not duplicate the report.
         return;
     };
     let kinds = tables.locked_door_kinds();
@@ -1031,6 +1034,48 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
                 .all(|f| !(f.check == "V-P7" && f.message.contains("no feasible walk"))),
             "a walkover exit fires from either crossing side, so the start's own room (the \
              back room, unable to climb to the front) is already a goal: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_blocking_walkover_exit_is_not_a_goal_and_reads_as_no_exit() {
+        // The map's only exit line carries a walkover special but is also
+        // flagged BLOCKING — `PIT_CheckLine` rejects it for any non-missile
+        // before `P_TryMove`'s `spechit` bookkeeping is ever reached, so
+        // `P_CrossSpecialLine` can never fire it ("Exit goals" above,
+        // `Boundary::passable`'s own doc). `resolve_goals`'s `b.passable()`
+        // gate must therefore find no goal anywhere, which is the same
+        // shape as a map with no exit line at all: a `V-P7` Map error
+        // reading "no exit line", not a flood that runs and finds the map
+        // unfinishable (it never gets that far) and not a silent pass.
+        let tables = Tables::load().expect("tables");
+        let start_id = tables.thing_id("player1_start").expect("player1_start id");
+        let walkover = tables.exit_walkover_special();
+        let things = thing_at(64.0, 64.0, start_id);
+        let text = room_chain(
+            &[(0, 128, 160), (0, 128, 160)],
+            &[(i32::from(walkover), 0, true)],
+            None,
+            &things,
+        );
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings);
+        assert!(
+            reached.is_none(),
+            "an uncrossable walkover exit is not a goal from either side; the flood cannot \
+             run: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Map)
+                && f.message.contains("no exit line")),
+            "expected the no-exit-line V-P7 Map error: {findings:?}"
+        );
+        assert_eq!(
+            findings.len(),
+            1,
+            "no unrelated finding joins it: {findings:?}"
         );
     }
 
