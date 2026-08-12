@@ -31,7 +31,7 @@ spec → IR generation does not exist, so the IR below is still authored
 directly as JSON. See [Known gaps](#known-gaps).
 
 ```bash
-cargo test                                   # 475 tests
+cargo test                                   # 490 tests
 cargo run --bin crustygen-check -- maps/entrada.wad \
     --spec tests/fixtures/entrada.spec.md
 ```
@@ -85,6 +85,15 @@ a silent gap, and a structurally broken map marks every row not-run rather
 than judging one against corrupt geometry. Exit 0 clean, 1 on a defect, 2 on
 bad input. See [`docs/check.md`](docs/check.md).
 
+## Surveying a WAD
+
+`crustygen-lift` is the first stage of decompiling a WAD's geometry back into
+a map-spec. Today it only surveys: reading a WAD's maps through the same
+shared ingest path `crustygen-check` uses, and reporting raw element counts
+and linedef/sector/thing-type histograms per map, human-readable or as
+`--json`. It interprets nothing yet — no table lookups, no spec emission. See
+[`docs/lift.md`](docs/lift.md).
+
 ## The data tables are the highest-stakes part
 
 Every engine value in `data/engine.toml` and `data/vocabulary.toml` carries a
@@ -112,6 +121,7 @@ the four id/Final Doom IWADs. See
 | [`docs/design.md`](docs/design.md) | The map-spec template, the IR, the compiler contract, and the v1 bar |
 | [`docs/map-spec.md`](docs/map-spec.md) | The map-spec document format, the parser's API, and the enforcement split |
 | [`docs/check.md`](docs/check.md) | The layer-4 verifier: the check catalog, the flood's construction rules, conformance verdicts, and the CLI contract |
+| [`docs/lift.md`](docs/lift.md) | The lifter's charter, its telemetry-skeleton scope, and the `crustygen-lift` CLI contract |
 | [`docs/geometry.md`](docs/geometry.md) | Worked coordinates for the gap and door-chain constructions |
 | [`docs/verticality.md`](docs/verticality.md) | Height differences, and the stairs/lifts phases that follow |
 | [`docs/measurements/`](docs/measurements/) | Corpus measurements over the retail IWADs |
