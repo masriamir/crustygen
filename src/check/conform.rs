@@ -1,6 +1,15 @@
-//! Spec conformance rows: every frontmatter parameter [`crate::spec::Spec`]
-//! declares, judged against what the parsed [`Scene`] and [`MapStats`]
-//! actually show (`docs/design.md` §8.1's conformance report). Unlike
+//! Spec conformance rows: the fixed catalog of frontmatter parameters this
+//! checker can measure — plus one row per spec monster species, one per a
+//! placed species the spec never names, and one per `sustain.powerups[]`
+//! entry — each judged against what the parsed [`Scene`] and [`MapStats`]
+//! actually show (`docs/design.md` §8.1's conformance report). **This is not
+//! every frontmatter parameter [`crate::spec::Spec`] declares.** A parameter
+//! with no sourced geometric definition, or nothing emitted to measure it
+//! against, gets an explicit [`Verdict::NotDerivable`] row instead of being
+//! silently absent — three rows are always `NotDerivable` (`identity.grid`,
+//! `combat.encounter_style`, `combat.sound.propagation`), and several more
+//! become `NotDerivable` only when the map itself gives [`rows`] nothing to
+//! measure; `docs/check.md`'s "Conformance" section has the full list. Unlike
 //! `scene.rs`/`invariants.rs`/`flood.rs`, nothing here re-derives a
 //! playability rule from the pinned engine — every row is a plain
 //! target-vs-actual comparison, so the only sourcing burden is the ammo
@@ -23,7 +32,9 @@ use std::collections::{BTreeSet, HashSet};
 use crate::check::scene::{Scene, SceneThing};
 use crate::check::{ConformanceRow, MapStats, Verdict};
 use crate::spec::Spec;
-use crate::spec::frontmatter::{ExitKind, ExitTrigger, Facing, Frontmatter, MinMax};
+use crate::spec::frontmatter::{
+    EncounterStyle, ExitKind, ExitTrigger, Facing, Frontmatter, MinMax, Propagation,
+};
 use crate::tables::{AmmoType, Tables};
 
 // ---------------------------------------------------------------------
@@ -171,6 +182,20 @@ fn identity_row(fm: &Frontmatter, map_name: &str) -> ConformanceRow {
             Verdict::Fail
         },
     }
+}
+
+/// `identity.grid`: always [`Verdict::NotDerivable`]. `KNOWN-GAPS.md`:
+/// "Portal `width` and `at` are exempt from the grid rule" that binds room
+/// footprints — real doorways are routinely finer than the grid their rooms
+/// sit on — so a vertex-grid check would false-positive on every emitted
+/// opening rather than actually re-deriving the rule the spec states.
+fn identity_grid_row(fm: &Frontmatter) -> ConformanceRow {
+    not_derivable(
+        "identity.grid".to_owned(),
+        fm.identity.grid.to_string(),
+        "portal width/at are exempt from the grid rule, so a vertex-grid check false-positives \
+         on every opening",
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -547,9 +572,108 @@ fn exit_trigger_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conform
     }
 }
 
+/// Every `progression.*` row: keys, locked doors, exit kind/trigger, and the
+/// four switch/walkover/lift/teleport `MinMax` counts. Extracted out of
+/// [`rows`] itself (alongside [`monster_rows`]/[`sustain_rows`]/
+/// [`lighting_rows`]) purely to keep that function under clippy's line-count
+/// lint — the row order and content are unchanged either way.
+fn progression_rows(
+    fm: &Frontmatter,
+    scene: &Scene,
+    tables: &Tables,
+    rows: &mut Vec<ConformanceRow>,
+) {
+    rows.push(keys_row(fm, scene, tables));
+    rows.push(locked_doors_row(fm, scene, tables));
+    rows.push(exit_kind_row(fm, scene, tables));
+    rows.push(exit_trigger_row(fm, scene, tables));
+    rows.push(range_row(
+        "progression.switches.count".to_owned(),
+        &fm.progression.switches.count,
+        count_specials(
+            scene,
+            &[
+                i32::from(tables.exit_switch_special()),
+                i32::from(tables.secret_exit_switch_special()),
+            ],
+        ),
+    ));
+    rows.push(range_row(
+        "progression.walkover_triggers.count".to_owned(),
+        &fm.progression.walkover_triggers.count,
+        count_specials(
+            scene,
+            &[
+                i32::from(tables.exit_walkover_special()),
+                i32::from(tables.secret_exit_walkover_special()),
+            ],
+        ),
+    ));
+    rows.push(range_row(
+        "progression.lifts.count".to_owned(),
+        &fm.progression.lifts.count,
+        count_specials(
+            scene,
+            &[
+                i32::from(tables.lift_switch_special()),
+                i32::from(tables.lift_walkover_special()),
+            ],
+        ),
+    ));
+    rows.push(range_row(
+        "progression.teleports.count".to_owned(),
+        &fm.progression.teleports.count,
+        count_specials(scene, &[i32::from(tables.teleport_special())]),
+    ));
+}
+
 // ---------------------------------------------------------------------
 // combat
 // ---------------------------------------------------------------------
+
+/// The document-vocabulary name of an [`EncounterStyle`] variant
+/// (`map-spec.template.md`'s `incidental | ambush | arena | corridor`
+/// spelling).
+fn encounter_style_name(style: EncounterStyle) -> &'static str {
+    match style {
+        EncounterStyle::Incidental => "incidental",
+        EncounterStyle::Ambush => "ambush",
+        EncounterStyle::Arena => "arena",
+        EncounterStyle::Corridor => "corridor",
+    }
+}
+
+/// `combat.encounter_style`: always [`Verdict::NotDerivable`] — no sourced
+/// definition of what geometry an "ambush" versus a "corridor" fight
+/// actually looks like exists to measure against.
+fn encounter_style_row(fm: &Frontmatter) -> ConformanceRow {
+    not_derivable(
+        "combat.encounter_style".to_owned(),
+        encounter_style_name(fm.combat.encounter_style).to_owned(),
+        "no sourced geometric definition exists",
+    )
+}
+
+/// The document-vocabulary name of a [`Propagation`] variant
+/// (`map-spec.template.md`'s `open | contained | sealed` spelling).
+fn propagation_name(propagation: Propagation) -> &'static str {
+    match propagation {
+        Propagation::Open => "open",
+        Propagation::Contained => "contained",
+        Propagation::Sealed => "sealed",
+    }
+}
+
+/// `combat.sound.propagation`: always [`Verdict::NotDerivable`] — no sourced
+/// definition of how far sound actually carries between emitted sectors
+/// exists to measure against.
+fn sound_propagation_row(fm: &Frontmatter) -> ConformanceRow {
+    not_derivable(
+        "combat.sound.propagation".to_owned(),
+        propagation_name(fm.combat.sound.propagation).to_owned(),
+        "no sourced geometric definition exists",
+    )
+}
 
 /// One [`range_row`] per [`crate::spec::frontmatter::MonsterSpec`] in
 /// `fm.combat.monsters` (placed count of that species versus its
@@ -894,6 +1018,7 @@ pub fn rows(
 
     // identity
     rows.push(identity_row(fm, map_name));
+    rows.push(identity_grid_row(fm));
 
     // scale
     rows.push(range_row(
@@ -937,53 +1062,14 @@ pub fn rows(
     rows.push(coop_only_items_row(fm, scene));
 
     // progression
-    rows.push(keys_row(fm, scene, tables));
-    rows.push(locked_doors_row(fm, scene, tables));
-    rows.push(exit_kind_row(fm, scene, tables));
-    rows.push(exit_trigger_row(fm, scene, tables));
-    rows.push(range_row(
-        "progression.switches.count".to_owned(),
-        &fm.progression.switches.count,
-        count_specials(
-            scene,
-            &[
-                i32::from(tables.exit_switch_special()),
-                i32::from(tables.secret_exit_switch_special()),
-            ],
-        ),
-    ));
-    rows.push(range_row(
-        "progression.walkover_triggers.count".to_owned(),
-        &fm.progression.walkover_triggers.count,
-        count_specials(
-            scene,
-            &[
-                i32::from(tables.exit_walkover_special()),
-                i32::from(tables.secret_exit_walkover_special()),
-            ],
-        ),
-    ));
-    rows.push(range_row(
-        "progression.lifts.count".to_owned(),
-        &fm.progression.lifts.count,
-        count_specials(
-            scene,
-            &[
-                i32::from(tables.lift_switch_special()),
-                i32::from(tables.lift_walkover_special()),
-            ],
-        ),
-    ));
-    rows.push(range_row(
-        "progression.teleports.count".to_owned(),
-        &fm.progression.teleports.count,
-        count_specials(scene, &[i32::from(tables.teleport_special())]),
-    ));
+    progression_rows(fm, scene, tables, &mut rows);
 
     // combat
+    rows.push(encounter_style_row(fm));
     monster_rows(fm, scene, tables, &mut rows);
     rows.push(hitscanner_ratio_row(fm, scene, tables));
     rows.push(deaf_ratio_row(fm, scene, tables));
+    rows.push(sound_propagation_row(fm));
     rows.push(not_derivable(
         "combat.max_simultaneous".to_owned(),
         fm.combat.max_simultaneous.to_string(),
@@ -1133,6 +1219,20 @@ thing { x = 160.000; y = 32.000; type = 2007; single = true; }
     fn scale_rooms_is_not_derivable() {
         let rows = fixture_rows();
         assert_eq!(row(&rows, "scale.rooms").verdict, Verdict::NotDerivable);
+    }
+
+    #[test]
+    fn identity_grid_encounter_style_and_sound_propagation_are_not_derivable() {
+        let rows = fixture_rows();
+        assert_eq!(row(&rows, "identity.grid").verdict, Verdict::NotDerivable);
+        assert_eq!(
+            row(&rows, "combat.encounter_style").verdict,
+            Verdict::NotDerivable
+        );
+        assert_eq!(
+            row(&rows, "combat.sound.propagation").verdict,
+            Verdict::NotDerivable
+        );
     }
 
     #[test]
