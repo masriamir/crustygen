@@ -6,6 +6,7 @@
 pub mod check;
 pub mod compile;
 pub mod geom;
+pub mod ingest;
 pub mod ir;
 pub mod pack;
 pub mod reach;
