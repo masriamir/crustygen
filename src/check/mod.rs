@@ -3,9 +3,13 @@
 //! Works on [`crustywad::map::udmf::UdmfMap`] — the assembled artifact, never
 //! the IR — so a compiler bug that satisfies the compiler's own pre-checks is
 //! still caught here (`docs/design.md` §8 layer 4). Reuses [`crate::tables`]
-//! (the sourced-constants authority) and [`crate::reach`]'s search, and
-//! deliberately nothing from `compile/` or `rules.rs`: those are the logic
-//! under cross-examination.
+//! (the sourced-constants authority) and [`crate::reach`]'s search, plus
+//! [`crate::spec`]'s types as conformance targets, and deliberately nothing
+//! from `compile/` or `rules.rs`: those are the logic under
+//! cross-examination.
+//!
+//! `docs/check.md` documents the check catalog, the flood's construction
+//! rules, the conformance verdict discipline, and the CLI contract.
 
 use crate::spec::Spec;
 use crate::tables::Tables;

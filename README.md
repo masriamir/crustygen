@@ -12,6 +12,8 @@ map-spec (Markdown)  →  parse  →  Spec        (not yet wired to the IR)
 
 IR (JSON)  →  validate  →  compile  →  TEXTMAP  →  PWAD
                                           └──────→  Doom-format twin
+
+PWAD (+ optional Spec)  →  crustygen-check  →  findings + conformance rows
 ```
 
 Built on [crustywad](https://github.com/masriamir/crustywad) for WAD I/O and
@@ -20,15 +22,18 @@ node building, consumed as a pinned published dependency.
 ## Status
 
 The compiler works and its output has been played to completion in Chocolate
-Doom. What exists is the geometry core, plus a map-spec parser that turns a
-filled copy of [`map-spec.template.md`](map-spec.template.md) into a typed
-`Spec` (see [`docs/map-spec.md`](docs/map-spec.md)). The two are not yet
-wired together: spec → IR generation does not exist, so the IR below is
-still authored directly as JSON. See [Known gaps](#known-gaps).
+Doom. What exists is the geometry core, a map-spec parser that turns a filled
+copy of [`map-spec.template.md`](map-spec.template.md) into a typed `Spec`
+(see [`docs/map-spec.md`](docs/map-spec.md)), and the layer-4 verifier that
+re-derives playability from a *built* WAD (see
+[`docs/check.md`](docs/check.md)). The spec is not yet wired to the compiler:
+spec → IR generation does not exist, so the IR below is still authored
+directly as JSON. See [Known gaps](#known-gaps).
 
 ```bash
-cargo test
-cargo run --example ...   # not yet — there is no CLI
+cargo test                                   # 423 tests
+cargo run --bin crustygen-check -- maps/entrada.wad \
+    --spec tests/fixtures/entrada.spec.md
 ```
 
 The sample map lives in `maps/`:
@@ -62,6 +67,19 @@ check no action sits at tag 0, render `TEXTMAP`, then run the playability
 catalog. A violation is a hard error, not a warning — a door the player
 cannot fit through is a broken map, not a missed target.
 
+## A second opinion on the built map
+
+Those checks run against the IR, before a coordinate exists — so a compiler
+bug that satisfies them still ships. `src/check` and its `crustygen-check`
+binary are verification layer 4 (`docs/design.md` §8): they parse the
+`TEXTMAP` back out of a built PWAD and re-derive the same invariants from the
+emitted geometry, reusing the sourced tables and the reachability core but
+nothing from `compile/` or `rules.rs` — the logic under cross-examination.
+Fourteen checks, from dangling cross-references to a key-aware flood that
+proves the map can still be finished. Given a map-spec it also reports every
+frontmatter parameter against its actual value. Exit 0 clean, 1 on a defect,
+2 on bad input. See [`docs/check.md`](docs/check.md).
+
 ## The data tables are the highest-stakes part
 
 Every engine value in `data/engine.toml` and `data/vocabulary.toml` carries a
@@ -88,6 +106,7 @@ the four id/Final Doom IWADs. See
 | [`KNOWN-GAPS.md`](KNOWN-GAPS.md) | **Read this first.** Every known gap and every decision that looks wrong without its reason |
 | [`docs/design.md`](docs/design.md) | The map-spec template, the IR, the compiler contract, and the v1 bar |
 | [`docs/map-spec.md`](docs/map-spec.md) | The map-spec document format, the parser's API, and the enforcement split |
+| [`docs/check.md`](docs/check.md) | The layer-4 verifier: the check catalog, the flood's construction rules, conformance verdicts, and the CLI contract |
 | [`docs/geometry.md`](docs/geometry.md) | Worked coordinates for the gap and door-chain constructions |
 | [`docs/verticality.md`](docs/verticality.md) | Height differences, and the stairs/lifts phases that follow |
 | [`docs/measurements/`](docs/measurements/) | Corpus measurements over the retail IWADs |
@@ -100,14 +119,18 @@ The honest list is [`KNOWN-GAPS.md`](KNOWN-GAPS.md). The headlines:
   yet.** `src/spec` parses a filled `map-spec.template.md` copy into a typed
   `Spec` (see [`docs/map-spec.md`](docs/map-spec.md)); the IR is still
   authored directly as JSON, and spec → IR generation does not exist.
-- **No verifier and no conformance report.** `docs/design.md` §8 specifies
-  five verification layers; layers 2 and 4 do not exist.
-- **P20 has no per-pickup check, and P7 passes vacuously without a player
-  start or an exit.** The key-aware reachability flood both would need now
-  exists in `src/reach.rs`; P7 uses it to reject unfinishable and stranding
-  maps, but P20's own per-pickup loop is still unwritten, and P7 itself does
-  not run at all on a map missing a start or an exit.
-- **12 of 25 playability rules** are implemented.
+- **No conformance report file.** `docs/design.md` §8 specifies five
+  verification layers; layer 4 now exists and layer 2 does not. §8.1's
+  `report.md` is likewise unwritten — `crustygen-check` computes everything it
+  needs and prints plain lines, but nothing renders the table or the sacrifice
+  list, or writes a file alongside the WAD.
+- **The compiler's P7 still passes vacuously without a player start or an
+  exit**, and it has no P20 pass at all. The verifier closes both at layer 4 —
+  a missing start or exit is a hard finding there, and V-P20 checks each
+  pickup for prop embedding and flood reachability — but on a built WAD, one
+  stage later.
+- **12 of 25 playability rules** are enforced by the compiler; the verifier
+  re-derives those twelve from the emitted map and adds P20.
 - **Texture alignment is minimal** — only an exit switch is centred; offsets
   do not accumulate across collinear runs.
 
