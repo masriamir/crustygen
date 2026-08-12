@@ -467,7 +467,27 @@ normal solid one-sided wall.
 **Every exit is tagged, even though neither `G_ExitLevel` nor
 `G_SecretExitLevel` reads a tag.** Mirrors the existing precedent for manual
 doors (above): uniform tagging keeps `tags::check_no_action_at_tag_zero` a
-single exception-free invariant and the tag manifest complete.
+single exception-free invariant and the tag manifest complete. Unlike a
+manual door, though, the exit's allocated tag resolves to no sector at
+all — `compile::exits::emit_switch_exit`/`emit_walkover_exit` write the tag
+onto the exit's own linedef and stop there; no sector's `.tag` field is ever
+set to match it (a manual door, by contrast, assigns its tag to its own
+door sector). This is correct, not an oversight: `G_ExitLevel`/
+`G_SecretExitLevel` are declared `void (void)` and read no argument at all
+(`g_game.c:1002` and `:1009`, pinned commit
+`a77dfb96cb91780ca334d0d4cfd86957558007e0`), and neither the switch path
+(`p_switch.c`'s `P_UseSpecialLine`, cases 11/51 — `P_ChangeSwitchTexture`
+reads only `line->sidenum[0]`/`line->special`, never a tag) nor the walkover
+path (`p_spec.c`'s `P_CrossSpecialLine`, cases 52/124, which call
+`G_ExitLevel`/`G_SecretExitLevel` directly) ever performs a
+`P_FindSectorFromLineTag`-style lookup for these four specials. The
+verifier's `check::invariants::check_tags` (V-P13) therefore exempts
+exactly this set — the same four specials `recognized_specials` already
+curates — from its "an action line's tag must resolve to a sector"
+requirement: an unresolved tag here is not a dead action, since the tag was
+never going to be consulted regardless. V-P14 (no action line at tag 0) and
+the tag manifest still cover exit lines like any other action line; only
+P13's resolution check is scoped to exclude them.
 
 ## Sourcing rule — do not relax this
 

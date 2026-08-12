@@ -275,16 +275,22 @@ pub fn check_door_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Fin
 ///
 /// The four exit specials (switch/walkover crossed with normal/secret) are
 /// a genuine exception to P13's resolution requirement, not a convention
-/// gap: `G_ExitLevel`/`G_SecretExitLevel` take no tag argument at all
+/// gap: `G_ExitLevel`/`G_SecretExitLevel` are declared `void (void)` and
+/// read no argument at all (pinned commit
+/// `a77dfb96cb91780ca334d0d4cfd86957558007e0`, `g_game.c:1002` and `:1009`),
+/// and neither the switch path (`p_switch.c`'s `P_UseSpecialLine`, cases
+/// 11/51 — `P_ChangeSwitchTexture` reads only `line->sidenum[0]`/
+/// `line->special`, never a tag) nor the walkover path (`p_spec.c`'s
+/// `P_CrossSpecialLine`, cases 52/124) ever looks a tag up to find a sector
 /// (`KNOWN-GAPS.md`, "Every exit is tagged, even though neither ... reads a
-/// tag"). Unlike a manual door, whose tag at least resolves to its own back
-/// sector, `compile::exits` never wires an exit's allocated tag to any
-/// sector — correctly so, since there is no sector for it to name. So an
-/// unresolved tag on one of these four specials is not "nothing happens
-/// when it fires"; nothing was ever going to happen via the tag on this
-/// special regardless of whether it resolves, which is exactly why P13
-/// exempts them here rather than reporting a dead action that was never
-/// alive.
+/// tag", has the full citation trail). Unlike a manual door, whose tag at
+/// least resolves to its own back sector, `compile::exits` never wires an
+/// exit's allocated tag to any sector — correctly so, since there is no
+/// sector for it to name. So an unresolved tag on one of these four
+/// specials is not "nothing happens when it fires"; nothing was ever going
+/// to happen via the tag on this special regardless of whether it resolves,
+/// which is exactly why P13 exempts them here rather than reporting a dead
+/// action that was never alive.
 ///
 /// Returns the tag manifest: one [`TagEntry`] per distinct nonzero tag seen
 /// on either side (an action line's `args[0]` or a sector's `id`), sorted
