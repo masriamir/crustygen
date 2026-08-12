@@ -1,5 +1,6 @@
 //! CLI smoke tests for `crustygen-check`: exit codes and output shape.
 
+use std::path::PathBuf;
 use std::process::Command;
 
 use crustygen::compile::compile;
@@ -7,11 +8,41 @@ use crustygen::compile::textmap::emit_textmap;
 use crustygen::ir::Ir;
 use crustygen::pack::pack_udmf;
 use crustygen::tables::Tables;
+use crustywad::{WadBuilder, WadKind};
 
 const ENTRADA: &str = include_str!("fixtures/entrada_base.json");
+const ENTRADA_SPEC_PATH: &str = "tests/fixtures/entrada.spec.md";
 
 fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_crustygen-check"))
+}
+
+/// Writes `bytes` to a uniquely named file under `std::env::temp_dir()`
+/// (`label` distinguishes call sites in the filename), for a test to point
+/// the CLI at and remove afterward.
+fn write_temp(bytes: &[u8], label: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("time moves forward")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "crustygen-check-{label}-{}-{nanos}.wad",
+        std::process::id()
+    ));
+    std::fs::write(&path, bytes).expect("write temp file");
+    path
+}
+
+/// A minimal one-map UDMF `PWAD`: a `MAP01` marker, a `TEXTMAP` lump holding
+/// `textmap` verbatim, and an `ENDMAP` terminator — the same three-lump shape
+/// `crustywad::map::group`'s own UDMF detection requires.
+fn wad_with_textmap(textmap: impl Into<Vec<u8>>) -> Vec<u8> {
+    WadBuilder::new(WadKind::Pwad)
+        .add_lump("MAP01", Vec::new())
+        .add_lump("TEXTMAP", textmap)
+        .add_lump("ENDMAP", Vec::new())
+        .build()
+        .expect("builds")
 }
 
 #[test]
@@ -74,16 +105,7 @@ fn a_broken_wad_exits_1_and_names_the_finding() {
     compiled.textmap = emit_textmap(&compiled.data, &compiled.things);
 
     let bytes = pack_udmf(&compiled, "MAP01").expect("packs into a PWAD");
-
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("time moves forward")
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "crustygen-check-broken-{}-{nanos}.wad",
-        std::process::id()
-    ));
-    std::fs::write(&path, &bytes).expect("write temp wad");
+    let path = write_temp(&bytes, "broken");
 
     let out = bin().arg(&path).output().expect("runs");
     std::fs::remove_file(&path).ok();
@@ -98,5 +120,222 @@ fn a_broken_wad_exits_1_and_names_the_finding() {
     assert!(
         stdout.contains("V-P8"),
         "expected a V-P8 finding in stdout: {stdout}"
+    );
+}
+
+#[test]
+fn an_unknown_flag_exits_2_with_usage_on_stderr() {
+    let out = bin()
+        .arg("maps/entrada.wad")
+        .arg("--bogus")
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("unknown flag `--bogus`"), "got: {stderr}");
+    assert!(stderr.contains("usage:"), "got: {stderr}");
+}
+
+#[test]
+fn a_map_flag_missing_its_value_exits_2() {
+    let out = bin()
+        .arg("maps/entrada.wad")
+        .arg("--map")
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("--map requires a value"), "got: {stderr}");
+}
+
+#[test]
+fn an_extra_positional_argument_exits_2() {
+    let out = bin()
+        .arg("maps/entrada.wad")
+        .arg("extra")
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unexpected extra argument `extra`"),
+        "got: {stderr}"
+    );
+}
+
+#[test]
+fn a_map_flag_naming_an_absent_group_exits_2() {
+    let out = bin()
+        .arg("maps/entrada.wad")
+        .arg("--map")
+        .arg("NOSUCHMAP")
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no map group named `NOSUCHMAP`"),
+        "got: {stderr}"
+    );
+}
+
+#[test]
+fn a_wad_with_no_map_groups_exits_2() {
+    let bytes = WadBuilder::new(WadKind::Pwad)
+        .add_lump("DUMMY", b"not a map".to_vec())
+        .build()
+        .expect("builds");
+    let path = write_temp(&bytes, "no-map-groups");
+    let out = bin().arg(&path).output().expect("runs");
+    std::fs::remove_file(&path).ok();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("contains no map groups"), "got: {stderr}");
+}
+
+#[test]
+fn a_textmap_lump_with_invalid_utf8_exits_2() {
+    let bytes = wad_with_textmap(vec![0xFF, 0xFE, 0x00]);
+    let path = write_temp(&bytes, "invalid-utf8");
+    let out = bin().arg(&path).output().expect("runs");
+    std::fs::remove_file(&path).ok();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("is not valid UTF-8"), "got: {stderr}");
+}
+
+#[test]
+fn a_spec_flag_naming_an_unreadable_file_exits_2() {
+    let out = bin()
+        .arg("maps/entrada.wad")
+        .arg("--spec")
+        .arg("no-such-spec.md")
+        .output()
+        .expect("runs");
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("failed to read spec `no-such-spec.md`"),
+        "got: {stderr}"
+    );
+}
+
+#[test]
+fn a_spec_flag_naming_unparseable_content_exits_2() {
+    let path = write_temp(b"not a valid spec document", "bad-spec");
+    let out = bin()
+        .arg("maps/entrada.wad")
+        .arg("--spec")
+        .arg(&path)
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("failed to parse spec"), "got: {stderr}");
+}
+
+#[test]
+fn a_spec_run_prints_conformance_rows_and_their_summary_count() {
+    // `entrada.spec.md` is hand-paired to `maps/entrada.wad`'s own compiled
+    // actuals (see `tests/check_conformance.rs`), so this run's rows span
+    // Pass, Info, and NotDerivable verdicts — exercising `print_report`'s
+    // conformance-row loop and most of `verdict_str`'s match arms end to
+    // end through the actual binary, not just the library's own unit tests.
+    let out = bin()
+        .arg("maps/entrada.wad")
+        .arg("--spec")
+        .arg(ENTRADA_SPEC_PATH)
+        .output()
+        .expect("runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout: {stdout}\nstderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stdout.contains("identity.slot: pass"),
+        "expected a pass row: {stdout}"
+    );
+    assert!(
+        stdout.contains("not-derivable"),
+        "expected a not-derivable row: {stdout}"
+    );
+    assert!(
+        stdout.contains("combat.hitscanner_ratio: info"),
+        "expected an info row: {stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .next_back()
+            .is_some_and(|line| line.contains("conformance row(s)")),
+        "expected the summary line to name the conformance row count: {stdout}"
+    );
+}
+
+#[test]
+fn a_spec_mismatch_prints_a_fail_row() {
+    let spec_text = std::fs::read_to_string(ENTRADA_SPEC_PATH).expect("reads");
+    let wrong = spec_text.replacen(
+        "count: 1                   # per-secret detail lives in the prose body",
+        "count: 2                   # per-secret detail lives in the prose body",
+        1,
+    );
+    assert_ne!(wrong, spec_text, "the patch changed nothing");
+    let path = write_temp(wrong.as_bytes(), "wrong-secret-count-spec");
+    let out = bin()
+        .arg("maps/entrada.wad")
+        .arg("--spec")
+        .arg(&path)
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("secrets.count: fail"),
+        "expected a fail row: {stdout}"
+    );
+}
+
+#[test]
+fn a_structurally_broken_map_prints_not_run_conformance_rows() {
+    // A dangling sidedef->sector cross-reference (the same shape
+    // `tests/check_conformance.rs`'s own
+    // `a_structurally_broken_scene_marks_every_conformance_row_not_run`
+    // pins at the library level) trips `check::run`'s failure containment,
+    // forcing every conformance row to `Verdict::NotRun` — exercising
+    // `verdict_str`'s `NotRun` arm through the actual binary.
+    const DANGLING_SIDEDEF_TEXTMAP: &str = r#"namespace = "doom";
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 128.000; y = 0.000; }
+vertex { x = 128.000; y = 128.000; }
+vertex { x = 0.000; y = 128.000; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; blocking = true; }
+linedef { v1 = 1; v2 = 2; sidefront = 1; blocking = true; }
+linedef { v1 = 2; v2 = 3; sidefront = 2; blocking = true; }
+linedef { v1 = 3; v2 = 0; sidefront = 3; blocking = true; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 9; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }
+thing { x = 32.000; y = 32.000; type = 1; single = true; }
+"#;
+    let bytes = wad_with_textmap(DANGLING_SIDEDEF_TEXTMAP);
+    let path = write_temp(&bytes, "structurally-broken");
+    let out = bin()
+        .arg(&path)
+        .arg("--spec")
+        .arg(ENTRADA_SPEC_PATH)
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(": not-run "),
+        "expected at least one not-run conformance row: {stdout}"
     );
 }

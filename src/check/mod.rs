@@ -278,4 +278,27 @@ mod tests {
             "V-P8 error linedef 12: two-sided line needs a lower texture on its front side"
         );
     }
+
+    #[test]
+    fn every_severity_and_subject_variant_formats_distinctly() {
+        let cases = [
+            (Severity::Error, Subject::Sector(3), "V-S error sector 3: x"),
+            (
+                Severity::Warning,
+                Subject::Linedef(4),
+                "V-S warning linedef 4: x",
+            ),
+            (Severity::Info, Subject::Thing(5), "V-S info thing 5: x"),
+            (Severity::Info, Subject::Map, "V-S info map: x"),
+        ];
+        for (severity, subject, expected) in cases {
+            let f = Finding {
+                check: "V-S",
+                severity,
+                subject,
+                message: "x".to_owned(),
+            };
+            assert_eq!(f.to_string(), expected);
+        }
+    }
 }

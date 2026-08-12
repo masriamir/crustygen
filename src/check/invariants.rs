@@ -83,6 +83,13 @@ pub fn check_textures(map: &UdmfMap, scene: &Scene, findings: &mut Vec<Finding>)
                 }
                 continue;
             }
+            // COVERAGE: unreachable. `scene.rs`'s `process_linedef` pushes a
+            // "V-S" finding and contributes NO `Boundary` at all when
+            // `two_sided != back.is_some()`; every `Boundary` that reaches
+            // this loop with `two_sided == true` was therefore built from a
+            // `Some` `back`, so `neighbor` (`back.map(|(_, s)| s)` on the
+            // front mirror, `Some(front_sector)` on the back mirror) is
+            // always `Some` here too.
             let Some(neighbor_idx) = b.neighbor else {
                 continue;
             };
@@ -93,6 +100,8 @@ pub fn check_textures(map: &UdmfMap, scene: &Scene, findings: &mut Vec<Finding>)
             // as `Some` and in range — this conversion cannot fail in
             // practice; the `else` stays as defensive belt-and-braces, not
             // a reachable case.
+            //
+            // COVERAGE: unreachable for the reason stated above.
             let Some(back_idx) = map.linedefs[b.linedef]
                 .sideback
                 .and_then(|s| usize::try_from(s).ok())
@@ -642,6 +651,11 @@ pub fn check_starts(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>)
             let Some(prop) = tables.prop(other_name) else {
                 continue;
             };
+            // COVERAGE: unreachable through the public `Tables` API — every
+            // `[props.*]` entry in the pinned `data/engine.toml` sets
+            // `blocks = true` (confirmed by grepping the table: no entry
+            // omits it or sets it false), and `Tables::prop` reads only
+            // that table.
             if !prop.blocks {
                 continue;
             }
@@ -751,6 +765,8 @@ pub fn check_prop_embedding(scene: &Scene, tables: &Tables, findings: &mut Vec<F
             let Some(prop) = tables.prop(other_name) else {
                 continue;
             };
+            // COVERAGE: unreachable — see `check_starts`'s identical guard
+            // above; the pinned vocabulary has no non-blocking prop.
             if !prop.blocks {
                 continue;
             }
@@ -943,6 +959,14 @@ pub fn check_door_openings(scene: &Scene, tables: &Tables, findings: &mut Vec<Fi
             .filter_map(|b| b.neighbor)
             .map(|n| scene.sectors[n].ceiling)
             .min();
+        // COVERAGE: unreachable. `d` only entered `door_sectors` because
+        // some `fronts_this` boundary elsewhere carried a door special and
+        // named `d` as its `neighbor` (the loop above) — `scene.rs`'s
+        // two-sided mirroring convention guarantees `d`'s own boundary list
+        // then holds the mirror of that exact linedef (same `special`,
+        // `neighbor: Some(front_sector)`), so the filter/filter_map chain
+        // above always yields at least one ceiling and `.min()` is never
+        // `None`.
         let Some(min_ceiling) = min_ceiling else {
             continue;
         };
@@ -1039,6 +1063,7 @@ pub fn check_recognized_specials(scene: &Scene, tables: &Tables, findings: &mut 
 mod tests {
     use super::*;
     use crate::check;
+    use crate::check::scene::{SceneSector, SceneThing};
     use crustywad::Limits;
     use crustywad::map::udmf::parse_udmf;
 
@@ -1095,6 +1120,62 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
         );
     }
 
+    /// `TWO_BOX_STEPPED`'s own two-sector shape, but reversed: sector 0
+    /// (the shared line's *front*) now holds the *higher* floor (24) and
+    /// the *lower* ceiling (100), sector 1 (the *back*) the plain 0/128.
+    /// This flips which mirror (`front` vs `back`) is the lower-floor /
+    /// higher-ceiling side compared to `TWO_BOX_STEPPED`, exercising
+    /// [`check_textures`]'s `back`-selecting ternary arms that a
+    /// front-is-lower fixture never reaches.
+    const TWO_BOX_STEPPED_REVERSED: &str = r#"namespace = "doom";
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 64.000; y = 0.000; }
+vertex { x = 128.000; y = 0.000; }
+vertex { x = 128.000; y = 64.000; }
+vertex { x = 64.000; y = 64.000; }
+vertex { x = 0.000; y = 64.000; }
+linedef { v1 = 1; v2 = 4; sidefront = 0; sideback = 1; twosided = true; }
+linedef { v1 = 0; v2 = 1; sidefront = 2; blocking = true; }
+linedef { v1 = 4; v2 = 5; sidefront = 3; blocking = true; }
+linedef { v1 = 5; v2 = 0; sidefront = 4; blocking = true; }
+linedef { v1 = 1; v2 = 2; sidefront = 5; blocking = true; }
+linedef { v1 = 2; v2 = 3; sidefront = 6; blocking = true; }
+linedef { v1 = 3; v2 = 4; sidefront = 7; blocking = true; }
+sidedef { sector = 0; texturemiddle = "-"; }
+sidedef { sector = 1; texturemiddle = "-"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 24; heightceiling = 100; lightlevel = 160; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }
+thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 = true; skill4 = true; skill5 = true; single = true; dm = true; coop = true; }
+"#;
+
+    #[test]
+    fn a_floor_step_and_ceiling_step_missing_the_backs_texture_are_p8_errors() {
+        // Neither sidedef sets texturebottom/texturetop, so the back side
+        // (sector 1, the lower-ceiling... rather higher-ceiling/lower-floor
+        // side here) is missing both.
+        let findings = findings_of(TWO_BOX_STEPPED_REVERSED);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P8"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Linedef(0))
+                && f.message.contains("floors differ (24 vs 0)")),
+            "expected a lower-texture V-P8 error naming the back side: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.check == "V-P8"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Linedef(0))
+                && f.message.contains("ceilings differ (100 vs 128)")),
+            "expected an upper-texture V-P8 error naming the back side: {findings:?}"
+        );
+    }
+
     #[test]
     fn a_one_sided_line_missing_its_middle_is_a_p8_error() {
         let blanked = TWO_BOX_STEPPED.replacen(
@@ -1123,6 +1204,25 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
                 .iter()
                 .any(|f| f.check == "V-P9" && f.severity == Severity::Error),
             "expected a V-P9 error: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_scaling_sidedef_extra_raises_no_p9_finding() {
+        // A ZDoom UDMF extension this checker does not care about (`light`,
+        // a per-sidedef light override) lands in `UdmfSidedef::extras` just
+        // like a scaling field does, but its name does not start with
+        // `scalex`/`scaley` — `check_scaling` must skip it rather than flag
+        // it, proving the name-prefix filter (not merely "extras is
+        // nonempty") gates the finding.
+        let extra_field = TWO_BOX_STEPPED.replace(
+            "sidedef { sector = 0; texturemiddle = \"STARTAN2\"; }",
+            "sidedef { sector = 0; texturemiddle = \"STARTAN2\"; light = 128; }",
+        );
+        let findings = findings_of(&extra_field);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P9"),
+            "a non-scaling extra must not be flagged: {findings:?}"
         );
     }
 
@@ -1536,11 +1636,11 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         let barrel_radius = f64::from(t.prop("barrel").expect("barrel prop").radius);
         let player_radius = f64::from(t.player().radius);
         let blockdist = barrel_radius + player_radius;
+        let diagonal = (20.0_f64).hypot(20.0);
         assert!(
-            (20.0_f64).hypot(20.0) >= blockdist,
+            diagonal >= blockdist,
             "fixture assumption: the diagonal distance must be Euclidean-clear \
-             ({blockdist} expected): got {}",
-            (20.0_f64).hypot(20.0)
+             ({blockdist} expected): got {diagonal}"
         );
         let mut things = thing_at(64.0, 64.0, 2035); // barrel
         things.push_str(&thing_at(84.0, 84.0, 1)); // start, dx = dy = 20
@@ -1567,6 +1667,105 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         assert!(
             findings.iter().all(|f| f.check != "V-P20"),
             "stimpack exactly at the barrel's radius: no finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn dist_to_segment_f64_handles_a_degenerate_zero_length_segment() {
+        // A segment whose endpoints coincide (`len2 == 0.0`) has no
+        // projection to clamp against; the distance is just the distance to
+        // that single point.
+        let d = dist_to_segment_f64(3.0, 4.0, 0.0, 0.0, 0.0, 0.0);
+        assert!((d - 5.0).abs() < 1e-9, "expected hypot(3, 4) = 5: got {d}");
+    }
+
+    #[test]
+    fn check_starts_prop_overlap_skips_an_unnamed_nearby_thing() {
+        // A thing whose type this checker's vocabulary never names (`31337`,
+        // so `Scene::build` resolves no `name`) sits right next to the
+        // start. The prop-overlap pass must skip it via its own name lookup
+        // rather than treating a nameless thing as a blocking prop.
+        let mut things = thing_at(64.0, 64.0, 1); // start
+        things.push_str(&thing_at(70.0, 64.0, 31337)); // unrecognized, unnamed
+        let text = room(128, 160, &things);
+        let findings = findings_of(&text);
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.check != "V-P25" || !f.message.contains("blocking prop")),
+            "an unnamed thing must not be treated as a blocking prop: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn check_prop_embedding_skips_an_unnamed_nearby_thing() {
+        // Mirrors the start-side test above, for the collectible-embedding
+        // pass: a stimpack sits right next to an unrecognized, unnamed
+        // thing, which must not be mistaken for a blocking prop.
+        let mut things = thing_at(64.0, 64.0, 2011); // stimpack
+        things.push_str(&thing_at(70.0, 64.0, 31337)); // unrecognized, unnamed
+        let text = room(128, 160, &things);
+        let findings = findings_of(&text);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P20"),
+            "an unnamed nearby thing must not be treated as a blocking prop: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn check_pickup_reachability_skips_an_unnamed_thing() {
+        let tables = Tables::load().expect("tables");
+        let scene = Scene {
+            sectors: vec![SceneSector {
+                floor: 0,
+                ceiling: 128,
+                light: 160,
+                special: 0,
+                tag: 0,
+                boundary: vec![],
+                closed: true,
+            }],
+            things: vec![SceneThing {
+                x: 0.0,
+                y: 0.0,
+                angle: 0,
+                type_id: 31337,
+                flags: 0,
+                sector: Some(0),
+                name: None,
+            }],
+        };
+        let reached = vec![false];
+        let mut findings = Vec::new();
+        check_pickup_reachability(&scene, &tables, &reached, &mut findings);
+        assert!(
+            findings.is_empty(),
+            "an unnamed thing is never a collectible: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn check_pickup_reachability_skips_a_collectible_with_no_resolved_sector() {
+        let tables = Tables::load().expect("tables");
+        let scene = Scene {
+            sectors: vec![],
+            things: vec![SceneThing {
+                x: 0.0,
+                y: 0.0,
+                angle: 0,
+                type_id: 2011,
+                flags: 0,
+                sector: None,
+                name: Some("stimpack".to_owned()),
+            }],
+        };
+        let reached = vec![];
+        let mut findings = Vec::new();
+        check_pickup_reachability(&scene, &tables, &reached, &mut findings);
+        assert!(
+            findings.is_empty(),
+            "a collectible outside every sector already carries its own V-S finding from \
+             Scene::build, not a fresh V-P20 one: {findings:?}"
         );
     }
 

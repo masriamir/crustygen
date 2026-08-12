@@ -117,6 +117,13 @@ fn intern_lock_classes(tables: &Tables) -> Option<(Vec<u16>, Vec<Vec<String>>)> 
     let mut specials: Vec<u16> = kinds.iter().map(|&(_, s)| s).collect();
     specials.sort_unstable();
     specials.dedup();
+    // COVERAGE: unreachable through the public `Tables` API. `Tables::load`
+    // only ever parses the two `include_str!`-embedded tables compiled into
+    // this crate, and the pinned `data/vocabulary.toml` lists exactly three
+    // distinct locked-door specials (26/27/28 — blue/yellow/red, card and
+    // skull of a colour sharing one special), far under `KeyMask::BITS`
+    // (8). Exercising this branch would need a `Tables` built from a
+    // vocabulary this crate does not ship, which no constructor offers.
     if specials.len() > KeyMask::BITS as usize {
         return None;
     }
@@ -386,6 +393,8 @@ fn push_flood_findings(
 pub fn run_flood(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) -> Option<Vec<bool>> {
     let start = resolve_start(scene, findings)?;
     let goals = resolve_goals(scene, tables, findings)?;
+    // COVERAGE: unreachable — see `intern_lock_classes`'s own comment on its
+    // identical `None` branch; the pinned vocabulary never triggers it.
     let Some((specials, class_names)) = intern_lock_classes(tables) else {
         findings.push(Finding {
             check: "V-P7",
@@ -458,6 +467,9 @@ pub fn check_key_lock_coherence(scene: &Scene, tables: &Tables, findings: &mut V
         // Silent here, not a gap: `run_flood` reports this same overflow as
         // its own hard `V-P7` finding, and `check::run` always calls it
         // first, so this pass need not duplicate the report.
+        //
+        // COVERAGE: unreachable for the same reason `intern_lock_classes`'s
+        // own `None` branch is — the pinned vocabulary never triggers it.
         return;
     };
     let kinds = tables.locked_door_kinds();
@@ -539,6 +551,10 @@ pub fn check_key_lock_coherence(scene: &Scene, tables: &Tables, findings: &mut V
         let Some(&(_, special)) = kinds.iter().find(|(k, _)| k == name) else {
             continue;
         };
+        // COVERAGE: unreachable — `special` came from `kinds` (`tables.
+        // locked_door_kinds()`), and `specials` is that same call's deduped
+        // second elements (via `intern_lock_classes`, above), so `special`
+        // is always a member of `specials` and `class_of` always resolves.
         let Some(class) = class_of(&specials, special) else {
             continue;
         };
@@ -556,6 +572,7 @@ pub fn check_key_lock_coherence(scene: &Scene, tables: &Tables, findings: &mut V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check::scene::{Boundary, SceneSector, SceneThing};
     use crustywad::map::udmf::parse_udmf;
 
     /// A [`room_chain_ex`] fixture's text, plus the next unused
@@ -1355,6 +1372,121 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             reached,
             Some(vec![true, true]),
             "both the L-shaped room and the box are forward-reachable"
+        );
+    }
+
+    /// A [`Boundary`] with `special`, minimal everywhere else.
+    fn boundary(
+        special: i32,
+        two_sided: bool,
+        blocking: bool,
+        neighbor: Option<usize>,
+    ) -> Boundary {
+        Boundary {
+            a: (0.0, 0.0),
+            b: (64.0, 0.0),
+            linedef: 0,
+            neighbor,
+            two_sided,
+            blocking,
+            upper_unpegged: false,
+            lower_unpegged: false,
+            special,
+            tag: 0,
+            fronts_this: true,
+            sidedef: 0,
+        }
+    }
+
+    fn empty_sector() -> SceneSector {
+        SceneSector {
+            floor: 0,
+            ceiling: 128,
+            light: 160,
+            special: 0,
+            tag: 0,
+            boundary: vec![],
+            closed: true,
+        }
+    }
+
+    #[test]
+    fn keys_in_words_reports_no_keys_for_an_empty_mask() {
+        assert_eq!(keys_in_words(0, &[]), "no keys");
+    }
+
+    #[test]
+    fn resolve_goals_skips_a_boundary_whose_special_is_out_of_u16_range() {
+        let tables = Tables::load().expect("tables");
+        let mut sector = empty_sector();
+        // -1 does not fit a u16, so `u16::try_from` fails and this boundary
+        // must be skipped rather than panicking or miscounting as an exit.
+        sector.boundary.push(boundary(-1, false, false, None));
+        let scene = Scene {
+            sectors: vec![sector],
+            things: vec![],
+        };
+        let mut findings = Vec::new();
+        let goals = resolve_goals(&scene, &tables, &mut findings);
+        assert_eq!(goals, None, "the only boundary was skipped: no exit found");
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "V-P7" && f.message.contains("no exit line")),
+            "got {findings:?}"
+        );
+    }
+
+    #[test]
+    fn build_nodes_skips_an_unnamed_thing_and_a_key_outside_every_sector() {
+        let tables = Tables::load().expect("tables");
+        let (specials, _class_names) = intern_lock_classes(&tables).expect("small vocabulary");
+        let kinds = tables.locked_door_kinds();
+        let scene = Scene {
+            sectors: vec![empty_sector()],
+            things: vec![
+                SceneThing {
+                    x: 0.0,
+                    y: 0.0,
+                    angle: 0,
+                    type_id: 31337,
+                    flags: 0,
+                    sector: Some(0),
+                    name: None,
+                },
+                SceneThing {
+                    x: 0.0,
+                    y: 0.0,
+                    angle: 0,
+                    type_id: 5,
+                    flags: 0,
+                    sector: None,
+                    name: Some("blue_card".to_owned()),
+                },
+            ],
+        };
+        let nodes = build_nodes(&scene, &specials, &kinds);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(
+            nodes[0].keys, 0,
+            "the unnamed thing and the unresolved key both contribute no key bit"
+        );
+    }
+
+    #[test]
+    fn build_edges_skips_a_blocking_twosided_boundary() {
+        let tables = Tables::load().expect("tables");
+        let (specials, _class_names) = intern_lock_classes(&tables).expect("small vocabulary");
+        let mut front = empty_sector();
+        front.boundary.push(boundary(0, true, true, Some(1)));
+        let scene = Scene {
+            sectors: vec![front, empty_sector()],
+            things: vec![],
+        };
+        let edges = build_edges(&scene, &tables, &specials);
+        assert!(
+            edges.is_empty(),
+            "a blocking twosided boundary is a wall to the flood: {edges:?}"
         );
     }
 }

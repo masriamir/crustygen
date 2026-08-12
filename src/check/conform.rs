@@ -1131,6 +1131,7 @@ pub fn not_run_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check::scene::SceneSector;
     use crustywad::Limits;
     use crustywad::map::udmf::parse_udmf;
 
@@ -1464,5 +1465,336 @@ thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
             assert_eq!(nr.verdict, Verdict::NotRun);
             assert_eq!(nr.actual, "scene failed structural validation");
         }
+    }
+
+    /// A [`Boundary`] with `special`, minimal everywhere else — enough to
+    /// drive [`count_specials`]/[`any_special_present`] without a parsed
+    /// fixture.
+    fn boundary_with_special(special: i32) -> crate::check::scene::Boundary {
+        crate::check::scene::Boundary {
+            a: (0.0, 0.0),
+            b: (1.0, 0.0),
+            linedef: 0,
+            neighbor: None,
+            two_sided: false,
+            blocking: false,
+            upper_unpegged: false,
+            lower_unpegged: false,
+            special,
+            tag: 0,
+            fronts_this: true,
+            sidedef: 0,
+        }
+    }
+
+    #[test]
+    fn identity_slot_mismatch_is_fail() {
+        let tables = Tables::load().expect("tables");
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+        let r = identity_row(&doc.spec.frontmatter, "WRONGNAME");
+        assert_eq!(r.verdict, Verdict::Fail, "got {r:?}");
+    }
+
+    #[test]
+    fn bounding_box_scale_size_vertical_range_and_lighting_are_not_derivable_with_no_sectors() {
+        let tables = Tables::load().expect("tables");
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+        let scene = Scene {
+            sectors: vec![],
+            things: vec![],
+        };
+
+        assert!(
+            bounding_box(&scene).is_none(),
+            "no boundary geometry at all"
+        );
+
+        let size = scale_size_row(&doc.spec.frontmatter, &scene);
+        assert_eq!(size.verdict, Verdict::NotDerivable);
+        assert!(size.actual.contains("no boundary geometry"), "got {size:?}");
+
+        let vr = vertical_range_row(&doc.spec.frontmatter, &scene);
+        assert_eq!(vr.verdict, Verdict::NotDerivable);
+        assert!(vr.actual.contains("no sectors present"), "got {vr:?}");
+
+        let mut lighting = Vec::new();
+        lighting_rows(&doc.spec.frontmatter, &scene, &mut lighting);
+        assert_eq!(lighting.len(), 2);
+        assert_eq!(
+            lighting[0].verdict,
+            Verdict::NotDerivable,
+            "got {lighting:?}"
+        );
+        assert_eq!(
+            lighting[1].verdict,
+            Verdict::NotDerivable,
+            "got {lighting:?}"
+        );
+
+        let start = start_facing_row(&doc.spec.frontmatter, &scene);
+        assert_eq!(start.verdict, Verdict::NotDerivable);
+        assert!(
+            start.actual.contains("no player1_start placed"),
+            "got {start:?}"
+        );
+    }
+
+    #[test]
+    fn lighting_rows_fail_outside_the_declared_band() {
+        let tables = Tables::load().expect("tables");
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+        // Template default: aesthetics.lighting min 96, max 208.
+        let scene = Scene {
+            sectors: vec![
+                SceneSector {
+                    floor: 0,
+                    ceiling: 128,
+                    light: 50,
+                    special: 0,
+                    tag: 0,
+                    boundary: vec![],
+                    closed: true,
+                },
+                SceneSector {
+                    floor: 0,
+                    ceiling: 128,
+                    light: 255,
+                    special: 0,
+                    tag: 0,
+                    boundary: vec![],
+                    closed: true,
+                },
+            ],
+            things: vec![],
+        };
+        let mut rows = Vec::new();
+        lighting_rows(&doc.spec.frontmatter, &scene, &mut rows);
+        let (min_row, max_row) = (&rows[0], &rows[1]);
+        assert_eq!(
+            min_row.verdict,
+            Verdict::Fail,
+            "50 is below the min-96 floor: {min_row:?}"
+        );
+        assert_eq!(
+            max_row.verdict,
+            Verdict::Fail,
+            "255 is above the max-208 ceiling: {max_row:?}"
+        );
+    }
+
+    #[test]
+    fn start_facing_mismatch_is_fail() {
+        let tables = Tables::load().expect("tables");
+        // Template default: start_facing east (0 degrees).
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+        let scene = Scene {
+            sectors: vec![],
+            things: vec![SceneThing {
+                x: 0.0,
+                y: 0.0,
+                angle: 180,
+                type_id: 1,
+                flags: 0,
+                sector: None,
+                name: Some("player1_start".to_owned()),
+            }],
+        };
+        let r = start_facing_row(&doc.spec.frontmatter, &scene);
+        assert_eq!(r.verdict, Verdict::Fail, "got {r:?}");
+    }
+
+    #[test]
+    fn coop_only_items_present_but_not_targeted_is_fail() {
+        let tables = Tables::load().expect("tables");
+        // Template default: coop_only_items: false.
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+        let scene = Scene {
+            sectors: vec![],
+            things: vec![SceneThing {
+                x: 0.0,
+                y: 0.0,
+                angle: 0,
+                type_id: 2001,
+                flags: MULTIPLAYER_ONLY_BIT,
+                sector: None,
+                name: Some("shotgun".to_owned()),
+            }],
+        };
+        let r = coop_only_items_row(&doc.spec.frontmatter, &scene);
+        assert_eq!(r.verdict, Verdict::Fail, "got {r:?}");
+    }
+
+    #[test]
+    fn facing_degrees_and_name_cover_every_variant() {
+        assert_eq!(facing_degrees(&Facing::East), 0);
+        assert_eq!(facing_degrees(&Facing::North), 90);
+        assert_eq!(facing_degrees(&Facing::West), 180);
+        assert_eq!(facing_degrees(&Facing::South), 270);
+        assert_eq!(facing_degrees(&Facing::Degrees(45)), 45);
+
+        assert_eq!(facing_name(&Facing::East), "east");
+        assert_eq!(facing_name(&Facing::North), "north");
+        assert_eq!(facing_name(&Facing::South), "south");
+        assert_eq!(facing_name(&Facing::West), "west");
+        assert_eq!(facing_name(&Facing::Degrees(45)), "45");
+    }
+
+    #[test]
+    fn exit_kind_and_trigger_names_cover_every_variant() {
+        assert_eq!(exit_kind_name(ExitKind::Normal), "normal");
+        assert_eq!(exit_kind_name(ExitKind::Secret), "secret");
+        assert_eq!(exit_kind_name(ExitKind::Both), "both");
+
+        assert_eq!(exit_trigger_name(ExitTrigger::Switch), "switch");
+        assert_eq!(exit_trigger_name(ExitTrigger::Teleport), "teleport");
+        assert_eq!(exit_trigger_name(ExitTrigger::Walkover), "walkover");
+    }
+
+    #[test]
+    fn encounter_style_and_propagation_names_cover_every_variant() {
+        assert_eq!(
+            encounter_style_name(EncounterStyle::Incidental),
+            "incidental"
+        );
+        assert_eq!(encounter_style_name(EncounterStyle::Ambush), "ambush");
+        assert_eq!(encounter_style_name(EncounterStyle::Arena), "arena");
+        assert_eq!(encounter_style_name(EncounterStyle::Corridor), "corridor");
+
+        assert_eq!(propagation_name(Propagation::Open), "open");
+        assert_eq!(propagation_name(Propagation::Contained), "contained");
+        assert_eq!(propagation_name(Propagation::Sealed), "sealed");
+    }
+
+    #[test]
+    fn exit_kind_row_reports_both_and_secret_only() {
+        let tables = Tables::load().expect("tables");
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+
+        let secret_only = Scene {
+            sectors: vec![SceneSector {
+                floor: 0,
+                ceiling: 128,
+                light: 160,
+                special: 0,
+                tag: 0,
+                boundary: vec![boundary_with_special(i32::from(
+                    tables.secret_exit_switch_special(),
+                ))],
+                closed: true,
+            }],
+            things: vec![],
+        };
+        let r = exit_kind_row(&doc.spec.frontmatter, &secret_only, &tables);
+        assert_eq!(r.actual, "secret", "got {r:?}");
+
+        let both = Scene {
+            sectors: vec![SceneSector {
+                floor: 0,
+                ceiling: 128,
+                light: 160,
+                special: 0,
+                tag: 0,
+                boundary: vec![
+                    boundary_with_special(i32::from(tables.exit_switch_special())),
+                    boundary_with_special(i32::from(tables.secret_exit_switch_special())),
+                ],
+                closed: true,
+            }],
+            things: vec![],
+        };
+        let r = exit_kind_row(&doc.spec.frontmatter, &both, &tables);
+        assert_eq!(r.actual, "both", "got {r:?}");
+    }
+
+    #[test]
+    fn exit_trigger_teleport_target_is_not_derivable() {
+        let tables = Tables::load().expect("tables");
+        let base = test_spec_text();
+        let patched = base.replace("trigger: switch", "trigger: teleport");
+        assert_ne!(patched, base, "the patch changed nothing");
+        let doc = Spec::from_markdown(&patched, &tables).expect("spec parses");
+        let scene = Scene {
+            sectors: vec![],
+            things: vec![],
+        };
+        let r = exit_trigger_row(&doc.spec.frontmatter, &scene, &tables);
+        assert_eq!(r.verdict, Verdict::NotDerivable, "got {r:?}");
+        assert!(r.actual.contains("no teleports emitted"), "got {r:?}");
+    }
+
+    #[test]
+    fn exit_trigger_row_reports_walkover_only_and_both_present() {
+        let tables = Tables::load().expect("tables");
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+
+        let walkover_only = Scene {
+            sectors: vec![SceneSector {
+                floor: 0,
+                ceiling: 128,
+                light: 160,
+                special: 0,
+                tag: 0,
+                boundary: vec![boundary_with_special(i32::from(
+                    tables.exit_walkover_special(),
+                ))],
+                closed: true,
+            }],
+            things: vec![],
+        };
+        let r = exit_trigger_row(&doc.spec.frontmatter, &walkover_only, &tables);
+        assert_eq!(r.actual, "walkover", "got {r:?}");
+
+        let both = Scene {
+            sectors: vec![SceneSector {
+                floor: 0,
+                ceiling: 128,
+                light: 160,
+                special: 0,
+                tag: 0,
+                boundary: vec![
+                    boundary_with_special(i32::from(tables.exit_switch_special())),
+                    boundary_with_special(i32::from(tables.exit_walkover_special())),
+                ],
+                closed: true,
+            }],
+            things: vec![],
+        };
+        let r = exit_trigger_row(&doc.spec.frontmatter, &both, &tables);
+        assert_eq!(r.actual, "both switch and walkover present", "got {r:?}");
+    }
+
+    #[test]
+    fn ammo_ratio_row_skips_things_with_no_resolved_name() {
+        let tables = Tables::load().expect("tables");
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+        let scene = Scene {
+            sectors: vec![],
+            things: vec![
+                SceneThing {
+                    x: 0.0,
+                    y: 0.0,
+                    angle: 0,
+                    type_id: 31337,
+                    flags: 0,
+                    sector: None,
+                    name: None,
+                },
+                SceneThing {
+                    x: 0.0,
+                    y: 0.0,
+                    angle: 0,
+                    type_id: 3004,
+                    flags: 0,
+                    sector: None,
+                    name: Some("zombieman".to_owned()),
+                },
+            ],
+        };
+        let r = ammo_ratio_row(&doc.spec.frontmatter, &scene, &tables);
+        assert_eq!(r.verdict, Verdict::Info, "got {r:?}");
+        assert!(
+            r.actual.contains("0.000"),
+            "no ammo placed, so the ratio is zero: {r:?}"
+        );
     }
 }

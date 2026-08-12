@@ -603,6 +603,70 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
     }
 
     #[test]
+    fn a_dangling_v1_vertex_index_is_reported_and_the_linedef_is_skipped() {
+        let broken = TWO_BOX.replace(
+            "linedef { v1 = 1; v2 = 4; sidefront = 0; sideback = 1; twosided = true; }",
+            "linedef { v1 = 99; v2 = 4; sidefront = 0; sideback = 1; twosided = true; }",
+        );
+        let (scene, findings) = scene_of(&broken);
+        assert!(
+            findings.iter().any(|f| f.check == "V-S"
+                && matches!(f.subject, crate::check::Subject::Linedef(0))
+                && f.message.contains("v1 references vertex 99")),
+            "expected a v1 reference-validity finding: {findings:?}"
+        );
+        assert!(
+            scene.sectors[0].boundary.iter().all(|b| b.linedef != 0),
+            "the broken linedef contributes no boundary"
+        );
+    }
+
+    #[test]
+    fn a_dangling_v2_vertex_index_is_reported_and_the_linedef_is_skipped() {
+        let broken = TWO_BOX.replace(
+            "linedef { v1 = 1; v2 = 4; sidefront = 0; sideback = 1; twosided = true; }",
+            "linedef { v1 = 1; v2 = 99; sidefront = 0; sideback = 1; twosided = true; }",
+        );
+        let (_, findings) = scene_of(&broken);
+        assert!(
+            findings.iter().any(|f| f.check == "V-S"
+                && matches!(f.subject, crate::check::Subject::Linedef(0))
+                && f.message.contains("v2 references vertex 99")),
+            "expected a v2 reference-validity finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_dangling_sidefront_index_is_reported_and_the_linedef_is_skipped() {
+        let broken = TWO_BOX.replace(
+            "linedef { v1 = 0; v2 = 1; sidefront = 2; blocking = true; }",
+            "linedef { v1 = 0; v2 = 1; sidefront = 99; blocking = true; }",
+        );
+        let (_, findings) = scene_of(&broken);
+        assert!(
+            findings.iter().any(|f| f.check == "V-S"
+                && matches!(f.subject, crate::check::Subject::Linedef(1))
+                && f.message.contains("sidefront references sidedef 99")),
+            "expected a sidefront reference-validity finding: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_dangling_sideback_index_is_reported_and_the_linedef_is_skipped() {
+        let broken = TWO_BOX.replace(
+            "linedef { v1 = 1; v2 = 4; sidefront = 0; sideback = 1; twosided = true; }",
+            "linedef { v1 = 1; v2 = 4; sidefront = 0; sideback = 99; twosided = true; }",
+        );
+        let (_, findings) = scene_of(&broken);
+        assert!(
+            findings.iter().any(|f| f.check == "V-S"
+                && matches!(f.subject, crate::check::Subject::Linedef(0))
+                && f.message.contains("sideback references sidedef 99")),
+            "expected a sideback reference-validity finding: {findings:?}"
+        );
+    }
+
+    #[test]
     fn a_twosided_flag_disagreeing_with_sidedef_presence_is_reported() {
         // Perimeter line 1 claims twosided but has no back sidedef.
         let broken = TWO_BOX.replace(
