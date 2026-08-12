@@ -46,6 +46,36 @@ pub fn binary_entrada_wad() -> Vec<u8> {
     builder.build().expect("wad builds")
 }
 
+/// The binary entrada WAD plus a second, deliberately unloadable map group:
+/// a `MAP02` marker whose data lumps are MAP01's five Doom-format lumps with
+/// a zero-length `BEHAVIOR` appended, which flips detection to the Hexen
+/// format. Whether assembly then fails on record shape or the format gate
+/// refuses it, `MAP02` cannot load — which is the point: a per-map failure
+/// among survivors.
+pub fn binary_entrada_wad_with_broken_second_map() -> Vec<u8> {
+    let base = binary_entrada_wad();
+    let wad = Wad::from_bytes(base).expect("binary fixture parses");
+    let lumps = wad.lumps();
+    let group = wad
+        .map_groups()
+        .into_iter()
+        .next()
+        .expect("binary fixture has a map group");
+    let mut builder = WadBuilder::new(WadKind::Pwad);
+    // MAP01, intact.
+    builder.add_lump(group.name.as_str(), Vec::new());
+    for &i in &group.data_indices {
+        builder.add_lump(lumps[i].name(), wad.lump_data(&lumps[i]).to_vec());
+    }
+    // MAP02, Hexen-flagged copy.
+    builder.add_lump("MAP02", Vec::new());
+    for &i in &group.data_indices {
+        builder.add_lump(lumps[i].name(), wad.lump_data(&lumps[i]).to_vec());
+    }
+    builder.add_lump("BEHAVIOR", Vec::new());
+    builder.build().expect("wad builds")
+}
+
 /// A minimal one-map UDMF PWAD wrapping `textmap` verbatim (same shape as
 /// `check_cli.rs`'s private helper).
 pub fn wad_with_textmap(textmap: impl Into<Vec<u8>>) -> Vec<u8> {
