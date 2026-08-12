@@ -1651,6 +1651,48 @@ mod tests {
         );
     }
 
+    /// Every named weapon in `[ammo.weapon_grant.*]` must resolve its
+    /// pickup-grant amount and ammo type, checked individually and
+    /// exhaustively over the six weapons the table lists — mirrors
+    /// [`every_ammo_pickup_resolves`]'s own shape for `[ammo.pickups.*]`.
+    /// The pistol (no placed pickup thing exists for it) and the chainsaw
+    /// (`am_noammo`) are deliberately absent from the table and must not
+    /// resolve here either.
+    #[test]
+    fn every_weapon_ammo_grant_resolves() {
+        let t = Tables::load().expect("tables load");
+        // (name, amount, ammo_type)
+        let grants: &[(&str, i32, AmmoType)] = &[
+            ("chaingun", 20, AmmoType::Bullets),
+            ("shotgun", 8, AmmoType::Shells),
+            ("super_shotgun", 8, AmmoType::Shells),
+            ("rocket_launcher", 2, AmmoType::Rockets),
+            ("plasma_rifle", 40, AmmoType::Cells),
+            ("bfg9000", 40, AmmoType::Cells),
+        ];
+        for (name, amount, ammo_type) in grants {
+            let g = t
+                .weapon_ammo_grant(name)
+                .unwrap_or_else(|| panic!("`{name}` weapon ammo grant"));
+            assert_eq!(g.amount, *amount, "`{name}` amount");
+            assert_eq!(g.ammo_type, *ammo_type, "`{name}` ammo_type");
+        }
+        assert_eq!(grants.len(), 6, "every listed weapon grant was checked");
+
+        assert!(
+            t.weapon_ammo_grant("pistol").is_none(),
+            "the pistol is never a placed pickup thing and must not resolve"
+        );
+        assert!(
+            t.weapon_ammo_grant("chainsaw").is_none(),
+            "the chainsaw draws am_noammo and must not resolve"
+        );
+        assert!(
+            t.weapon_ammo_grant("plaid_gun").is_none(),
+            "an unknown weapon name must fail loudly, not silently fall back"
+        );
+    }
+
     /// End-to-end proof that the ammo-damage model is actually usable, not
     /// merely present: computes `arsenal.ammo.ratio` ("placed ammo damage /
     /// total baseline monster HP") for a small synthetic case — three

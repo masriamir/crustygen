@@ -225,27 +225,44 @@ fn scale_size_row(fm: &Frontmatter, scene: &Scene) -> ConformanceRow {
     }
 }
 
-/// `scale.vertical_range`: `max(floor) - min(floor)` across every sector in
-/// `scene`.
+/// `scale.vertical_range`: every sector's floor height must lie within
+/// `[min, max]`.
 ///
-/// Follows `map-spec.template.md`'s own inline comment on this field —
-/// `vertical_range: { min: 0, max: 256 } # allowed floor heights; the map's
-/// span is max - min` — which `docs/design.md` §5 repeats verbatim; ceiling
-/// heights play no part. An empty `scene` (no sectors) reads as span 0
-/// rather than panicking on an empty `min`/`max`.
+/// The authoritative definition is the field's own doc comment
+/// (`Scale::vertical_range` in `frontmatter.rs`): "The allowed floor height
+/// range" — an inclusive bound on every individual floor, not a target for
+/// the map's *computed* vertical span. `map-spec.template.md`'s inline
+/// comment (`# allowed floor heights; the map's span is max - min`, which
+/// `docs/design.md` §5 repeats verbatim) reads as ambiguous in isolation,
+/// but its own leading clause agrees with `frontmatter.rs`: "allowed floor
+/// heights" names a per-floor bound, and "the map's span is max - min" is
+/// describing what the *allowed band itself* spans (`max - min` map units
+/// wide), not instructing this check to compare the map's actual floor
+/// span against it — those are different claims. A map whose floors sit at
+/// -16 and 128 fails `vertical_range: { min: 0, max: 256 }` under the
+/// per-floor reading (the -16 floor is below `min`), even though its
+/// *span* (128 - (-16) = 144) would pass under the span reading — the
+/// per-floor reading is what this row implements. `actual` reports the
+/// observed floor extremes rather than their difference, so a failure
+/// names which one is out of band.
 fn vertical_range_row(fm: &Frontmatter, scene: &Scene) -> ConformanceRow {
-    let floors = scene.sectors.iter().map(|s| s.floor);
-    let (mut lo, mut hi) = (i32::MAX, i32::MIN);
-    for floor in floors {
-        lo = lo.min(floor);
-        hi = hi.max(floor);
+    let mm = &fm.scale.vertical_range;
+    let target = format!("{}..={}", mm.min, mm.max);
+    let floors: Vec<i32> = scene.sectors.iter().map(|s| s.floor).collect();
+    let (Some(&lo), Some(&hi)) = (floors.iter().min(), floors.iter().max()) else {
+        return not_derivable(
+            "scale.vertical_range".to_owned(),
+            target,
+            "no sectors present",
+        );
+    };
+    let pass = floors.iter().all(|&f| f >= mm.min && f <= mm.max);
+    ConformanceRow {
+        parameter: "scale.vertical_range".to_owned(),
+        target,
+        actual: format!("floors {lo}..{hi}"),
+        verdict: if pass { Verdict::Pass } else { Verdict::Fail },
     }
-    let span = if lo > hi { 0 } else { hi - lo };
-    range_row(
-        "scale.vertical_range".to_owned(),
-        &fm.scale.vertical_range,
-        span,
-    )
 }
 
 // ---------------------------------------------------------------------
@@ -636,19 +653,6 @@ fn deaf_ratio_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conforman
 // arsenal.ammo.ratio
 // ---------------------------------------------------------------------
 
-/// The six placeable weapon vocabulary names [`Tables::weapon_damage`] and
-/// [`Tables::weapon_ammo_grant`] both resolve. The pistol is deliberately
-/// absent (never a placed pickup thing — see [`ammo_ratio_row`]'s doc
-/// comment) and so is the chainsaw (`am_noammo`).
-const WEAPON_NAMES: [&str; 6] = [
-    "chaingun",
-    "shotgun",
-    "super_shotgun",
-    "rocket_launcher",
-    "plasma_rifle",
-    "bfg9000",
-];
-
 /// Ammo units placed on the map, one running total per ammo pool.
 #[derive(Debug, Default)]
 struct AmmoUnits {
@@ -678,9 +682,13 @@ impl AmmoUnits {
 /// **max** [`crate::tables::WeaponDamage::expected_damage_per_ammo`] among
 /// weapons drawing that pool that are either **placed on the map** or the
 /// **pistol** (always carried, so its `bullets` figure is always available
-/// even with no weapon thing placed at all). A pool with no available weapon
-/// (e.g. no cell weapon placed) contributes zero damage — never `NaN` or a
-/// fallback guess.
+/// even with no weapon thing placed at all). "Placed on the map" is
+/// classified by `tables.weapon_damage(name).is_some()` — every thing name
+/// with a `[weapons.damage.*]` entry — rather than a hardcoded name list,
+/// so a weapon added to that table later is picked up automatically instead
+/// of silently falling out of the pool-rate set. A pool with no available
+/// weapon (e.g. no cell weapon placed) contributes zero damage — never
+/// `NaN` or a fallback guess.
 ///
 /// **Ammo units.** Sum of `tables.ammo_pickup(name).amount` over every
 /// placed ammo thing, plus `backpack` count times
@@ -697,7 +705,7 @@ fn ammo_ratio_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conforman
         .things
         .iter()
         .filter_map(|t| t.name.as_deref())
-        .filter(|name| WEAPON_NAMES.contains(name))
+        .filter(|&name| tables.weapon_damage(name).is_some())
         .collect();
     available.insert("pistol");
 
@@ -1063,14 +1071,14 @@ thing { x = 160.000; y = 32.000; type = 2007; single = true; }
         patched
     }
 
-    /// Builds the fixture's `Scene`, `MapStats`, and parsed [`Spec`], and
-    /// runs [`rows`] over them. Panics (via `expect`) rather than returning
-    /// `Result` — every fixture here is known-good, so a failure here is
-    /// this test's own setup being wrong, not something a caller should
-    /// have to handle.
-    fn fixture_rows() -> Vec<ConformanceRow> {
+    /// Builds `text`'s `Scene`/`MapStats` and [`test_spec_text`]'s parsed
+    /// [`Spec`], and runs [`rows`] over them. Panics (via `expect`) rather
+    /// than returning `Result` — every fixture here is known-good, so a
+    /// failure here is this test's own setup being wrong, not something a
+    /// caller should have to handle.
+    fn rows_for(text: &str) -> Vec<ConformanceRow> {
         let tables = Tables::load().expect("tables");
-        let map = parse_udmf(FIXTURE_MAP, Limits::default()).expect("fixture parses");
+        let map = parse_udmf(text, Limits::default()).expect("fixture parses");
         let mut findings = Vec::new();
         let scene = Scene::build(&map, &tables, &mut findings);
         assert!(findings.is_empty(), "clean fixture: {findings:?}");
@@ -1084,6 +1092,11 @@ thing { x = 160.000; y = 32.000; type = 2007; single = true; }
         };
         let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
         rows(&scene, &stats, "MAP01", &doc.spec, &tables)
+    }
+
+    /// [`rows_for`] over [`FIXTURE_MAP`].
+    fn fixture_rows() -> Vec<ConformanceRow> {
+        rows_for(FIXTURE_MAP)
     }
 
     fn row<'a>(rows: &'a [ConformanceRow], parameter: &str) -> &'a ConformanceRow {
@@ -1156,5 +1169,135 @@ thing { x = 160.000; y = 32.000; type = 2007; single = true; }
         let r = row(&rows, "arsenal.ammo.ratio");
         assert_eq!(r.verdict, Verdict::Info);
         assert!(r.actual.contains("1.035"), "got {r:?}");
+    }
+
+    /// A single 256x256 sector holding a `player1_start`, one `zombieman`
+    /// (`spawnhealth` 20), one `imp` (`spawnhealth` 60), one `backpack`
+    /// (doomednum 8), one `shotgun` (doomednum 2001), and one
+    /// `super_shotgun` (doomednum 82) — both shell weapons placed together
+    /// so [`ammo_ratio_combines_max_pool_rate_backpack_and_weapon_grants`]
+    /// can exercise the max-of-several-weapons pool rate, the backpack
+    /// grant, and the per-weapon pickup grant in one fixture.
+    const AMMO_COMBO_FIXTURE_MAP: &str = r#"namespace = "doom";
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 256.000; y = 0.000; }
+vertex { x = 256.000; y = 256.000; }
+vertex { x = 0.000; y = 256.000; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; blocking = true; }
+linedef { v1 = 1; v2 = 2; sidefront = 1; blocking = true; }
+linedef { v1 = 2; v2 = 3; sidefront = 2; blocking = true; }
+linedef { v1 = 3; v2 = 0; sidefront = 3; blocking = true; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; lightlevel = 160; }
+thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
+thing { x = 64.000; y = 32.000; type = 3004; single = true; }
+thing { x = 96.000; y = 32.000; type = 3001; single = true; }
+thing { x = 128.000; y = 32.000; type = 8; single = true; }
+thing { x = 160.000; y = 32.000; type = 2001; single = true; }
+thing { x = 192.000; y = 32.000; type = 82; single = true; }
+"#;
+
+    #[test]
+    fn ammo_ratio_combines_max_pool_rate_backpack_and_weapon_grants() {
+        // Hand-computed from data/engine.toml, exercising three arithmetic
+        // paths together: (a) two placed weapons on the SAME pool at
+        // different expected_damage_per_ammo (the shotgun and the super
+        // shotgun both draw `shells`) — the pool rate must take the max,
+        // not the first or an average; (b) a placed backpack, granting all
+        // four pools at once; (c) each placed weapon's own pickup grant
+        // (picking up a weapon grants ammo too, not only dedicated ammo
+        // pickups).
+        //
+        // Pool rates: bullets = pistol's expected_damage_per_ammo
+        // (10.3515625, always carried — no bullet weapon is placed here);
+        // shells = max(shotgun 72.4609375, super_shotgun 103.515625) =
+        // 103.515625; cells = 0 and rockets = 0 (no weapon on either pool
+        // is placed).
+        //
+        // Units: the one placed backpack grants bullets 10, shells 4,
+        // cells 20, rockets 1 ([ammo.pickups.backpack]); the placed
+        // shotgun and super_shotgun each also grant their own pickup ammo
+        // ([ammo.weapon_grant.shotgun] = 8 shells,
+        // [ammo.weapon_grant.super_shotgun] = 8 shells) — shells units =
+        // 4 + 8 + 8 = 20.
+        //
+        // Total damage = 10*10.3515625 (bullets) + 20*103.515625 (shells)
+        // + 20*0 (cells) + 1*0 (rockets) = 103.515625 + 2070.3125 =
+        // 2173.828125. Denominator = zombieman 20 + imp 60 = 80
+        // spawnhealth. Ratio = 2173.828125 / 80 = 27.1728515625, which
+        // rounds to "27.173" at the row's 3-decimal formatting.
+        let tables = Tables::load().expect("tables");
+        let pistol = tables.weapon_damage("pistol").expect("pistol damage");
+        let shotgun = tables.weapon_damage("shotgun").expect("shotgun damage");
+        let super_shotgun = tables
+            .weapon_damage("super_shotgun")
+            .expect("super shotgun damage");
+        let backpack = tables.ammo_backpack_grant();
+        let shotgun_grant = tables
+            .weapon_ammo_grant("shotgun")
+            .expect("shotgun ammo grant");
+        let ssg_grant = tables
+            .weapon_ammo_grant("super_shotgun")
+            .expect("super shotgun ammo grant");
+
+        let shells_rate = shotgun
+            .expected_damage_per_ammo
+            .max(super_shotgun.expected_damage_per_ammo);
+        let shells_units = f64::from(backpack.shells + shotgun_grant.amount + ssg_grant.amount);
+        let bullets_damage = f64::from(backpack.bullets) * pistol.expected_damage_per_ammo;
+        let shells_damage = shells_units * shells_rate;
+        let expected = (bullets_damage + shells_damage) / 80.0;
+        assert!(
+            (expected - 27.172_851_562_5).abs() < 1e-9,
+            "hand-computation itself: got {expected}"
+        );
+
+        let rows = rows_for(AMMO_COMBO_FIXTURE_MAP);
+        let r = row(&rows, "arsenal.ammo.ratio");
+        assert_eq!(r.verdict, Verdict::Info);
+        assert!(r.actual.contains("27.173"), "got {r:?}");
+    }
+
+    /// [`FIXTURE_MAP`] with its one sector's floor lowered to -16, below the
+    /// template's default `vertical_range: { min: 0, max: 256 }` floor.
+    const BELOW_VERTICAL_RANGE_FIXTURE_MAP: &str = r#"namespace = "doom";
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 256.000; y = 0.000; }
+vertex { x = 256.000; y = 256.000; }
+vertex { x = 0.000; y = 256.000; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; blocking = true; }
+linedef { v1 = 1; v2 = 2; sidefront = 1; blocking = true; }
+linedef { v1 = 2; v2 = 3; sidefront = 2; blocking = true; }
+linedef { v1 = 3; v2 = 0; sidefront = 3; blocking = true; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = -16; heightceiling = 128; lightlevel = 160; }
+thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
+"#;
+
+    #[test]
+    fn vertical_range_fails_a_below_min_floor_even_though_its_span_alone_would_pass() {
+        // A single sector at floor -16 would read as trivially Pass under a
+        // "span" comparison against the template's default `vertical_range:
+        // { min: 0, max: 256 }` — max(floor) - min(floor) = 0, well within
+        // [0, 256] — but the field's authoritative meaning
+        // (`Scale::vertical_range`'s own doc comment: "The allowed floor
+        // height range") is a per-floor bound, which -16 violates directly.
+        // This is the exact regression a span-based implementation would
+        // miss.
+        let rows = rows_for(BELOW_VERTICAL_RANGE_FIXTURE_MAP);
+        let r = row(&rows, "scale.vertical_range");
+        assert_eq!(r.verdict, Verdict::Fail, "got {r:?}");
+        assert!(r.actual.contains("-16"), "got {r:?}");
+
+        // The unmodified fixture (floor 0, within the same [0, 256] band)
+        // stays Pass, pinning the non-regressed side too.
+        let clean = fixture_rows();
+        assert_eq!(row(&clean, "scale.vertical_range").verdict, Verdict::Pass);
     }
 }
