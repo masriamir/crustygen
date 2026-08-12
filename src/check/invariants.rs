@@ -254,7 +254,8 @@ pub fn check_door_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Fin
                     subject: Subject::Linedef(b.linedef),
                     message: format!(
                         "door special {} carries an unpegged flag on its own face \
-                         (dontpegtop={}, dontpegbottom={}) — only the track should be pegged",
+                         (dontpegtop={}, dontpegbottom={}) — only the track is \
+                         lower-unpegged; faces carry neither flag",
                         b.special, b.upper_unpegged, b.lower_unpegged
                     ),
                 });
@@ -1262,8 +1263,11 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
         assert!(
             findings.iter().any(|f| f.check == "V-P11"
                 && f.severity == Severity::Warning
-                && matches!(f.subject, Subject::Linedef(0))),
-            "expected a V-P11 warning on linedef 0: {findings:?}"
+                && matches!(f.subject, Subject::Linedef(0))
+                && f.message
+                    .contains("only the track is lower-unpegged; faces carry neither flag")),
+            "expected a V-P11 warning on linedef 0, correctly stating which side should carry \
+             the flag: {findings:?}"
         );
     }
 

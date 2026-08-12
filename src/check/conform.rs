@@ -246,7 +246,7 @@ fn scale_size_row(fm: &Frontmatter, scene: &Scene) -> ConformanceRow {
     ConformanceRow {
         parameter: "scale.size".to_owned(),
         target,
-        actual: format!("{width:.0}x{height:.0}"),
+        actual: format!("{width}x{height}"),
         verdict: if pass { Verdict::Pass } else { Verdict::Fail },
     }
 }
@@ -1536,6 +1536,48 @@ thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
         assert!(
             start.actual.contains("no player1_start placed"),
             "got {start:?}"
+        );
+    }
+
+    #[test]
+    fn scale_size_actual_renders_full_precision_not_rounded() {
+        // A 2100.4-wide bounding box must report its exact width in
+        // `actual`, not a rounded one — `{width:.0}x{height:.0}` used to
+        // print "2100" for a box that is really 2100.4 wide, silently
+        // disagreeing with the `pass`/`fail` judgment just above, which
+        // already compares at full precision.
+        let tables = Tables::load().expect("tables");
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+        let scene = Scene {
+            sectors: vec![SceneSector {
+                floor: 0,
+                ceiling: 128,
+                light: 160,
+                special: 0,
+                tag: 0,
+                boundary: vec![crate::check::scene::Boundary {
+                    a: (0.0, 0.0),
+                    b: (2100.4, 50.7),
+                    linedef: 0,
+                    neighbor: None,
+                    two_sided: false,
+                    blocking: false,
+                    upper_unpegged: false,
+                    lower_unpegged: false,
+                    special: 0,
+                    tag: 0,
+                    fronts_this: true,
+                    sidedef: 0,
+                }],
+                closed: true,
+            }],
+            things: vec![],
+        };
+
+        let row = scale_size_row(&doc.spec.frontmatter, &scene);
+        assert_eq!(
+            row.actual, "2100.4x50.7",
+            "the actual size must render at full precision, not rounded: {row:?}"
         );
     }
 

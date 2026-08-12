@@ -31,7 +31,7 @@ spec → IR generation does not exist, so the IR below is still authored
 directly as JSON. See [Known gaps](#known-gaps).
 
 ```bash
-cargo test                                   # 474 tests
+cargo test                                   # 475 tests
 cargo run --bin crustygen-check -- maps/entrada.wad \
     --spec tests/fixtures/entrada.spec.md
 ```
