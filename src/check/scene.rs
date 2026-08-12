@@ -157,22 +157,26 @@ fn index_in(idx: i32, len: usize) -> Option<usize> {
     usize::try_from(idx).ok().filter(|&i| i < len)
 }
 
-/// Resolves a linedef's `field` index (naming it `kind` in the message) to a
-/// `usize` valid for `len`. Pushes a `"V-S"` finding naming linedef `i` and
-/// returns `None` if `idx` is out of range.
+/// Resolves a linedef's `field` index (naming it `kind.0` in the message,
+/// singular) to a `usize` valid for `len`. Pushes a `"V-S"` finding naming
+/// linedef `i` and returns `None` if `idx` is out of range, pluralizing
+/// `kind.0` as `kind.1` in that finding's "but the map has N ..." clause
+/// rather than blindly appending an "s" — `kind.0 == "vertex"` would
+/// otherwise read "vertexs".
 fn resolve_index(
     i: usize,
     field: &str,
-    kind: &str,
+    kind: (&str, &str),
     idx: i32,
     len: usize,
     findings: &mut Vec<Finding>,
 ) -> Option<usize> {
     let resolved = index_in(idx, len);
     if resolved.is_none() {
+        let (singular, plural) = kind;
         findings.push(reference_error(
             i,
-            format!("{field} references {kind} {idx}, but the map has {len} {kind}s"),
+            format!("{field} references {singular} {idx}, but the map has {len} {plural}"),
         ));
     }
     resolved
@@ -229,6 +233,39 @@ impl BoundaryFlagBits {
     }
 }
 
+/// Resolves one linedef side (`field` is `"sidefront"` or `"sideback"`,
+/// `idx` its declared sidedef index) to its `(sidedef, sector)` pair,
+/// pushing a `"V-S"` finding naming linedef `i` and returning `None` for
+/// whichever cross-reference — the sidedef itself, or that sidedef's own
+/// `sector` field — is out of range first. Shared by [`process_linedef`]'s
+/// front and back handling, which are otherwise identical.
+fn resolve_side(
+    i: usize,
+    field: &str,
+    idx: i32,
+    map: &UdmfMap,
+    sectors: &[SceneSector],
+    findings: &mut Vec<Finding>,
+) -> Option<(usize, usize)> {
+    let sidedef = resolve_index(
+        i,
+        field,
+        ("sidedef", "sidedefs"),
+        idx,
+        map.sidedefs.len(),
+        findings,
+    )?;
+    let sector = resolve_index(
+        i,
+        &format!("{field}'s sector"),
+        ("sector", "sectors"),
+        map.sidedefs[sidedef].sector,
+        sectors.len(),
+        findings,
+    )?;
+    Some((sidedef, sector))
+}
+
 /// Validates linedef `i`'s cross-references and, if it is well-formed,
 /// pushes its [`Boundary`] contribution(s) into `sectors`. On any violation,
 /// pushes exactly one `"V-S"` [`Finding`] and contributes no boundary.
@@ -240,49 +277,38 @@ fn process_linedef(
     sectors: &mut [SceneSector],
     findings: &mut Vec<Finding>,
 ) {
-    let Some(v1) = resolve_index(i, "v1", "vertex", line.v1, map.vertices.len(), findings) else {
-        return;
-    };
-    let Some(v2) = resolve_index(i, "v2", "vertex", line.v2, map.vertices.len(), findings) else {
-        return;
-    };
-    let Some(sidefront) = resolve_index(
+    let Some(v1) = resolve_index(
         i,
-        "sidefront",
-        "sidedef",
-        line.sidefront,
-        map.sidedefs.len(),
+        "v1",
+        ("vertex", "vertices"),
+        line.v1,
+        map.vertices.len(),
         findings,
     ) else {
         return;
     };
-    let Some(front_sector) = resolve_index(
+    let Some(v2) = resolve_index(
         i,
-        "sidefront's sector",
-        "sector",
-        map.sidedefs[sidefront].sector,
-        sectors.len(),
+        "v2",
+        ("vertex", "vertices"),
+        line.v2,
+        map.vertices.len(),
         findings,
     ) else {
+        return;
+    };
+    let Some((sidefront, front_sector)) =
+        resolve_side(i, "sidefront", line.sidefront, map, sectors, findings)
+    else {
         return;
     };
 
     let back = match line.sideback {
         None => None,
         Some(sb) => {
-            let Some(sideback) =
-                resolve_index(i, "sideback", "sidedef", sb, map.sidedefs.len(), findings)
+            let Some((sideback, back_sector)) =
+                resolve_side(i, "sideback", sb, map, sectors, findings)
             else {
-                return;
-            };
-            let Some(back_sector) = resolve_index(
-                i,
-                "sideback's sector",
-                "sector",
-                map.sidedefs[sideback].sector,
-                sectors.len(),
-                findings,
-            ) else {
                 return;
             };
             Some((sideback, back_sector))
@@ -612,8 +638,10 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
         assert!(
             findings.iter().any(|f| f.check == "V-S"
                 && matches!(f.subject, crate::check::Subject::Linedef(0))
-                && f.message.contains("v1 references vertex 99")),
-            "expected a v1 reference-validity finding: {findings:?}"
+                && f.message
+                    .contains("v1 references vertex 99, but the map has 6 vertices")),
+            "expected a v1 reference-validity finding, correctly pluralized (not \"vertexs\"): \
+             {findings:?}"
         );
         assert!(
             scene.sectors[0].boundary.iter().all(|b| b.linedef != 0),
@@ -631,8 +659,10 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
         assert!(
             findings.iter().any(|f| f.check == "V-S"
                 && matches!(f.subject, crate::check::Subject::Linedef(0))
-                && f.message.contains("v2 references vertex 99")),
-            "expected a v2 reference-validity finding: {findings:?}"
+                && f.message
+                    .contains("v2 references vertex 99, but the map has 6 vertices")),
+            "expected a v2 reference-validity finding, correctly pluralized (not \"vertexs\"): \
+             {findings:?}"
         );
     }
 
