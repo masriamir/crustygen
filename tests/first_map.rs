@@ -13,6 +13,13 @@ use crustywad::{Wad, WadKind};
 const ENTRADA: &str = include_str!("fixtures/entrada_base.json");
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one linear walkthrough of the whole payoff fixture — compile, pack both artifacts, \
+              assemble both, run the layer-4 verifier, check structural progression, write the \
+              drift-guard comparison — reads clearer as one sequence than split across helpers \
+              that would each need the same `compiled`/`tables`/`plain_map` in scope"
+)]
 fn entrada_base_compiles_and_reassembles_through_crustywad() {
     let ir = Ir::from_json(ENTRADA).expect("ir parses");
     let tables = Tables::load().expect("tables load");
@@ -69,6 +76,20 @@ fn entrada_base_compiles_and_reassembles_through_crustywad() {
         noded_map.sectors().len(),
         18,
         "same geometry, both artifacts"
+    );
+
+    // Layer 4: the verifier re-derives playability from the emitted TEXTMAP.
+    let text = crustygen::compile::textmap::emit_textmap(&compiled.data, &compiled.things);
+    let udmf = crustywad::map::udmf::parse_udmf(&text, crustywad::Limits::default())
+        .expect("emitted TEXTMAP parses");
+    let report = crustygen::check::run(&udmf, "MAP01", &tables, None);
+    assert!(
+        report
+            .findings
+            .iter()
+            .all(|f| f.severity != crustygen::check::Severity::Error),
+        "layer-4 findings on the shipped map: {:?}",
+        report.findings
     );
 
     // Structural progression proof: exactly one key, one locked door special
