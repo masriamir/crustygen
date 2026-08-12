@@ -9,6 +9,10 @@
 
 [things]
 player1_start = 1
+player2_start = 2
+player3_start = 3
+player4_start = 4
+deathmatch_start = 11
 zombieman = 3004
 shotgun_guy = 9
 imp = 3001
@@ -20,7 +24,8 @@ blue_skull = 40
 yellow_skull = 39
 red_skull = 38
 teleport_dest = 14
-source = "id-Software/DOOM linuxdoom-1.10/p_mobj.c, P_SpawnMapThing: 'if (mthing->type <= 4) { playerstarts[mthing->type-1] = *mthing; ... }' establishes doomednum 1 as player 1's start. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_mobj.c — monster doomednums (zombieman 3004, shotgun_guy 9, imp 3001, pinky 3002) cross-checked against info.c mobjinfo in the same pinned commit, see data/engine.toml [species.*] citations"
+source = "id-Software/DOOM linuxdoom-1.10/p_mobj.c, P_SpawnMapThing: 'if (mthing->type <= 4) { playerstarts[mthing->type-1] = *mthing; ... }' establishes doomednum 1 as player 1's start, and by the same array-indexed assignment (playerstarts[mthing->type-1] for mthing->type in 1..=4) doomednums 2, 3, and 4 as player2_start, player3_start, and player4_start respectively. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_mobj.c — monster doomednums (zombieman 3004, shotgun_guy 9, imp 3001, pinky 3002) cross-checked against info.c mobjinfo in the same pinned commit, see data/engine.toml [species.*] citations"
+deathmatch_start_source = "id-Software/DOOM linuxdoom-1.10/p_mobj.c, P_SpawnMapThing, immediately before the mthing->type <= 4 player-start check quoted in `source` above: 'if (mthing->type == 11) { if (deathmatch_p < &deathmatchstarts[10]) { memcpy (deathmatch_p, mthing, sizeof(*mthing)); deathmatch_p++; } return; }' establishes doomednum 11 as a deathmatch start, collected into the same `deathmatchstarts[MAX_DM_STARTS]` array engine.toml's [starts] dm_max citation sources (the literal 10 here is that same MAX_DM_STARTS). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_mobj.c"
 keys_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo, read at the pinned commit a77dfb96cb91780ca334d0d4cfd86957558007e0. Each entry's first field is its doomednum and its second its spawnstate, and states[] at the same commit gives each spawnstate's sprite: MT_MISC4 = { 5, S_BKEY } with S_BKEY = {SPR_BKEY,...} (blue card); MT_MISC6 = { 6, S_YKEY } / SPR_YKEY (yellow card); MT_MISC5 = { 13, S_RKEY } / SPR_RKEY (red card); MT_MISC9 = { 40, S_BSKULL } / SPR_BSKU (blue skull); MT_MISC7 = { 39, S_YSKULL } / SPR_YSKU (yellow skull); MT_MISC8 = { 38, S_RSKULL } / SPR_RSKU (red skull). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
 teleport_dest_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_TELEPORTMAN]: doomednum = 14 (with spawnstate S_NULL, so it renders nothing — it is a pure position/angle marker). p_telept.c, EV_Teleport confirms the role: it walks every sector whose tag equals the teleport line's tag, finds the one MT_TELEPORTMAN mobj in that sector ('if (m->type != MT_TELEPORTMAN) continue;'), and moves the teleporting thing to that mobj's (x, y) and angle ('thing->angle = m->angle;'). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c and .../p_telept.c"
 

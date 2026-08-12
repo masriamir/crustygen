@@ -230,6 +230,10 @@ struct LinedefFlags {
     block_monsters: u16,
     secret: u16,
     sound_block: u16,
+    blocking: u16,
+    two_sided: u16,
+    upper_unpegged: u16,
+    lower_unpegged: u16,
 }
 
 #[derive(Debug, Deserialize)]
@@ -283,9 +287,25 @@ struct AmmoPickups {
     backpack: BackpackGrant,
 }
 
+/// How much ammo a placed weapon pickup itself grants on first pickup
+/// (`engine.toml`'s `[ammo.weapon_grant.*]` table) — distinct from
+/// [`AmmoPickups`], which covers ammo-only pickups. The pistol (never a
+/// placed pickup thing) and chainsaw (draws no ammo) are deliberately
+/// absent; see that table's header comment.
+#[derive(Debug, Deserialize)]
+struct WeaponGrant {
+    chaingun: AmmoPickup,
+    shotgun: AmmoPickup,
+    super_shotgun: AmmoPickup,
+    rocket_launcher: AmmoPickup,
+    plasma_rifle: AmmoPickup,
+    bfg9000: AmmoPickup,
+}
+
 #[derive(Debug, Deserialize)]
 struct AmmoTable {
     pickups: AmmoPickups,
+    weapon_grant: WeaponGrant,
 }
 
 #[derive(Debug, Deserialize)]
@@ -500,6 +520,17 @@ impl Tables {
             .ok()
     }
 
+    /// Every `[things]` vocabulary entry, `(name, doomednum)`, skipping the
+    /// `*_source` citation strings (their values are not integers). The reverse
+    /// direction of [`Self::thing_id`], for classifying an emitted thing.
+    pub fn thing_kinds(&self) -> impl Iterator<Item = (&str, u16)> + '_ {
+        self.vocabulary.things.iter().filter_map(|(name, v)| {
+            v.as_integer()
+                .and_then(|i| u16::try_from(i).ok())
+                .map(|id| (name.as_str(), id))
+        })
+    }
+
     /// The linedef special that opens a manual door.
     #[must_use]
     pub fn door_special(&self) -> u16 {
@@ -648,22 +679,33 @@ impl Tables {
     }
 
     /// The `doomdata.h` bit value for a named linedef flag (`block_monsters`
-    /// | `sound_block`), if known. `combat.block_monster_lines` needs
-    /// `block_monsters` (`ML_BLOCKMONSTERS`); `combat.sound.block_sound_at`
-    /// needs `sound_block` (`ML_SOUNDBLOCK`).
+    /// | `secret` | `sound_block` | `blocking` | `two_sided` |
+    /// `upper_unpegged` | `lower_unpegged`), if known. `combat.block_monster_lines`
+    /// needs `block_monsters` (`ML_BLOCKMONSTERS`); `combat.sound.block_sound_at`
+    /// needs `sound_block` (`ML_SOUNDBLOCK`). `blocking`, `two_sided`
+    /// (`ML_BLOCKING`, `ML_TWOSIDED`), `upper_unpegged`
+    /// (`ML_DONTPEGTOP`), and `lower_unpegged` (`ML_DONTPEGBOTTOM`) are read
+    /// back by [`crate::check::scene`] to re-derive a parsed map's own
+    /// boundary passability and texture-pegging from its linedef `flags`
+    /// bits, rather than trusting the compiler's structural output.
     ///
     /// UDMF's `doom` namespace spells each flag as its own named boolean
     /// field on the linedef object — `blockmonsters` and `blocksound`
     /// respectively — rather than this packed bit; see `emit_textmap`'s
     /// existing `blocking`/`dontpegbottom`/`dontpegtop` output for the
-    /// convention a future emission path should follow. Not wired into any
-    /// emission path yet.
+    /// convention a future emission path should follow. `block_monsters` and
+    /// `sound_block` are sourced and accessible but unemitted; `secret` is
+    /// wired into `compile::portals`.
     #[must_use]
     pub fn linedef_flag(&self, name: &str) -> Option<u16> {
         match name {
             "block_monsters" => Some(self.engine.linedef.flags.block_monsters),
             "secret" => Some(self.engine.linedef.flags.secret),
             "sound_block" => Some(self.engine.linedef.flags.sound_block),
+            "blocking" => Some(self.engine.linedef.flags.blocking),
+            "two_sided" => Some(self.engine.linedef.flags.two_sided),
+            "upper_unpegged" => Some(self.engine.linedef.flags.upper_unpegged),
+            "lower_unpegged" => Some(self.engine.linedef.flags.lower_unpegged),
             _ => None,
         }
     }
@@ -736,6 +778,27 @@ impl Tables {
     #[must_use]
     pub fn ammo_backpack_grant(&self) -> BackpackGrant {
         self.engine.ammo.pickups.backpack
+    }
+
+    /// A named weapon's ammo grant from the weapon pickup itself (`chaingun`
+    /// | `shotgun` | `super_shotgun` | `rocket_launcher` | `plasma_rifle` |
+    /// `bfg9000`), if listed — distinct from [`Self::ammo_pickup`], which
+    /// covers ammo-only pickups. The pistol (never a placed pickup thing)
+    /// and chainsaw (draws no ammo) are deliberately absent from the
+    /// vocabulary this covers; see `engine.toml`'s `[ammo.weapon_grant.*]`
+    /// header comment.
+    #[must_use]
+    pub fn weapon_ammo_grant(&self, name: &str) -> Option<AmmoPickup> {
+        let grant = &self.engine.ammo.weapon_grant;
+        match name {
+            "chaingun" => Some(grant.chaingun),
+            "shotgun" => Some(grant.shotgun),
+            "super_shotgun" => Some(grant.super_shotgun),
+            "rocket_launcher" => Some(grant.rocket_launcher),
+            "plasma_rifle" => Some(grant.plasma_rifle),
+            "bfg9000" => Some(grant.bfg9000),
+            _ => None,
+        }
     }
 
     /// The texture for a role (`wall`, `floor`, `ceiling`, `door`,
@@ -1158,14 +1221,39 @@ mod tests {
         );
         assert_eq!(
             t.linedef_flag("blocking"),
-            None,
-            "ML_BLOCKING is structural (LinedefOut::blocking), not a sourced flag entry"
+            Some(1),
+            "ML_BLOCKING is now sourced too, for check::scene's Boundary::blocking"
         );
         assert_eq!(
             t.linedef_flag("plaid_flag"),
             None,
             "an unknown flag name must fail loudly, not silently fall back"
         );
+    }
+
+    #[test]
+    fn thing_kinds_inverts_thing_id_and_skips_source_entries() {
+        let t = Tables::load().expect("tables");
+        let kinds: std::collections::HashMap<&str, u16> = t.thing_kinds().collect();
+        assert_eq!(kinds.get("imp"), Some(&3001));
+        assert_eq!(kinds.get("player1_start"), Some(&1));
+        assert!(!kinds.contains_key("source"));
+        for (name, id) in t.thing_kinds() {
+            assert_eq!(t.thing_id(name), Some(id));
+        }
+    }
+
+    #[test]
+    fn the_verifier_linedef_flags_and_start_things_are_sourced() {
+        let t = Tables::load().expect("tables");
+        assert_eq!(t.linedef_flag("blocking"), Some(1));
+        assert_eq!(t.linedef_flag("two_sided"), Some(4));
+        assert_eq!(t.linedef_flag("upper_unpegged"), Some(8));
+        assert_eq!(t.linedef_flag("lower_unpegged"), Some(16));
+        assert_eq!(t.thing_id("player2_start"), Some(2));
+        assert_eq!(t.thing_id("player3_start"), Some(3));
+        assert_eq!(t.thing_id("player4_start"), Some(4));
+        assert_eq!(t.thing_id("deathmatch_start"), Some(11));
     }
 
     /// The exploding barrel and every scenery/light-source prop must
@@ -1560,6 +1648,48 @@ mod tests {
         assert!(
             t.ammo_pickup("plaid_ammo").is_none(),
             "an unknown ammo pickup name must fail loudly, not silently fall back"
+        );
+    }
+
+    /// Every named weapon in `[ammo.weapon_grant.*]` must resolve its
+    /// pickup-grant amount and ammo type, checked individually and
+    /// exhaustively over the six weapons the table lists — mirrors
+    /// [`every_ammo_pickup_resolves`]'s own shape for `[ammo.pickups.*]`.
+    /// The pistol (no placed pickup thing exists for it) and the chainsaw
+    /// (`am_noammo`) are deliberately absent from the table and must not
+    /// resolve here either.
+    #[test]
+    fn every_weapon_ammo_grant_resolves() {
+        let t = Tables::load().expect("tables load");
+        // (name, amount, ammo_type)
+        let grants: &[(&str, i32, AmmoType)] = &[
+            ("chaingun", 20, AmmoType::Bullets),
+            ("shotgun", 8, AmmoType::Shells),
+            ("super_shotgun", 8, AmmoType::Shells),
+            ("rocket_launcher", 2, AmmoType::Rockets),
+            ("plasma_rifle", 40, AmmoType::Cells),
+            ("bfg9000", 40, AmmoType::Cells),
+        ];
+        for (name, amount, ammo_type) in grants {
+            let g = t
+                .weapon_ammo_grant(name)
+                .unwrap_or_else(|| panic!("`{name}` weapon ammo grant"));
+            assert_eq!(g.amount, *amount, "`{name}` amount");
+            assert_eq!(g.ammo_type, *ammo_type, "`{name}` ammo_type");
+        }
+        assert_eq!(grants.len(), 6, "every listed weapon grant was checked");
+
+        assert!(
+            t.weapon_ammo_grant("pistol").is_none(),
+            "the pistol is never a placed pickup thing and must not resolve"
+        );
+        assert!(
+            t.weapon_ammo_grant("chainsaw").is_none(),
+            "the chainsaw draws am_noammo and must not resolve"
+        );
+        assert!(
+            t.weapon_ammo_grant("plaid_gun").is_none(),
+            "an unknown weapon name must fail loudly, not silently fall back"
         );
     }
 

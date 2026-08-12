@@ -576,7 +576,7 @@ Five layers, cheapest first.
 4. **`crustygen-check`** works on the assembled map rather than the IR, which is what makes it
    more than a restatement of layer 1: it re-derives the playability invariants from the actual
    emitted geometry, so a compiler bug that satisfies its own pre-checks still gets caught. On
-   top of that it does spec conformance — every frontmatter number against its actual, a
+   top of that it does spec conformance — every derivable frontmatter number against its actual, a
    key-aware reachability flood from player start to exit, secret-special count, exit trigger
    presence, tag manifest consistency, and the ammo ratio computed against real baseline
    monster HP.

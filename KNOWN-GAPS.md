@@ -1,36 +1,49 @@
 # crustygen — known gaps and carried decisions
 
 State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD →
-reassembles through crustywad. 240 tests (232 lib + 1 first_map + 6
-golden_textmap + 1 walking_skeleton), plus a separately-run `#[ignore]`d
-golden-regeneration generator not included in that count. This file records
-what is deliberately absent, what is known-fragile, and the decisions a
-future contributor would otherwise have to re-derive.
+reassembles through crustywad, plus the layer-4 verifier that re-checks the
+emitted map (`src/check`, `crustygen-check` — see `docs/check.md`). 475 tests
+(439 lib + 7 check_adversarial + 14 check_cli + 4 check_conformance + 1
+first_map + 6 golden_textmap + 3 spec_documents + 1 walking_skeleton), plus a
+separately-run `#[ignore]`d golden-regeneration generator not included in that
+count. This file records what is deliberately absent, what is known-fragile,
+and the decisions a future contributor would otherwise have to re-derive.
 
 ## Not implemented, by design
 
 The compiler covers structural invariants S1–S6 and playability rules P2,
 P3, P4, P7, P8, P9, P11, P13, P14, P19, P24, P25. **P1** is retired — see
 `rules.rs`'s module doc and `CompileError::PortalNoHeadroom`, and the gap
-entry below.
+entry below. The layer-4 verifier (`src/check`, `docs/check.md`)
+independently re-derives those same twelve from the *emitted* map, as
+`V-P2`…`V-P25`, and adds `V-P20`.
 
 Deliberately absent, deferred to the next stage: **P5** (lifts), **P6**
 (monster mobility), **P10** (clean vertical tiling), **P12** (sky
 coherence), **P15** (teleport pairing), **P16**/**P17** (liquids and damage
-survivability), **P18** (secret accounting), **P20** (pickup accessibility),
-**P21** (light sources), **P22** (hanging decorations), **P23** (barrel
-safety).
+survivability), **P18** (secret accounting), **P20** (pickup accessibility —
+compiler-side only; the verifier covers it, below), **P21** (light sources),
+**P22** (hanging decorations), **P23** (barrel safety).
 
-P20 still needs a per-pickup check. The key-aware reachability flood both P7
-and P20 were waiting on now exists in `reach.rs`. The subsumption below only
-holds while P7 runs at all — a map with no player start or no exit runs neither
-check. Where it does run, P7's coverage check (every room forward-reached from
-the start) already subsumes P20's "every pickup is reachable": a thing carries
-its own `at` position, but a room compiles to one sector with a single, uniform
-floor, so reaching the room makes every pickup inside it reachable regardless
-of where in the room it sits. The explicit per-pickup loop becomes meaningful,
-and worth writing, once intra-room verticality exists — the day a room stops
-being one flat sector.
+**P20's per-pickup check now exists, at layer 4 rather than in the compiler.**
+`check::invariants::check_prop_embedding` measures every collectible against
+every blocking prop's radius, and `check_pickup_reachability` requires each
+collectible's sector to be one the verifier's own key-aware flood actually
+reached. The two halves land differently against the compiler, which still has
+no P20 pass of its own: the **embedding** half it covers nowhere at all, while
+the **reachability** half it covers only while its own P7 runs — a map with no
+player start or no exit runs neither check compile-side. The verifier has no
+such hole: its flood either runs or reports a hard `V-P7` finding (see the P7
+entry), so the gap never becomes silence there.
+
+Where P7 does run, its coverage check (every room forward-reached from the
+start) subsumes P20's "every pickup is reachable": a thing carries its own `at`
+position, but a room compiles to one sector with a single, uniform floor, so
+reaching the room makes every pickup inside it reachable regardless of where in
+the room it sits. That argument is also what the verifier's own reachability
+half rests on — it judges sectors, not positions — and it is what stops holding
+once intra-room verticality exists: the day a room stops being one flat sector,
+both layers need the position and not just the sector.
 
 **P2 (headroom) is now fully covered.** `compile::things::place_things` checks
 every room's headroom against the player's own height once per room,
@@ -49,15 +62,27 @@ carry the sourced secret sector special (`Tables::secret_sector_special`)
 instead of requiring an author to write the raw number into `Room::special` —
 the two are mutually exclusive, rejected at parse time
 (`IrError::SecretWithExplicitSpecial`) rather than resolved by silent
-precedence. What is still absent is P18's actual *rule* — "the number of
-secret sectors equals `secrets.count`" — since `secrets.count` is a map-spec
-concept with no representation in this IR; that check belongs at the stage
-that reads the map-spec, not here.
+precedence. P18's actual *rule* — "the number of secret sectors equals
+`secrets.count`" — is still absent **from the compiler**, and always will be:
+`secrets.count` is a map-spec concept with no representation in this IR, so
+that check belongs at a stage that reads the map-spec. It now exists there, as
+the verifier's `secrets.count` conformance row (`check::conform`, exact count
+against `MapStats::secret_sectors`, pinned by
+`check_conformance::a_wrong_secret_count_fails_its_row`). Note the layer
+difference: that row is a `Fail` verdict in a report, not a finding, so it
+does not by itself fail a run — grading a spec violation is
+`constraints.enforcement`'s call (`docs/design.md` §9), not the checker's.
 
-Also absent: the verifier and the conformance report. (The packer —
-`pack::pack_udmf` and `pack::pack_udmf_with_nodes` — and an authored map —
-`tests/fixtures/entrada_base.json`, built into `maps/entrada.wad` — both
-shipped after this paragraph was first written and are no longer absent.)
+Still absent: the conformance **report** (issue #3) — `docs/design.md` §8.1's
+`report.md`, the rendered deliverable of a run. Its *content* now exists:
+`check::run` returns a `CheckReport` carrying the findings, the spec-vs-actual
+rows, the tag manifest and the map stats, and `crustygen-check` prints all of
+it as plain lines; what is unwritten is the Markdown table, the sacrifice list
+under `constraints.priority`, and any wiring that emits a file alongside the
+WAD. (The verifier itself — `docs/design.md` §8 layer 4 — shipped with issue
+#2 and is no longer absent, as did the packer, `pack::pack_udmf` and
+`pack::pack_udmf_with_nodes`, and an authored map,
+`tests/fixtures/entrada_base.json`, built into `maps/entrada.wad`.)
 Specials for lifts, teleports, and liquid sector effects, monster
 `spawnhealth`, health/armor pickup amounts and caps, the gore prop set, and
 the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef flags are all **sourced and
@@ -69,11 +94,15 @@ accessible** but nothing emits any of them yet. Doors, exits
 `Spec`/`SpecDocument` (see `docs/map-spec.md`), but it records nothing about
 the deeper conflicts `docs/design.md` §5.1 expects — `hitscanner_ratio`
 feasibility against the per-species min/max ranges, `sectors.max` against
-`detail_level` — because those belong to the resolver and verifier stages
-this section already lists as absent, not to a stage that only reads the
-spec. `Tables::hitscan` already exists and classifies species by hitscan
-behavior, so the feasibility check the verifier will eventually need is
-cheap to write once the verifier exists; the parser just doesn't do it.
+`detail_level` — because those belong to the resolver, not to a stage that
+only reads the spec. **The verifier's arrival does not close this.**
+`check::conform` judges a spec against a *built map* — `combat.hitscanner_ratio`
+becomes an `Info` row carrying its delta — which is a different question from
+whether the spec's own numbers are mutually satisfiable before any map exists.
+Nothing checks that today: `Tables::hitscan` classifies species by hitscan
+behavior and makes the feasibility check cheap to write, and
+`aesthetics.detail_level` is only range-validated (`spec::validate`), never
+compared against `scale.sectors`.
 `map-spec.template.md` itself ships **filled**, not blank, for the reasons
 `docs/map-spec.md` gives: a blank template could neither parse nor be
 tested, so the filled one is simultaneously the contract, the
@@ -106,16 +135,24 @@ still finish is **P7** (`src/reach.rs`): a forward/backward search over
 states `(sector, keys-held)` rejects both an unfinishable map (no state
 reaches an exit) and a stranding one (a state the player can reach but can no
 longer reach an exit from) at compile time. Measurement:
-`docs/measurements/verticality-corpus.md`. One deliberate hole remains: P7
-runs only when the map has a player 1 start and at least one exit, and passes
-vacuously otherwise — a missing start or exit is a different defect, one this
-rule does not claim to catch.
+`docs/measurements/verticality-corpus.md`. One deliberate hole remains
+compile-side: P7 runs only when the map has a player 1 start and at least one
+exit, and passes vacuously otherwise — a missing start or exit is a different
+defect, one this rule does not claim to catch. **Layer 4 closes that hole for
+an emitted map.** `check::flood::run_flood` has no "elsewhere" to defer to: no
+player 1 start, a start that resolves to no sector, and no exit line are each
+a hard `V-P7` Error there rather than a silent pass
+(`check_adversarial::removing_the_player_start_is_a_hard_error_not_a_vacuous_pass`
+pins it). The compiler-side hole stands as recorded — the verifier runs on a
+built WAD, so it catches the defect one stage later, not instead.
 
 **P8 has no sky exception.** `r_segs.c` sets `worldtop = worldhigh` when both
 sectors' `ceilingpic == skyflatnum`, so a sky-to-sky boundary draws no upper
 and needs none — 60.3% of the corpus's absent uppers are exactly this
 case — legitimately so. crustygen emits no sky flat, so no fixture can reach
-it and the check is deliberately unwritten rather than guessed at. Required
+it and the check is deliberately unwritten rather than guessed at — in both
+`rules::check_missing_textures` and the verifier's independent
+`check::invariants::check_textures` (V-P8), for the same reason. Required
 before sky is added.
 
 ## Decisions that look wrong without their reason
@@ -126,16 +163,26 @@ the card or the skull — `!p->cards[it_bluecard] && !p->cards[it_blueskull]`
 rejects the move only if *neither* is held. `reach.rs` interns lock classes by
 colour to match: `graph_from_compiled`'s keyed-special lookup is deliberately
 many-to-one, so either key thing of a colour satisfies a `Door` edge's lock.
-`check_key_lock_coherence` (P24) does not — it compares the authored lock
-string (`Portal::lock`, e.g. `"blue_card"`) against placed thing kinds by exact
-string equality. A map that locks a portal `"blue_card"` while placing only a
-`blue_skull` thing is therefore genuinely finishable — the skull opens the door
-in the engine, and P7 passes it — while P24 still fails it, because the string
-`"blue_card"` names a thing that never appears. This is deliberate, not a bug
-in either rule: P24 polices *authored intent* (you named a card, place a card),
-and P7 polices the *engine's actual behavior* (either key of the colour works).
-Recorded here so a future "fix" does not make one rule agree with the other at
-the cost of disagreeing with the engine or with the author's stated intent.
+`rules::check_key_lock_coherence` (P24) does not — it compares the authored
+lock string (`Portal::lock`, e.g. `"blue_card"`) against placed thing kinds by
+exact string equality. A map that locks a portal `"blue_card"` while placing
+only a `blue_skull` thing is therefore genuinely finishable — the skull opens
+the door in the engine, and P7 passes it — while P24 still fails it, because
+the string `"blue_card"` names a thing that never appears. This is deliberate,
+not a bug in either rule: P24 polices *authored intent* (you named a card,
+place a card), and P7 polices the *engine's actual behavior* (either key of the
+colour works). Recorded here so a future "fix" does not make one rule agree
+with the other at the cost of disagreeing with the engine or with the author's
+stated intent.
+
+The verifier's own V-P24 (`check::flood::check_key_lock_coherence`) sits on the
+engine side of that split, and had no choice: a linedef's emitted `special` is
+`26`, which names the *colour class*, not which key kind the author wrote. It
+therefore checks class-level coherence — every lock class present has a key of
+that colour placed, every placed key opens some door — and the authored-intent
+form stays the compile-side rule's job, since the intent is only legible in the
+IR. The two are not redundant and are not in conflict; they check different
+statements at different layers.
 
 **The crate's own lints are `warn`, and CI is what makes them fatal.**
 `Cargo.toml` sets `clippy::all` and `clippy::pedantic` to `warn`, not `deny`,
@@ -196,7 +243,8 @@ it was played — correct behavior with nothing to find, but indistinguishable
 from a broken secret mechanism. The room is optional, off `combat`'s north
 wall, and `tests/first_map.rs` pins that exactly one emitted sector carries
 `Tables::secret_sector_special`. This exercises P18's *mechanism*; P18's
-counting rule still does not exist (see above).
+counting rule lives at layer 4 as a conformance row, never in the compiler
+(see above).
 
 **A secret room's portal thresholds also carry `ML_SECRET`, and that is the
 only feedback vanilla gives.** Verified against the pinned engine: entering a
@@ -338,9 +386,16 @@ jambs) use the theme's new `trim` texture role (`STARGR2` for `tech_base`);
 the door's own jambs — "the track" — use `door_track` (`DOORTRAK`) as
 before, and are lower-unpegged by default so the texture stays anchored to
 the floor as the door sector's ceiling animates open, now with an explicit
-opt-out (`Portal::track_lower_unpegged: false`) — the door's own two faces
-stay lower-unpegged unconditionally, since that setting only ever governed
-the track. `compile::doors::validate_door_texture` additionally rejects a
+opt-out (`Portal::track_lower_unpegged: false`). The door's own two faces
+carry **neither** pegging flag: `ML_DONTPEGBOTTOM` never affects
+upper-texture rendering (`r_segs.c`, pinned commit a77dfb96), which is what
+a face's visible texture is, and 247/255 door-special lines in DOOM2.WAD
+ship unflagged — an earlier revision set `lower_unpegged` on the faces too,
+which `check::invariants::check_door_pegging` (V-P11) now flags if it
+recurs, at Warning severity: the convention is measured and reasoned, not
+sourced as an engine requirement, so a violation is ugly rather than broken
+(`docs/check.md`). `compile::doors::validate_door_texture` additionally
+rejects a
 theme whose `door` texture is not in `vocabulary.toml`'s curated (not
 sourced — see that table's own leading comment)
 `[door_texture_catalog]`. See `docs/geometry.md`
@@ -364,16 +419,31 @@ pins the current (room-`a`-sourced) behavior so a fix does not silently
 change it unnoticed.
 
 **`heights::visible_lower_side`/`visible_upper_side` are the single place the
-drawn-side comparison is made, and nothing re-derives it to keep the two
-callers honest.** `heights::apply_height_textures` (which fills a texture)
-and `rules::check_missing_textures` (P8, which requires one) both call
-through these same two functions rather than each computing "which side is
-visible" itself, specifically so the pass and the rule cannot independently
-drift on the answer. That guarantee rests entirely on both call sites
+drawn-side comparison is made compile-side, and nothing *within the compiler*
+re-derives it to keep the two callers honest.**
+`heights::apply_height_textures` (which fills a texture) and
+`rules::check_missing_textures` (P8, which requires one) both call through
+these same two functions rather than each computing "which side is visible"
+itself, specifically so the pass and the rule cannot independently drift on
+the answer. That guarantee rests entirely on both call sites
 continuing to call through the shared functions — nothing checks that they
 still do, so a future edit that inlines or reimplements the comparison at
 either call site would silently break the consistency with no test able to
 catch it.
+
+**The layer-4 verifier is now the independent re-derivation this entry said
+did not exist.** `check::invariants::check_textures` (V-P8,
+`src/check/invariants.rs`) answers "which side draws the texture" from
+`r_segs.c`'s `R_StoreWallRange` directly — line 570's `worldhigh < worldtop`
+branch selects the *own* sidedef's `toptexture`, line 589's
+`worldlow > worldbottom` branch its `bottomtexture`, with the full citation
+trail in that function's doc comment — and never calls
+`visible_lower_side`/`visible_upper_side`. A wrong answer shared by the fill
+pass and the P8 rule now fails at layer 4 against the emitted map. This does
+not make the compile-side coupling safe on its own: the verifier runs on a
+built WAD, so it catches the drift after the fact rather than preventing it,
+and only when someone runs it (`tests/check_adversarial.rs`'s
+`blanking_a_visible_lower_texture_is_caught_as_p8` is the standing regression).
 
 **`facing_spans` has no distance bound, which can surprise an author moving a
 room away from a fixture that used to be adjacent.** Two walls "face" each
@@ -462,7 +532,27 @@ normal solid one-sided wall.
 **Every exit is tagged, even though neither `G_ExitLevel` nor
 `G_SecretExitLevel` reads a tag.** Mirrors the existing precedent for manual
 doors (above): uniform tagging keeps `tags::check_no_action_at_tag_zero` a
-single exception-free invariant and the tag manifest complete.
+single exception-free invariant and the tag manifest complete. Unlike a
+manual door, though, the exit's allocated tag resolves to no sector at
+all — `compile::exits::emit_switch_exit`/`emit_walkover_exit` write the tag
+onto the exit's own linedef and stop there; no sector's `.tag` field is ever
+set to match it (a manual door, by contrast, assigns its tag to its own
+door sector). This is correct, not an oversight: `G_ExitLevel`/
+`G_SecretExitLevel` are declared `void (void)` and read no argument at all
+(`g_game.c:1002` and `:1009`, pinned commit
+`a77dfb96cb91780ca334d0d4cfd86957558007e0`), and neither the switch path
+(`p_switch.c`'s `P_UseSpecialLine`, cases 11/51 — `P_ChangeSwitchTexture`
+reads only `line->sidenum[0]`/`line->special`, never a tag) nor the walkover
+path (`p_spec.c`'s `P_CrossSpecialLine`, cases 52/124, which call
+`G_ExitLevel`/`G_SecretExitLevel` directly) ever performs a
+`P_FindSectorFromLineTag`-style lookup for these four specials. The
+verifier's `check::invariants::check_tags` (V-P13) therefore exempts
+exactly this set — the same four specials `recognized_specials` already
+curates — from its "an action line's tag must resolve to a sector"
+requirement: an unresolved tag here is not a dead action, since the tag was
+never going to be consulted regardless. V-P14 (no action line at tag 0) and
+the tag manifest still cover exit lines like any other action line; only
+P13's resolution check is scoped to exclude them.
 
 ## Sourcing rule — do not relax this
 

@@ -94,11 +94,12 @@ fn validate_door_texture(tables: &Tables, theme: &str, texture: &str) -> Result<
 /// See the module documentation for the construction. The door sector's own
 /// two faces carry the door special (so the door can actually be opened,
 /// from either room, or from an alcove standing in front of it) and the
-/// door sector's tag; every line touching the door sector — its faces and
-/// its jambs — is lower-unpegged so its texture does not slide as the
-/// sector's ceiling animates open (P11), the jambs' pegging additionally
-/// gated on [`Portal::track_lower_unpegged`]. An alcove's own faces and
-/// jambs are never lower-unpegged (nothing there ever moves) and never
+/// door sector's tag, but neither pegging flag: a face's visible texture is
+/// its upper, which `ML_DONTPEGBOTTOM`/`ML_DONTPEGTOP` never govern (P11).
+/// Only the door's own jambs — its track — are lower-unpegged by default,
+/// so the DOORTRAK texture does not slide as the sector's ceiling animates
+/// open, gated on [`Portal::track_lower_unpegged`]. An alcove's own faces
+/// and jambs are never lower-unpegged (nothing there ever moves) and never
 /// carry a special, matching a [`PortalKind::Plain`] portal's own passage.
 ///
 /// Resolves each door portal's geometry independently via
@@ -321,8 +322,15 @@ pub fn emit_doors(
 
         mark_secret_thresholds(data, room_a.secret != room_b.secret, thresholds);
 
+        // The door's own two faces carry neither pegging flag: unlike the
+        // track, their visible texture is the upper (the door slab itself,
+        // drawn while the sector's ceiling is below the neighboring
+        // sectors' — see the module doc comment), and `ML_DONTPEGBOTTOM`
+        // never affects upper-texture rendering (`r_segs.c`, pinned commit
+        // a77dfb96) — so the flag was inert there. 247/255 door-special
+        // lines in DOOM2.WAD ship unflagged, confirming this is the
+        // convention, not an oversight.
         for line in [door_seg.near_line, door_seg.far_line] {
-            data.linedefs[line].lower_unpegged = true;
             data.linedefs[line].special = special;
             data.linedefs[line].tag = tag;
             let front = data.linedefs[line].front;
@@ -334,9 +342,10 @@ pub fn emit_doors(
         }
         // The jambs (the door's track) always carry DOORTRAK, but whether
         // they are lower-unpegged is the author's call
-        // (`Portal::track_lower_unpegged`, default `true`) — the same reason
-        // as the faces above (P11) when left on: their middle texture must
-        // not slide as the door sector's ceiling animates open.
+        // (`Portal::track_lower_unpegged`, default `true`): when left on,
+        // their middle texture must not slide as the door sector's ceiling
+        // animates open (P11) — unlike the faces above, whose visible
+        // texture is unaffected by either pegging flag.
         for line in door_seg.jamb_lines {
             data.linedefs[line].lower_unpegged = portal.track_lower_unpegged;
         }
@@ -660,30 +669,55 @@ mod tests {
     }
 
     #[test]
-    fn door_lines_are_lower_unpegged_so_the_track_does_not_slide() {
+    fn the_door_track_is_lower_unpegged_so_it_does_not_slide() {
+        // The track (the door sector's one-sided jambs, DOORTRAK) is the
+        // only geometry this setting was ever meant to govern — see
+        // `door_faces_carry_neither_pegging_flag` below for the corrected
+        // face behavior.
         let (_, data, door) = compiled(DOOR_IR);
-        let touches_door = |l: &crate::compile::LinedefOut| {
-            data.sidedefs[l.front].sector == door
-                || l.back.is_some_and(|b| data.sidedefs[b].sector == door)
-        };
+        let jambs: Vec<_> = data
+            .linedefs
+            .iter()
+            .filter(|l| l.back.is_none() && data.sidedefs[l.front].sector == door)
+            .collect();
+        assert_eq!(jambs.len(), 2, "a door has two track jambs");
         assert!(
-            data.linedefs
-                .iter()
-                .filter(|l| touches_door(l))
-                .all(|l| l.lower_unpegged),
-            "every line on the door sector is lower-unpegged"
+            jambs.iter().all(|l| l.lower_unpegged),
+            "the door track is lower-unpegged by default"
+        );
+    }
+
+    #[test]
+    fn door_faces_carry_neither_pegging_flag() {
+        // Human ruling (project owner, during Task 5 review): only the
+        // track is lower-unpegged by default; `ML_DONTPEGBOTTOM` never
+        // touches upper-texture rendering (`r_segs.c`, pinned commit
+        // a77dfb96), which is what a door face's visible texture is, and
+        // 247/255 door-special lines in DOOM2.WAD ship unflagged. Asserted
+        // directly against the compiled `MapData`, not through `check::run`
+        // — the compiler pins its own emission.
+        let (_, data, door) = compiled(DOOR_IR);
+        let faces: Vec<_> = data
+            .linedefs
+            .iter()
+            .filter(|l| l.back.is_some_and(|b| data.sidedefs[b].sector == door))
+            .collect();
+        assert_eq!(faces.len(), 2, "a door has two faces");
+        assert!(
+            faces.iter().all(|l| !l.lower_unpegged && !l.upper_unpegged),
+            "a door's own two faces carry neither dontpegbottom nor dontpegtop"
         );
     }
 
     #[test]
     fn track_lower_unpegged_can_be_disabled_while_the_texture_stays_doortrak() {
         // Default `true` is already pinned by
-        // `door_lines_are_lower_unpegged_so_the_track_does_not_slide` above
+        // `the_door_track_is_lower_unpegged_so_it_does_not_slide` above
         // (DOOR_IR sets no `track_lower_unpegged` at all). This pins the
         // other half: an explicit `false` disables pegging on the jambs
-        // specifically — never on the door's own two faces, which stay
-        // lower-unpegged unconditionally — while the DOORTRAK texture is
-        // unaffected either way.
+        // specifically — the door's own two faces carry neither pegging
+        // flag either way, since `track_lower_unpegged` only ever governs
+        // the track — while the DOORTRAK texture is unaffected either way.
         let disabled = DOOR_IR.replace(
             "\"door_thickness\":32",
             "\"door_thickness\":32, \"track_lower_unpegged\":false",
@@ -713,9 +747,9 @@ mod tests {
             .collect();
         assert_eq!(faces.len(), 2, "a door has two faces");
         assert!(
-            faces.iter().all(|l| l.lower_unpegged),
-            "the door's own faces stay lower-unpegged regardless of track_lower_unpegged, \
-             which only governs the jambs"
+            faces.iter().all(|l| !l.lower_unpegged && !l.upper_unpegged),
+            "the door's own faces carry neither pegging flag regardless of \
+             track_lower_unpegged, which only governs the jambs"
         );
     }
 
