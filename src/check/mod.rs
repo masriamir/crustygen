@@ -80,7 +80,7 @@ pub struct ConformanceRow {
 }
 
 /// One tag's resolution: which sectors carry it, which lines reference it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TagEntry {
     /// The nonzero tag.
     pub tag: i32,
@@ -145,11 +145,12 @@ impl std::fmt::Display for Finding {
 /// `spec` once a conformance pass exists to compare against it. For now,
 /// this builds the [`scene::Scene`] (which contributes reference-validity
 /// findings), runs the texture ([`invariants::check_textures`], V-P8),
-/// scaling ([`invariants::check_scaling`], V-P9), and door-pegging
-/// ([`invariants::check_door_pegging`], V-P11) invariants, fills
-/// [`MapStats`] from the map's own declaration counts, and returns them
-/// with `conformance: None` and an empty tag manifest — later tasks append
-/// more passes.
+/// scaling ([`invariants::check_scaling`], V-P9), door-pegging
+/// ([`invariants::check_door_pegging`], V-P11), and tag
+/// ([`invariants::check_tags`], V-P13/P14) invariants, fills [`MapStats`]
+/// from the map's own declaration counts, and returns them with
+/// `conformance: None` and the tag manifest `check_tags` produced — later
+/// tasks append more passes.
 #[must_use]
 pub fn run(map: &UdmfMap, _map_name: &str, tables: &Tables, _spec: Option<&Spec>) -> CheckReport {
     let mut findings = Vec::new();
@@ -158,6 +159,7 @@ pub fn run(map: &UdmfMap, _map_name: &str, tables: &Tables, _spec: Option<&Spec>
     invariants::check_textures(map, &scene, &mut findings);
     invariants::check_scaling(map, &mut findings);
     invariants::check_door_pegging(&scene, tables, &mut findings);
+    let tag_manifest = invariants::check_tags(map, &mut findings);
 
     let stats = MapStats {
         sectors: map.sectors.len(),
@@ -175,7 +177,7 @@ pub fn run(map: &UdmfMap, _map_name: &str, tables: &Tables, _spec: Option<&Spec>
     CheckReport {
         findings,
         conformance: None,
-        tag_manifest: Vec::new(),
+        tag_manifest,
         stats,
     }
 }

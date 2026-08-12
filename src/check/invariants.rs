@@ -10,10 +10,10 @@
 //! un-cross-checked place that comparison is made compile-side).
 
 use crate::check::scene::Scene;
-use crate::check::{Finding, Severity, Subject};
+use crate::check::{Finding, Severity, Subject, TagEntry};
 use crate::tables::Tables;
 use crustywad::map::udmf::UdmfMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Builds a `"V-P8"` Error naming `linedef`.
 fn texture_error(linedef: usize, message: String) -> Finding {
@@ -248,6 +248,114 @@ pub fn check_door_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Fin
     }
 }
 
+/// V-P13/P14: a tag is the compiler's cross-reference between an action
+/// line and the sector(s) it addresses, so a mismatch on either side is
+/// silently unplayable rather than a build error. Re-derives both rules
+/// `docs/design.md`'s "Tags and specials" section states directly, without
+/// consulting `compile/tags.rs`'s own `check_no_action_at_tag_zero` (the
+/// logic this check exists to cross-examine):
+///
+/// - **P14**: any linedef whose `special` is nonzero ("action line") must
+///   carry a nonzero `args[0]`. Tag 0 is not "no tag" to the engine — it is
+///   the tag every untagged sector already has, so a stray 0 on an action
+///   line matches *every* untagged sector in the map: one stray zero opens
+///   every door.
+/// - **P13**: an action line's tag must resolve to at least one sector — an
+///   unresolvable tag is a dead action, since nothing happens when it
+///   fires. Symmetrically, a sector carrying a nonzero tag that no action
+///   line references is a stale tag: suspicious (dead weight, or a
+///   forgotten trigger) but not itself broken, hence [`Severity::Warning`]
+///   rather than Error.
+///
+/// This compiler tags every action line uniformly, manual doors included —
+/// a manual door's tag resolves to its own back sector even though the
+/// vanilla manual-door path never reads it (`KNOWN-GAPS.md`) — so that
+/// convention needs no special case here: a manual door's own sector is
+/// simply a sector an action line references, like any other.
+///
+/// Returns the tag manifest: one [`TagEntry`] per distinct nonzero tag seen
+/// on either side (an action line's `args[0]` or a sector's `id`), sorted
+/// ascending by tag, with `sectors`/`lines` holding the declaration indices
+/// that carry/reference it.
+pub fn check_tags(map: &UdmfMap, findings: &mut Vec<Finding>) -> Vec<TagEntry> {
+    let mut manifest: BTreeMap<i32, TagEntry> = BTreeMap::new();
+    let sector_ids: HashSet<i32> = map
+        .sectors
+        .iter()
+        .map(|sector| sector.id)
+        .filter(|&id| id != 0)
+        .collect();
+
+    for (i, sector) in map.sectors.iter().enumerate() {
+        if sector.id == 0 {
+            continue;
+        }
+        manifest
+            .entry(sector.id)
+            .or_insert_with(|| TagEntry {
+                tag: sector.id,
+                sectors: Vec::new(),
+                lines: Vec::new(),
+            })
+            .sectors
+            .push(i);
+    }
+
+    for (i, line) in map.linedefs.iter().enumerate() {
+        if line.special == 0 {
+            continue;
+        }
+        let tag = line.args[0];
+        if tag == 0 {
+            findings.push(Finding {
+                check: "V-P14",
+                severity: Severity::Error,
+                subject: Subject::Linedef(i),
+                message: format!(
+                    "action line (special {}) carries tag 0, which every untagged sector already has",
+                    line.special
+                ),
+            });
+            continue;
+        }
+        if !sector_ids.contains(&tag) {
+            findings.push(Finding {
+                check: "V-P13",
+                severity: Severity::Error,
+                subject: Subject::Linedef(i),
+                message: format!("action line references tag {tag}, but no sector has that id"),
+            });
+        }
+        manifest
+            .entry(tag)
+            .or_insert_with(|| TagEntry {
+                tag,
+                sectors: Vec::new(),
+                lines: Vec::new(),
+            })
+            .lines
+            .push(i);
+    }
+
+    for entry in manifest.values() {
+        if entry.lines.is_empty() {
+            for &sector in &entry.sectors {
+                findings.push(Finding {
+                    check: "V-P13",
+                    severity: Severity::Warning,
+                    subject: Subject::Sector(sector),
+                    message: format!(
+                        "sector carries tag {} but no action line references it",
+                        entry.tag
+                    ),
+                });
+            }
+        }
+    }
+
+    manifest.into_values().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -397,6 +505,74 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
         assert!(
             findings.iter().all(|f| f.check != "V-P11"),
             "clean fixture: {findings:?}"
+        );
+    }
+
+    /// Runs [`check_tags`] alone (not the full orchestrator) over `text` and
+    /// returns its manifest and findings.
+    fn tags_of(text: &str) -> (Vec<TagEntry>, Vec<Finding>) {
+        let map = parse_udmf(text, Limits::default()).expect("fixture parses");
+        let mut findings = Vec::new();
+        let manifest = check_tags(&map, &mut findings);
+        (manifest, findings)
+    }
+
+    #[test]
+    fn a_manual_doors_tag_resolves_to_its_own_sector_in_the_manifest() {
+        let (manifest, findings) = tags_of(&door_fixture(""));
+        assert_eq!(
+            manifest,
+            vec![TagEntry {
+                tag: 5,
+                sectors: vec![1],
+                lines: vec![0],
+            }]
+        );
+        assert!(
+            findings
+                .iter()
+                .all(|f| f.check != "V-P13" && f.check != "V-P14"),
+            "clean tag fixture: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn an_action_line_tagged_zero_is_a_p14_error() {
+        let untagged = door_fixture("").replace("arg0 = 5;", "arg0 = 0;");
+        let (_, findings) = tags_of(&untagged);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P14"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Linedef(0))),
+            "expected a V-P14 error on linedef 0: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn an_action_tag_matching_no_sector_is_a_p13_error() {
+        let orphaned = door_fixture("").replace("arg0 = 5;", "arg0 = 9;");
+        let (_, findings) = tags_of(&orphaned);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P13"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Linedef(0))),
+            "expected a V-P13 error on linedef 0: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_sector_tag_with_no_referencing_action_line_is_a_p13_warning() {
+        // TWO_BOX_STEPPED has no action lines at all; tag sector 1 anyway.
+        let stale = TWO_BOX_STEPPED.replace(
+            "sector { texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; heightfloor = 24; heightceiling = 128; lightlevel = 160; }",
+            "sector { texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; heightfloor = 24; heightceiling = 128; lightlevel = 160; id = 7; }",
+        );
+        let (_, findings) = tags_of(&stale);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P13"
+                && f.severity == Severity::Warning
+                && matches!(f.subject, Subject::Sector(1))),
+            "expected a V-P13 warning on sector 1: {findings:?}"
         );
     }
 }
