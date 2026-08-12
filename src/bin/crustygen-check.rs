@@ -3,21 +3,26 @@
 //! Usage: `crustygen-check <wad> [--map NAME] [--spec FILE]`.
 //!
 //! Reads `<wad>`, selects a map group (`--map NAME`, else the WAD's first map
-//! group), parses its `TEXTMAP` lump, and runs [`crustygen::check::run`]
-//! against it — optionally judging conformance against a spec document
-//! (`--spec FILE`). Findings print one per line via their `Display`;
-//! conformance rows (when a spec was supplied) follow as
-//! `parameter: verdict (target X, actual Y)`; a one-line summary closes the
-//! output. Exit 0 for a clean map, 1 if any finding is `Severity::Error`, 2
-//! on any usage, I/O, or parse failure — every such failure names what
-//! failed on stderr.
+//! group), and loads it via [`crustygen::ingest::load_map`] — the input may
+//! be a UDMF or classic Doom binary-format WAD. A UDMF group's `TEXTMAP`
+//! parses directly; a binary group is assembled via crustywad, rendered to
+//! UDMF, and re-parsed, and its render-path notes print to stderr as
+//! `` crustygen-check: note: map `NAME`: … ``. Hexen and Doom 64 groups are
+//! refused. The loaded map runs through [`crustygen::check::run`] —
+//! optionally judging conformance against a spec document (`--spec FILE`).
+//! Findings print one per line via their `Display`; conformance rows (when a
+//! spec was supplied) follow as `parameter: verdict (target X, actual Y)`; a
+//! one-line summary closes the output, labeled `, assembled from binary
+//! format` when the map came from the binary path. Exit 0 for a clean map, 1
+//! if any finding is `Severity::Error`, 2 on any usage, I/O, parse, or
+//! assembly failure — every such failure names what failed on stderr.
 
 use crustygen::check::{self, CheckReport, Severity, Verdict};
+use crustygen::ingest::{self, MapOrigin};
 use crustygen::spec::{Spec, SpecDocument};
 use crustygen::tables::Tables;
+use crustywad::Wad;
 use crustywad::map::MapGroup;
-use crustywad::map::udmf::parse_udmf;
-use crustywad::{Limits, Wad};
 
 const USAGE: &str = "usage: crustygen-check <wad> [--map NAME] [--spec FILE]";
 
@@ -90,19 +95,21 @@ fn check_wad(args: &Args) -> Result<i32, String> {
     let wad = Wad::from_bytes(bytes)
         .map_err(|err| format!("failed to parse `{}` as a WAD: {err}", args.wad_path))?;
     let group = select_group(&wad, args.map_name.as_deref(), &args.wad_path)?;
-    let text = read_textmap(&wad, &group)?;
-    let map = parse_udmf(text, Limits::default())
-        .map_err(|err| format!("failed to parse TEXTMAP in map `{}`: {err}", group.name))?;
+    let loaded =
+        ingest::load_map(&wad, &group).map_err(|err| format!("map `{}`: {err}", group.name))?;
+    for note in &loaded.notes {
+        eprintln!("crustygen-check: note: map `{}`: {note}", group.name);
+    }
     let tables = Tables::load().map_err(|err| format!("failed to load tables: {err}"))?;
     let spec = load_spec(args.spec_path.as_deref(), &tables)?;
 
     let report = check::run(
-        &map,
+        &loaded.map,
         &group.name,
         &tables,
         spec.as_ref().map(|doc| &doc.spec),
     );
-    print_report(&report);
+    print_report(&report, loaded.origin);
 
     let has_error = report
         .findings
@@ -124,23 +131,6 @@ fn select_group(wad: &Wad, map_name: Option<&str>, wad_path: &str) -> Result<Map
     })
 }
 
-/// Finds `group`'s `TEXTMAP` lump and reads it as UTF-8 text.
-fn read_textmap<'wad>(wad: &'wad Wad, group: &MapGroup) -> Result<&'wad str, String> {
-    let lumps = wad.lumps();
-    let textmap_idx = group
-        .data_indices
-        .iter()
-        .copied()
-        .find(|&i| lumps[i].name() == "TEXTMAP")
-        .ok_or_else(|| format!("map `{}` has no TEXTMAP lump (not a UDMF map)", group.name))?;
-    std::str::from_utf8(wad.lump_data(&lumps[textmap_idx])).map_err(|err| {
-        format!(
-            "TEXTMAP lump in map `{}` is not valid UTF-8: {err}",
-            group.name
-        )
-    })
-}
-
 /// Reads and parses `spec_path` when given; `Ok(None)` when no `--spec` was
 /// passed.
 fn load_spec(spec_path: Option<&str>, tables: &Tables) -> Result<Option<SpecDocument>, String> {
@@ -155,8 +145,9 @@ fn load_spec(spec_path: Option<&str>, tables: &Tables) -> Result<Option<SpecDocu
 }
 
 /// Prints every finding (one per line, via `Display`), then every
-/// conformance row when a spec was supplied, then a one-line summary.
-fn print_report(report: &CheckReport) {
+/// conformance row when a spec was supplied, then a one-line summary ending
+/// with an origin label when `origin` is [`MapOrigin::AssembledFromBinary`].
+fn print_report(report: &CheckReport, origin: MapOrigin) {
     for finding in &report.findings {
         println!("{finding}");
     }
@@ -182,8 +173,12 @@ fn print_report(report: &CheckReport) {
         .filter(|f| f.severity == Severity::Warning)
         .count();
     let rows = report.conformance.as_ref().map_or(0, Vec::len);
+    let origin_note = match origin {
+        MapOrigin::Udmf => "",
+        MapOrigin::AssembledFromBinary => ", assembled from binary format",
+    };
     println!(
-        "{blocking} blocking, {warnings} warning(s), {rows} conformance row(s), {} tag(s)",
+        "{blocking} blocking, {warnings} warning(s), {rows} conformance row(s), {} tag(s){origin_note}",
         report.tag_manifest.len()
     );
 }
