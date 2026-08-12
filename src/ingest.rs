@@ -49,7 +49,7 @@ pub struct LoadedMap {
 pub enum IngestError {
     /// The group's `TEXTMAP` lump is not valid UTF-8.
     #[error("TEXTMAP lump is not valid UTF-8: {0}")]
-    NonUtf8Textmap(std::str::Utf8Error),
+    NonUtf8Textmap(#[source] std::str::Utf8Error),
     /// The group's `TEXTMAP` text failed to parse as UDMF.
     #[error("failed to parse TEXTMAP: {0}")]
     UdmfParse(#[from] UdmfParseError),
@@ -71,7 +71,7 @@ pub enum IngestError {
     Render(#[from] UdmfWriteError),
     /// The rendered UDMF text failed to re-parse.
     #[error("round-trip UDMF failed to re-parse: {0}")]
-    Reparse(UdmfParseError),
+    Reparse(#[source] UdmfParseError),
 }
 
 /// Loads `group` from `wad` as a parsed [`UdmfMap`] via whichever path its
@@ -136,7 +136,7 @@ mod tests {
     }
 
     #[test]
-    fn hexen_and_doom64_are_refused_by_name() {
+    fn non_doom_formats_are_refused_by_name() {
         for format in [MapFormat::Hexen, MapFormat::Doom64, MapFormat::Udmf] {
             let err = ensure_doom_format(format).expect_err("must refuse");
             let msg = err.to_string();
