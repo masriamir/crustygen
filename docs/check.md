@@ -378,7 +378,7 @@ Exit codes:
 |---|---|
 | 0 | No finding carried `Severity::Error` |
 | 1 | At least one `Error` finding |
-| 2 | Usage, I/O, or parse failure — bad flag, missing `<wad>`, unreadable file, not a WAD, no such map group, unassemblable binary map, unsupported binary format (Hexen, Doom 64), non-UTF-8 `TEXTMAP`, unloadable tables, or an unparseable `--spec`. Every one names what failed on stderr. |
+| 2 | Usage, I/O, or parse failure — bad flag, missing `<wad>`, unreadable file, not a WAD, no such map group, unassemblable binary map, a binary map strict UDMF rendering refuses (e.g. a frontless linedef), unsupported binary format (Hexen, Doom 64), non-UTF-8 `TEXTMAP`, unloadable tables, or an unparseable `--spec`. Every one names what failed on stderr. |
 
 **Warnings do not change the exit code, and neither do conformance verdicts.**
 A map with ten `Fail` rows and no `Error` finding exits 0: the rows are a
