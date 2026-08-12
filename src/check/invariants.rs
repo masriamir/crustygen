@@ -273,11 +273,34 @@ pub fn check_door_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Fin
 /// convention needs no special case here: a manual door's own sector is
 /// simply a sector an action line references, like any other.
 ///
+/// The four exit specials (switch/walkover crossed with normal/secret) are
+/// a genuine exception to P13's resolution requirement, not a convention
+/// gap: `G_ExitLevel`/`G_SecretExitLevel` take no tag argument at all
+/// (`KNOWN-GAPS.md`, "Every exit is tagged, even though neither ... reads a
+/// tag"). Unlike a manual door, whose tag at least resolves to its own back
+/// sector, `compile::exits` never wires an exit's allocated tag to any
+/// sector — correctly so, since there is no sector for it to name. So an
+/// unresolved tag on one of these four specials is not "nothing happens
+/// when it fires"; nothing was ever going to happen via the tag on this
+/// special regardless of whether it resolves, which is exactly why P13
+/// exempts them here rather than reporting a dead action that was never
+/// alive.
+///
 /// Returns the tag manifest: one [`TagEntry`] per distinct nonzero tag seen
 /// on either side (an action line's `args[0]` or a sector's `id`), sorted
 /// ascending by tag, with `sectors`/`lines` holding the declaration indices
 /// that carry/reference it.
-pub fn check_tags(map: &UdmfMap, findings: &mut Vec<Finding>) -> Vec<TagEntry> {
+pub fn check_tags(map: &UdmfMap, tables: &Tables, findings: &mut Vec<Finding>) -> Vec<TagEntry> {
+    let tagless_specials: HashSet<i32> = [
+        tables.exit_switch_special(),
+        tables.exit_walkover_special(),
+        tables.secret_exit_switch_special(),
+        tables.secret_exit_walkover_special(),
+    ]
+    .into_iter()
+    .map(i32::from)
+    .collect();
+
     let mut manifest: BTreeMap<i32, TagEntry> = BTreeMap::new();
     let sector_ids: HashSet<i32> = map
         .sectors
@@ -318,7 +341,7 @@ pub fn check_tags(map: &UdmfMap, findings: &mut Vec<Finding>) -> Vec<TagEntry> {
             });
             continue;
         }
-        if !sector_ids.contains(&tag) {
+        if !sector_ids.contains(&tag) && !tagless_specials.contains(&line.special) {
             findings.push(Finding {
                 check: "V-P13",
                 severity: Severity::Error,
@@ -1092,8 +1115,9 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
     /// returns its manifest and findings.
     fn tags_of(text: &str) -> (Vec<TagEntry>, Vec<Finding>) {
         let map = parse_udmf(text, Limits::default()).expect("fixture parses");
+        let tables = Tables::load().expect("tables");
         let mut findings = Vec::new();
-        let manifest = check_tags(&map, &mut findings);
+        let manifest = check_tags(&map, &tables, &mut findings);
         (manifest, findings)
     }
 
@@ -1137,6 +1161,29 @@ thing { x = 32.000; y = 32.000; type = 1; skill1 = true; skill2 = true; skill3 =
                 && f.severity == Severity::Error
                 && matches!(f.subject, Subject::Linedef(0))),
             "expected a V-P13 error on linedef 0: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn an_exit_specials_tag_resolving_to_no_sector_is_not_a_p13_error() {
+        // `compile::exits` allocates a tag for every exit uniformly (like a
+        // door) but, unlike a door, never assigns it to any sector — there
+        // is none for a level exit to name, and `G_ExitLevel` never reads
+        // the tag anyway (`KNOWN-GAPS.md`). An orphaned tag on one of the
+        // four exit specials is therefore the expected shape, not a defect.
+        let tables = Tables::load().expect("tables");
+        let exit_special = tables.exit_switch_special();
+        let text = TWO_BOX_STEPPED.replace(
+            "linedef { v1 = 1; v2 = 4; sidefront = 0; sideback = 1; twosided = true; }",
+            &format!(
+                "linedef {{ v1 = 1; v2 = 4; sidefront = 0; sideback = 1; twosided = true; \
+                 special = {exit_special}; arg0 = 9; }}"
+            ),
+        );
+        let (_, findings) = tags_of(&text);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P13"),
+            "an exit's orphaned tag must not be a P13 finding: {findings:?}"
         );
     }
 

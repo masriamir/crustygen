@@ -172,7 +172,7 @@ pub fn run(map: &UdmfMap, map_name: &str, tables: &Tables, spec: Option<&Spec>) 
     invariants::check_textures(map, &scene, &mut findings);
     invariants::check_scaling(map, &mut findings);
     invariants::check_door_pegging(&scene, tables, &mut findings);
-    let tag_manifest = invariants::check_tags(map, &mut findings);
+    let tag_manifest = invariants::check_tags(map, tables, &mut findings);
     invariants::check_thing_headroom(&scene, tables, &mut findings);
     invariants::check_light_bounds(&scene, tables, &mut findings);
     invariants::check_starts(&scene, tables, &mut findings);
