@@ -17,8 +17,9 @@ rather than a public issue.
    the hooks gate branch names and commit subjects and run fmt/clippy before each commit.
    A fresh clone has no hooks until this runs; skip it and every local gate silently does
    nothing.
-3. `python3` (usually preinstalled) powers the commit-subject validator and the meta-sync
-   drift check.
+3. Python **3.11 or newer** (`python3`) powers the commit-subject validator and the
+   meta-sync drift check — `meta_sync.py` uses the stdlib `tomllib`, which older
+   Pythons lack.
 
 ## Everyday commands
 
