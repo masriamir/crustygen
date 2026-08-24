@@ -1,0 +1,28 @@
+# Canonical lefthook config for Rust repositories (masriamir/.github,
+# templates/rust/lefthook.yml — synced whole-file via meta-check).
+pre-push:
+  commands:
+    branch-name:
+      run: |
+        branch=$(git rev-parse --abbrev-ref HEAD)
+        pattern='^(main|(feature|bugfix|hotfix|docs|chore)/([a-z][a-z0-9_-]*|[0-9][a-z0-9_-]*[a-z][a-z0-9_-]*))$'
+        if ! echo "$branch" | grep -qE "$pattern"; then
+          echo "Branch '$branch' does not follow naming conventions."
+          echo "Use: <type>/<slug> where type is feature|bugfix|hotfix|docs|chore (issue number optional, e.g. feature/42-mmap), or main"
+          exit 1
+        fi
+
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      run: cargo fmt --all --check
+    clippy:
+      run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+commit-msg:
+  commands:
+    # Shares its validator with the `pr-title` CI workflow, which checks the PR
+    # title — the string squash-merge actually puts on `main`.
+    conventional-commits:
+      run: python3 scripts/check-conventional-subject.py < "{1}"
