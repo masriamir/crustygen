@@ -1,1 +1,16 @@
 /target/
+
+# AI agent planning artifacts (superpowers specs/plans) — never committed
+docs/superpowers/
+
+# Claude Code agent worktrees (ephemeral, created by Claude Code)
+.claude/worktrees/
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# NOTE: *.wad is deliberately NOT ignored — maps/*.wad are committed build
+# artifacts that CI re-derives and compares against the compiler.
