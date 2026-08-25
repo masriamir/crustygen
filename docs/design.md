@@ -102,10 +102,12 @@ conformance report.
 High-level names in the template (`shotgun_guy`, `blue_card`, `tech_base`) resolve to concrete
 thing IDs, texture names, line specials, and sector types through a `vocabulary.toml` table.
 
-**Every value in that table must be derived from a primary source** — the UDMF specification, the
-ZDoom wiki, or the IWAD's own `TEXTURE1`/`PNAMES`/flat lumps read via `cwad list` — and never
-written from recall. The table is data, not code, precisely so it can be checked against sources
-independently of the compiler.
+**Every value in that table must carry a citation, never be written from recall** — a `source`
+(the UDMF specification, the ZDoom wiki, or the IWAD's own `TEXTURE1`/`PNAMES`/flat lumps read via
+`cwad list`), a `derivation` for computed values, or `curated` for the judgment calls that have no
+primary source (e.g. `[door_texture_catalog]`, `[key_trim]`), which must **not** claim a source.
+The table is data, not code, precisely so it can be checked against sources independently of the
+compiler.
 
 ## 5. The template
 
@@ -555,8 +557,10 @@ lift speeds; barrel blast radius and damage; decoration radii, heights, and bloc
 sector damage specials by tier; the secret sector special; the sky flat name; the valid light
 range; and which specials consume a tag.
 
-Both tables follow the same sourcing rule: **every entry is derived from a primary source and
-carries a `source` field recording it.** Nothing in either table is written from recall.
+Both tables follow the same sourcing rule: **every entry carries a citation — a `source` field
+recording a primary source, a `derivation` for a computed value, or `curated` for a judgment call
+that has no primary source (and which must not claim one).** Nothing in either table is written
+from recall.
 
 This matters more here than it does for vocabulary. A wrong texture name produces a visible
 defect; a wrong step height or monster radius produces a map that loads, looks correct, and

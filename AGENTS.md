@@ -10,12 +10,12 @@ not here (see `.meta-manifest.toml` and `just meta-check`).
 `crustygen` compiles a hand-authored room-graph IR into a UDMF `TEXTMAP`, packs it into a playable
 Doom PWAD, and emits a binary Doom-format twin. It removes coordinate bookkeeping, not layout
 design: you describe rooms, portals, doors, things and an exit; it produces watertight geometry,
-allocates tags, and rejects a map that fails its **wired** playability checks. Several rules are
-enforced only by the layer-4 verifier against the built WAD, not at compile time — notably the
-*compiler* skips its reachability check when a map has no player start or no exit (see
-`KNOWN-GAPS.md`). The layer-4 verifier still catches that as a hard `V-P7` finding on the built
-WAD; it is the compiler-side guarantee that is incomplete, so "refuses every unwalkable map" is the
-goal at compile time, not yet a promise. Built on
+allocates tags, and rejects a map that fails its **wired** playability checks. The layer-4 verifier
+independently re-derives those same twelve wired rules from the built WAD and adds one verifier-only
+rule (P20); the one compiler-side gap is that its P7 reachability check is skipped when a map has no
+player start or no exit (the verifier still catches that as a hard `V-P7` finding — see
+`KNOWN-GAPS.md`). So "refuses every unwalkable map" is the compile-time goal, not yet a guarantee.
+Built on
 [crustywad](https://github.com/masriamir/crustywad) (pinned published dependency, `write` +
 `nodebuild` features) for WAD I/O and node building. Single crate, Rust 2024 edition, MSRV 1.94.0,
 `publish = false`, dual-licensed MIT OR Apache-2.0.
@@ -137,7 +137,9 @@ and has **no release automation**, so the block's "release automation derives th
 does not apply here. The version stays `0.1.0`; the Conventional Commit type is a changelog/clarity
 choice, not a version one. `lefthook`'s `commit-msg` hook and CI's `pr-title` job share
 `scripts/check-conventional-subject.py`, so the branch-commit gate and the PR-title gate cannot
-drift.
+drift. Because the merge squashes to the PR title and blanks the body, mark a breaking change with
+`!` in the **PR title** (`feat(map)!: …`) — the block's `BREAKING CHANGE:` footer option lands only
+in a body that is discarded, so it never signals anything here.
 
 ## Git branching workflow
 
