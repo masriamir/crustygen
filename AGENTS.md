@@ -11,9 +11,11 @@ not here (see `.meta-manifest.toml` and `just meta-check`).
 Doom PWAD, and emits a binary Doom-format twin. It removes coordinate bookkeeping, not layout
 design: you describe rooms, portals, doors, things and an exit; it produces watertight geometry,
 allocates tags, and rejects a map that fails its **wired** playability checks. Several rules are
-enforced only by the layer-4 verifier against the built WAD, not at compile time — notably
-reachability is not checked when a map has no player start or no exit (see `KNOWN-GAPS.md`), so
-"refuses every unwalkable map" is the goal, not yet a compile-time guarantee. Built on
+enforced only by the layer-4 verifier against the built WAD, not at compile time — notably the
+*compiler* skips its reachability check when a map has no player start or no exit (see
+`KNOWN-GAPS.md`). The layer-4 verifier still catches that as a hard `V-P7` finding on the built
+WAD; it is the compiler-side guarantee that is incomplete, so "refuses every unwalkable map" is the
+goal at compile time, not yet a promise. Built on
 [crustywad](https://github.com/masriamir/crustywad) (pinned published dependency, `write` +
 `nodebuild` features) for WAD I/O and node building. Single crate, Rust 2024 edition, MSRV 1.94.0,
 `publish = false`, dual-licensed MIT OR Apache-2.0.
