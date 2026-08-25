@@ -30,7 +30,7 @@ src/
   geom.rs         # geometry primitives
   reach.rs        # reachability core (key-aware flood)
   pack.rs         # TEXTMAP → PWAD packing
-  compile/        # the fixed-order compile passes (sectors, portals, doors, exits, heights, things, render)
+  compile/        # the fixed-order compile passes (sectors, portals, doors, exits, heights, things, tags, textmap)
   check/          # verification layer 4 — re-derives playability from a BUILT WAD
   lift/           # crustygen-lift: survey a WAD's geometry (telemetry only, no spec emission yet)
   bin/            # crustygen-check.rs, crustygen-lift.rs
@@ -140,6 +140,10 @@ Branch from `main` after a `git pull`. Name every branch `<type>/<slug>` where `
 
 **Release branches are not used.** Release automation handles version bumps, changelog, and tags from the Conventional Commits on `main`; merge the release PR to ship.
 <!-- <<< meta:branch-naming -->
+
+Crustygen override: the block's "release automation / merge the release PR to ship" does **not**
+apply here — crustygen has no release automation, no release PR, and no version tags (it stays at
+`0.1.0`, `publish = false`). Merging to `main` is the whole of shipping.
 
 ## Copilot review
 
