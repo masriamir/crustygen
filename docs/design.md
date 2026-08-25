@@ -103,11 +103,10 @@ High-level names in the template (`shotgun_guy`, `blue_card`, `tech_base`) resol
 thing IDs, texture names, line specials, and sector types through a `vocabulary.toml` table.
 
 **Every value in that table must carry a citation, never be written from recall** — a `source`
-(the UDMF specification, the ZDoom wiki, or the IWAD's own `TEXTURE1`/`PNAMES`/flat lumps read via
-`cwad list`), a `derivation` for computed values, or `curated` for the judgment calls that have no
-primary source (e.g. `[door_texture_catalog]`, `[key_trim]`), which must **not** claim a source.
-The table is data, not code, precisely so it can be checked against sources independently of the
-compiler.
+recording a primary reference (the UDMF specification, the ZDoom wiki, the id-Software DOOM
+sources, or a measured IWAD-corpus reading, among others), a `derivation` for a computed value, or
+`curated` for a judgment call that has no primary source (which must **not** claim one). The table
+is data, not code, precisely so it can be checked against sources independently of the compiler.
 
 ## 5. The template
 

@@ -40,7 +40,7 @@ src/
   lift/           # crustygen-lift: survey a WAD's geometry (telemetry only, no spec emission yet)
   bin/            # crustygen-check.rs, crustygen-lift.rs
 data/
-  engine.toml     # engine constants — every value carries a `source` citation (see below)
+  engine.toml     # engine constants — every value carries a citation (source/derivation/curated; see below)
   vocabulary.toml # texture/name vocabulary — sourced or `curated`
 docs/             # design.md, map-spec.md, check.md, lift.md, geometry.md, verticality.md, measurements/
 maps/             # entrada.wad (UDMF) + entrada_doom.wad (binary twin)
