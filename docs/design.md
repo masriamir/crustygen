@@ -667,8 +667,9 @@ front end.
 - **Table accuracy is the highest-stakes data in the project.** Wrong thing IDs or line specials
   in `vocabulary.toml`, or a wrong step height, monster radius, or door clearance in
   `engine.toml`, produce maps that load, look correct, and are unplayable. Unit tests cannot
-  catch it: the test and the compiler read the same table. Mitigation: primary sources only,
-  a `source` field on every entry, a table-versus-IWAD check in verification, and boundary-pinned
+  catch it: the test and the compiler read the same table. Mitigation: a citation on every entry
+  (a `source`, a `derivation`, or `curated` — never written from recall), a table-versus-IWAD check
+  in verification, and boundary-pinned
   playability tests that at least prove the comparison logic is right even when a threshold is
   not.
 - **Authoring the IR is still work.** The compiler removes coordinate bookkeeping, not layout
