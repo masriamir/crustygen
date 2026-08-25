@@ -39,7 +39,7 @@ data/
   vocabulary.toml # texture/name vocabulary — sourced or `curated`
 docs/             # design.md, map-spec.md, check.md, lift.md, geometry.md, verticality.md, measurements/
 maps/             # entrada.wad (UDMF) + entrada_doom.wad (binary twin)
-map-spec.template.md  # the blank map-spec a parser turns into a typed Spec
+map-spec.template.md  # a filled, parseable example the parser turns into a typed Spec (authors copy + edit it)
 tests/            # integration tests + fixtures
 ```
 
@@ -81,10 +81,11 @@ cargo run --bin crustygen-check -- maps/entrada.wad --spec tests/fixtures/entrad
 
 ### The data tables are the highest-stakes part
 
-Every engine value in `data/engine.toml` and `data/vocabulary.toml` carries a `source` citation to
-the id-Software DOOM release at pinned commit `a77dfb96cb91780ca334d0d4cfd86957558007e0`. Computed
-values carry a separate `derivation`; curated judgment calls (which texture names read as a door,
-which trim marks a keyed door) carry `curated` instead, and must **not** claim a source.
+Every value in `data/engine.toml` and `data/vocabulary.toml` carries a citation: a `source` (the
+id-Software DOOM release at pinned commit `a77dfb96cb91780ca334d0d4cfd86957558007e0`, or the UDMF /
+Unofficial Doom specs where those govern instead, or a measured-corpus reference), a `derivation`
+for computed values, or `curated` for judgment calls (which texture names read as a door, which
+trim marks a keyed door) — and a `curated` entry must **not** claim a source.
 
 **This is not ceremony. A wrong constant produces a map that loads, renders correctly, and is
 unplayable — and no test catches it, because the test reads the same table the compiler does.**
@@ -98,8 +99,10 @@ across the retail IWADs (see [`docs/measurements/`](docs/measurements/)), never 
   a doc comment.
 - `clippy::all` + `clippy::pedantic` are enabled (warn locally, denied in CI). Prefer
   `T::try_from(..)` over `as` casts to stay clean under `pedantic`.
-- Compilation runs a fixed pass order, each pass depending on the last; a violation is a **hard
-  error, not a warning** — a door the player cannot fit through is a broken map, not a missed target.
+- Compilation runs a fixed pass order, each pass depending on the last; a playability violation is
+  a **hard error** — a door the player cannot fit through is a broken map, not a missed target. The
+  documented exceptions are **P10** (clean vertical tiling) and the verifier's **V-P11** convention
+  check, which deliberately degrade to warnings (ugly, not unplayable); see `docs/design.md` §9.
 
 ## Testing
 
@@ -107,9 +110,10 @@ across the retail IWADs (see [`docs/measurements/`](docs/measurements/)), never 
   re-derives playability from a **built** WAD, reusing the sourced tables and the reachability core
   but **nothing** from `compile/` or `rules.rs` — the logic under cross-examination — so a compiler
   bug that satisfies the IR-time checks is still caught against emitted geometry.
-- **Fixture diversity matters more than fixture count.** A suite where every fixture is the same
-  shape rotated once hid four Critical geometry defects behind 65 green tests; add fixtures whose
-  *shape* is new, and state the cells a fixture does not cover.
+- **Fixture diversity matters more than fixture count.** A suite where every fixture was the same
+  rectangle rotated four ways hid four Critical geometry defects behind 65 green tests; a rotated
+  variant is not new shape coverage. Add fixtures whose *shape* is new, and state the cells a
+  fixture does not cover.
 - Commercial IWADs are never committed; corpus measurements live in `docs/measurements/`.
 
 ## Commit conventions
@@ -122,8 +126,9 @@ Follow [Conventional Commits](https://www.conventionalcommits.org/): `feat` (new
 **The PR title is the changelog entry and the version bump.** PRs squash-merge to a single commit whose subject is the PR title and whose body is blank — every branch commit subject is discarded. So the PR title alone selects the changelog section and drives the derived bump. Write it as a real Conventional Commit describing the shipped outcome; never `gh pr create --fill` (it takes the title from the branch name). Title a mixed PR by its highest-impact change (`!` > `feat` > `fix` > everything else), or split it into one PR per type when both halves each earn a changelog line. Never hand-force a version to compensate for a title.
 <!-- <<< meta:commit-conventions -->
 
-Crustygen specifics: the crate is `publish = false` and cuts no releases — the version stays
-`0.1.0` and there is no release automation, so the Conventional Commit type is a changelog/clarity
+Crustygen specifics — an explicit **override** of the block above: crustygen is `publish = false`
+and has **no release automation**, so the block's "release automation derives the version bump"
+does not apply here. The version stays `0.1.0`; the Conventional Commit type is a changelog/clarity
 choice, not a version one. `lefthook`'s `commit-msg` hook and CI's `pr-title` job share
 `scripts/check-conventional-subject.py`, so the branch-commit gate and the PR-title gate cannot
 drift.
@@ -152,7 +157,8 @@ Resolved threads over a red required check — or unaddressed missing coverage �
 
 Crustygen specifics: `just ci` (`lint test doc`) is the local pre-push gate; the required checks on
 the `Main Branch` ruleset (OS-matrix test, MSRV, coverage, `security-deny`, the committed-WADs drift
-guard, `pr-title`, `meta-check`) are the source of truth via `gh pr checks`.
+guard) are the source of truth via `gh pr checks`. `pr-title` and `meta-check` run on PRs but are
+not yet required — a follow-up adds them to the ruleset.
 
 ## Known gaps
 
