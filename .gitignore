@@ -1,16 +1,60 @@
+# Shared ignores are block-synced from masriamir/.github (see .meta-manifest.toml,
+# `just meta-check`). Edit the canonical source upstream, not inside the markers.
+# >>> meta:gitignore-rust
+# Compiled output / build artifacts
 /target/
+**/target/
 
-# AI agent planning artifacts (superpowers specs/plans) — never committed
-docs/superpowers/
+# Backup files from rustfmt / editors
+**/*.rs.bk
+*.orig
 
-# Claude Code agent worktrees (ephemeral, created by Claude Code)
-.claude/worktrees/
+# MSVC debug info (Windows)
+*.pdb
 
+# Coverage output (cargo-llvm-cov / grcov)
+*.profraw
+*.profdata
+/lcov.info
+/coverage/
+# <<< meta:gitignore-rust
+
+# >>> meta:gitignore-base
 # OS / editor cruft
 .DS_Store
 Thumbs.db
 *.swp
 *~
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Environment / local overrides
+.env
+.env.local
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
+# Temporary files
+/.tmp/
+
+# Claude Code agent worktrees (ephemeral, created by Claude Code)
+.claude/worktrees/
+
+# Ad-hoc local git worktrees
+.worktrees/
+
+# AI agent artifacts (superpowers plans/specs — never committed)
+docs/superpowers/
+
+# Playwright MCP browser-session artifacts
+.playwright-mcp/
+# <<< meta:gitignore-base
+
+# ─── crustygen-specific ──────────────────────────────────────────────────────
 
 # NOTE: *.wad is deliberately NOT ignored — maps/*.wad are committed build
 # artifacts that CI re-derives and compares against the compiler.
