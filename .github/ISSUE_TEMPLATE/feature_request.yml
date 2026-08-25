@@ -13,6 +13,6 @@ body:
     id: proposal
     attributes:
       label: Proposal
-      description: The desired IR/spec surface, compile pass, or verifier check.
+      description: The desired IR/spec surface, compile pass, verifier check, or crustygen-lift behavior.
     validations:
       required: true
