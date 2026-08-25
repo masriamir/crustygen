@@ -10,7 +10,10 @@ not here (see `.meta-manifest.toml` and `just meta-check`).
 `crustygen` compiles a hand-authored room-graph IR into a UDMF `TEXTMAP`, packs it into a playable
 Doom PWAD, and emits a binary Doom-format twin. It removes coordinate bookkeeping, not layout
 design: you describe rooms, portals, doors, things and an exit; it produces watertight geometry,
-allocates tags, and refuses to emit a map a player could not walk through. Built on
+allocates tags, and rejects a map that fails its **wired** playability checks. Several rules are
+enforced only by the layer-4 verifier against the built WAD, not at compile time — notably
+reachability is not checked when a map has no player start or no exit (see `KNOWN-GAPS.md`), so
+"refuses every unwalkable map" is the goal, not yet a compile-time guarantee. Built on
 [crustywad](https://github.com/masriamir/crustywad) (pinned published dependency, `write` +
 `nodebuild` features) for WAD I/O and node building. Single crate, Rust 2024 edition, MSRV 1.94.0,
 `publish = false`, dual-licensed MIT OR Apache-2.0.
@@ -101,8 +104,9 @@ across the retail IWADs (see [`docs/measurements/`](docs/measurements/)), never 
   `T::try_from(..)` over `as` casts to stay clean under `pedantic`.
 - Compilation runs a fixed pass order, each pass depending on the last; a playability violation is
   a **hard error** — a door the player cannot fit through is a broken map, not a missed target. The
-  documented exceptions are **P10** (clean vertical tiling) and the verifier's **V-P11** convention
-  check, which deliberately degrade to warnings (ugly, not unplayable); see `docs/design.md` §9.
+  documented exceptions are **P10** (clean vertical tiling; `docs/design.md` §9) and the verifier's
+  **V-P11** convention check (`docs/check.md`), which deliberately degrade to warnings (ugly, not
+  unplayable).
 
 ## Testing
 
