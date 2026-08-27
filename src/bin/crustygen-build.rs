@@ -211,6 +211,20 @@ mod tests {
     }
 
     #[test]
+    fn an_existing_target_file_is_replaced() {
+        // `std::fs::rename` replaces an existing destination file on every
+        // supported platform (Windows included, via `MoveFileExW`); this
+        // pins that a rebuild onto the same `<out.wad>` path succeeds.
+        let dir = temp_dir("overwrite");
+        let target = dir.join("out.wad");
+        std::fs::write(&target, b"stale bytes from an earlier build").expect("seed");
+        write_atomically(&target, b"PWAD").expect("replaces the existing file");
+        assert_eq!(std::fs::read(&target).expect("read back"), b"PWAD");
+        assert_eq!(entries(&dir), vec!["out.wad".to_owned()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn a_failed_rename_leaves_no_temp_file_behind() {
         let dir = temp_dir("dirtarget");
         // A non-empty directory at the target path: the temp write beside it

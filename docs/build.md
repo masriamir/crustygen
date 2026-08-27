@@ -66,6 +66,6 @@ and an off-grid coordinate exit 1 with `ir:`; overlapping rooms exit 3 with
 `compile:`; a portal narrower than the player exits 4 naming `P3`; an
 unwritable output path exits 2, and an output path that is a directory exits
 2 leaving no temp file beside it. The binary's own unit tests pin the
-atomic-write helper: a success leaves only the target, a failed rename leaves
-no temp file. The IR fixtures are the two-room map from the
+atomic-write helper: a success leaves only the target, an existing target
+file is replaced, and a failed rename leaves no temp file. The IR fixtures are the two-room map from the
 rules' own unit tests, patched in code.
