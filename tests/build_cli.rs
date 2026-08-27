@@ -100,7 +100,11 @@ fn an_unknown_flag_exits_2() {
 fn an_extra_positional_argument_exits_2() {
     let out = bin().args(["x.json", "y.wad", "z"]).output().expect("runs");
     assert_eq!(out.status.code(), Some(2));
-    assert!(stderr(&out).contains('z'), "stderr: {}", stderr(&out));
+    assert!(
+        stderr(&out).contains("unexpected extra argument `z`"),
+        "stderr: {}",
+        stderr(&out)
+    );
 }
 
 #[test]
