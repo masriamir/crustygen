@@ -222,3 +222,28 @@ fn map_without_a_value_exits_2() {
         stderr(&out)
     );
 }
+
+#[test]
+fn an_output_path_that_is_a_directory_exits_2_leaving_nothing_behind() {
+    let ir_path = temp_path("dirout", "json");
+    std::fs::write(&ir_path, ENTRADA).expect("write temp IR");
+    let parent = temp_path("dirout-parent", "d");
+    let out_dir = parent.join("out.wad");
+    std::fs::create_dir_all(&out_dir).expect("create blocking dir");
+    std::fs::write(out_dir.join("occupant"), b"x").expect("occupy it");
+    let out = bin().arg(&ir_path).arg(&out_dir).output().expect("runs");
+    std::fs::remove_file(&ir_path).ok();
+    let mut leftovers: Vec<String> = std::fs::read_dir(&parent)
+        .expect("read parent")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    leftovers.sort();
+    std::fs::remove_dir_all(&parent).ok();
+    assert_eq!(out.status.code(), Some(2), "stderr: {}", stderr(&out));
+    assert!(stderr(&out).contains("out.wad"), "stderr: {}", stderr(&out));
+    assert_eq!(
+        leftovers,
+        vec!["out.wad".to_owned()],
+        "temp file left behind"
+    );
+}

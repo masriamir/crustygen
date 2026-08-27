@@ -43,7 +43,10 @@ stderr, prefixed `crustygen-build:` and then the stage:
 | 3 | compile | `compile:` | a structural refusal — overlapping rooms, a portal between rooms that share no wall, a thing outside its room, … |
 | 4 | playability | `playability:` | the map compiled but breaks playability rules; one line per rule, e.g. `playability: P3 (a <-> b): opening 16 is narrower than the 32 the player needs` |
 
-No WAD is written on any non-zero exit.
+No WAD is written on any non-zero exit: the bytes go to a sibling temp file
+(`<out.wad>.<pid>.tmp`) that is renamed into place only after the whole
+write succeeded, and a failed rename removes the temp file — so a mid-write
+failure never leaves a partial `<out.wad>` behind.
 
 ## Reproducibility
 
@@ -61,5 +64,8 @@ entrada fixture builds with exit 0, the expected summary line, and bytes
 equal to `maps/entrada.wad`; `--map E1M1` names the map group; invalid JSON
 and an off-grid coordinate exit 1 with `ir:`; overlapping rooms exit 3 with
 `compile:`; a portal narrower than the player exits 4 naming `P3`; an
-unwritable output path exits 2. The IR fixtures are the two-room map from the
+unwritable output path exits 2, and an output path that is a directory exits
+2 leaving no temp file beside it. The binary's own unit tests pin the
+atomic-write helper: a success leaves only the target, a failed rename leaves
+no temp file. The IR fixtures are the two-room map from the
 rules' own unit tests, patched in code.

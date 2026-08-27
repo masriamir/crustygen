@@ -146,7 +146,7 @@ fn build(args: &Args) -> Result<(), Failure> {
     })?;
     let bytes = pack::pack_udmf_with_nodes(&compiled, &args.map_name)
         .map_err(|err| Failure::Usage(format!("failed to pack `{}`: {err}", args.map_name)))?;
-    std::fs::write(&args.out_path, bytes)
+    write_atomically(std::path::Path::new(&args.out_path), &bytes)
         .map_err(|err| Failure::Usage(format!("failed to write `{}`: {err}", args.out_path)))?;
     println!(
         "{}: {} rooms, {} portals → {} sectors, {} linedefs, {} things → {}",
@@ -159,4 +159,72 @@ fn build(args: &Args) -> Result<(), Failure> {
         args.out_path
     );
     Ok(())
+}
+
+/// Writes `bytes` to `target` through a sibling temp file renamed into
+/// place, so a failure part-way leaves no partial output at `target`.
+fn write_atomically(target: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut temp = target.as_os_str().to_owned();
+    temp.push(format!(".{}.tmp", std::process::id()));
+    let temp = std::path::PathBuf::from(temp);
+    std::fs::write(&temp, bytes)?;
+    std::fs::rename(&temp, target).inspect_err(|_| {
+        // Best effort: the rename error is the one worth reporting.
+        std::fs::remove_file(&temp).ok();
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_atomically;
+
+    fn temp_dir(label: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time moves forward")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "crustygen-build-unit-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&dir).expect("create temp dir");
+        dir
+    }
+
+    fn entries(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn a_successful_write_leaves_only_the_target() {
+        let dir = temp_dir("ok");
+        let target = dir.join("out.wad");
+        write_atomically(&target, b"PWAD").expect("writes");
+        assert_eq!(std::fs::read(&target).expect("read back"), b"PWAD");
+        assert_eq!(entries(&dir), vec!["out.wad".to_owned()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_failed_rename_leaves_no_temp_file_behind() {
+        let dir = temp_dir("dirtarget");
+        // A non-empty directory at the target path: the temp write beside it
+        // succeeds, the rename onto it cannot.
+        let target = dir.join("out.wad");
+        std::fs::create_dir(&target).expect("create blocking dir");
+        std::fs::write(target.join("occupant"), b"x").expect("occupy it");
+        let err = write_atomically(&target, b"PWAD").expect_err("cannot replace a directory");
+        assert!(!err.to_string().is_empty());
+        assert_eq!(
+            entries(&dir),
+            vec!["out.wad".to_owned()],
+            "temp file left behind"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
