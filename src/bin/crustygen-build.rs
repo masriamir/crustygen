@@ -162,16 +162,20 @@ fn build(args: &Args) -> Result<(), Failure> {
 }
 
 /// Writes `bytes` to `target` through a sibling temp file renamed into
-/// place, so a failure part-way leaves no partial output at `target`.
+/// place, so a failure part-way leaves no partial output at `target` — and
+/// no temp file either: whether the temp write or the rename fails, the
+/// temp file is removed (best effort) before the original error is returned.
 fn write_atomically(target: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut temp = target.as_os_str().to_owned();
     temp.push(format!(".{}.tmp", std::process::id()));
     let temp = std::path::PathBuf::from(temp);
-    std::fs::write(&temp, bytes)?;
-    std::fs::rename(&temp, target).inspect_err(|_| {
-        // Best effort: the rename error is the one worth reporting.
-        std::fs::remove_file(&temp).ok();
-    })
+    std::fs::write(&temp, bytes)
+        .and_then(|()| std::fs::rename(&temp, target))
+        .inspect_err(|_| {
+            // A partially written temp file (disk full) or a failed rename:
+            // either way the original error is the one worth reporting.
+            std::fs::remove_file(&temp).ok();
+        })
 }
 
 #[cfg(test)]
