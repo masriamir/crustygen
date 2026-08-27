@@ -10,7 +10,7 @@ allocates tags, and refuses to emit a map a player could not walk through.
 ```
 map-spec (Markdown)  →  parse  →  Spec        (not yet wired to the IR)
 
-IR (JSON)  →  validate  →  compile  →  TEXTMAP  →  PWAD
+IR (JSON)  →  validate  →  compile  →  TEXTMAP  →  PWAD      (crustygen-build)
                                           └──────→  Doom-format twin
 
 PWAD (+ optional Spec)  →  crustygen-check  →  findings + conformance rows
@@ -28,10 +28,12 @@ copy of [`map-spec.template.md`](map-spec.template.md) into a typed `Spec`
 re-derives playability from a *built* WAD (see
 [`docs/check.md`](docs/check.md)). The spec is not yet wired to the compiler:
 spec → IR generation does not exist, so the IR below is still authored
-directly as JSON. See [Known gaps](#known-gaps).
+directly as JSON and built with `crustygen-build` (see
+[`docs/build.md`](docs/build.md)). See [Known gaps](#known-gaps).
 
 ```bash
-cargo test                                   # 495 tests
+cargo test                                   # 509 tests
+cargo run --bin crustygen-build -- tests/fixtures/entrada_base.json out.wad
 cargo run --bin crustygen-check -- maps/entrada.wad \
     --spec tests/fixtures/entrada.spec.md
 ```
@@ -120,6 +122,7 @@ the four id/Final Doom IWADs. See
 | [`KNOWN-GAPS.md`](KNOWN-GAPS.md) | **Read this first.** Every known gap and every decision that looks wrong without its reason |
 | [`docs/design.md`](docs/design.md) | The map-spec template, the IR, the compiler contract, and the v1 bar |
 | [`docs/map-spec.md`](docs/map-spec.md) | The map-spec document format, the parser's API, and the enforcement split |
+| [`docs/build.md`](docs/build.md) | The build stage: the `crustygen-build` CLI contract, its per-stage exit codes, and byte-reproducibility of the committed map |
 | [`docs/check.md`](docs/check.md) | The layer-4 verifier: the check catalog, the flood's construction rules, conformance verdicts, and the CLI contract |
 | [`docs/lift.md`](docs/lift.md) | The lifter's charter, its telemetry-skeleton scope, and the `crustygen-lift` CLI contract |
 | [`docs/geometry.md`](docs/geometry.md) | Worked coordinates for the gap and door-chain constructions |
@@ -133,7 +136,8 @@ The honest list is [`KNOWN-GAPS.md`](KNOWN-GAPS.md). The headlines:
 - **The map-spec parser reads the template; nothing turns it into an IR
   yet.** `src/spec` parses a filled `map-spec.template.md` copy into a typed
   `Spec` (see [`docs/map-spec.md`](docs/map-spec.md)); the IR is still
-  authored directly as JSON, and spec → IR generation does not exist.
+  authored directly as JSON (and built with `crustygen-build`), and spec → IR
+  generation does not exist.
 - **No conformance report file.** `docs/design.md` §8 specifies five
   verification layers; layer 4 now exists and layer 2 does not. §8.1's
   `report.md` is likewise unwritten — `crustygen-check` computes everything it

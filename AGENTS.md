@@ -38,11 +38,11 @@ src/
   compile/        # the fixed-order compile passes (sectors, portals, doors, exits, heights, things, tags, textmap)
   check/          # verification layer 4 — re-derives playability from a BUILT WAD
   lift/           # crustygen-lift: survey a WAD's geometry (telemetry only, no spec emission yet)
-  bin/            # crustygen-check.rs, crustygen-lift.rs
+  bin/            # crustygen-build.rs, crustygen-check.rs, crustygen-lift.rs
 data/
   engine.toml     # engine constants — every value carries a citation (source/derivation/curated; see below)
   vocabulary.toml # texture/name vocabulary — sourced or `curated`
-docs/             # design.md, map-spec.md, check.md, lift.md, geometry.md, verticality.md, measurements/
+docs/             # design.md, map-spec.md, build.md, check.md, lift.md, geometry.md, verticality.md, measurements/
 maps/             # entrada.wad (UDMF) + entrada_doom.wad (binary twin)
 map-spec.template.md  # a filled, parseable example the parser turns into a typed Spec (authors copy + edit it)
 tests/            # integration tests + fixtures
@@ -70,6 +70,7 @@ matrix, the MSRV build on 1.94.0, coverage, `cargo deny`, and the committed-WADs
 
 ```bash
 cargo test                                   # the full suite
+cargo run --bin crustygen-build -- tests/fixtures/entrada_base.json out.wad   # IR → PWAD
 cargo run --bin crustygen-check -- maps/entrada.wad --spec tests/fixtures/entrada.spec.md
 ```
 
