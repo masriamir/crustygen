@@ -124,13 +124,17 @@ powerups_source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo doomednums: M
 # decorations were the bulk of the misses. `decorations_source` cites every
 # one; their dims live in engine.toml's `[props.*]`.
 #
-# Two naming notes, both choices rather than sourced facts — mobjinfo gives
-# every one of these the same 16x16 dims (`big_tree` alone is radius 32),
-# so no engine constant separates a tall prop from a short one. The
-# `tall_`/`short_` split across the six torches follows their sprite pairs
-# (TBLU/TGRN/TRED against SMBT/SMGT/SMRT, "small"). `short_techno_lamp`
+# Three naming notes. The first two are choices rather than sourced facts —
+# mobjinfo gives every one of these the same 16x16 dims (`big_tree` alone is
+# radius 32), so no engine constant separates a tall prop from a short one.
+# The `tall_`/`short_` split across the six torches follows their sprite
+# pairs (TBLU/TGRN/TRED against SMBT/SMGT/SMRT, "small"). `short_techno_lamp`
 # (86, S_TECH2LAMP, sprite TLP2) is named against the `techno_lamp` (85,
 # S_TECHLAMP, sprite TLMP) this table already carried, on the same basis.
+# The third does rest on an engine fact: the spawnstate is spelled
+# S_STALAGTITE, but the entry carries no MF_SPAWNCEILING, so it stands on
+# the floor rather than hanging from the ceiling — `stalagmite` names what
+# the row actually is.
 #
 # `gibs` (MT_MISC71, doomednum 24) previously lived in this block too, but
 # its own citation already called it a corpse/gib item, contradicting its
