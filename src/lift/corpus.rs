@@ -591,7 +591,7 @@ pub fn render_markdown(provenance: Option<&Provenance>, b: &Buckets, a: &Aggrega
     s.push_str(
         "> **Status of these numbers: measured practice, not engine fact — and an upper bound.** ",
     );
-    s.push_str("A map counts as expressible when every non-zero line special, sector special, and thing type it carries is in crustygen's emittable vocabulary. ");
+    s.push_str("A map counts as expressible when every non-zero line special and sector special, and every thing type, it carries is in crustygen's emittable vocabulary. ");
     s.push_str("Geometry, flags, tags, and texture names are not measured; a geometry-aware lifter can only do worse, never better, than this membership test.\n\n");
     if let Some(p) = provenance {
         s.push_str("## Sample\n\n");
