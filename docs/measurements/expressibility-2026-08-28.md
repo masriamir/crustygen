@@ -15,10 +15,12 @@ The two runs differ only in the vocabulary the binary was built with — same di
 sample, byte-identical stderr (419 lines both times).
 
 > **Status of these numbers: measured practice, not engine fact — and an upper bound.**
-> A map counts as expressible when every non-zero line special, sector special, and thing type
-> it carries is in crustygen's emittable vocabulary. Geometry, flags, tags, and texture names
-> are not measured; a geometry-aware lifter can only do worse, never better, than this
-> membership test. Two further reasons to read every share below as a ceiling rather than a
+> A map counts as expressible when every non-zero linedef special it carries, every non-zero
+> sector special it carries, and **every** thing type it carries — zero included — is in
+> crustygen's emittable vocabulary. `lift::survey` skips zero on the two special axes only;
+> thing types are histogrammed as they come, so a thing of type 0 blocks a map like any other
+> unknown value. Geometry, flags, tags, and texture names are not measured; a geometry-aware
+> lifter can only do worse, never better, than this membership test. Two further reasons to read every share below as a ceiling rather than a
 > score:
 >
 > - **The sample of record is 374 archives, not 400.** 26 of the seeded 400 failed to download
@@ -45,8 +47,10 @@ Read from `sample-manifest.json` in the sample directory (crustywad
 | entries `ok` | 374 |
 | entries `failed` | 26 |
 
-Every one of the 26 failures is a size mismatch against the size the fetch list declares — 17
-`body exceeded declared size`, 9 `short body` — and each reproduces on retry, so the sample of
+Every one of the 26 failures is a size mismatch between the size the fetch list declares and the
+body the mirror returned — 17 `body exceeded declared size`, 9 `short body`. The manifest records
+one fetch pass and nothing else (every success is plain `ok`; no entry is marked as already
+present), so it is no evidence either way about whether a retry would succeed. The sample of
 record is the 374 archives that are on disk:
 
 | id | file | manifest status |
@@ -127,8 +131,10 @@ on vocabulary:
 | `textmap_unparseable` | 23 |
 
 371 of the 374 archives on disk opened; they yielded 403 WAD members and 1,285 raw map groups,
-of which **1,282 are unique** by content hash. Every share in this document is against those
-1,282 maps.
+of which **1,282 are unique** by content hash. Two denominators are in play below: the
+"All unique maps" column, every blocker table and both greedy curves are against those 1,282
+maps, while the "Vanilla-only slice" column is against the slice itself — 77.7 % of 1,282, i.e.
+**996 maps**. So the after run's 8.3 % on the slice is 83 of 996, not 83 of 1,282.
 
 Normalizing the 419 stderr lines (digits replaced, source path stripped) gives the failure
 classes behind those buckets:
@@ -440,9 +446,11 @@ Every axis reads higher here, and the conjunction reads higher even though this 
 stricter statistic — three axes rather than two. That is a divergence worth recording rather
 than smoothing. Candidate reasons, none of them established:
 
-- **Different draw.** A different seed over the same 15,273-row fetch list is a different set
-  of archives. Neither run computed a confidence interval, so sampling noise can be neither
-  ruled in nor ruled out as the cause of the gap.
+- **Different draw.** A different seed is a different set of archives. The spike drew from a
+  fetch list of the same 15,273 rows, but its fetch-list hash is not recorded, so "the same
+  list" is an inference from the row count rather than a checked fact. Neither run computed a
+  confidence interval, so sampling noise can be neither ruled in nor ruled out as the cause of
+  the gap.
 - **The conjunctions are not the same statistic.** The spike's 3.9 % was line ∧ thing; this
   tool's 5.1 % adds the sector axis, which on its own passes 60.8 % of maps. Comparing them
   directly compares two different tests.
@@ -455,6 +463,12 @@ than smoothing. Candidate reasons, none of them established:
   spike's key is not recorded.
 - **The spike is not re-runnable.** Its script was session scratch and was not kept, so the two
   runs cannot be differenced to attribute the gap to any of the above.
+
+One candidate the doc *can* rule out: **the vocabulary was not different.** The spike recorded
+the emittable line set as {1, 11, 26, 27, 28, 51, 52, 124} and 86 thing doomednums; at
+`d6da4dc`, `Tables::emittable_line_specials()` yields exactly that set (door 1, exits 11/51/52/124,
+locked doors 26/27/28) and `data/vocabulary.toml` carries exactly 86 integer `[things]` entries.
+The two runs measured the same vocabulary.
 
 ### The noun effect
 
@@ -504,11 +518,18 @@ The greedy conjunction curve — maps already clear on sectors and things, cumul
 | 21 | 10.2 % | 18.1 % |
 | 51 | 13.6 % | 27.0 % |
 
-The nouns roughly doubled the return on every line special: with the decoration set in place,
-the first special alone (97) takes the conjunction from 6.5 % to 7.6 %, the first five
-(97 → 62 → 123 → 117 → 88) reach 11.7 %, and 51 of them reach 27.0 % — where before the same 51
-reached 13.6 %. That ordering is the input to Project G sub-project 2: **teleports (97) first,
-then lifts (62 and 88)**, taken from this table rather than from memory.
+The nouns roughly doubled the aggregate return by k = 51: the cumulative share is 1.33×, 1.65×,
+1.74×, 1.77× and 1.99× the before-run share at the five checkpoints. Only those cumulative
+shares are comparable — **the two curves do not add the same specials.** Each is greedy over its
+own already-ok population, so they diverge from the fifth pick (before: 97 → 62 → 123 → 117 → 2;
+after: 97 → 62 → 123 → 117 → 88), differ by 12 values in each direction by k = 51, and run to
+different lengths before exhausting (139 steps before, 357 after). "The same 51 specials" is not
+a comparison this table supports.
+
+With the decoration set in place, the first special alone (97) takes the conjunction from 6.5 %
+to 7.6 % and the first five reach 11.7 %. That ordering is the input to Project G sub-project 2:
+**teleports (97) first, then lifts (62 and 88)**, taken from this table rather than from
+memory.
 
 ### Residual thing blockers
 
@@ -528,11 +549,25 @@ After the rows, the thing-type blocker table opens at 8.7 % where it previously 
 | 9044 | 15 | 1.2 % |
 
 The tail (90, 92, 94, 95, 96, 9800, 9999, 5004, 5803, 5804, 5807, 5809, 9045, 9070, 9072, 9080)
-is each at or below 1.0 %. Most of the residue sits in numeric ranges outside the classic doomednum
-space — the 5000s, the 9000s, 32000 — which is where Boom, ZDoom and DeHackEd-range editor
-numbers live; `0` is not a doomednum at all. Identifying any specific value is out of scope for
-this document: these are the numbers the sweep counted, and naming them is work for whoever
-takes the next vocabulary slice.
+is each at or below 1.0 %.
+
+The residue splits in two, and the split matters for what to do about it.
+
+**Four values are vanilla, and their absence is a scoping decision already made.** 88 (65 maps),
+72 (45), 87 (35) and 89 (29) are `mobjinfo` doomednums — `MT_BOSSBRAIN`, `MT_KEEN`,
+`MT_BOSSTARGET` and `MT_BOSSSPIT`, read from `linuxdoom-1.10/info.c` at entries 1758, 1732,
+1810 and 1784. The decoration task deliberately left them out: 72 carries `MF_COUNTKILL`, so it is a
+monster rather than a prop, and 87/88/89 are the three parts of the Icon of Sin mechanism, not
+scenery. They are not missing vocabulary — they are vocabulary the noun slice declined.
+
+**The rest are non-vanilla by definition.** Vanilla `mobjinfo` doomednums run 5–89 (11 absent)
+plus the 2001–2049 and 3001–3006 blocks; player starts 1–4 and 11 are handled outside
+`mobjinfo`. So 0, 90, 92, 94, 95, 96, every 5xxx and 9xxx value, and 32000 lie outside that
+space entirely — Boom/ZDoom/DeHackEd-range editor numbers, plus `0`, which is not a doomednum at
+all and is counted because the thing axis does not skip zero. Summing map-hits over the 25
+rows (521 in total): the four vanilla values account for 174, the 5xxx/9xxx/32000 ranges for
+272, the 90–96 values for 51, and type 0 for 24 — so 347 of the 521 hits are non-vanilla
+values that no vanilla-scoped vocabulary would ever cover.
 
 ## Re-running
 
