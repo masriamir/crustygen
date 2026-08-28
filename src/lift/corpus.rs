@@ -469,6 +469,199 @@ pub fn aggregate(maps: &[MapRecord]) -> Aggregate {
     }
 }
 
+/// The identity of a sample, echoed from `sample-manifest.json` when the
+/// swept directory holds one (written by crustywad's `xtask harvest-sample`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Provenance {
+    /// The draw's seed.
+    pub seed: u64,
+    /// The requested sample size.
+    pub count: usize,
+    /// Rows in the sampling frame.
+    pub frame_rows: usize,
+    /// Hash of the fetch list the frame was cut from.
+    pub fetch_list_hash: String,
+    /// Sampled archive ids, ascending.
+    pub ids: Vec<u64>,
+}
+
+/// Reads `<dir>/sample-manifest.json`; `None` when absent or unparseable.
+#[must_use]
+pub fn read_provenance(dir: &Path) -> Option<Provenance> {
+    /// One manifest entry; only the archive id is echoed, the rest of the
+    /// harvest bookkeeping (directory, filename, size, status) is ignored.
+    #[derive(serde::Deserialize)]
+    struct Entry {
+        id: u64,
+    }
+    /// The subset of `sample-manifest.json` the report echoes.
+    #[derive(serde::Deserialize)]
+    struct Manifest {
+        seed: u64,
+        count: usize,
+        frame_rows: usize,
+        fetch_list_hash: String,
+        entries: Vec<Entry>,
+    }
+    let text = std::fs::read_to_string(dir.join("sample-manifest.json")).ok()?;
+    let m: Manifest = serde_json::from_str(&text).ok()?;
+    let mut ids: Vec<u64> = m.entries.iter().map(|e| e.id).collect();
+    ids.sort_unstable();
+    Some(Provenance {
+        seed: m.seed,
+        count: m.count,
+        frame_rows: m.frame_rows,
+        fetch_list_hash: m.fetch_list_hash,
+        ids,
+    })
+}
+
+/// The `--json` document.
+#[derive(Debug, serde::Serialize)]
+pub struct Report<'a> {
+    /// Sample identity, when present.
+    pub provenance: Option<&'a Provenance>,
+    /// The counts.
+    pub buckets: &'a Buckets,
+    /// The summary.
+    pub aggregate: &'a Aggregate,
+    /// Every unique map.
+    pub maps: &'a [MapRecord],
+}
+
+/// A fraction as a one-decimal percentage.
+fn pct(x: f64) -> String {
+    format!("{:.1} %", x * 100.0)
+}
+
+/// The Markdown report: header caveat, provenance, buckets, shares, blockers,
+/// greedy checkpoints. Aggregate tables only — no per-map rows.
+#[must_use]
+pub fn render_markdown(provenance: Option<&Provenance>, b: &Buckets, a: &Aggregate) -> String {
+    use std::fmt::Write as _;
+
+    let mut s = String::new();
+    s.push_str("# Corpus expressibility\n\n");
+    s.push_str(
+        "> **Status of these numbers: measured practice, not engine fact — and an upper bound.** ",
+    );
+    s.push_str("A map counts as expressible when every non-zero line special, sector special, and thing type it carries is in crustygen's emittable vocabulary. ");
+    s.push_str("Geometry, flags, tags, and texture names are not measured; a geometry-aware lifter can only do worse, never better, than this membership test.\n\n");
+    if let Some(p) = provenance {
+        s.push_str("## Sample\n\n");
+        let _ = writeln!(
+            s,
+            "- seed `{}`, count {}, frame rows {}, fetch list `{}`",
+            p.seed, p.count, p.frame_rows, p.fetch_list_hash
+        );
+        let ids: Vec<String> = p.ids.iter().map(ToString::to_string).collect();
+        let _ = writeln!(s, "- ids: {}\n", ids.join(" "));
+    }
+    s.push_str("## Buckets\n\n| Bucket | Count |\n|---|---|\n");
+    for (name, n) in [
+        ("archives", b.archives),
+        ("wads", b.wads),
+        ("maps_raw", b.maps_raw),
+        ("maps_unique", b.maps_unique),
+        ("archive_unreadable", b.archive_unreadable),
+        ("wad_unreadable", b.wad_unreadable),
+        ("no_maps", b.no_maps),
+        ("unsupported_format", b.unsupported_format),
+        ("assembly_refused", b.assembly_refused),
+        ("textmap_unparseable", b.textmap_unparseable),
+    ] {
+        let _ = writeln!(s, "| `{name}` | {n} |");
+    }
+    s.push_str(
+        "\n## Expressibility\n\n| Axis | All unique maps | Vanilla-only slice |\n|---|---|---|\n",
+    );
+    for (name, all, van) in [
+        (
+            "line specials",
+            a.all.line_specials,
+            a.vanilla.line_specials,
+        ),
+        (
+            "sector specials",
+            a.all.sector_specials,
+            a.vanilla.sector_specials,
+        ),
+        ("thing kinds", a.all.thing_kinds, a.vanilla.thing_kinds),
+        ("**all three**", a.all.expressible, a.vanilla.expressible),
+    ] {
+        let _ = writeln!(s, "| {name} | {} | {} |", pct(all), pct(van));
+    }
+    let _ = writeln!(
+        s,
+        "\nVanilla-only slice: {} of unique maps.",
+        pct(a.vanilla_share)
+    );
+    for (title, list) in [
+        ("Line-special blockers", &a.line_blockers),
+        ("Sector-special blockers", &a.sector_blockers),
+        ("Thing-type blockers", &a.thing_blockers),
+    ] {
+        let _ = write!(
+            s,
+            "\n## {title}\n\n| Value | Maps | Share |\n|---|---|---|\n"
+        );
+        for bl in list {
+            let _ = writeln!(s, "| {} | {} | {} |", bl.value, bl.maps, pct(bl.share));
+        }
+    }
+    render_curves(&mut s, a);
+    s
+}
+
+/// The two greedy-curve sections. Both curves are scored against *all* unique
+/// maps, never against the population they walk — spelled out in each table's
+/// header and note, so the conjunction curve's plateau below 100 % reads as
+/// the sector- and thing-blocked remainder it is, not as a truncated curve.
+fn render_curves(s: &mut String, a: &Aggregate) {
+    use std::fmt::Write as _;
+
+    for (title, note, curve, baseline) in [
+        (
+            "Greedy curve — line axis alone",
+            "Share is of all unique maps, with sector specials and thing kinds held expressible.",
+            &a.greedy_line_axis,
+            a.all.line_specials,
+        ),
+        (
+            "Greedy curve — conjunction (maps already ok on sectors and things)",
+            "Share is of **all unique maps**, not of the already-ok population this curve walks, \
+             so it plateaus below 100 % by exactly the maps blocked on a sector special or a \
+             thing kind.",
+            &a.greedy_conjunction,
+            a.all.expressible,
+        ),
+    ] {
+        let _ = write!(
+            s,
+            "\n## {title}\n\n{note}\n\n| k | Cumulative share of all unique maps |\n|---|---|\n"
+        );
+        if curve.steps.is_empty() {
+            // No map in this population is blocked on the line axis (the
+            // population may itself be empty), so there is nothing to add
+            // greedily: state the standing share at k = 0 rather than
+            // emitting a table header with no rows under it.
+            let _ = writeln!(s, "| 0 | {} |", pct(baseline));
+            s.push_str("\nOrder chosen: (none)\n");
+            continue;
+        }
+        for (k, share) in &curve.checkpoints {
+            let _ = writeln!(s, "| {k} | {} |", pct(*share));
+        }
+        let order: Vec<String> = curve
+            .steps
+            .iter()
+            .take(BLOCKER_TOP)
+            .map(|st| st.special.to_string())
+            .collect();
+        let _ = writeln!(s, "\nOrder chosen: {}", order.join(" → "));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,5 +815,47 @@ mod tests {
         assert_eq!(a.all.expressible, 0.0);
         assert!(a.line_blockers.is_empty());
         assert!(a.greedy_line_axis.steps.is_empty());
+    }
+
+    #[test]
+    fn markdown_carries_the_caveat_and_every_section() {
+        let a = aggregate(&[record(&[97], &[97], true, true, true)]);
+        let md = render_markdown(None, &Buckets::default(), &a);
+        for needle in [
+            "upper bound",
+            "## Buckets",
+            "## Expressibility",
+            "## Line-special blockers",
+            "## Greedy curve",
+            "| 97 | 1 | 100.0 % |",
+            // The conjunction curve names its denominator, so a plateau
+            // below 100 % reads as the sector-/thing-blocked remainder.
+            "Share is of **all unique maps**",
+        ] {
+            assert!(md.contains(needle), "missing {needle:?}:\n{md}");
+        }
+        assert!(!md.contains("## Sample"));
+    }
+
+    #[test]
+    fn provenance_reads_a_sample_manifest_and_sorts_ids() {
+        let dir = std::env::temp_dir().join(format!("crustygen-prov-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("sample-manifest.json"),
+            r#"{"seed":42,"count":2,"frame_rows":9,"fetch_list_hash":"blake3:00","entries":[{"id":7,"dir":"d/","filename":"b.zip","zip_size":1,"status":"ok"},{"id":3,"dir":"d/","filename":"a.zip","zip_size":1,"status":"failed:x"}]}"#,
+        )
+        .unwrap();
+        let p = read_provenance(&dir).expect("parses");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(p.ids, vec![3, 7]);
+        assert_eq!(p.seed, 42);
+        let md = render_markdown(Some(&p), &Buckets::default(), &aggregate(&[]));
+        assert!(md.contains("ids: 3 7"), "{md}");
+        // An empty aggregate leaves both greedy curves stepless: each gets a
+        // single baseline row rather than a table header with nothing under it.
+        assert_eq!(md.matches("| 0 | 0.0 % |").count(), 2, "{md}");
+        assert_eq!(md.matches("Order chosen: (none)").count(), 2, "{md}");
+        assert_eq!(read_provenance(Path::new("/nonexistent-dir")), None);
     }
 }
