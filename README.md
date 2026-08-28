@@ -96,6 +96,12 @@ and linedef/sector/thing-type histograms per map, human-readable or as
 `--json`. It interprets nothing yet — no table lookups, no spec emission. See
 [`docs/lift.md`](docs/lift.md).
 
+`crustygen-lift --vocabulary` adds a per-map verdict: whether every special
+and thing type is in the compiler's emittable vocabulary. `crustygen-corpus
+<dir>` sweeps a directory of idgames zips into the corpus expressibility
+report the vocabulary roadmap is re-ordered from — an upper bound, by
+membership only. See [`docs/corpus.md`](docs/corpus.md).
+
 ## The data tables are the highest-stakes part
 
 Every engine value in `data/engine.toml` and `data/vocabulary.toml` carries a
@@ -125,6 +131,7 @@ the four id/Final Doom IWADs. See
 | [`docs/build.md`](docs/build.md) | The build stage: the `crustygen-build` CLI contract, its per-stage exit codes, and byte-reproducibility of the committed map |
 | [`docs/check.md`](docs/check.md) | The layer-4 verifier: the check catalog, the flood's construction rules, conformance verdicts, and the CLI contract |
 | [`docs/lift.md`](docs/lift.md) | The lifter's charter, its telemetry-skeleton scope, and the `crustygen-lift` CLI contract |
+| [`docs/corpus.md`](docs/corpus.md) | The corpus sweep: what "expressible" means (and does not), the `crustygen-corpus` CLI contract, and the per-release re-run procedure |
 | [`docs/geometry.md`](docs/geometry.md) | Worked coordinates for the gap and door-chain constructions |
 | [`docs/verticality.md`](docs/verticality.md) | Height differences, and the stairs/lifts phases that follow |
 | [`docs/measurements/`](docs/measurements/) | Corpus measurements over the retail IWADs |

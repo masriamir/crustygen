@@ -145,6 +145,9 @@ fn archive_options() -> ParseOptions {
 
 /// Surveys `dir` (non-recursive). See the module docs.
 ///
+/// An entry the directory listing itself cannot read (a permission error
+/// mid-listing) is skipped silently — no bucket, no failure line.
+///
 /// # Errors
 /// [`CorpusError::Io`] when `dir` cannot be listed; [`CorpusError::NoCandidates`]
 /// when it holds no `.zip`/`.wad` file.

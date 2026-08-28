@@ -4,8 +4,10 @@ State as of the compiler's completion: IR → validated UDMF `TEXTMAP` → PWAD 
 reassembles through crustywad, plus the layer-4 verifier that re-checks the
 emitted map (`src/check`, `crustygen-check` — see `docs/check.md`), plus the
 shared `crustygen::ingest` path and the `crustygen-lift` telemetry skeleton
-(`src/lift`, `src/ingest.rs` — see `docs/lift.md`), plus the `crustygen-build`
-CLI over the compiler (`src/bin/crustygen-build.rs` — see `docs/build.md`).
+(`src/lift`, `src/ingest.rs` — see `docs/lift.md`), plus `lift::vocabulary`'s
+membership verdict and the `crustygen-corpus` corpus sweep (see
+`docs/corpus.md`), plus the `crustygen-build` CLI over the compiler
+(`src/bin/crustygen-build.rs` — see `docs/build.md`).
 513 tests (443 lib + 3 crustygen-build unit + 15 build_cli + 7 check_adversarial + 16 check_cli + 4
 check_conformance + 1 first_map + 6 golden_textmap + 10 lift_cli + 3
 spec_documents + 4 vanilla_wad + 1 walking_skeleton), plus a separately-run `#[ignore]`d golden-regeneration
@@ -28,6 +30,12 @@ coherence), **P15** (teleport pairing), **P16**/**P17** (liquids and damage
 survivability), **P18** (secret accounting), **P20** (pickup accessibility —
 compiler-side only; the verifier covers it, below), **P21** (light sources),
 **P22** (hanging decorations), **P23** (barrel safety).
+
+**Expressibility is membership, not geometry.** `lift::vocabulary` and
+`crustygen-corpus` decide expressibility by set membership on three axes;
+nothing reads geometry, flags, tags, or texture names. The number is an
+upper bound on lift yield and every report says so. A geometry-aware
+recognizer is the lifter's next stage.
 
 **P20's per-pickup check now exists, at layer 4 rather than in the compiler.**
 `check::invariants::check_prop_embedding` measures every collectible against
