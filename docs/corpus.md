@@ -13,7 +13,7 @@ Membership on three axes, read from the same tables the compiler reads:
 
 | Axis | Set |
 |---|---|
-| line specials | `Tables::emittable_line_specials()` — what a compiler pass writes today (door, keyed doors, four exits); lifts and teleports are sourced but not yet emitted, so they are *out* |
+| line specials | `Tables::emittable_line_specials()` — what a compiler pass writes today (door, keyed doors, four exits, four teleports); the lift specials are sourced but not yet emitted, so they are *out* |
 | sector specials | `Tables::named_sector_specials()` — secret, the three damage tiers, the four light effects |
 | thing kinds | `Tables::thing_kinds()` |
 

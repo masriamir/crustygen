@@ -2,15 +2,18 @@
 //! `Tables::named_sector_specials`: the curated sets must equal what the
 //! compiler really writes. Fixtures below cover every IR construct that
 //! emits a special — plain, door and locked portals (one per key color), the
-//! four exit kinds, and a secret room.
+//! four exit kinds, the four teleport specials, and a secret room.
 //!
-//! These tests do not detect a new emitting pass on their own: no fixture can
-//! author a construct the IR cannot yet express, so a landed teleport pass
-//! leaves the fixtures' union unchanged. What they enforce is the other
+//! These tests still do not detect a new emitting pass on their own: no
+//! fixture can author a construct the IR cannot yet express. The teleport
+//! pass is the worked example this file's doc used to predict — until the IR
+//! grew `teleports[]`, nothing here could emit 97, so landing the pass meant
+//! landing its fixtures and growing the curated set in the same change, by
+//! rule rather than by detection. What the tests enforce is the other
 //! direction — adding a special to the curated set without a fixture that
-//! emits it breaks the equality assertion, and adding 62, 88 or 97 breaks
-//! `sourced_but_unemitted_specials_stay_out_of_the_emittable_set`. So a new
-//! pass lands its fixture and updates both tests by rule, not by detection.
+//! emits it breaks the equality assertion, and adding 62 or 88, the two lift
+//! specials the tables source but no pass writes, breaks
+//! `sourced_but_unemitted_specials_stay_out_of_the_emittable_set`.
 
 use std::collections::BTreeSet;
 
@@ -18,9 +21,10 @@ use crustygen::compile::compile;
 use crustygen::ir::Ir;
 use crustygen::tables::Tables;
 
-/// Two rooms authored apart (gap 64 on x), `{PORTAL}`, `{KEY}` and `{EXITS}`
-/// filled per fixture. Geometry mirrors `golden_textmap.rs`'s `LOCKED_DOOR`.
-/// Room `b` is secret so the sector half of the arbiter has a value to find.
+/// Two rooms authored apart (gap 64 on x), `{PORTAL}`, `{KEY}`, `{EXITS}`,
+/// `{TELEPORTS}` and `{THINGS_B}` filled per fixture. Geometry mirrors
+/// `golden_textmap.rs`'s `LOCKED_DOOR`. Room `b` is secret so the sector
+/// half of the arbiter has a value to find.
 const BASE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
   "rooms":[
     { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
@@ -31,14 +35,43 @@ const BASE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
       ] },
     { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
       "floor":0, "ceiling":128, "light":160, "secret": true,
-      "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+      "things":[{THINGS_B}] }
   ],
   "portals":[{PORTAL}],
-  "exits":[{EXITS}] }"#;
+  "exits":[{EXITS}],
+  "teleports":[{TELEPORTS}] }"#;
 
 const PLAIN: &str = r#"{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }"#;
 const DOOR: &str = r#"{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128],
   "door_thickness":32, "alcove_near":16, "alcove_far":16 }"#;
+
+/// A free-standing pad in room `a` (square 32..96 × 160..224, clear of both
+/// the player start and the west wall) delivering into room `b`. Repeatable
+/// and crossable by anything: the `97` special.
+const TELEPORT_ISLAND: &str = r#"{ "id":"i", "room":"a", "pad":{"island":[64,192]},
+  "to":{"room":"b","at":[448,128],"angle":90} }"#;
+/// The same delivery from a pad recessed into room `a`'s north wall, fired
+/// once: the `39` special.
+const TELEPORT_WALL_ONE_SHOT: &str = r#"{ "id":"w", "room":"a", "pad":{"wall":[64,256]},
+  "to":{"room":"b","at":[448,128],"angle":90}, "repeatable":false }"#;
+/// A monsters-only pad in room `b` delivering into room `a`: the `126`
+/// special. The destination is `[64,64]` and not room `a`'s center, where
+/// the player start stands: nothing in the compiler polices an arrival
+/// point that lands on another thing, so the fixture keeps the two apart by
+/// hand rather than leaning on a check that is not there. Pair with
+/// [`IMP_B`], whose species sets the clearance the destination must offer
+/// (`teleports::arriving_dims` takes the largest species in the pad's own
+/// room).
+const TELEPORT_MONSTERS: &str = r#"{ "id":"m", "room":"b", "pad":{"island":[448,192]},
+  "to":{"room":"a","at":[64,64],"angle":0}, "monsters_only":true }"#;
+/// [`TELEPORT_MONSTERS`] fired once: the `125` special.
+const TELEPORT_MONSTERS_ONE_SHOT: &str = r#"{ "id":"mo", "room":"b", "pad":{"island":[448,192]},
+  "to":{"room":"a","at":[64,64],"angle":0}, "monsters_only":true, "repeatable":false }"#;
+/// A monster in room `b`, clear of the pad square there. Rule P27 wants a
+/// monster-holding room to have a portal or be a teleport destination, so
+/// every fixture that places it also carries the [`PLAIN`] portal.
+const IMP_B: &str = r#"{ "kind":"imp", "at":[384,64], "angle":0 }"#;
 
 /// A door locked to `lock`, in place of the `DOOR` portal. One fixture per
 /// key color: blue, yellow and red are three distinct specials in the
@@ -71,11 +104,34 @@ fn exit(trigger: &str, secret: bool, at_y: i32) -> String {
     )
 }
 
-fn specials_of(portal: &str, key_thing: &str, exits: &str) -> (BTreeSet<u16>, BTreeSet<u16>) {
+/// A `teleport`-triggered exit on room **`b`**'s east wall (x = 576),
+/// centered at `at_y`.
+///
+/// Not [`exit`] with a different trigger string: rule P26 requires a
+/// teleport exit's room to carry no portal and to hold a teleport
+/// destination, and room `a` — where the player starts and every teleport
+/// fixture's pad sits — satisfies neither. Room `b` is the room the
+/// teleports deliver into, so the exit goes there and the fixture drops its
+/// portal.
+fn teleport_exit(at_y: i32) -> String {
+    format!(
+        r#"{{ "room":"b", "trigger":"teleport", "secret":false, "width":64, "at":[576,{at_y}] }}"#
+    )
+}
+
+fn specials_of(
+    portal: &str,
+    key_thing: &str,
+    exits: &str,
+    teleports: &str,
+    things_b: &str,
+) -> (BTreeSet<u16>, BTreeSet<u16>) {
     let json = BASE
         .replace("{PORTAL}", portal)
         .replace("{KEY}", key_thing)
-        .replace("{EXITS}", exits);
+        .replace("{EXITS}", exits)
+        .replace("{TELEPORTS}", teleports)
+        .replace("{THINGS_B}", things_b);
     let ir = Ir::from_json(&json).expect("fixture parses");
     let tables = Tables::load().expect("tables");
     let out = compile(&ir, &tables).expect("fixture compiles");
@@ -101,32 +157,57 @@ fn every_construct_the_compiler_emits_is_in_the_curated_sets() {
     let tables = Tables::load().expect("tables");
     let mut lines = BTreeSet::new();
     let mut sectors = BTreeSet::new();
-    let fixtures: [(String, String, String); 8] = [
-        (PLAIN.to_owned(), String::new(), String::new()),
-        (DOOR.to_owned(), String::new(), String::new()),
-        (locked("blue_card"), key("blue_card"), String::new()),
-        (locked("yellow_card"), key("yellow_card"), String::new()),
+    let fixtures = [
+        specials_of(PLAIN, "", "", "", ""),
+        specials_of(DOOR, "", "", "", ""),
+        specials_of(&locked("blue_card"), &key("blue_card"), "", "", ""),
+        specials_of(&locked("yellow_card"), &key("yellow_card"), "", "", ""),
         // A skull rather than a card: the two key forms of one color share a
         // door special, and this fixture pins that half of the mapping too.
-        (locked("red_skull"), key("red_skull"), String::new()),
-        (
-            PLAIN.to_owned(),
-            String::new(),
-            format!(
+        specials_of(&locked("red_skull"), &key("red_skull"), "", "", ""),
+        specials_of(
+            PLAIN,
+            "",
+            &format!(
                 "{}, {}",
                 exit("switch", false, 64),
                 exit("walkover", true, 192)
             ),
+            "",
+            "",
         ),
-        (
-            PLAIN.to_owned(),
-            String::new(),
-            exit("walkover", false, 128),
+        specials_of(PLAIN, "", &exit("walkover", false, 128), "", ""),
+        specials_of(PLAIN, "", &exit("switch", true, 128), "", ""),
+        // One fixture per teleport special: an island pad (97), a wall pad
+        // fired once (39), and the monsters-only pair (126, 125), which
+        // needs a monster in the pad's room to be worth emitting at all.
+        specials_of(PLAIN, "", &exit("switch", false, 128), TELEPORT_ISLAND, ""),
+        specials_of(
+            PLAIN,
+            "",
+            &exit("switch", false, 128),
+            TELEPORT_WALL_ONE_SHOT,
+            "",
         ),
-        (PLAIN.to_owned(), String::new(), exit("switch", true, 128)),
+        specials_of(
+            PLAIN,
+            "",
+            &exit("switch", false, 128),
+            TELEPORT_MONSTERS,
+            IMP_B,
+        ),
+        specials_of(
+            PLAIN,
+            "",
+            &exit("switch", false, 128),
+            TELEPORT_MONSTERS_ONE_SHOT,
+            IMP_B,
+        ),
+        // Rule P26's shape: no portal at all, and the exit sits in the room
+        // the teleport delivers into, reached only across the pad.
+        specials_of("", "", &teleport_exit(128), TELEPORT_ISLAND, ""),
     ];
-    for (portal, key_thing, exits) in &fixtures {
-        let (l, s) = specials_of(portal, key_thing, exits);
+    for (l, s) in fixtures {
         lines.extend(l);
         sectors.extend(s);
     }
@@ -147,7 +228,7 @@ fn the_curated_sets_hold_their_expected_values_today() {
     let tables = Tables::load().expect("tables");
     assert_eq!(
         tables.emittable_line_specials(),
-        BTreeSet::from([1, 26, 27, 28, 11, 51, 52, 124])
+        BTreeSet::from([1, 26, 27, 28, 11, 51, 52, 124, 39, 97, 125, 126])
     );
     assert_eq!(
         tables.named_sector_specials(),
@@ -159,10 +240,7 @@ fn the_curated_sets_hold_their_expected_values_today() {
 fn sourced_but_unemitted_specials_stay_out_of_the_emittable_set() {
     let tables = Tables::load().expect("tables");
     let set = tables.emittable_line_specials();
-    for s in [tables.lift_switch_special(), tables.lift_walkover_special()]
-        .into_iter()
-        .chain(tables.teleport_specials())
-    {
+    for s in [tables.lift_switch_special(), tables.lift_walkover_special()] {
         assert!(!set.contains(&s), "special {s} has no compiler pass yet");
     }
 }

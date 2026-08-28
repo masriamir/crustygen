@@ -218,15 +218,18 @@ of the explicit `NotDerivable` rows below, not a silent omission, and several
 frontmatter fields (`identity.title`/`.author`/`.iwad`/`.outputs`/`.seed`,
 most of `combat`'s administrative fields, `progression.doors`'s
 speed/behavior settings, and others) have no row at all: nothing this checker
-does turns on their value. Unlike the rest of the module, nothing here
-re-derives a playability rule — every row is a target-vs-actual comparison, so
-the only sourcing burden is the ammo ratio's damage figures and the two
-thing-flag bits (`MTF_AMBUSH` = 8; multiplayer-only = 16, which the pinned
-source writes as a raw literal with no named constant).
+does turns on their value. Unlike the rest of the module, all of these rows
+but one re-derive no playability rule — each is a target-vs-actual
+comparison — so the only sourcing burden is the ammo ratio's damage figures,
+the two thing-flag bits (`MTF_AMBUSH` = 8; multiplayer-only = 16, which the
+pinned source writes as a raw literal with no named constant), and the
+teleport specials the two pad counts read. The one exception is
+`progression.exit.trigger`, which borrows the flood's teleport-only
+predicate; see the `NotDerivable` discussion below.
 
-Thirty-five rows are fixed, plus one per spec monster species, one per placed
+Thirty-six rows are fixed, plus one per spec monster species, one per placed
 species the spec never names (always `Fail`, target `absent`), and one per
-`sustain.powerups[]` entry. Entrada against its paired spec produces 48.
+`sustain.powerups[]` entry. Entrada against its paired spec produces 49.
 
 **Verdict discipline.** A range (`MinMax`) or exact-count or boolean target is
 `Pass`/`Fail` — those are decidable. A **scalar continuous** target
@@ -264,9 +267,18 @@ Five more become `NotDerivable` only when the map gives them nothing to
 measure: `scale.size` (`no boundary geometry to measure`),
 `scale.vertical_range` (`no sectors present`), `players.start_facing` (`no
 player1_start placed`), `aesthetics.lighting.min` and `.max` (`no sectors
-present`). And `progression.exit.trigger` is `NotDerivable` whenever the spec
-targets `teleport`: this compiler emits no teleports, so that target can never
-be measured (`no teleports emitted`).
+present`).
+
+`progression.exit.trigger` is decidable for all three targets, including
+`teleport`. A teleport exit emits exactly a plain walkover exit's specials
+(`compile::exits`), so nothing on the line tells them apart — what does is
+where the line sits. The row reads `teleport` when the map carries walkover
+exit specials, no switch ones, and *every* sector holding a crossable
+walkover exit line is teleport-only in `flood::teleport_only_sectors`'s
+sense: the flood with teleport edges reaches it and the flood without them
+does not. A map with no teleports, or one whose exit sector can also be
+walked to, reads `walkover` — which is rule P26's own shape, measured rather
+than assumed.
 
 Two readings worth pinning, both recorded at their functions:
 
@@ -369,7 +381,7 @@ every conformance row as `{parameter}: {verdict} (target {target}, actual
 then a one-line summary:
 
 ```
-0 blocking, 0 warning(s), 48 conformance row(s), 3 tag(s)
+0 blocking, 0 warning(s), 49 conformance row(s), 3 tag(s)
 ```
 
 Exit codes:

@@ -11,14 +11,20 @@
 //! `combat.sound.propagation`, `combat.max_simultaneous`), and several more
 //! become `NotDerivable` only when the map itself gives [`rows`] nothing to
 //! measure; `docs/check.md`'s "Conformance" section has the full list. Unlike
-//! `scene.rs`/`invariants.rs`/`flood.rs`, nothing here re-derives a
-//! playability rule from the pinned engine — every row is a plain
-//! target-vs-actual comparison, so the only sourcing burden is the ammo
-//! ratio's damage-per-ammo figures ([`crate::tables::Tables::weapon_damage`],
+//! `scene.rs`/`invariants.rs`/`flood.rs`, all but one row here is a plain
+//! target-vs-actual comparison that re-derives no playability rule from the
+//! pinned engine, so the only sourcing burden is the ammo ratio's
+//! damage-per-ammo figures ([`crate::tables::Tables::weapon_damage`],
 //! [`crate::tables::Tables::weapon_ammo_grant`]), the `MTF_AMBUSH` bit
 //! ([`crate::tables::Tables::thing_flag`], sourced in `engine.toml`'s
-//! `[thing.flags]`), and the engine fact cited on the
-//! `MULTIPLAYER_ONLY_BIT` thing-flag constant below.
+//! `[thing.flags]`), the teleport specials the two pad counts read
+//! ([`crate::tables::Tables::player_teleport_specials`],
+//! [`crate::tables::Tables::monster_teleport_specials`]), and the engine fact
+//! cited on the `MULTIPLAYER_ONLY_BIT` thing-flag constant below. The
+//! exception is `progression.exit.trigger`: a teleport exit emits the same
+//! specials as a plain walkover one, so the row borrows
+//! [`crate::check::flood::teleport_only_sectors`]'s reachability predicate
+//! rather than reading the line.
 //!
 //! [`rows`] implements exactly the row catalog in the Task 10 brief, in the
 //! brief's own order, and follows its verdict rules: a `MinMax` or exact-count
@@ -150,6 +156,56 @@ fn count_specials(scene: &Scene, specials: &[i32]) -> u32 {
 /// Whether any `fronts_this` boundary in `scene` carries one of `specials`.
 fn any_special_present(scene: &Scene, specials: &[i32]) -> bool {
     count_specials(scene, specials) > 0
+}
+
+/// Distinct pads any thing may cross: the back sectors of `fronts_this`
+/// boundaries carrying a player teleport special. A pad is a square, so its
+/// four edges share one back sector — this counts pads, not edges, which is
+/// what `progression.teleports.count` means by "teleports".
+fn count_player_pads(scene: &Scene, tables: &Tables) -> u32 {
+    let specials: Vec<i32> = tables
+        .player_teleport_specials()
+        .into_iter()
+        .map(i32::from)
+        .collect();
+    let pads: BTreeSet<usize> = scene
+        .sectors
+        .iter()
+        .flat_map(|s| &s.boundary)
+        .filter(|b| b.fronts_this && specials.contains(&b.special))
+        .filter_map(|b| b.neighbor)
+        .collect();
+    u32::try_from(pads.len()).expect("pad counts fit u32")
+}
+
+/// Distinct monsters-only pads whose host room holds at least one monster —
+/// a teleport ambush.
+///
+/// The host is the pad edge's *front* sector, the one whose boundary list
+/// the `fronts_this` mirror sits in: the pad is always the trigger line's
+/// back sector ([`crate::ir::Teleport`]), so the front side is the room the
+/// monsters walk in from. A monsters-only pad in a room with no monster is
+/// no ambush, and one room's monsters can stage several.
+fn count_teleport_ambushes(scene: &Scene, tables: &Tables) -> u32 {
+    let specials: Vec<i32> = tables
+        .monster_teleport_specials()
+        .into_iter()
+        .map(i32::from)
+        .collect();
+    let monster_sectors: BTreeSet<usize> = monsters(scene, tables)
+        .iter()
+        .filter_map(|t| t.sector)
+        .collect();
+    let pads: BTreeSet<usize> = scene
+        .sectors
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| monster_sectors.contains(i))
+        .flat_map(|(_, s)| &s.boundary)
+        .filter(|b| b.fronts_this && specials.contains(&b.special))
+        .filter_map(|b| b.neighbor)
+        .collect();
+    u32::try_from(pads.len()).expect("pad counts fit u32")
 }
 
 /// Every thing in `scene` classified as a monster: `tables.spawnhealth(name)`
@@ -525,18 +581,26 @@ fn exit_kind_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conformanc
 }
 
 /// `progression.exit.trigger`: switch (11/51) versus walkover (52/124)
-/// specials found. [`Verdict::NotDerivable`] when the spec targets
-/// [`ExitTrigger::Teleport`] — this compiler emits no teleports yet
-/// (`KNOWN-GAPS.md`), so that target can never be measured.
+/// specials found — and, among the walkover exits, the
+/// [`ExitTrigger::Teleport`] ones.
+///
+/// A teleport exit emits the same specials as a plain walkover exit
+/// ([`crate::compile::exits`]), so nothing on the line itself tells the two
+/// apart. What does is where the line sits: rule P26's teleport exit is a
+/// walkover line in a room the player can only arrive in by teleport, which
+/// is exactly [`crate::check::flood::teleport_only_sectors`]'s predicate.
+/// Every sector carrying a crossable walkover exit line must be
+/// teleport-only for the map to read `teleport`; one that can also be walked
+/// to reads `walkover`.
+///
+/// The "crossable" qualifier makes that set non-empty whenever a walkover
+/// special is present at all, so the `all` below is never vacuously true on
+/// a map worth grading: `P_CrossSpecialLine` fires on neither a one-sided
+/// line nor a blocking one, so [`crate::compile::exits`] builds every
+/// walkover threshold two-sided and non-blocking, and a hand-authored map
+/// that did otherwise has an exit the engine would never fire.
 fn exit_trigger_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> ConformanceRow {
     let target = exit_trigger_name(fm.progression.exit.trigger).to_owned();
-    if fm.progression.exit.trigger == ExitTrigger::Teleport {
-        return not_derivable(
-            "progression.exit.trigger".to_owned(),
-            target,
-            "no teleports emitted",
-        );
-    }
     let switches = [
         i32::from(tables.exit_switch_special()),
         i32::from(tables.secret_exit_switch_special()),
@@ -547,9 +611,27 @@ fn exit_trigger_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conform
     ];
     let has_switch = any_special_present(scene, &switches);
     let has_walkover = any_special_present(scene, &walkovers);
-    let actual_trigger = match (has_switch, has_walkover) {
-        (true, false) => Some(ExitTrigger::Switch),
-        (false, true) => Some(ExitTrigger::Walkover),
+    let teleport_only = crate::check::flood::teleport_only_sectors(scene, tables);
+    let walkover_goal_sectors: Vec<usize> = scene
+        .sectors
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            s.boundary
+                .iter()
+                .any(|b| walkovers.contains(&b.special) && b.passable())
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let is_teleport_exit = has_walkover
+        && !has_switch
+        && teleport_only
+            .as_ref()
+            .is_some_and(|only| walkover_goal_sectors.iter().all(|&s| only[s]));
+    let actual_trigger = match (has_switch, has_walkover, is_teleport_exit) {
+        (true, false, _) => Some(ExitTrigger::Switch),
+        (false, true, true) => Some(ExitTrigger::Teleport),
+        (false, true, false) => Some(ExitTrigger::Walkover),
         _ => None,
     };
     let actual = actual_trigger.map_or_else(
@@ -625,7 +707,7 @@ fn progression_rows(
     rows.push(range_row(
         "progression.teleports.count".to_owned(),
         &fm.progression.teleports.count,
-        count_specials(scene, &tables.teleport_specials().map(i32::from)),
+        count_player_pads(scene, tables),
     ));
 }
 
@@ -1065,6 +1147,11 @@ pub fn rows(
     monster_rows(fm, scene, tables, &mut rows);
     rows.push(hitscanner_ratio_row(fm, scene, tables));
     rows.push(deaf_ratio_row(fm, scene, tables));
+    rows.push(range_row(
+        "combat.ambush.teleport_ambushes".to_owned(),
+        &fm.combat.ambush.teleport_ambushes,
+        count_teleport_ambushes(scene, tables),
+    ));
     rows.push(sound_propagation_row(fm));
     rows.push(not_derivable(
         "combat.max_simultaneous".to_owned(),
@@ -1743,20 +1830,77 @@ thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
         assert_eq!(r.actual, "both", "got {r:?}");
     }
 
-    #[test]
-    fn exit_trigger_teleport_target_is_not_derivable() {
+    /// [`test_spec_text`]'s frontmatter with `progression.exit.trigger`
+    /// replaced by `trigger`. The template names a trigger exactly once, so
+    /// this patches that one line and nothing else.
+    fn frontmatter_with_exit_trigger(trigger: ExitTrigger) -> Frontmatter {
         let tables = Tables::load().expect("tables");
         let base = test_spec_text();
-        let patched = base.replace("trigger: switch", "trigger: teleport");
-        assert_ne!(patched, base, "the patch changed nothing");
-        let doc = Spec::from_markdown(&patched, &tables).expect("spec parses");
-        let scene = Scene {
-            sectors: vec![],
-            things: vec![],
-        };
-        let r = exit_trigger_row(&doc.spec.frontmatter, &scene, &tables);
-        assert_eq!(r.verdict, Verdict::NotDerivable, "got {r:?}");
-        assert!(r.actual.contains("no teleports emitted"), "got {r:?}");
+        let patched = base.replace(
+            "trigger: switch",
+            &format!("trigger: {}", exit_trigger_name(trigger)),
+        );
+        Spec::from_markdown(&patched, &tables)
+            .expect("spec parses")
+            .spec
+            .frontmatter
+    }
+
+    #[test]
+    fn exit_trigger_teleport_passes_only_for_a_teleport_only_exit_sector() {
+        let (scene, tables) =
+            crate::check::fixtures::scene_of(crate::check::fixtures::TELEPORT_MAP);
+        let fm = frontmatter_with_exit_trigger(ExitTrigger::Teleport);
+        let row = exit_trigger_row(&fm, &scene, &tables);
+        assert_eq!(row.verdict, Verdict::Pass, "{row:?}");
+        assert_eq!(row.actual, "teleport");
+        // A walkover target on the same map fails: the exit's sectors are
+        // reachable only across the pad, so the trigger reads `teleport`.
+        let row = exit_trigger_row(
+            &frontmatter_with_exit_trigger(ExitTrigger::Walkover),
+            &scene,
+            &tables,
+        );
+        assert_eq!(row.verdict, Verdict::Fail, "{row:?}");
+    }
+
+    #[test]
+    fn teleports_count_counts_pads_not_edges() {
+        let (scene, tables) =
+            crate::check::fixtures::scene_of(crate::check::fixtures::TELEPORT_MAP);
+        assert_eq!(count_player_pads(&scene, &tables), 1, "four edges, one pad");
+    }
+
+    #[test]
+    fn teleport_ambushes_counts_monsters_only_pads_in_monster_sectors() {
+        const START: &str = "thing { x = 32.0; y = 32.0; angle = 90; type = 1; single = true; }";
+        const IMP: &str = "thing { x = 32.0; y = 96.0; angle = 0; type = 3001; single = true; }";
+        let base = crate::check::fixtures::TELEPORT_MAP;
+
+        // The fixture's own pad carries 97 — a special any thing may cross —
+        // so a monster standing beside it is not a teleport ambush.
+        let player_pad = base.replace(START, &format!("{START}\n{IMP}"));
+        assert_ne!(player_pad, base, "the patch changed nothing");
+        let (scene, tables) = crate::check::fixtures::scene_of(&player_pad);
+        assert_eq!(
+            count_teleport_ambushes(&scene, &tables),
+            0,
+            "97 is not a monsters-only special"
+        );
+
+        // The same pad made monsters-only: one ambush, counted once for all
+        // four of the pad's edges.
+        let ambush = player_pad.replace("special = 97;", "special = 126;");
+        assert_ne!(ambush, player_pad, "the patch changed nothing");
+        let (scene, tables) = crate::check::fixtures::scene_of(&ambush);
+        assert_eq!(count_teleport_ambushes(&scene, &tables), 1);
+
+        // A monsters-only pad in a room holding no monster is not one: the
+        // ambush is the monsters, not the pad.
+        let no_monster = base.replace("special = 97;", "special = 126;");
+        assert_ne!(no_monster, base, "the patch changed nothing");
+        let (scene, tables) = crate::check::fixtures::scene_of(&no_monster);
+        assert_eq!(count_teleport_ambushes(&scene, &tables), 0);
     }
 
     #[test]

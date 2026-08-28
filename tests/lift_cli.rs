@@ -203,7 +203,7 @@ fn vocabulary_flag_appends_a_verdict_to_human_and_json_output() {
 fn vocabulary_flag_names_unknown_values() {
     let textmap = r#"namespace = "doom";
 vertex { x = 0; y = 0; } vertex { x = 128; y = 0; } vertex { x = 128; y = 128; } vertex { x = 0; y = 128; }
-linedef { v1 = 0; v2 = 1; sidefront = 0; special = 97; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; special = 62; }
 linedef { v1 = 1; v2 = 2; sidefront = 1; }
 linedef { v1 = 2; v2 = 3; sidefront = 2; }
 linedef { v1 = 3; v2 = 0; sidefront = 3; }
@@ -220,7 +220,7 @@ thing { x = 64; y = 64; type = 1; } thing { x = 80; y = 64; type = 9999; }
     std::fs::remove_file(&path).ok();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("expressible: no"), "{stdout}");
-    assert!(stdout.contains("line specials unknown: 97"), "{stdout}");
+    assert!(stdout.contains("line specials unknown: 62"), "{stdout}");
     // 46 (the tall red torch) used to stand in for an unknown thing type
     // here; it is a real `[things]` row now, so this asserts on 9999 —
     // a doomednum no vanilla mobjinfo entry defines, which keeps the test
