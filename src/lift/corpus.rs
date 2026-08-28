@@ -58,6 +58,22 @@ pub struct Buckets {
     pub textmap_unparseable: u64,
 }
 
+impl Buckets {
+    /// Candidates that failed to load — every failure bucket except
+    /// `no_maps`. A WAD carrying no map group loaded fine and is ordinary
+    /// corpus content (a resource WAD), so it is counted and named but must
+    /// not read as a failure; on a real idgames sample it would otherwise
+    /// make a non-zero exit the norm.
+    #[must_use]
+    pub fn load_failures(&self) -> u64 {
+        self.archive_unreadable
+            + self.wad_unreadable
+            + self.unsupported_format
+            + self.assembly_refused
+            + self.textmap_unparseable
+    }
+}
+
 /// A whole sweep's output.
 #[derive(Debug)]
 pub struct Sweep {
@@ -65,7 +81,9 @@ pub struct Sweep {
     pub buckets: Buckets,
     /// Unique maps, in discovery order.
     pub maps: Vec<MapRecord>,
-    /// One line per counted failure, for stderr.
+    /// One line per counted failure *and* per map-free WAD, for stderr.
+    /// A map-free WAD is ordinary corpus content, so these lines are wider
+    /// than the exit-code signal: use [`Buckets::load_failures`] for that.
     pub failures: Vec<String>,
 }
 
@@ -486,6 +504,13 @@ pub struct Provenance {
 }
 
 /// Reads `<dir>/sample-manifest.json`; `None` when absent or unparseable.
+///
+/// An absent manifest is silent — most swept directories are not samples.
+/// One that is present but unreadable or malformed warns on stderr, because
+/// silently dropping the provenance section would leave a report that looks
+/// complete while having lost the identity of its sample. This library
+/// function writes to stderr only because stderr is `crustygen-corpus`'s
+/// operator channel and this is the sole caller.
 #[must_use]
 pub fn read_provenance(dir: &Path) -> Option<Provenance> {
     /// One manifest entry; only the archive id is echoed, the rest of the
@@ -503,8 +528,22 @@ pub fn read_provenance(dir: &Path) -> Option<Provenance> {
         fetch_list_hash: String,
         entries: Vec<Entry>,
     }
-    let text = std::fs::read_to_string(dir.join("sample-manifest.json")).ok()?;
-    let m: Manifest = serde_json::from_str(&text).ok()?;
+    let path = dir.join("sample-manifest.json");
+    let parsed = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Manifest>(&text).ok());
+    let Some(m) = parsed else {
+        // Reached for a read failure as well as a parse failure; `exists`
+        // separates "this directory is simply not a sample" from "its
+        // manifest is there but unusable", which is the case worth naming.
+        if path.exists() {
+            eprintln!(
+                "crustygen-corpus: sample-manifest.json is unreadable or malformed; \
+                 no provenance recorded"
+            );
+        }
+        return None;
+    };
     let mut ids: Vec<u64> = m.entries.iter().map(|e| e.id).collect();
     ids.sort_unstable();
     Some(Provenance {
@@ -605,6 +644,12 @@ pub fn render_markdown(provenance: Option<&Provenance>, b: &Buckets, a: &Aggrega
             s,
             "\n## {title}\n\n| Value | Maps | Share |\n|---|---|---|\n"
         );
+        if list.is_empty() {
+            // No out-of-set value on this axis: say so in a row, mirroring
+            // the stepless-curve baseline, rather than leaving a bare header.
+            s.push_str("| (none) | | |\n");
+            continue;
+        }
         for bl in list {
             let _ = writeln!(s, "| {} | {} | {} |", bl.value, bl.maps, pct(bl.share));
         }
@@ -834,6 +879,9 @@ mod tests {
         ] {
             assert!(md.contains(needle), "missing {needle:?}:\n{md}");
         }
+        // Sector and thing axes have no blockers here: an empty axis states
+        // so in a row rather than leaving a bare table header.
+        assert_eq!(md.matches("| (none) | | |").count(), 2, "{md}");
         assert!(!md.contains("## Sample"));
     }
 
@@ -857,5 +905,20 @@ mod tests {
         assert_eq!(md.matches("| 0 | 0.0 % |").count(), 2, "{md}");
         assert_eq!(md.matches("Order chosen: (none)").count(), 2, "{md}");
         assert_eq!(read_provenance(Path::new("/nonexistent-dir")), None);
+
+        // Present but malformed: refused, and named on stderr.
+        let bad = std::env::temp_dir().join(format!(
+            "crustygen-prov-bad-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(bad.join("sample-manifest.json"), b"{ not json").unwrap();
+        let got = read_provenance(&bad);
+        std::fs::remove_dir_all(&bad).ok();
+        assert_eq!(got, None);
     }
 }

@@ -77,6 +77,10 @@ fn a_mixed_directory_sweeps_dedups_and_buckets() {
     );
     assert!(stderr.contains("broken.zip"), "{stderr}");
     assert!(stderr.contains("MAP02"), "{stderr}");
+    // The map-free member is named even though it does not move the exit code.
+    assert!(stderr.contains("RES.WAD: no map groups"), "{stderr}");
+    // `--json` alone routes the report to the file, leaving stdout empty.
+    assert!(out.stdout.is_empty(), "{:?}", out.stdout);
     let report: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
     std::fs::remove_dir_all(&dir).ok();
@@ -180,4 +184,26 @@ fn usage_and_empty_directories_exit_2() {
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("no .zip or .wad candidates"));
+}
+
+/// A map-free WAD is ordinary corpus content: counted and named, but not a
+/// load failure, so a corpus of nothing but resource WADs still exits 0.
+#[test]
+fn a_map_free_wad_is_counted_but_does_not_fail_the_run() {
+    let dir = corpus_dir("resource", &[("res.wad", resource_wad())]);
+    let json_path = dir.join("out.json");
+    let out = bin()
+        .args([dir.to_str().unwrap(), "--json", json_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    assert!(stderr.contains("res.wad: no map groups"), "{stderr}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(report["buckets"]["no_maps"], 1);
+    assert_eq!(report["buckets"]["maps_unique"], 0);
+    assert_eq!(report["buckets"]["wads"], 1);
+    assert_eq!(report["maps"].as_array().unwrap().len(), 0);
 }

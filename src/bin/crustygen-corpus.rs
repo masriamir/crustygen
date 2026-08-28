@@ -9,9 +9,14 @@
 //! to stdout by default, to `--report FILE` when given. `--json FILE` writes
 //! the full document, per-map rows included.
 //!
-//! Exit 0 when every candidate surveyed, 1 when at least one archive, WAD,
-//! or map failed to load (each named on stderr; survivors still counted),
-//! 2 on a usage, I/O, or no-candidates failure.
+//! Exit 0 when every candidate loaded, 1 when at least one archive, WAD, or
+//! map failed to *load* (each named on stderr; survivors still counted), 2 on
+//! a usage, I/O, or no-candidates failure.
+//!
+//! A WAD carrying no map group is ordinary corpus content — a resource WAD —
+//! not a load failure. It is named on stderr and counted in the `no_maps`
+//! bucket, but it does not affect the exit code; on a real idgames sample,
+//! counting it would make a non-zero exit the norm.
 
 use std::path::PathBuf;
 
@@ -77,7 +82,9 @@ fn real_main() -> i32 {
 }
 
 /// Sweeps the directory, writes the requested outputs, and returns the exit
-/// code (0 all surveyed, 1 some candidates failed).
+/// code (0 all loaded, 1 some candidates failed to load). Every failure line
+/// is echoed to stderr, map-free WADs included, but only the load-failure
+/// buckets move the exit code.
 fn run(args: &Args) -> Result<i32, String> {
     let tables = Tables::load().map_err(|e| format!("tables: {e}"))?;
     let vocab = Vocabulary::from_tables(&tables);
@@ -109,5 +116,5 @@ fn run(args: &Args) -> Result<i32, String> {
         None if args.json.is_none() => print!("{markdown}"),
         None => {}
     }
-    Ok(i32::from(!sweep.failures.is_empty()))
+    Ok(i32::from(sweep.buckets.load_failures() > 0))
 }
