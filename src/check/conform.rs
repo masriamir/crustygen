@@ -15,9 +15,10 @@
 //! playability rule from the pinned engine — every row is a plain
 //! target-vs-actual comparison, so the only sourcing burden is the ammo
 //! ratio's damage-per-ammo figures ([`crate::tables::Tables::weapon_damage`],
-//! [`crate::tables::Tables::weapon_ammo_grant`]) and the two engine facts
-//! cited on the `AMBUSH_BIT`/`MULTIPLAYER_ONLY_BIT` thing-flag constants
-//! below.
+//! [`crate::tables::Tables::weapon_ammo_grant`]), the `MTF_AMBUSH` bit
+//! ([`crate::tables::Tables::thing_flag`], sourced in `engine.toml`'s
+//! `[thing.flags]`), and the engine fact cited on the
+//! `MULTIPLAYER_ONLY_BIT` thing-flag constant below.
 //!
 //! [`rows`] implements exactly the row catalog in the Task 10 brief, in the
 //! brief's own order, and follows its verdict rules: a `MinMax` or exact-count
@@ -382,9 +383,9 @@ fn start_facing_row(fm: &Frontmatter, scene: &Scene) -> ConformanceRow {
 /// Sourced from `p_mobj.c`'s `P_SpawnMapThing` (pinned commit
 /// `a77dfb96cb91780ca334d0d4cfd86957558007e0`): `if (!netgame &&
 /// (mthing->options & 16)) return;` — a thing carrying this bit is skipped
-/// entirely in single-player. Unlike [`AMBUSH_BIT`], this bit has no named
-/// `MTF_*` constant in the pinned `doomdef.h`; the source above uses the
-/// raw literal `16` itself.
+/// entirely in single-player. Unlike `MTF_AMBUSH` (sourced in `engine.toml`'s
+/// `[thing.flags]`), this bit has no named `MTF_*` constant in the pinned
+/// `doomdef.h`; the source above uses the raw literal `16` itself.
 const MULTIPLAYER_ONLY_BIT: u32 = 16;
 
 /// `players.coop_only_items`: whether any non-start thing in `scene` carries
@@ -624,7 +625,7 @@ fn progression_rows(
     rows.push(range_row(
         "progression.teleports.count".to_owned(),
         &fm.progression.teleports.count,
-        count_specials(scene, &[i32::from(tables.teleport_special())]),
+        count_specials(scene, &tables.teleport_specials().map(i32::from)),
     ));
 }
 
@@ -744,18 +745,9 @@ fn hitscanner_ratio_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Con
     )
 }
 
-/// The `MTF_AMBUSH` "deaf" thing-flag bit — bit 3, value 8.
-///
-/// Sourced from `doomdef.h` (pinned commit
-/// `a77dfb96cb91780ca334d0d4cfd86957558007e0`): `#define MTF_AMBUSH 8`, and
-/// `p_mobj.c`'s `P_SpawnMapThing`: `if (mthing->options & MTF_AMBUSH)
-/// mobj->flags |= MF_AMBUSH;` — the flag that makes a monster wake on sight
-/// rather than on hearing the player.
-const AMBUSH_BIT: u32 = 8;
-
-/// `combat.ambush.deaf_ratio`: monsters carrying [`AMBUSH_BIT`] over total
-/// monsters. `actual` reads `"no monsters"` when none are placed, per the
-/// brief.
+/// `combat.ambush.deaf_ratio`: monsters carrying the `MTF_AMBUSH` bit
+/// (`Tables::thing_flag("ambush")`) over total monsters. `actual` reads
+/// `"no monsters"` when none are placed, per the brief.
 fn deaf_ratio_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> ConformanceRow {
     let placed = monsters(scene, tables);
     if placed.is_empty() {
@@ -766,7 +758,10 @@ fn deaf_ratio_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conforman
             verdict: Verdict::Info,
         };
     }
-    let deaf = placed.iter().filter(|t| t.flags & AMBUSH_BIT != 0).count();
+    let ambush = tables
+        .thing_flag("ambush")
+        .expect("the ambush flag is sourced");
+    let deaf = placed.iter().filter(|t| t.flags & ambush != 0).count();
     info_row(
         "combat.ambush.deaf_ratio".to_owned(),
         fm.combat.ambush.deaf_ratio,

@@ -159,11 +159,10 @@ fn the_curated_sets_hold_their_expected_values_today() {
 fn sourced_but_unemitted_specials_stay_out_of_the_emittable_set() {
     let tables = Tables::load().expect("tables");
     let set = tables.emittable_line_specials();
-    for s in [
-        tables.lift_switch_special(),
-        tables.lift_walkover_special(),
-        tables.teleport_special(),
-    ] {
+    for s in [tables.lift_switch_special(), tables.lift_walkover_special()]
+        .into_iter()
+        .chain(tables.teleport_specials())
+    {
         assert!(!set.contains(&s), "special {s} has no compiler pass yet");
     }
 }
@@ -178,11 +177,10 @@ fn the_vanilla_list_contains_every_emittable_special_and_matches_its_citation() 
         "distinct count recorded in the citation"
     );
     assert!(tables.emittable_line_specials().is_subset(&vanilla));
-    for s in [
-        tables.lift_switch_special(),
-        tables.lift_walkover_special(),
-        tables.teleport_special(),
-    ] {
+    for s in [tables.lift_switch_special(), tables.lift_walkover_special()]
+        .into_iter()
+        .chain(tables.teleport_specials())
+    {
         assert!(vanilla.contains(&s));
     }
 }

@@ -163,6 +163,8 @@ struct TextureSet {
     /// The texture for a door's optional trim alcove sectors
     /// ([`crate::ir::Portal::alcove_near`]/[`crate::ir::Portal::alcove_far`]).
     trim: String,
+    /// The floor flat of a teleport pad — the GATE family.
+    pad: String,
     /// Width in pixels of the `switch` texture's canvas, so an exit line
     /// narrower than it can centre the texture rather than showing its
     /// left edge.
@@ -316,6 +318,18 @@ struct AmmoTable {
     weapon_grant: WeaponGrant,
 }
 
+/// Thing attribute flag bits (`engine.toml` `[thing.flags]`).
+#[derive(Debug, Deserialize)]
+struct ThingFlags {
+    ambush: u32,
+}
+
+/// `[thing]`: attribute tables for map things.
+#[derive(Debug, Deserialize)]
+struct ThingAttrs {
+    flags: ThingFlags,
+}
+
 #[derive(Debug, Deserialize)]
 struct Engine {
     movement: Movement,
@@ -332,6 +346,7 @@ struct Engine {
     ammo: AmmoTable,
     starts: Starts,
     game: Game,
+    thing: ThingAttrs,
 }
 
 /// The linedef specials for the level exit, keyed by
@@ -352,10 +367,14 @@ struct LiftSpecials {
     walkover: u16,
 }
 
-/// The linedef special for a teleporter line.
+/// The four teleporter line specials, keyed by who may cross and whether
+/// the line survives its first use.
 #[derive(Debug, Deserialize)]
-struct TeleportSpecial {
-    line: u16,
+struct TeleportSpecials {
+    repeatable: u16,
+    one_shot: u16,
+    monsters_only: u16,
+    monsters_only_one_shot: u16,
 }
 
 /// The linedef specials that open a door, keyed the same way the engine
@@ -370,7 +389,7 @@ struct Specials {
     locked: HashMap<String, toml::Value>,
     exit: ExitSpecials,
     lift: LiftSpecials,
-    teleport: TeleportSpecial,
+    teleport: TeleportSpecials,
 }
 
 /// The curated (not sourced — see [`Tables::is_door_texture`]) list of
@@ -620,10 +639,56 @@ impl Tables {
         self.vocabulary.specials.lift.walkover
     }
 
-    /// The linedef special for a teleporter line.
+    /// The linedef special for a teleporter line. `monsters_only` selects the
+    /// `!thing->player`-guarded pair (126/125); `repeatable` selects the
+    /// RETRIGGERS form, which keeps its special after firing.
     #[must_use]
-    pub fn teleport_special(&self) -> u16 {
-        self.vocabulary.specials.teleport.line
+    pub fn teleport_special(&self, monsters_only: bool, repeatable: bool) -> u16 {
+        let t = &self.vocabulary.specials.teleport;
+        match (monsters_only, repeatable) {
+            (false, true) => t.repeatable,
+            (false, false) => t.one_shot,
+            (true, true) => t.monsters_only,
+            (true, false) => t.monsters_only_one_shot,
+        }
+    }
+
+    /// All four teleporter specials, ascending.
+    #[must_use]
+    pub fn teleport_specials(&self) -> [u16; 4] {
+        let t = &self.vocabulary.specials.teleport;
+        let mut all = [
+            t.repeatable,
+            t.one_shot,
+            t.monsters_only,
+            t.monsters_only_one_shot,
+        ];
+        all.sort_unstable();
+        all
+    }
+
+    /// The two specials any thing may cross: `[repeatable, one_shot]`.
+    #[must_use]
+    pub fn player_teleport_specials(&self) -> [u16; 2] {
+        let t = &self.vocabulary.specials.teleport;
+        [t.repeatable, t.one_shot]
+    }
+
+    /// The two monsters-only specials: `[repeatable, one_shot]`.
+    #[must_use]
+    pub fn monster_teleport_specials(&self) -> [u16; 2] {
+        let t = &self.vocabulary.specials.teleport;
+        [t.monsters_only, t.monsters_only_one_shot]
+    }
+
+    /// A thing attribute flag bit by its sourced name (`engine.toml`
+    /// `[thing.flags]`): `"ambush"` is `MTF_AMBUSH`.
+    #[must_use]
+    pub fn thing_flag(&self, name: &str) -> Option<u32> {
+        match name {
+            "ambush" => Some(self.engine.thing.flags.ambush),
+            _ => None,
+        }
     }
 
     /// The sector special marking a sector "secret" (rule P18).
@@ -868,7 +933,8 @@ impl Tables {
     }
 
     /// The texture for a role (`wall`, `floor`, `ceiling`, `door`,
-    /// `door_track`, `switch`, `trim`) under a theme, if both resolve.
+    /// `door_track`, `switch`, `trim`, `pad`) under a theme, if both
+    /// resolve.
     #[must_use]
     pub fn texture(&self, role: &str, theme: &str) -> Option<&str> {
         let set = self.vocabulary.textures.get(theme)?;
@@ -880,6 +946,7 @@ impl Tables {
             "door_track" => Some(&set.door_track),
             "switch" => Some(&set.switch),
             "trim" => Some(&set.trim),
+            "pad" => Some(&set.pad),
             _ => None,
         }
     }
@@ -1075,7 +1142,9 @@ mod tests {
 
         // `progression.teleports`: the line special and the destination
         // thing a `teleport` portal needs on both ends.
-        assert_ne!(t.teleport_special(), 0, "a teleport special exists");
+        for s in t.teleport_specials() {
+            assert_ne!(s, 0, "a teleport special exists");
+        }
         assert!(
             t.thing_id("teleport_dest").is_some(),
             "`teleport_dest` has a thing ID"
@@ -1966,5 +2035,55 @@ mod tests {
             assert!(t.light_effect_special(name).is_some(), "unresolved: {name}");
         }
         assert!(t.light_effect_special("disco").is_none());
+    }
+
+    #[test]
+    fn the_four_teleport_specials_are_distinct_and_selected_by_both_flags() {
+        let t = Tables::load().expect("tables load");
+        let all = t.teleport_specials();
+        assert_eq!(
+            all,
+            [39, 97, 125, 126],
+            "ascending, the four vanilla teleport lines"
+        );
+        assert_eq!(
+            t.teleport_special(false, true),
+            97,
+            "player, repeatable (WR)"
+        );
+        assert_eq!(
+            t.teleport_special(false, false),
+            39,
+            "player, one-shot (W1)"
+        );
+        assert_eq!(
+            t.teleport_special(true, true),
+            126,
+            "monsters only, repeatable"
+        );
+        assert_eq!(
+            t.teleport_special(true, false),
+            125,
+            "monsters only, one-shot"
+        );
+        assert_eq!(t.player_teleport_specials(), [97, 39]);
+        assert_eq!(t.monster_teleport_specials(), [126, 125]);
+        for s in all {
+            assert!(t.vanilla_line_specials().contains(&s), "{s} is vanilla");
+        }
+    }
+
+    #[test]
+    fn the_pad_flat_resolves_for_every_theme() {
+        let t = Tables::load().expect("tables load");
+        assert_eq!(t.texture("pad", "tech_base"), Some("GATE3"));
+        assert_eq!(t.texture("pad", "no_such_theme"), None);
+    }
+
+    #[test]
+    fn the_ambush_thing_flag_is_bit_three() {
+        let t = Tables::load().expect("tables load");
+        assert_eq!(t.thing_flag("ambush"), Some(8));
+        assert_eq!(t.thing_flag("deaf"), None, "only the sourced name resolves");
     }
 }
