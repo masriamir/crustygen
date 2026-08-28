@@ -2,7 +2,7 @@
 //! deduplicated by content, with every failure counted in a bucket.
 //! Aggregation and the report live in the second half of this module.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crustywad::archive::Archive;
@@ -255,6 +255,220 @@ fn survey_wad(
     }
 }
 
+/// Where the greedy curve is sampled for the report.
+pub const GREEDY_CHECKPOINTS: [usize; 5] = [1, 5, 10, 21, 51];
+/// How many blockers per axis the report lists.
+pub const BLOCKER_TOP: usize = 25;
+
+/// Expressibility per axis as a fraction of a population of maps.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct AxisShare {
+    /// Fraction whose line specials are all emittable.
+    pub line_specials: f64,
+    /// Fraction whose sector specials are all nameable.
+    pub sector_specials: f64,
+    /// Fraction whose thing types are all in vocabulary.
+    pub thing_kinds: f64,
+    /// Fraction expressible on all three.
+    pub expressible: f64,
+}
+
+/// One out-of-set value and how many maps carry it.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct Blocker {
+    /// The raw value.
+    pub value: i32,
+    /// Maps carrying it.
+    pub maps: u64,
+    /// `maps / maps_unique`.
+    pub share: f64,
+}
+
+/// One greedy step.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct GreedyStep {
+    /// 1-based step.
+    pub k: usize,
+    /// The special added at this step.
+    pub special: i32,
+    /// Fraction of the population unblocked after this step.
+    pub cumulative_share: f64,
+}
+
+/// The greedy "add the special that unblocks the most maps" curve.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct GreedyCurve {
+    /// Every step until nothing is left to unblock.
+    pub steps: Vec<GreedyStep>,
+    /// `(k, cumulative_share)` at each of [`GREEDY_CHECKPOINTS`] that the
+    /// curve reaches (the share at the last step is used past its end).
+    pub checkpoints: Vec<(usize, f64)>,
+}
+
+/// The whole-sweep summary.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Aggregate {
+    /// Population size.
+    pub maps_unique: u64,
+    /// Shares over every unique map.
+    pub all: AxisShare,
+    /// Fraction of unique maps inside the vanilla special list.
+    pub vanilla_share: f64,
+    /// Shares over the vanilla-only slice.
+    pub vanilla: AxisShare,
+    /// Top out-of-set line specials by map share.
+    pub line_blockers: Vec<Blocker>,
+    /// Top out-of-set sector specials by map share.
+    pub sector_blockers: Vec<Blocker>,
+    /// Top out-of-set thing types by map share.
+    pub thing_blockers: Vec<Blocker>,
+    /// Greedy curve with thing kinds and sector specials held expressible.
+    pub greedy_line_axis: GreedyCurve,
+    /// Greedy curve over maps already ok on the other two axes. Its shares
+    /// are still over every unique map, so it plateaus below 1.0 whenever
+    /// some map is blocked on a sector special or a thing kind.
+    pub greedy_conjunction: GreedyCurve,
+}
+
+/// `n / of` as a fraction, with an empty population scoring 0.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "map counts are always far under f64's 52-bit mantissa"
+)]
+fn share(n: usize, of: usize) -> f64 {
+    if of == 0 { 0.0 } else { n as f64 / of as f64 }
+}
+
+fn axis_share(maps: &[&MapRecord]) -> AxisShare {
+    let n = maps.len();
+    let count = |f: fn(&Verdict) -> bool| share(maps.iter().filter(|m| f(&m.verdict)).count(), n);
+    AxisShare {
+        line_specials: count(|v| v.line_specials_ok),
+        sector_specials: count(|v| v.sector_specials_ok),
+        thing_kinds: count(|v| v.thing_kinds_ok),
+        expressible: count(|v| v.expressible),
+    }
+}
+
+/// The out-of-set values `pick` reports, ranked by how many maps carry them
+/// (ties by ascending value) and cut to [`BLOCKER_TOP`]. Each `unknown_*`
+/// list is already deduplicated, so a count is a map count.
+///
+/// # Panics
+///
+/// If a count does not fit a `u64`, which needs more maps than a directory
+/// of files can hold.
+fn blockers(maps: &[MapRecord], pick: fn(&Verdict) -> &[i32]) -> Vec<Blocker> {
+    let mut counts: BTreeMap<i32, usize> = BTreeMap::new();
+    for m in maps {
+        for &v in pick(&m.verdict) {
+            *counts.entry(v).or_insert(0) += 1;
+        }
+    }
+    let mut out: Vec<Blocker> = counts
+        .into_iter()
+        .map(|(value, n)| Blocker {
+            value,
+            maps: u64::try_from(n).expect("fits u64"),
+            share: share(n, maps.len()),
+        })
+        .collect();
+    out.sort_by(|a, b| b.maps.cmp(&a.maps).then(a.value.cmp(&b.value)));
+    out.truncate(BLOCKER_TOP);
+    out
+}
+
+/// Greedy set cover over `population`: each step adds the out-of-set
+/// special that turns the most still-blocked maps expressible on the line
+/// axis; ties go to the smaller special number. `population` is the set of
+/// maps eligible to be unblocked; `total` is the denominator.
+fn greedy(population: &[&MapRecord], total: usize) -> GreedyCurve {
+    let mut remaining: Vec<BTreeSet<i32>> = population
+        .iter()
+        .map(|m| m.verdict.unknown_line_specials.iter().copied().collect())
+        .filter(|s: &BTreeSet<i32>| !s.is_empty())
+        .collect();
+    let mut unblocked = population.len() - remaining.len();
+    let mut steps = Vec::new();
+    while !remaining.is_empty() {
+        let mut gain: BTreeMap<i32, usize> = BTreeMap::new();
+        for set in &remaining {
+            if set.len() == 1 {
+                *gain
+                    .entry(*set.iter().next().expect("non-empty"))
+                    .or_insert(0) += 1;
+            }
+        }
+        // A special that alone completes no map still makes progress; when
+        // no single special completes any map, add the one carried by the
+        // most maps.
+        let best = if gain.is_empty() {
+            let mut carried: BTreeMap<i32, usize> = BTreeMap::new();
+            for set in &remaining {
+                for &s in set {
+                    *carried.entry(s).or_insert(0) += 1;
+                }
+            }
+            carried
+                .into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+                .map(|(s, _)| s)
+        } else {
+            gain.into_iter()
+                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+                .map(|(s, _)| s)
+        };
+        let Some(best) = best else { break };
+        for set in &mut remaining {
+            set.remove(&best);
+        }
+        let before = remaining.len();
+        remaining.retain(|s| !s.is_empty());
+        unblocked += before - remaining.len();
+        steps.push(GreedyStep {
+            k: steps.len() + 1,
+            special: best,
+            cumulative_share: share(unblocked, total),
+        });
+    }
+    let checkpoints = GREEDY_CHECKPOINTS
+        .iter()
+        .filter_map(|&k| {
+            steps
+                .get(k.min(steps.len()).checked_sub(1)?)
+                .map(|s| (k, s.cumulative_share))
+        })
+        .collect();
+    GreedyCurve { steps, checkpoints }
+}
+
+/// Summarizes a sweep's unique maps.
+///
+/// # Panics
+///
+/// If the sweep holds more than `u64::MAX` maps, which no directory of
+/// files can produce.
+#[must_use]
+pub fn aggregate(maps: &[MapRecord]) -> Aggregate {
+    let all: Vec<&MapRecord> = maps.iter().collect();
+    let vanilla: Vec<&MapRecord> = maps.iter().filter(|m| m.verdict.vanilla_only).collect();
+    let conjunction_pop: Vec<&MapRecord> = maps
+        .iter()
+        .filter(|m| m.verdict.sector_specials_ok && m.verdict.thing_kinds_ok)
+        .collect();
+    Aggregate {
+        maps_unique: u64::try_from(maps.len()).expect("fits u64"),
+        all: axis_share(&all),
+        vanilla_share: share(vanilla.len(), maps.len()),
+        vanilla: axis_share(&vanilla),
+        line_blockers: blockers(maps, |v| v.unknown_line_specials.as_slice()),
+        sector_blockers: blockers(maps, |v| v.unknown_sector_specials.as_slice()),
+        thing_blockers: blockers(maps, |v| v.unknown_thing_types.as_slice()),
+        greedy_line_axis: greedy(&all, maps.len()),
+        greedy_conjunction: greedy(&conjunction_pop, maps.len()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,5 +503,98 @@ mod tests {
         );
         assert_ne!(h(&a), h(&c));
         assert!(h(&a).starts_with("sha256:"));
+    }
+
+    fn record(
+        line: &[i32],
+        unknown_line: &[i32],
+        sector_ok: bool,
+        thing_ok: bool,
+        vanilla: bool,
+    ) -> MapRecord {
+        use std::collections::BTreeMap;
+        let telemetry = MapTelemetry {
+            map: "M".into(),
+            census: crate::lift::Census {
+                vertices: 0,
+                linedefs: 0,
+                sidedefs: 0,
+                sectors: 0,
+                things: 0,
+            },
+            linedef_specials: line.iter().map(|&s| (s, 1)).collect(),
+            sector_specials: BTreeMap::new(),
+            thing_types: BTreeMap::new(),
+        };
+        let verdict = Verdict {
+            line_specials_ok: unknown_line.is_empty(),
+            sector_specials_ok: sector_ok,
+            thing_kinds_ok: thing_ok,
+            expressible: unknown_line.is_empty() && sector_ok && thing_ok,
+            vanilla_only: vanilla,
+            unknown_line_specials: unknown_line.to_vec(),
+            unknown_sector_specials: if sector_ok { vec![] } else { vec![4] },
+            unknown_thing_types: if thing_ok { vec![] } else { vec![46] },
+        };
+        MapRecord {
+            source: "s".into(),
+            map: "M".into(),
+            origin: "udmf".into(),
+            hash: "h".into(),
+            telemetry,
+            verdict,
+        }
+    }
+
+    #[test]
+    fn aggregate_shares_blockers_and_greedy_curve() {
+        let maps = vec![
+            record(&[1], &[], true, true, true),             // expressible
+            record(&[1, 97], &[97], true, true, true),       // blocked by 97
+            record(&[97, 62], &[97, 62], true, false, true), // blocked by 97, 62, and a thing
+            record(&[8192], &[8192], false, true, false),    // boom, sector-blocked
+        ];
+        let a = aggregate(&maps);
+        assert_eq!(a.maps_unique, 4);
+        assert!((a.all.line_specials - 0.25).abs() < 1e-9);
+        assert!((a.all.thing_kinds - 0.75).abs() < 1e-9);
+        assert!((a.all.expressible - 0.25).abs() < 1e-9);
+        assert!((a.vanilla_share - 0.75).abs() < 1e-9);
+        assert!((a.vanilla.line_specials - (1.0 / 3.0)).abs() < 1e-9);
+
+        assert_eq!(a.line_blockers[0].value, 97);
+        assert_eq!(a.line_blockers[0].maps, 2);
+        assert!((a.line_blockers[0].share - 0.5).abs() < 1e-9);
+        assert_eq!(a.thing_blockers[0].value, 46);
+        assert_eq!(a.sector_blockers[0].value, 4);
+
+        // Line axis alone: +97 unblocks map 2 (and map 3 needs 62 too).
+        let g = &a.greedy_line_axis;
+        assert_eq!(g.steps[0].special, 97);
+        assert!((g.steps[0].cumulative_share - 0.5).abs() < 1e-9);
+        assert_eq!(g.steps[1].special, 62);
+        assert!((g.steps[1].cumulative_share - 0.75).abs() < 1e-9);
+        assert_eq!(g.steps[2].special, 8192);
+        assert_eq!(g.checkpoints[0], (1, 0.5));
+        // Conjunction: map 3 stays blocked by its thing; map 4 by its sector.
+        let c = &a.greedy_conjunction;
+        assert_eq!(c.steps[0].special, 97);
+        assert!((c.steps[0].cumulative_share - 0.5).abs() < 1e-9);
+        assert!(c.steps.len() <= 3);
+    }
+
+    #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "an empty population must score exactly zero, not merely near-zero — the \
+                  approximate form the sibling test uses would pass on a share this test \
+                  exists to rule out"
+    )]
+    fn aggregate_of_nothing_is_all_zero() {
+        let a = aggregate(&[]);
+        assert_eq!(a.maps_unique, 0);
+        assert_eq!(a.all.expressible, 0.0);
+        assert!(a.line_blockers.is_empty());
+        assert!(a.greedy_line_axis.steps.is_empty());
     }
 }
