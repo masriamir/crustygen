@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 
 use crustywad::map::udmf::UdmfMap;
 
+pub mod vocabulary;
+
 /// Raw element counts for one map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct Census {
