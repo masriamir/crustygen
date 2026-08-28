@@ -12,6 +12,7 @@ use std::collections::BTreeMap;
 
 use crustywad::map::udmf::UdmfMap;
 
+pub mod corpus;
 pub mod vocabulary;
 
 /// Raw element counts for one map.

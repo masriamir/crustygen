@@ -95,3 +95,76 @@ pub fn wad_with_textmap(textmap: impl Into<Vec<u8>>) -> Vec<u8> {
         .build()
         .expect("builds")
 }
+
+/// CRC-32 (IEEE, reflected) — the zip member checksum crustywad verifies.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFFu32;
+    for &b in bytes {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+/// A minimal stored-method zip holding `members` (`(path, bytes)`), enough
+/// for crustywad's archive reader: local headers, central directory, EOCD.
+pub fn stored_zip(members: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for (path, data) in members {
+        let offset = u32::try_from(out.len()).expect("fixture fits u32");
+        let crc = crc32(data);
+        let len = u32::try_from(data.len()).expect("fixture fits u32");
+        let name = path.as_bytes();
+        let nlen = u16::try_from(name.len()).expect("name fits u16");
+        // Local file header.
+        out.extend_from_slice(b"PK\x03\x04");
+        out.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        out.extend_from_slice(&0u16.to_le_bytes()); // flags
+        out.extend_from_slice(&0u16.to_le_bytes()); // method: stored
+        out.extend_from_slice(&[0, 0, 0, 0]); // time, date
+        out.extend_from_slice(&crc.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&nlen.to_le_bytes());
+        out.extend_from_slice(&0u16.to_le_bytes()); // extra len
+        out.extend_from_slice(name);
+        out.extend_from_slice(data);
+        // Central directory entry.
+        central.extend_from_slice(b"PK\x01\x02");
+        central.extend_from_slice(&20u16.to_le_bytes()); // version made by
+        central.extend_from_slice(&20u16.to_le_bytes()); // version needed
+        central.extend_from_slice(&0u16.to_le_bytes()); // flags
+        central.extend_from_slice(&0u16.to_le_bytes()); // method
+        central.extend_from_slice(&[0, 0, 0, 0]); // time, date
+        central.extend_from_slice(&crc.to_le_bytes());
+        central.extend_from_slice(&len.to_le_bytes());
+        central.extend_from_slice(&len.to_le_bytes());
+        central.extend_from_slice(&nlen.to_le_bytes());
+        central.extend_from_slice(&0u16.to_le_bytes()); // extra
+        central.extend_from_slice(&0u16.to_le_bytes()); // comment
+        central.extend_from_slice(&0u16.to_le_bytes()); // disk
+        central.extend_from_slice(&0u16.to_le_bytes()); // internal attrs
+        central.extend_from_slice(&0u32.to_le_bytes()); // external attrs
+        central.extend_from_slice(&offset.to_le_bytes());
+        central.extend_from_slice(name);
+    }
+    let cd_offset = u32::try_from(out.len()).expect("fits u32");
+    let cd_len = u32::try_from(central.len()).expect("fits u32");
+    let n = u16::try_from(members.len()).expect("fits u16");
+    out.extend_from_slice(&central);
+    out.extend_from_slice(b"PK\x05\x06");
+    out.extend_from_slice(&[0, 0, 0, 0]); // disk numbers
+    out.extend_from_slice(&n.to_le_bytes());
+    out.extend_from_slice(&n.to_le_bytes());
+    out.extend_from_slice(&cd_len.to_le_bytes());
+    out.extend_from_slice(&cd_offset.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes()); // comment len
+    out
+}
