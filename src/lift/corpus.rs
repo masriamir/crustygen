@@ -291,7 +291,7 @@ pub struct GreedyStep {
     pub k: usize,
     /// The special added at this step.
     pub special: i32,
-    /// Fraction of the population unblocked after this step.
+    /// Fraction of all unique maps unblocked after this step.
     pub cumulative_share: f64,
 }
 
@@ -581,6 +581,32 @@ mod tests {
         assert_eq!(c.steps[0].special, 97);
         assert!((c.steps[0].cumulative_share - 0.5).abs() < 1e-9);
         assert!(c.steps.len() <= 3);
+    }
+
+    /// The fallback branch: with every remaining map blocked by two
+    /// specials, no single special completes a map, so step 1 adds the one
+    /// carried by the most maps and unblocks nothing (share 0.0) — the
+    /// signature of the fallback having fired.
+    #[test]
+    fn greedy_falls_back_to_the_most_carried_special_when_no_singleton_completes_a_map() {
+        let maps = vec![
+            record(&[1, 2], &[1, 2], true, true, true),
+            record(&[1, 3], &[1, 3], true, true, true),
+        ];
+        let g = aggregate(&maps).greedy_line_axis;
+        assert_eq!(g.steps.len(), 3);
+        assert_eq!(
+            g.steps[0].special, 1,
+            "carried by both maps, completes neither"
+        );
+        assert!(
+            g.steps[0].cumulative_share.abs() < 1e-9,
+            "the fallback step unblocks no map"
+        );
+        assert_eq!(g.steps[1].special, 2, "singletons tie, the smaller wins");
+        assert!((g.steps[1].cumulative_share - 0.5).abs() < 1e-9);
+        assert_eq!(g.steps[2].special, 3);
+        assert!((g.steps[2].cumulative_share - 1.0).abs() < 1e-9);
     }
 
     #[test]
