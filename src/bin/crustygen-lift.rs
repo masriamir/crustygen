@@ -1,44 +1,50 @@
 //! `crustygen-lift` — survey a WAD's maps into raw telemetry (the lifter
 //! skeleton; `docs/lift.md`).
 //!
-//! Usage: `crustygen-lift <wad> [--map NAME] [--json]`.
+//! Usage: `crustygen-lift <wad> [--map NAME] [--json] [--vocabulary]`.
 //!
 //! Surveys every map group (or just `--map NAME`) through the shared
 //! ingestion path — UDMF or classic Doom binary — and prints one
 //! human-readable census line per map, or a JSON array with `--json`.
+//! `--vocabulary` appends a per-map verdict from `crustygen::lift::vocabulary`.
 //! Groups that fail to load are named on stderr and skipped; survivors are
 //! still reported. Exit 0 when every selected group surveyed, 1 when some
 //! failed, 2 on a usage, I/O, or WAD-level failure (every such failure
 //! names what failed on stderr).
 
 use crustygen::ingest::{self, MapOrigin};
+use crustygen::lift::vocabulary::{Verdict, Vocabulary};
 use crustygen::lift::{self, MapTelemetry};
+use crustygen::tables::Tables;
 use crustywad::Wad;
 
-const USAGE: &str = "usage: crustygen-lift <wad> [--map NAME] [--json]";
+const USAGE: &str = "usage: crustygen-lift <wad> [--map NAME] [--json] [--vocabulary]";
 
 fn main() {
     std::process::exit(real_main());
 }
 
-/// The parsed command line: the positional WAD path plus the two flags.
+/// The parsed command line: the positional WAD path plus the flags.
 struct Args {
     wad_path: String,
     map_name: Option<String>,
     json: bool,
+    vocabulary: bool,
 }
 
 /// Hand-rolled argument parsing, mirroring `crustygen-check`'s: one
-/// positional `<wad>`, `--map NAME`, and the boolean `--json`.
+/// positional `<wad>`, `--map NAME`, and the boolean `--json`/`--vocabulary`.
 fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     let mut wad_path = None;
     let mut map_name = None;
     let mut json = false;
+    let mut vocabulary = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--map" => map_name = Some(args.next().ok_or("--map requires a value")?),
             "--json" => json = true,
+            "--vocabulary" => vocabulary = true,
             flag if flag.starts_with("--") => return Err(format!("unknown flag `{flag}`")),
             positional if wad_path.is_none() => wad_path = Some(positional.to_owned()),
             extra => return Err(format!("unexpected extra argument `{extra}`")),
@@ -51,6 +57,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
             wad_path,
             map_name,
             json,
+            vocabulary,
         })
 }
 
@@ -92,7 +99,17 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
         return Err(format!("`{}` contains no map groups", args.wad_path));
     }
 
-    let mut records: Vec<(MapTelemetry, MapOrigin)> = Vec::new();
+    // Loaded once, up front, when `--vocabulary` is set — `classify` is
+    // cheap and the same `Vocabulary` classifies every surveyed map.
+    let vocab = if args.vocabulary {
+        Some(Vocabulary::from_tables(
+            &Tables::load().map_err(|err| format!("tables: {err}"))?,
+        ))
+    } else {
+        None
+    };
+
+    let mut records: Vec<(MapTelemetry, MapOrigin, Option<Verdict>)> = Vec::new();
     let mut failures = 0usize;
     for group in &groups {
         match ingest::load_map(&wad, group) {
@@ -104,7 +121,9 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
                 for note in &loaded.notes {
                     eprintln!("crustygen-lift: note: map `{}`: {note}", group.name);
                 }
-                records.push((lift::survey(&group.name, &loaded.map), loaded.origin));
+                let telemetry = lift::survey(&group.name, &loaded.map);
+                let verdict = vocab.as_ref().map(|v| v.classify(&telemetry));
+                records.push((telemetry, loaded.origin, verdict));
             }
             Err(err) => {
                 failures += 1;
@@ -114,13 +133,35 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
     }
 
     if args.json {
-        let telemetry: Vec<&MapTelemetry> = records.iter().map(|(t, _)| t).collect();
-        let text = serde_json::to_string_pretty(&telemetry)
-            .map_err(|err| format!("failed to serialize telemetry: {err}"))?;
+        let text = if args.vocabulary {
+            let mut values = Vec::with_capacity(records.len());
+            for (telemetry, _, verdict) in &records {
+                let mut value = serde_json::to_value(telemetry)
+                    .map_err(|err| format!("failed to serialize telemetry: {err}"))?;
+                let verdict = verdict
+                    .as_ref()
+                    .expect("--vocabulary set: every record carries a verdict");
+                value
+                    .as_object_mut()
+                    .expect("MapTelemetry serializes to a JSON object")
+                    .insert(
+                        "verdict".to_owned(),
+                        serde_json::to_value(verdict)
+                            .map_err(|err| format!("failed to serialize telemetry: {err}"))?,
+                    );
+                values.push(value);
+            }
+            serde_json::to_string_pretty(&values)
+        } else {
+            let telemetry: Vec<&MapTelemetry> = records.iter().map(|(t, _, _)| t).collect();
+            serde_json::to_string_pretty(&telemetry)
+        }
+        .map_err(|err| format!("failed to serialize telemetry: {err}"))?;
         println!("{text}");
     } else {
-        for (telemetry, origin) in &records {
-            println!("{}", human_line(telemetry, *origin));
+        for (telemetry, origin, verdict) in &records {
+            let suffix = verdict.as_ref().map(verdict_suffix).unwrap_or_default();
+            println!("{}{suffix}", human_line(telemetry, *origin));
         }
     }
 
@@ -147,4 +188,39 @@ fn human_line(t: &MapTelemetry, origin: MapOrigin) -> String {
         t.sector_specials.len(),
         t.thing_types.len(),
     )
+}
+
+/// The `--vocabulary` suffix appended to a [`human_line`] census line: the
+/// overall verdict, an ok/unknown breakdown per axis, and a vanilla-only
+/// note when the map leaves the pinned engine's vanilla special list.
+fn verdict_suffix(v: &Verdict) -> String {
+    use std::fmt::Write as _;
+
+    let mut s = format!(
+        "; expressible: {}",
+        if v.expressible { "yes" } else { "no" }
+    );
+    let mut part = |label: &str, ok: bool, unknown: &[i32]| {
+        if ok {
+            let _ = write!(s, " ({label} ok)");
+        } else {
+            let list: Vec<String> = unknown.iter().map(ToString::to_string).collect();
+            let _ = write!(s, " ({label} unknown: {})", list.join(" "));
+        }
+    };
+    part(
+        "line specials",
+        v.line_specials_ok,
+        &v.unknown_line_specials,
+    );
+    part(
+        "sector specials",
+        v.sector_specials_ok,
+        &v.unknown_sector_specials,
+    );
+    part("thing types", v.thing_kinds_ok, &v.unknown_thing_types);
+    if !v.vanilla_only {
+        s.push_str(" (outside vanilla)");
+    }
+    s
 }
