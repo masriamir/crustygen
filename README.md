@@ -134,7 +134,7 @@ the four id/Final Doom IWADs. See
 | [`docs/corpus.md`](docs/corpus.md) | The corpus sweep: what "expressible" means (and does not), the `crustygen-corpus` CLI contract, and the per-release re-run procedure |
 | [`docs/geometry.md`](docs/geometry.md) | Worked coordinates for the gap and door-chain constructions |
 | [`docs/verticality.md`](docs/verticality.md) | Height differences, and the stairs/lifts phases that follow |
-| [`docs/measurements/`](docs/measurements/) | Corpus measurements over the retail IWADs |
+| [`docs/measurements/`](docs/measurements/) | Corpus measurements: the retail-IWAD verticality survey and the idgames expressibility instrument |
 
 ## Known gaps
 

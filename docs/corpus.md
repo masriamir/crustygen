@@ -47,8 +47,11 @@ usage: crustygen-corpus <dir> [--json FILE] [--report FILE]
   entry the listing itself cannot read (a permission error mid-listing) is
   skipped silently — no bucket, no stderr line. `*.zip` opens through
   crustywad's archive reader (lenient options, CRCs still verified) and
-  every `.wad` member is read; `*.wad` files are read directly. Everything
-  else is ignored.
+  every `.wad` member is read through those same lenient options; `*.wad`
+  files are read directly through crustywad's strict reader instead, so a
+  WAD that only warns under lenient parsing loads as a zip member but
+  counts as `wad_unreadable` when read bare — kept as-is since the sample
+  of record is all zips. Everything else is ignored.
 - Every map group goes through the shared `ingest::load_map` path, then
   `lift::survey` and `Vocabulary::classify`. Maps are deduplicated by
   `sha256:` over their lumps (name, length, bytes), so a map repackaged in
@@ -63,7 +66,8 @@ usage: crustygen-corpus <dir> [--json FILE] [--report FILE]
   path — which also catches near-misses a lenient assembler would load (a
   REJECT lump one byte short has been observed on real corpus content); a
   lenient-ingest option is a possible follow-up, not implemented today.
-- `--json FILE` writes `{provenance?, buckets, aggregate, maps[]}`.
+- `--json FILE` writes `{provenance, buckets, aggregate, maps[]}` —
+  `provenance` is `null` when `<dir>` carries no `sample-manifest.json`.
   `--report FILE` writes the Markdown aggregate (header caveat, sample,
   buckets, per-axis shares over all maps and the vanilla slice, top-25
   blockers per axis by map share, and the greedy curve at k = 1, 5, 10, 21,
@@ -99,7 +103,7 @@ failure.
    seed recorded in the latest `docs/measurements/expressibility-*.md`. A
    present, correctly sized zip is skipped, so this is cheap after the first run.
 2. Here: `just corpus <path-to-sample-dir>` → writes
-   `docs/measurements/expressibility-<today>.md` and a gitignored JSON beside
-   your working tree.
+   `docs/measurements/expressibility-<today>.md` and a gitignored JSON under
+   `target/`.
 3. Compare the new "all three" share and the blocker tables with the previous
    doc; re-order the Project G queue from the blocker tables, not from memory.

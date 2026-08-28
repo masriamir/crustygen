@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::lift::MapTelemetry;
 use crate::tables::Tables;
 
-/// The three emittable sets plus the vanilla membership list.
+/// The emittable line set, the named sector set, the thing set, plus the
+/// vanilla membership list.
 #[derive(Debug, Clone)]
 pub struct Vocabulary {
     line: BTreeSet<i32>,
@@ -107,7 +108,7 @@ mod tests {
     use std::fmt::Write as _;
 
     use super::*;
-    use crate::lift::{Census, survey};
+    use crate::lift::survey;
     use crustywad::Limits;
     use crustywad::map::udmf::parse_udmf;
 
@@ -192,13 +193,6 @@ mod tests {
     fn an_empty_map_is_vacuously_expressible() {
         let v = vocab().classify(&telemetry(&[], 0, &[]));
         assert!(v.expressible && v.vanilla_only);
-        let _ = Census {
-            vertices: 0,
-            linedefs: 0,
-            sidedefs: 0,
-            sectors: 0,
-            things: 0,
-        };
     }
 
     #[test]

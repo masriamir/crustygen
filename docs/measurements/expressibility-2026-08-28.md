@@ -20,8 +20,8 @@ sample, byte-identical stderr (419 lines both times).
 > crustygen's emittable vocabulary. `lift::survey` skips zero on the two special axes only;
 > thing types are histogrammed as they come, so a thing of type 0 blocks a map like any other
 > unknown value. Geometry, flags, tags, and texture names are not measured; a geometry-aware
-> lifter can only do worse, never better, than this membership test. Two further reasons to read every share below as a ceiling rather than a
-> score:
+> lifter can only do worse, never better, than this membership test. Two further reasons to
+> read every share below as a ceiling rather than a score:
 >
 > - **The sample of record is 374 archives, not 400.** 26 of the seeded 400 failed to download
 >   against the size the fetch list declares and are absent from the directory; both reports
@@ -461,7 +461,7 @@ than smoothing. Candidate reasons, none of them established:
   maps are excluded moves the shares.
 - **Different dedup.** Both deduplicate (1,192 → 1,177 there, 1,285 → 1,282 here), but the
   spike's key is not recorded.
-- **The spike is not re-runnable.** Its script was session scratch and was not kept, so the two
+- **The spike is not re-runnable.** It used a throwaway script that was not kept, so the two
   runs cannot be differenced to attribute the gap to any of the above.
 
 One candidate the doc *can* rule out: **the vocabulary was not different.** The spike recorded
@@ -487,11 +487,11 @@ three 6.6 % → 8.3 %.
 
 The line and sector axes are unchanged **by construction** — the rows add thing kinds only, and
 `Vocabulary::classify` reads each axis from its own set, so nouns cannot move the other two.
-The thing axis went from the tightest constraint of the three to the loosest: before, 77.1 %
-of maps carried a thing kind outside the set; after, it passes close to three maps in four. What did not follow is a
-matching jump in the conjunction, which moved 5.1 % → 6.5 % — because the line axis caps it at
-7.3 %. All three is now within 0.8 points of the line axis alone: of the maps that clear the
-line axis, most now clear the other two as well.
+The thing axis went from the tightest constraint of the three to the loosest: before, 77.1 % of
+maps carried a thing kind outside the set; after, it passes close to three maps in four. What
+did not follow is a matching jump in the conjunction, which moved 5.1 % → 6.5 % — because the
+line axis caps it at 7.3 %. All three is now within 0.8 points of the line axis alone: of the
+maps that clear the line axis, most now clear the other two as well.
 
 ### The binding constraint is the line axis
 
@@ -553,18 +553,21 @@ is each at or below 1.0 %.
 
 The residue splits in two, and the split matters for what to do about it.
 
-**Four values are vanilla, and their absence is a scoping decision already made.** 88 (65 maps),
-72 (45), 87 (35) and 89 (29) are `mobjinfo` doomednums — `MT_BOSSBRAIN`, `MT_KEEN`,
-`MT_BOSSTARGET` and `MT_BOSSSPIT`, read from `linuxdoom-1.10/info.c` at entries 1758, 1732,
-1810 and 1784. The decoration task deliberately left them out: 72 carries `MF_COUNTKILL`, so it is a
-monster rather than a prop, and 87/88/89 are the three parts of the Icon of Sin mechanism, not
-scenery. They are not missing vocabulary — they are vocabulary the noun slice declined.
+**Four values are vanilla, and their absence is a scoping decision already made.** 88 (65
+maps), 72 (45), 87 (35) and 89 (29) are `mobjinfo` doomednums — `MT_BOSSBRAIN`, `MT_KEEN`,
+`MT_BOSSTARGET` and `MT_BOSSSPIT`, read from `linuxdoom-1.10/info.c` at commit
+`a77dfb96cb91780ca334d0d4cfd86957558007e0`, lines 1732 (`MT_KEEN`), 1758 (`MT_BOSSBRAIN`), 1784
+(`MT_BOSSSPIT`) and 1810 (`MT_BOSSTARGET`). The decoration task deliberately left them out: 72
+carries `MF_COUNTKILL`, so it is a monster rather than a prop, and 87/88/89 are the three parts
+of the Icon of Sin mechanism, not scenery. They are not missing vocabulary — they are
+vocabulary the noun slice declined.
 
 **The rest are non-vanilla by definition.** Vanilla `mobjinfo` doomednums run 5–89 (11 absent)
-plus the 2001–2049 and 3001–3006 blocks; player starts 1–4 and 11 are handled outside
+plus the 2001–2049 and 3001–3006 blocks, per `linuxdoom-1.10/info.c` at commit
+`a77dfb96cb91780ca334d0d4cfd86957558007e0`; player starts 1–4 and 11 are handled outside
 `mobjinfo`. So 0, 90, 92, 94, 95, 96, every 5xxx and 9xxx value, and 32000 lie outside that
-space entirely — Boom/ZDoom/DeHackEd-range editor numbers, plus `0`, which is not a doomednum at
-all and is counted because the thing axis does not skip zero. Summing map-hits over the 25
+space entirely — Boom/ZDoom/DeHackEd-range editor numbers, plus `0`, which is not a doomednum
+at all and is counted because the thing axis does not skip zero. Summing map-hits over the 25
 rows (521 in total): the four vanilla values account for 174, the 5xxx/9xxx/32000 ranges for
 272, the 90–96 values for 51, and type 0 for 24 — so 347 of the 521 hits are non-vanilla
 values that no vanilla-scoped vocabulary would ever cover.

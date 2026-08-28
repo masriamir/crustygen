@@ -147,7 +147,7 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
                     .insert(
                         "verdict".to_owned(),
                         serde_json::to_value(verdict)
-                            .map_err(|err| format!("failed to serialize telemetry: {err}"))?,
+                            .map_err(|err| format!("failed to serialize verdict: {err}"))?,
                     );
                 values.push(value);
             }

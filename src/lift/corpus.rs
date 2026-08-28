@@ -133,9 +133,14 @@ fn has_ext(path: &Path, ext: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case(ext))
 }
 
-/// Lenient archive options: idgames zips carry non-ASCII member names and
-/// odd extras that strict mode would refuse outright; a warning-tolerant
-/// open still verifies every CRC.
+/// Lenient archive options: idgames zips carry non-ASCII member names and odd
+/// extras that strict mode would refuse outright; a warning-tolerant open
+/// still verifies every CRC. `Archive::wad` reuses these same options to
+/// parse each member WAD, so a member that only warns under lenient parsing
+/// still loads — while the identical bytes as a bare `.wad` file go through
+/// strict `Wad::from_path` below and land in `wad_unreadable`. That asymmetry
+/// is kept: the sample of record is all zips, so no bare `.wad` file
+/// exercises the strict path in practice.
 fn archive_options() -> ParseOptions {
     ParseOptions {
         strictness: Strictness::Lenient,
@@ -443,6 +448,12 @@ fn greedy(population: &[&MapRecord], total: usize) -> GreedyCurve {
                 .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
                 .map(|(s, _)| s)
         };
+        // Unreachable: the `while` guard keeps `remaining` non-empty, and
+        // `retain` above drops every empty set, so at least one non-empty
+        // set survives into `carried` (or `gain`) each iteration — `best`
+        // is always `Some`. Kept as a defensive exit rather than an
+        // `expect`, since a future change to either invariant should fail
+        // safely here, not panic.
         let Some(best) = best else { break };
         for set in &mut remaining {
             set.remove(&best);
@@ -757,7 +768,6 @@ mod tests {
         thing_ok: bool,
         vanilla: bool,
     ) -> MapRecord {
-        use std::collections::BTreeMap;
         let telemetry = MapTelemetry {
             map: "M".into(),
             census: crate::lift::Census {

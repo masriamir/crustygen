@@ -42,11 +42,12 @@ surveyed map in the census/histogram shape above; the origin suffix is a
 human-output-only annotation and is not part of the JSON record.
 
 `--vocabulary` appends a verdict per map: whether every non-zero linedef
-special, sector special, and thing type is in the compiler's emittable
-vocabulary (`Tables::emittable_line_specials`, `named_sector_specials`,
-`thing_kinds`), the unknown values on each axis, and whether the map stays
-inside the pinned engine's vanilla special list. This is membership only —
-an upper bound on lift yield, not a geometric judgment.
+special and sector special, and every thing type, is in the compiler's
+emittable vocabulary (`Tables::emittable_line_specials`,
+`named_sector_specials`, `thing_kinds`), the unknown values on each axis,
+and — on the line axis only — whether every non-zero linedef special the map
+carries is one the pinned vanilla engine dispatches. This is membership only
+— an upper bound on lift yield, not a geometric judgment.
 
 **Per-map failure policy.** A group that fails to load through the shared
 ingest path — for example an unsupported binary format (Hexen, Doom 64), a
@@ -61,7 +62,7 @@ Exit codes:
 |---|---|
 | 0 | Every selected group surveyed |
 | 1 | At least one selected group failed to load |
-| 2 | A usage, I/O, or WAD-level failure — bad flag, missing `<wad>`, unreadable file, not a WAD, no such `--map` group, a WAD with no map groups at all, or (rare) a telemetry-serialization failure under `--json`. Every such failure names what failed on stderr. |
+| 2 | A usage, I/O, or WAD-level failure — bad flag, missing `<wad>`, unreadable file, not a WAD, no such `--map` group, a WAD with no map groups at all, a tables-load failure under `--vocabulary`, or (rare) a telemetry-serialization failure under `--json`. Every such failure names what failed on stderr. |
 
 ## Next stages
 
