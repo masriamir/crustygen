@@ -2004,4 +2004,63 @@ mod tests {
         .expect("parses");
         assert_eq!(ir.exits[0].trigger, ExitTrigger::Teleport);
     }
+
+    #[test]
+    fn a_wall_pad_whose_span_overruns_the_wall_is_rejected() {
+        // (16, 256) is on room a's north wall (fixed=256, span 0..256), so
+        // the `wall_edges().find(..)` lookup itself succeeds — unlike
+        // `a_wall_pad_off_any_wall_is_rejected`'s [64,64], which is on no
+        // wall at all. What fails here is the second, narrower check: a
+        // 64-wide pad centered on along=16 spans -16..48, and open_lo=-16
+        // runs past the wall's own lo=0 end.
+        let err = with_teleports(
+            r#"{ "id":"w", "room":"a", "pad":{"wall":[16,256]},
+                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, IrError::TeleportPadOffWall { .. }), "{err}");
+    }
+
+    #[test]
+    fn an_island_pad_enclosing_a_concave_room_vertex_is_rejected() {
+        // Room `a` is a 256x256 square with a rectangular notch bitten out
+        // of the south wall (x in 112..144, up to y=112), so it has two
+        // reflex vertices at (112,112) and (144,112). The pad centered at
+        // (128,128) spans (96,96)-(160,160): all four corners test as
+        // strictly inside the room (contains + positive clearance) — the
+        // notch is well below the pad's own footprint — yet both reflex
+        // vertices land strictly inside the pad square, so the pad would
+        // straddle solid wall that the four-corner check alone cannot see.
+        let json = r#"{ "seed":1, "grid":16, "theme":"tech_base",
+          "rooms":[
+            { "id":"a",
+              "footprint":[[0,0],[0,256],[256,256],[256,0],[144,0],[144,112],[112,112],[112,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[ { "kind":"player1_start", "at":[192,64], "angle":90 } ] },
+            { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[],
+          "teleports":[
+            { "id":"t", "room":"a", "pad":{"island":[128,128]},
+              "to":{"room":"b","at":[448,128],"angle":90} }
+          ] }"#;
+        let err = Ir::from_json(json).unwrap_err();
+        assert!(
+            matches!(err, IrError::TeleportPadOutsideRoom { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_teleport_pad_coordinate_outside_the_binary_map_range_is_rejected() {
+        let err = with_teleports(
+            r#"{ "id":"t", "room":"a", "pad":{"island":[64,40000]},
+                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, IrError::CoordinateOutOfRange { .. }), "{err}");
+    }
 }
