@@ -172,6 +172,15 @@ fn usage_and_empty_directories_exit_2() {
     );
     assert_eq!(
         bin()
+            .args(["x", "--report"])
+            .output()
+            .unwrap()
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        bin()
             .arg("/nonexistent-dir")
             .output()
             .unwrap()
@@ -206,4 +215,85 @@ fn a_map_free_wad_is_counted_but_does_not_fail_the_run() {
     assert_eq!(report["buckets"]["maps_unique"], 0);
     assert_eq!(report["buckets"]["wads"], 1);
     assert_eq!(report["maps"].as_array().unwrap().len(), 0);
+}
+
+/// Both unreadable-WAD paths — a bare file that is not a WAD, and a zip
+/// member that opens as an archive entry but not as a WAD — land in the
+/// same bucket and are each named.
+#[test]
+fn unreadable_wads_are_bucketed_from_both_the_bare_and_the_member_path() {
+    let dir = corpus_dir(
+        "unreadable",
+        &[
+            ("junk.wad", b"not a wad at all".to_vec()),
+            ("j.zip", common::stored_zip(&[("JUNK.WAD", b"not a wad")])),
+        ],
+    );
+    let json_path = dir.join("out.json");
+    let out = bin()
+        .args([dir.to_str().unwrap(), "--json", json_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("junk.wad"), "{stderr}");
+    assert!(stderr.contains("j.zip!JUNK.WAD"), "{stderr}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(report["buckets"]["wad_unreadable"], 2);
+    assert_eq!(report["buckets"]["archives"], 1, "the zip itself opens");
+    assert_eq!(report["buckets"]["maps_unique"], 0);
+}
+
+/// A `TEXTMAP` that is not UTF-8 is a per-map load failure, not a sweep
+/// abort: the bucket counts it, the map is dropped, and the run exits 1.
+#[test]
+fn a_non_utf8_textmap_is_bucketed_as_unparseable() {
+    let dir = corpus_dir(
+        "textmap",
+        &[("bad.wad", common::wad_with_textmap(&[0xff, 0xfe, b'x'][..]))],
+    );
+    let json_path = dir.join("out.json");
+    let out = bin()
+        .args([dir.to_str().unwrap(), "--json", json_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("bad.wad MAP01"), "{stderr}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(report["buckets"]["textmap_unparseable"], 1);
+    assert_eq!(report["buckets"]["maps_unique"], 0);
+    assert_eq!(report["buckets"]["wads"], 1);
+}
+
+/// A Hexen map that assembles cleanly reaches the ingest path's Doom-format
+/// gate and is refused there — the `unsupported_format` bucket, distinct
+/// from the `assembly_refused` one.
+#[test]
+fn a_loadable_hexen_map_is_bucketed_as_an_unsupported_format() {
+    let dir = corpus_dir("hexen", &[("hexen.wad", common::hexen_entrada_wad())]);
+    let json_path = dir.join("out.json");
+    let out = bin()
+        .args([dir.to_str().unwrap(), "--json", json_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("unsupported binary map format Hexen"),
+        "{stderr}"
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    assert_eq!(report["buckets"]["unsupported_format"], 1);
+    assert_eq!(
+        report["buckets"]["assembly_refused"], 0,
+        "the fixture must assemble, so the format gate is what refuses it"
+    );
+    assert_eq!(report["buckets"]["maps_unique"], 0);
 }

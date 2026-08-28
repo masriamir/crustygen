@@ -227,3 +227,30 @@ thing { x = 64; y = 64; type = 1; } thing { x = 80; y = 64; type = 9999; }
     // about the unknown-value path rather than about a vocabulary gap.
     assert!(stdout.contains("thing types unknown: 9999"), "{stdout}");
 }
+
+/// A linedef special outside the pinned engine's vanilla list flips
+/// `vanilla_only` off, which the human line reports as an `(outside
+/// vanilla)` note alongside the unknown-value breakdown.
+#[test]
+fn a_non_vanilla_line_special_is_noted_as_outside_vanilla() {
+    let textmap = r#"namespace = "doom";
+vertex { x = 0; y = 0; } vertex { x = 128; y = 0; } vertex { x = 128; y = 128; } vertex { x = 0; y = 128; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; special = 8192; }
+linedef { v1 = 1; v2 = 2; sidefront = 1; }
+linedef { v1 = 2; v2 = 3; sidefront = 2; }
+linedef { v1 = 3; v2 = 0; sidefront = 3; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; } sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; } sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; }
+thing { x = 64; y = 64; type = 1; }
+"#;
+    let path = write_temp(&common::wad_with_textmap(textmap), "vocab-nonvanilla");
+    let out = bin()
+        .args([path.to_str().unwrap(), "--vocabulary"])
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("line specials unknown: 8192"), "{stdout}");
+    assert!(stdout.contains("(outside vanilla)"), "{stdout}");
+}

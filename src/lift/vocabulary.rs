@@ -75,12 +75,6 @@ impl Vocabulary {
         }
     }
 
-    /// The emittable linedef specials (for the corpus greedy curve).
-    #[must_use]
-    pub fn line_specials(&self) -> &BTreeSet<i32> {
-        &self.line
-    }
-
     /// Classifies one map's census. A map with nothing on an axis is `ok`
     /// on that axis — vacuously, a special-free map is expressible by
     /// specials.

@@ -168,3 +168,68 @@ pub fn stored_zip(members: &[(&str, &[u8])]) -> Vec<u8> {
     out.extend_from_slice(&0u16.to_le_bytes()); // comment len
     out
 }
+
+/// The binary entrada WAD rewritten as a *loadable* Hexen-format map: the
+/// same geometry, with `THINGS` and `LINEDEFS` re-encoded into the Hexen
+/// record layouts and an empty `BEHAVIOR` lump appended (the lump map-format
+/// detection keys on). Unlike
+/// [`binary_entrada_wad_with_broken_second_map`], this one assembles
+/// cleanly — so it reaches, and is refused by, the ingest path's
+/// Doom-format gate.
+///
+/// Record layouts mirror crustywad 0.9.6 `src/map/hexen.rs`:
+/// `Thing` (20 bytes) = `tid u16, x i16, y i16, z i16, angle u16,
+/// type_id u16, flags u16, special u8, args [u8; 5]`; `Linedef` (16 bytes) =
+/// `start_vertex u16, end_vertex u16, flags u16, special u8, args [u8; 5],
+/// right_sidedef u16, left_sidedef u16`. The Doom sources (`src/map/doom/
+/// mod.rs`) are `Thing` (10 bytes) = `x i16, y i16, angle u16, type_id u16,
+/// flags u16` and `Linedef` (14 bytes) = `start_vertex u16, end_vertex u16,
+/// flags u16, special_type u16, sector_tag u16, right_sidedef u16,
+/// left_sidedef u16`; the Doom special and tag have no Hexen counterpart and
+/// are dropped (Hexen's `special`/`args` are zeroed).
+pub fn hexen_entrada_wad() -> Vec<u8> {
+    /// Doom `THINGS` (10-byte records) → Hexen `THINGS` (20-byte records).
+    fn hexen_things(doom: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(doom.len() * 2);
+        for r in doom.as_chunks::<10>().0 {
+            out.extend_from_slice(&0u16.to_le_bytes()); // tid
+            out.extend_from_slice(&r[0..4]); // x, y
+            out.extend_from_slice(&0i16.to_le_bytes()); // z
+            out.extend_from_slice(&r[4..10]); // angle, type_id, flags
+            out.extend_from_slice(&[0u8; 6]); // special, args
+        }
+        out
+    }
+
+    /// Doom `LINEDEFS` (14-byte records) → Hexen `LINEDEFS` (16-byte records).
+    fn hexen_linedefs(doom: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(doom.len() * 2);
+        for r in doom.as_chunks::<14>().0 {
+            out.extend_from_slice(&r[0..6]); // start, end, flags
+            out.extend_from_slice(&[0u8; 6]); // special, args
+            out.extend_from_slice(&r[10..14]); // right, left
+        }
+        out
+    }
+
+    let wad = Wad::from_bytes(binary_entrada_wad()).expect("binary fixture parses");
+    let lumps = wad.lumps();
+    let group = wad
+        .map_groups()
+        .into_iter()
+        .next()
+        .expect("binary fixture has a map group");
+    let mut builder = WadBuilder::new(WadKind::Pwad);
+    builder.add_lump(group.name.as_str(), Vec::new());
+    for &i in &group.data_indices {
+        let data = wad.lump_data(&lumps[i]);
+        let rewritten = match lumps[i].name() {
+            "THINGS" => hexen_things(data),
+            "LINEDEFS" => hexen_linedefs(data),
+            _ => data.to_vec(),
+        };
+        builder.add_lump(lumps[i].name(), rewritten);
+    }
+    builder.add_lump("BEHAVIOR", Vec::new());
+    builder.build().expect("wad builds")
+}

@@ -179,6 +179,10 @@ pub fn sweep_dir(dir: &Path, vocab: &Vocabulary) -> Result<Sweep, CorpusError> {
     };
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for path in &candidates {
+        // COVERAGE: the `None` fallback is unreachable here. Every candidate
+        // came from a `read_dir` entry, and such a path always ends in the
+        // entry's own file name — `file_name` only returns `None` for a path
+        // ending in `..` or a bare root, neither of which a listing yields.
         let label = path.file_name().map_or_else(
             || path.display().to_string(),
             |n| n.to_string_lossy().into_owned(),
