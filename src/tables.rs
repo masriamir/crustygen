@@ -1,6 +1,6 @@
 //! Loads the sourced engine-constant and vocabulary tables.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::Deserialize;
 
@@ -622,6 +622,43 @@ impl Tables {
     #[must_use]
     pub fn secret_sector_special(&self) -> u16 {
         self.engine.sector.secret
+    }
+
+    /// Every linedef special a compiler pass writes today: the manual door,
+    /// the keyed doors, and the four exits. Curated rather than "every
+    /// accessor" — lift and teleport specials are sourced in the table but
+    /// no pass emits them yet. `tests/vocabulary_arbiter.rs` compiles a
+    /// fixture per construct and asserts this set equals what came out, so
+    /// a new emitting pass fails that test until this list grows.
+    #[must_use]
+    pub fn emittable_line_specials(&self) -> BTreeSet<u16> {
+        let mut set = BTreeSet::from([
+            self.door_special(),
+            self.exit_switch_special(),
+            self.exit_walkover_special(),
+            self.secret_exit_switch_special(),
+            self.secret_exit_walkover_special(),
+        ]);
+        set.extend(self.locked_door_kinds().into_iter().map(|(_, s)| s));
+        set
+    }
+
+    /// Every sector special `engine.toml` names — secret, the three damage
+    /// tiers, the four light effects. "Nameable" is the expressibility
+    /// criterion; which IR field carries the value is irrelevant.
+    #[must_use]
+    pub fn named_sector_specials(&self) -> BTreeSet<u16> {
+        let s = &self.engine.sector;
+        BTreeSet::from([
+            s.secret,
+            s.damage.light,
+            s.damage.medium,
+            s.damage.heavy,
+            s.light_effects.blink,
+            s.light_effects.flicker,
+            s.light_effects.glow,
+            s.light_effects.strobe_slow,
+        ])
     }
 
     /// The sector special for a liquid's damage tier (`flats.liquid.damage_tier`:
