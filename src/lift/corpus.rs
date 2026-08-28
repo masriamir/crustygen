@@ -107,20 +107,40 @@ pub enum CorpusError {
     },
 }
 
-/// `sha256:<hex>` over `name, len(u64 LE), bytes` for each of the group's
-/// data lumps in order — identical maps repackaged across zips hash equal.
+/// `sha256:<hex>` over, for each of the group's data lumps in order,
+/// `name_len (u16 LE) ‖ name bytes ‖ data_len (u64 LE) ‖ data` — identical
+/// maps repackaged across zips hash equal. The name carries its own length
+/// prefix so the name/data-length boundary cannot be reinterpreted: without
+/// it, two different (name, data) pairs could concatenate to the identical
+/// byte stream.
+///
+/// u16, not u8, for the name-length prefix: `Lump::name()` is at most 8 raw
+/// bytes on disk, but in lenient mode a non-ASCII name is decoded lossily
+/// (`String::from_utf8_lossy`), and each raw invalid byte can expand into its
+/// own 3-byte U+FFFD — an all-invalid 8-byte name decodes to a 24-byte
+/// `String` (verified empirically). That is still under `u8::MAX`, but it
+/// shows the raw 8-byte bound does not hold for the decoded name, so this
+/// leans on `u16`'s headroom instead of that assumption.
 ///
 /// # Panics
 ///
 /// If a lump's length does not fit a `u64`, which no platform this crate
-/// builds on can produce (`usize` is at most 64 bits everywhere).
+/// builds on can produce (`usize` is at most 64 bits everywhere); or if a
+/// lump's decoded name exceeds `u16::MAX` bytes, which the bound above rules
+/// out for any real WAD.
 #[must_use]
 pub fn map_hash(wad: &Wad, group: &MapGroup) -> String {
     let lumps = wad.lumps();
     let mut hasher = Sha256::new();
     for &i in &group.data_indices {
         let data = wad.lump_data(&lumps[i]);
-        hasher.update(lumps[i].name().as_bytes());
+        let name = lumps[i].name().as_bytes();
+        hasher.update(
+            u16::try_from(name.len())
+                .expect("a lossy-decoded lump name is far under u16::MAX bytes")
+                .to_le_bytes(),
+        );
+        hasher.update(name);
         hasher.update(u64::try_from(data.len()).expect("fits u64").to_le_bytes());
         hasher.update(data);
     }
@@ -162,14 +182,17 @@ fn archive_options() -> ParseOptions {
 /// If the sweep collects more than `u64::MAX` unique maps, which no
 /// directory of files can hold.
 pub fn sweep_dir(dir: &Path, vocab: &Vocabulary) -> Result<Sweep, CorpusError> {
-    let mut candidates: Vec<PathBuf> = std::fs::read_dir(dir)
+    let mut candidates: Vec<(PathBuf, String)> = std::fs::read_dir(dir)
         .map_err(|source| CorpusError::Io {
             path: dir.display().to_string(),
             source,
         })?
         .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_file() && (has_ext(p, "zip") || has_ext(p, "wad")))
+        .map(|entry| {
+            let label = entry.file_name().to_string_lossy().into_owned();
+            (entry.path(), label)
+        })
+        .filter(|(p, _)| p.is_file() && (has_ext(p, "zip") || has_ext(p, "wad")))
         .collect();
     candidates.sort();
     if candidates.is_empty() {
@@ -183,15 +206,7 @@ pub fn sweep_dir(dir: &Path, vocab: &Vocabulary) -> Result<Sweep, CorpusError> {
         failures: Vec::new(),
     };
     let mut seen: BTreeSet<String> = BTreeSet::new();
-    for path in &candidates {
-        // COVERAGE: the `None` fallback is unreachable here. Every candidate
-        // came from a `read_dir` entry, and such a path always ends in the
-        // entry's own file name — `file_name` only returns `None` for a path
-        // ending in `..` or a bare root, neither of which a listing yields.
-        let label = path.file_name().map_or_else(
-            || path.display().to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
+    for (path, label) in &candidates {
         if has_ext(path, "zip") {
             match Archive::from_path_with_options(path, archive_options()) {
                 Ok(archive) => {
@@ -218,7 +233,7 @@ pub fn sweep_dir(dir: &Path, vocab: &Vocabulary) -> Result<Sweep, CorpusError> {
             }
         } else {
             match Wad::from_path(path) {
-                Ok(wad) => survey_wad(&wad, &label, vocab, &mut sweep, &mut seen),
+                Ok(wad) => survey_wad(&wad, label, vocab, &mut sweep, &mut seen),
                 Err(err) => {
                     sweep.buckets.wad_unreadable += 1;
                     sweep.failures.push(format!("{label}: {err}"));
