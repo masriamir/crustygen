@@ -6,9 +6,9 @@
 //! [`crate::compile::portals`]'s, reused directly: "the same machinery,
 //! minus the second room."
 //!
-//! The two [`crate::ir::ExitTrigger`] kinds need different geometry, because
-//! they trigger differently in the pinned engine (see the citations in
-//! `specials-report.md` and the two "engine facts" already recorded in
+//! The three [`crate::ir::ExitTrigger`] kinds need different geometry,
+//! because they trigger differently in the pinned engine (see the citations
+//! in `specials-report.md` and the two "engine facts" already recorded in
 //! `KNOWN-GAPS.md`):
 //!
 //! - **Switch** (`P_UseSpecialLine`, front-side only) needs nothing more than
@@ -29,14 +29,17 @@
 //!   carves a small dead-end alcove out of the host room's own wall — one
 //!   real threshold plus three solid one-sided walls closing off the
 //!   remaining three sides, the same shape
-//!   `crate::compile::portals::emit_gap_sector` builds for a two-room gap
-//!   sector, just with one side (the far wall) solid instead of a second
-//!   threshold, since there is no second room here. Only the near threshold
+//!   `crate::compile::portals::emit_recess` builds. Only the near threshold
 //!   (front bound to the host room, back to the alcove) carries the walkover
 //!   special. The player steps into the alcove, crosses the threshold, and
 //!   the level ends.
+//! - **Teleport** — the walkover construction again, in a room that rule P26
+//!   requires to be portal-less and carry a teleport marker: the player
+//!   teleports in and simply steps across the alcove's threshold to end the
+//!   level, exactly like a walkover exit. See `crate::ir::Teleport` for the
+//!   marker itself.
 //!
-//! Both kinds resolve their span with `resolve_exit` and carve the host wall
+//! Every kind resolves its span with `resolve_exit` and carves the host wall
 //! with `portals::split_wall_for_opening` before emitting anything — the
 //! same "resolve and validate everything, then emit" discipline `cut_portals`
 //! and `doors::emit_doors` already follow, so a rejected exit leaves no
@@ -50,23 +53,12 @@
 //! stays a single, exception-free invariant and the tag manifest records
 //! every action a run took, not just the ones that mechanically need one.
 
-use crate::compile::portals::{Cut, emit_opening, emit_side_wall, split_wall_for_opening};
+use crate::compile::portals::{Cut, emit_recess, emit_side_wall, split_wall_for_opening};
 use crate::compile::tags::TagAllocator;
 use crate::compile::{CompileError, MapData, SectorOut};
-use crate::geom::{Axis, on_diagonal_wall, outward_sign, wall_edges};
+use crate::geom::{Axis, on_diagonal_wall, wall_edges};
 use crate::ir::{Exit, ExitTrigger, Ir};
 use crate::tables::Tables;
-
-/// The inclusive coordinate range every Doom map format stores in a signed
-/// 16-bit field.
-///
-/// A walkover exit's alcove is carved outward from its host room's wall with
-/// no containing room to bound it — unlike a door recess, whose far
-/// coordinate is forced strictly between the shared wall and room `b`'s own
-/// already-`i16`-validated far wall by `DoorTooDeep`, so it can never itself
-/// land out of range. The alcove has no such backstop, so it is checked
-/// directly here rather than assumed safe by analogy.
-const MAP_RANGE: std::ops::RangeInclusive<i32> = (i16::MIN as i32)..=(i16::MAX as i32);
 
 /// How far a walkover exit's alcove extends beyond the host room's wall, in
 /// map units.
@@ -172,11 +164,8 @@ fn exit_special(tables: &Tables, exit: &Exit) -> u16 {
     match (exit.trigger, exit.secret) {
         (ExitTrigger::Switch, false) => tables.exit_switch_special(),
         (ExitTrigger::Switch, true) => tables.secret_exit_switch_special(),
-        // TODO(#38 task 3): a teleport-only exit has no independent trigger
-        // special of its own — it is a walkover line in a room reachable
-        // only by teleport. Folded into the `Walkover` arm as a placeholder
-        // until task 3 finishes the wiring, which keeps the match
-        // exhaustive without duplicating the arm body.
+        // A teleport-only exit has no independent trigger special of its
+        // own — it is a walkover line in a room reachable only by teleport.
         (ExitTrigger::Walkover | ExitTrigger::Teleport, false) => tables.exit_walkover_special(),
         (ExitTrigger::Walkover | ExitTrigger::Teleport, true) => {
             tables.secret_exit_walkover_special()
@@ -193,16 +182,16 @@ fn exit_special(tables: &Tables, exit: &Exit) -> u16 {
 ///
 /// # Errors
 /// Returns [`CompileError::UnknownTheme`] when `ir.theme` resolves to no
-/// texture set, [`CompileError::ExitAlcoveOutOfRange`] when a walkover
-/// exit's alcove would land outside the 16-bit map range, and whatever
+/// texture set, [`CompileError::RecessOutOfRange`] when a walkover exit's
+/// alcove would land outside the 16-bit map range, and whatever
 /// `resolve_exit` (including [`CompileError::ExitOnDiagonalWall`], if the
 /// requested position sits on a diagonal wall) or
 /// `portals::split_wall_for_opening` raise.
 ///
 /// # Panics
-/// Panics if `emit_opening` (used for a walkover exit's threshold) ever
-/// returns a one-sided line — unreachable, as it always emits both
-/// sidedefs of the line it pushes.
+/// Panics if `emit_opening` (used via `portals::emit_recess` for a walkover
+/// exit's threshold) ever returns a one-sided line — unreachable, as it
+/// always emits both sidedefs of the line it pushes.
 pub fn emit_exits(
     ir: &Ir,
     tables: &Tables,
@@ -250,9 +239,6 @@ pub fn emit_exits(
             ExitTrigger::Switch => {
                 emit_switch_exit(data, &cut, &plan, special, tag, &switch_tex, switch_width);
             }
-            // TODO(#38 task 3): give `Teleport` its own construction; for
-            // now it emits the same walkover geometry as `Walkover`, which
-            // keeps this match exhaustive until task 3 finishes the wiring.
             ExitTrigger::Walkover | ExitTrigger::Teleport => {
                 emit_walkover_exit(ir, data, &cut, &plan, &exit.room, special, tag)?;
             }
@@ -297,14 +283,17 @@ fn emit_switch_exit(
 
 /// Emits a walkover exit's construction: a new closed alcove sector behind
 /// the host wall, a passable threshold carrying the special, and the three
-/// alcove-only walls that close the recess. See the module documentation for
-/// the full derivation.
+/// alcove-only walls that close the recess — via
+/// [`crate::compile::portals::emit_recess`], the same construction a
+/// teleport-triggered exit (and a teleport's own wall pad) share. See the
+/// module documentation for the full derivation.
 ///
 /// # Errors
-/// Returns [`CompileError::ExitAlcoveOutOfRange`] when the alcove's far wall
-/// would land outside the 16-bit map range — see [`MAP_RANGE`]'s doc comment
-/// for why this needs an explicit check rather than being implied by an
-/// already-validated bound.
+/// Returns [`CompileError::RecessOutOfRange`] when the alcove's far wall
+/// would land outside the 16-bit map range — see
+/// [`crate::compile::portals::MAP_RANGE`]'s doc comment for why this needs
+/// an explicit check rather than being implied by an already-validated
+/// bound.
 fn emit_walkover_exit(
     ir: &Ir,
     data: &mut MapData,
@@ -315,75 +304,26 @@ fn emit_walkover_exit(
     tag: u16,
 ) -> Result<(), CompileError> {
     let room = &ir.rooms[plan.room_idx];
-
-    // The alcove's outward direction is exactly the direction a facing
-    // room's wall would occupy in a two-room portal's gap — there is simply
-    // no room on the other side of it.
-    let sign = outward_sign(plan.axis, plan.forward);
-    let far = plan.fixed + sign * EXIT_ALCOVE_DEPTH;
-    let far_cut = Cut {
-        axis: plan.axis,
-        fixed: far,
-        open_lo: plan.open_lo,
-        open_hi: plan.open_hi,
-    };
-
-    if !MAP_RANGE.contains(&far) {
-        let probe = far_cut.pt(plan.open_lo);
-        return Err(CompileError::ExitAlcoveOutOfRange {
-            room: exit_room.to_owned(),
-            x: probe.x,
-            y: probe.y,
-        });
-    }
-
-    let alcove = data.sectors.len();
-    data.sectors.push(SectorOut {
-        floor: room.floor,
-        ceiling: room.ceiling,
-        light: room.light,
-        floor_tex: room.floor_tex.clone(),
-        ceil_tex: room.ceil_tex.clone(),
-        special: 0,
-        tag: 0,
-        wall_tex: room.wall_tex.clone(),
-    });
-
-    let near_line = emit_opening(data, cut, plan.room_idx, alcove, plan.forward);
-    data.linedefs[near_line].special = special;
-    data.linedefs[near_line].tag = tag;
-
-    // The alcove's three remaining sides, closing the recess: near_end ->
-    // far_end -> far_start -> near_start, where near_start/near_end are the
-    // two ends of the threshold this sector's interior lies to the right of
-    // (see `emit_opening`'s doc comment for the `a_forward` rule).
-    let (near_start, near_end) = if plan.forward {
-        (plan.open_hi, plan.open_lo)
-    } else {
-        (plan.open_lo, plan.open_hi)
-    };
-    emit_side_wall(
+    let recess = emit_recess(
         data,
-        cut.pt(near_end),
-        far_cut.pt(near_end),
-        alcove,
-        &room.wall_tex,
-    );
-    emit_side_wall(
-        data,
-        far_cut.pt(near_end),
-        far_cut.pt(near_start),
-        alcove,
-        &room.wall_tex,
-    );
-    emit_side_wall(
-        data,
-        far_cut.pt(near_start),
-        cut.pt(near_start),
-        alcove,
-        &room.wall_tex,
-    );
-
+        cut,
+        plan.room_idx,
+        plan.forward,
+        EXIT_ALCOVE_DEPTH,
+        SectorOut {
+            floor: room.floor,
+            ceiling: room.ceiling,
+            light: room.light,
+            floor_tex: room.floor_tex.clone(),
+            ceil_tex: room.ceil_tex.clone(),
+            special: 0,
+            tag: 0,
+            wall_tex: room.wall_tex.clone(),
+        },
+        exit_room,
+    )?;
+    data.linedefs[recess.threshold].special = special;
+    data.linedefs[recess.threshold].tag = tag;
     Ok(())
 }
 
@@ -659,6 +599,31 @@ mod tests {
         );
     }
 
+    /// A teleport-triggered exit routes to exactly the same construction as
+    /// a walkover exit — `exit_special` and `emit_exits`' own match both
+    /// fold `ExitTrigger::Teleport` into the `Walkover` arm — so this proves
+    /// the routing rather than re-proving the alcove geometry itself, which
+    /// the walkover tests above already cover in full.
+    #[test]
+    fn a_teleport_trigger_exit_is_a_walkover_alcove_with_the_walkover_special() {
+        let json = L_ROOM.replace(
+            "\"portals\":[]",
+            r#""exits":[{ "room":"a", "trigger":"teleport", "width":32, "at":[256,32] }],
+               "portals":[]"#,
+        );
+        let (ir, data) = compiled(&json);
+        let tables = Tables::load().expect("tables");
+        assert_well_formed(&ir, &data);
+        assert_eq!(data.sectors.len(), 2, "host plus the alcove");
+        let threshold = data
+            .linedefs
+            .iter()
+            .find(|l| l.special != 0)
+            .expect("the threshold carries the special");
+        assert_eq!(threshold.special, tables.exit_walkover_special());
+        assert!(threshold.back.is_some() && !threshold.blocking);
+    }
+
     #[test]
     fn an_exit_wider_than_its_wall_is_rejected() {
         let json = L_ROOM.replace(
@@ -699,7 +664,7 @@ mod tests {
         let mut tags = TagAllocator::new();
         assert!(matches!(
             emit_exits(&ir, &tables, &mut data, &mut tags),
-            Err(crate::compile::CompileError::ExitAlcoveOutOfRange { .. })
+            Err(crate::compile::CompileError::RecessOutOfRange { .. })
         ));
     }
 
@@ -791,6 +756,13 @@ mod tests {
     // this project has twice shipped Critical geometry defects from exactly
     // this kind of orientation undercount, so the exit construction gets its
     // own complete matrix rather than resting on that mitigation alone.
+    // `ExitTrigger::Teleport` does not get its own copy of this matrix: its
+    // construction is byte-identical to `Walkover`'s (both route through
+    // `emit_walkover_exit`), so a per-orientation sweep would only re-prove
+    // geometry the walkover matrix above already covers —
+    // `a_teleport_trigger_exit_is_a_walkover_alcove_with_the_walkover_special`
+    // proves the routing once, which is the only thing specific to the
+    // teleport trigger.
 
     /// West wall (edge `(0,0)->(0,256)`, `Axis::Vertical`, `forward = true`)
     /// — the missing fourth `(axis, forward)` combination for a switch exit.

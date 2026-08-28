@@ -14,9 +14,22 @@
 
 use crate::compile::sectors::vertex_index;
 use crate::compile::{CompileError, LinedefOut, MapData, SectorOut, SidedefOut};
-use crate::geom::{Axis, FacingSpan, Pt, facing_spans, find_facing_span, on_diagonal_wall};
+use crate::geom::{
+    Axis, FacingSpan, Pt, facing_spans, find_facing_span, on_diagonal_wall, outward_sign,
+};
 use crate::ir::{Ir, Portal, PortalKind};
 use crate::tables::Tables;
+
+/// The inclusive coordinate range every Doom map format stores in a signed
+/// 16-bit field.
+///
+/// A recess ([`emit_recess`]'s alcove) is carved outward from its host
+/// room's wall with no containing room to bound it — unlike a door's own
+/// depth, whose far coordinate is forced strictly between the shared wall
+/// and room `b`'s own already-`i16`-validated far wall by `DoorTooDeep`, so
+/// it can never itself land out of range. A recess has no such backstop, so
+/// it is checked directly here rather than assumed safe by analogy.
+pub(crate) const MAP_RANGE: std::ops::RangeInclusive<i32> = (i16::MIN as i32)..=(i16::MAX as i32);
 
 /// Opens every portal into the facing walls of its two rooms and fills the
 /// gap between them.
@@ -747,9 +760,9 @@ pub(crate) fn mark_secret_thresholds(
 /// Emits a one-sided wall from `p1` to `p2`, front bound to `sector`, with
 /// solid rock behind. Returns the new linedef's index.
 ///
-/// The construction [`emit_gap_sector`]'s two jambs, [`crate::compile::exits`]'s
-/// walkover alcove, and a switch exit's own line (which needs the returned
-/// index to attach its special and tag afterward) all need this.
+/// The construction [`emit_gap_sector`]'s two jambs, [`emit_recess`]'s three
+/// solid walls, and a switch exit's own line (which needs the returned index
+/// to attach its special and tag afterward) all need this.
 pub(crate) fn emit_side_wall(
     data: &mut MapData,
     p1: Pt,
@@ -782,14 +795,101 @@ pub(crate) fn emit_side_wall(
     data.linedefs.len() - 1
 }
 
+/// A recess carved outward from one host wall: its sector and the threshold
+/// line that joins it to the host.
+pub(crate) struct Recess {
+    /// Index of the recess's own sector.
+    #[allow(
+        dead_code,
+        reason = "unread by any caller until #38 task 4 wires a teleport pad's own sector \
+                  lookup onto it; emit_recess's own test already exercises it"
+    )]
+    pub(crate) sector: usize,
+    /// Index of the two-sided threshold (front = host, back = recess).
+    pub(crate) threshold: usize,
+}
+
+/// Emits a dead-end recess `depth` units outward from the host wall `cut`
+/// spans: one passable threshold (front bound to `host`, back to the new
+/// sector) and three solid one-sided walls closing the other sides.
+///
+/// The shape a walkover exit's alcove and a teleport's wall pad share — the
+/// same construction [`emit_gap_sector`] builds for a two-room gap sector,
+/// with the far wall solid instead of a second threshold. `cut`'s wall must
+/// already have been split by [`split_wall_for_opening`]. The caller owns
+/// the recess's properties (`sector_out`) and whatever special the
+/// threshold carries.
+///
+/// # Errors
+/// Returns [`CompileError::RecessOutOfRange`] when the far wall would land
+/// outside the 16-bit map range — the recess has no containing room to
+/// bound it, unlike a door's own depth.
+pub(crate) fn emit_recess(
+    data: &mut MapData,
+    cut: &Cut,
+    host: usize,
+    forward: bool,
+    depth: i32,
+    sector_out: SectorOut,
+    host_name: &str,
+) -> Result<Recess, CompileError> {
+    let sign = outward_sign(cut.axis, forward);
+    let far = cut.fixed + sign * depth;
+    let far_cut = Cut {
+        axis: cut.axis,
+        fixed: far,
+        open_lo: cut.open_lo,
+        open_hi: cut.open_hi,
+    };
+    if !MAP_RANGE.contains(&far) {
+        let probe = far_cut.pt(cut.open_lo);
+        return Err(CompileError::RecessOutOfRange {
+            host: host_name.to_owned(),
+            x: probe.x,
+            y: probe.y,
+        });
+    }
+    let wall_tex = sector_out.wall_tex.clone();
+    let sector = data.sectors.len();
+    data.sectors.push(sector_out);
+    let threshold = emit_opening(data, cut, host, sector, forward);
+    let (near_start, near_end) = if forward {
+        (cut.open_hi, cut.open_lo)
+    } else {
+        (cut.open_lo, cut.open_hi)
+    };
+    emit_side_wall(
+        data,
+        cut.pt(near_end),
+        far_cut.pt(near_end),
+        sector,
+        &wall_tex,
+    );
+    emit_side_wall(
+        data,
+        far_cut.pt(near_end),
+        far_cut.pt(near_start),
+        sector,
+        &wall_tex,
+    );
+    emit_side_wall(
+        data,
+        far_cut.pt(near_start),
+        cut.pt(near_start),
+        sector,
+        &wall_tex,
+    );
+    Ok(Recess { sector, threshold })
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
-    use crate::compile::portals::cut_portals;
+    use crate::compile::portals::{Cut, cut_portals, emit_recess, split_wall_for_opening};
     use crate::compile::sectors::emit_sectors;
-    use crate::compile::{CompileError, MapData};
-    use crate::geom::{Pt, contains};
+    use crate::compile::{CompileError, MapData, SectorOut};
+    use crate::geom::{Axis, Pt, contains};
     use crate::ir::Ir;
     use crate::tables::Tables;
 
@@ -1697,5 +1797,48 @@ mod tests {
             data.sectors[2].wall_tex, "WA",
             "the passage sector inherits room a's, matching its jamb texture"
         );
+    }
+
+    /// A plain 256-unit square room with no portals — no existing fixture in
+    /// this module is a single unadorned square, so [`emit_recess`]'s own
+    /// test gets one of its own rather than borrowing a shape-specific
+    /// fixture like [`OCTAGON_ROOM`] or [`L_SHAPED_A`].
+    const ONE_ROOM_JSON: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }
+      ],
+      "portals":[] }"#;
+
+    #[test]
+    fn emit_recess_builds_one_threshold_and_three_solid_walls_at_the_requested_depth() {
+        let ir = Ir::from_json(ONE_ROOM_JSON).expect("ir");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        let cut = Cut {
+            axis: Axis::Horizontal,
+            fixed: 256,
+            open_lo: 96,
+            open_hi: 160,
+        };
+        split_wall_for_opening(&mut data, &cut, 0, "a").expect("split");
+        let sector_out = SectorOut {
+            floor: 8,
+            ceiling: 128,
+            light: 160,
+            floor_tex: "GATE3".into(),
+            ceil_tex: "CEIL3_5".into(),
+            special: 0,
+            tag: 0,
+            wall_tex: "STARTAN3".into(),
+        };
+        let recess = emit_recess(&mut data, &cut, 0, true, 64, sector_out, "a").expect("recess");
+        assert_eq!(recess.sector, 1);
+        let t = &data.linedefs[recess.threshold];
+        assert_eq!(data.sidedefs[t.front].sector, 0, "front = host");
+        assert_eq!(data.sidedefs[t.back.unwrap()].sector, 1, "back = recess");
+        let far_y = data.vertices.iter().map(|v| v.y).max().unwrap();
+        assert_eq!(far_y, 256 + 64, "64 deep, outward from the north wall");
+        assert_eq!(data.sectors[1].floor, 8);
     }
 }

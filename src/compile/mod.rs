@@ -326,14 +326,15 @@ pub enum CompileError {
         /// The available wall length.
         available: i32,
     },
-    /// A walkover exit's alcove would place a vertex outside the 16-bit map
-    /// range every Doom map format uses.
+    /// A recess (a walkover exit's alcove, or a teleport's wall pad) would
+    /// place a vertex outside the 16-bit map range every Doom map format
+    /// uses.
     #[error(
-        "exit in room `{room}`: the walkover alcove would place a vertex at ({x}, {y}), outside the map range"
+        "the recess behind room `{host}` (an exit alcove or a teleport pad) would place a vertex at ({x}, {y}), outside the map range"
     )]
-    ExitAlcoveOutOfRange {
+    RecessOutOfRange {
         /// The host room.
-        room: String,
+        host: String,
         /// The out-of-range vertex's X coordinate.
         x: i32,
         /// The out-of-range vertex's Y coordinate.
