@@ -158,7 +158,10 @@ impl std::fmt::Display for Finding {
 /// passage-width ([`invariants::check_passage_width`], V-P3), door-opening
 /// ([`invariants::check_door_openings`], V-P4), and recognized-special
 /// ([`invariants::check_recognized_specials`], the flood's soundness
-/// precondition) invariants, runs the key-aware reachability flood
+/// precondition), teleport-pairing
+/// ([`invariants::check_teleport_pairing`], V-P15) and sealed-monster-sector
+/// ([`invariants::check_sealed_monster_rooms`], V-P27) invariants, runs the
+/// key-aware reachability flood
 /// ([`flood::run_flood`], V-P7) and, when it ran, the reachability half of
 /// pickup accessibility over its result (`invariants::check_pickup_reachability`,
 /// V-P20), runs key/lock coherence ([`flood::check_key_lock_coherence`],
@@ -201,6 +204,8 @@ pub fn run(map: &UdmfMap, map_name: &str, tables: &Tables, spec: Option<&Spec>) 
     invariants::check_passage_width(&scene, tables, &mut findings);
     invariants::check_door_openings(&scene, tables, &mut findings);
     invariants::check_recognized_specials(&scene, tables, &mut findings);
+    invariants::check_teleport_pairing(&scene, tables, &mut findings);
+    invariants::check_sealed_monster_rooms(&scene, tables, &mut findings);
     if let Some(reached) = flood::run_flood(&scene, tables, &mut findings) {
         invariants::check_pickup_reachability(&scene, tables, &reached, &mut findings);
     }
@@ -258,6 +263,110 @@ pub fn run(map: &UdmfMap, map_name: &str, tables: &Tables, spec: Option<&Spec>) 
         conformance,
         tag_manifest,
         stats,
+    }
+}
+
+/// TEXTMAP fixtures shared by more than one `check` submodule's tests.
+///
+/// A fixture lives here rather than in whichever module first needed it so
+/// the flood, the invariants, and the conformance rows all cross-examine the
+/// *same* map: a defect that shows up as a missing edge in one and a missing
+/// finding in another is only visibly the same defect when both read one
+/// text.
+#[cfg(test)]
+pub(crate) mod fixtures {
+    use crate::check::scene::Scene;
+    use crate::tables::Tables;
+    use crustywad::map::udmf::parse_udmf;
+
+    /// Two disjoint squares. Sector 0 (0..128) holds the player start and an
+    /// inner 32-unit island pad (sector 3) whose four edges carry
+    /// `special = 97; arg0 = 5;` with sector 0 on their front. Sector 1
+    /// (256..384) carries `id = 5` and the marker; sector 2 is a 32-deep
+    /// alcove east of it behind a two-sided walkover exit line (52).
+    ///
+    /// Sector 0's winding is clockwise (north, east, south, west); the
+    /// island's four lines wind counter-clockwise around the pad so their
+    /// right-hand side — the front, sector 0 — faces outward; sector 1's
+    /// east wall is split at `y = 32` and `y = 96` so the alcove threshold
+    /// is its own two-sided line.
+    pub(crate) const TELEPORT_MAP: &str = r#"namespace = "doom";
+
+vertex { x = 0.0; y = 0.0; }
+vertex { x = 0.0; y = 128.0; }
+vertex { x = 128.0; y = 128.0; }
+vertex { x = 128.0; y = 0.0; }
+vertex { x = 64.0; y = 64.0; }
+vertex { x = 64.0; y = 96.0; }
+vertex { x = 96.0; y = 96.0; }
+vertex { x = 96.0; y = 64.0; }
+vertex { x = 256.0; y = 0.0; }
+vertex { x = 256.0; y = 128.0; }
+vertex { x = 384.0; y = 128.0; }
+vertex { x = 384.0; y = 0.0; }
+vertex { x = 384.0; y = 32.0; }
+vertex { x = 384.0; y = 96.0; }
+vertex { x = 416.0; y = 96.0; }
+vertex { x = 416.0; y = 32.0; }
+
+linedef { v1 = 0; v2 = 1; sidefront = 0; blocking = true; }
+linedef { v1 = 1; v2 = 2; sidefront = 1; blocking = true; }
+linedef { v1 = 2; v2 = 3; sidefront = 2; blocking = true; }
+linedef { v1 = 3; v2 = 0; sidefront = 3; blocking = true; }
+linedef { v1 = 4; v2 = 7; sidefront = 4; sideback = 5; twosided = true; special = 97; arg0 = 5; }
+linedef { v1 = 7; v2 = 6; sidefront = 6; sideback = 7; twosided = true; special = 97; arg0 = 5; }
+linedef { v1 = 6; v2 = 5; sidefront = 8; sideback = 9; twosided = true; special = 97; arg0 = 5; }
+linedef { v1 = 5; v2 = 4; sidefront = 10; sideback = 11; twosided = true; special = 97; arg0 = 5; }
+linedef { v1 = 8; v2 = 9; sidefront = 12; blocking = true; }
+linedef { v1 = 9; v2 = 10; sidefront = 13; blocking = true; }
+linedef { v1 = 10; v2 = 13; sidefront = 14; blocking = true; }
+linedef { v1 = 13; v2 = 12; sidefront = 15; sideback = 16; twosided = true; special = 52; arg0 = 1; }
+linedef { v1 = 12; v2 = 11; sidefront = 17; blocking = true; }
+linedef { v1 = 11; v2 = 8; sidefront = 18; blocking = true; }
+linedef { v1 = 13; v2 = 14; sidefront = 19; blocking = true; }
+linedef { v1 = 14; v2 = 15; sidefront = 20; blocking = true; }
+linedef { v1 = 15; v2 = 12; sidefront = 21; blocking = true; }
+
+sidedef { sector = 0; texturemiddle = "STARTAN3"; }
+sidedef { sector = 0; texturemiddle = "STARTAN3"; }
+sidedef { sector = 0; texturemiddle = "STARTAN3"; }
+sidedef { sector = 0; texturemiddle = "STARTAN3"; }
+sidedef { sector = 0; texturebottom = "STARTAN3"; }
+sidedef { sector = 3; }
+sidedef { sector = 0; texturebottom = "STARTAN3"; }
+sidedef { sector = 3; }
+sidedef { sector = 0; texturebottom = "STARTAN3"; }
+sidedef { sector = 3; }
+sidedef { sector = 0; texturebottom = "STARTAN3"; }
+sidedef { sector = 3; }
+sidedef { sector = 1; texturemiddle = "STARTAN3"; }
+sidedef { sector = 1; texturemiddle = "STARTAN3"; }
+sidedef { sector = 1; texturemiddle = "STARTAN3"; }
+sidedef { sector = 1; }
+sidedef { sector = 2; }
+sidedef { sector = 1; texturemiddle = "STARTAN3"; }
+sidedef { sector = 1; texturemiddle = "STARTAN3"; }
+sidedef { sector = 2; texturemiddle = "STARTAN3"; }
+sidedef { sector = 2; texturemiddle = "STARTAN3"; }
+sidedef { sector = 2; texturemiddle = "STARTAN3"; }
+
+sector { heightfloor = 0; heightceiling = 128; texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; lightlevel = 160; }
+sector { heightfloor = 0; heightceiling = 128; texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; lightlevel = 160; id = 5; }
+sector { heightfloor = 0; heightceiling = 128; texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; lightlevel = 160; }
+sector { heightfloor = 8; heightceiling = 128; texturefloor = "GATE3"; textureceiling = "CEIL3_5"; lightlevel = 160; }
+
+thing { x = 32.0; y = 32.0; angle = 90; type = 1; single = true; }
+thing { x = 320.0; y = 64.0; angle = 0; type = 14; single = true; }
+"#;
+
+    /// Parses `text` and builds its [`Scene`], discarding structural
+    /// findings (the fixtures here are well-formed; a test that wants them
+    /// calls `Scene::build` itself).
+    pub(crate) fn scene_of(text: &str) -> (Scene, Tables) {
+        let tables = Tables::load().expect("tables");
+        let map = parse_udmf(text, crustywad::Limits::default()).expect("fixture parses");
+        let scene = Scene::build(&map, &tables, &mut Vec::new());
+        (scene, tables)
     }
 }
 
