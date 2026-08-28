@@ -8,9 +8,10 @@ shared `crustygen::ingest` path and the `crustygen-lift` telemetry skeleton
 membership verdict and the `crustygen-corpus` corpus sweep (see
 `docs/corpus.md`), plus the `crustygen-build` CLI over the compiler
 (`src/bin/crustygen-build.rs` — see `docs/build.md`).
-513 tests (443 lib + 3 crustygen-build unit + 15 build_cli + 7 check_adversarial + 16 check_cli + 4
-check_conformance + 1 first_map + 6 golden_textmap + 10 lift_cli + 3
-spec_documents + 4 vanilla_wad + 1 walking_skeleton), plus a separately-run `#[ignore]`d golden-regeneration
+546 tests (457 lib + 3 crustygen-build unit + 15 build_cli + 7 check_adversarial + 16 check_cli + 4
+check_conformance + 9 corpus_cli + 1 first_map + 6 golden_textmap + 13 lift_cli + 3
+spec_documents + 4 vanilla_wad + 4 vocabulary_arbiter + 3 vocabulary_tables + 1
+walking_skeleton), plus a separately-run `#[ignore]`d golden-regeneration
 generator not included in that count. This file records what is deliberately
 absent, what is known-fragile, and the decisions a future contributor would
 otherwise have to re-derive.
