@@ -356,6 +356,18 @@ fn check_teleport_pairing(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViola
     }
 }
 
+/// Whether some teleport marker delivers into `room_idx` — either directly
+/// (the marker's sector *is* the room's own sector) or onto an island pad
+/// hosted inside it (`SectorOut::host == Some(room_idx)`). Shared by P26 and
+/// P27, both of which treat a hosted-pad destination the same as a direct
+/// one: the pad is still physically inside the room, so anything arriving on
+/// it is inside the room too.
+fn is_teleport_destination(out: &Compiled, room_idx: usize) -> bool {
+    out.markers
+        .iter()
+        .any(|m| m.sector == room_idx || out.data.sectors[m.sector].host == Some(room_idx))
+}
+
 /// P26: an exit with `trigger: teleport` sits in a room with no portal and at
 /// least one destination marker — the player arrives by teleport and steps
 /// across the exit line (TNT MAP23's shape).
@@ -383,11 +395,7 @@ fn check_teleport_exit_rooms(ir: &Ir, out: &Compiled, v: &mut Vec<RuleViolation>
                     .to_owned(),
             });
         }
-        if !out
-            .markers
-            .iter()
-            .any(|m| m.sector == room_idx || out.data.sectors[m.sector].host == Some(room_idx))
-        {
+        if !is_teleport_destination(out, room_idx) {
             v.push(RuleViolation {
                 rule: "P26",
                 subject: exit.room.clone(),
@@ -416,11 +424,7 @@ fn check_sealed_monster_rooms(
             continue;
         }
         let has_portal = ir.portals.iter().any(|p| p.a == room.id || p.b == room.id);
-        let is_destination = out
-            .markers
-            .iter()
-            .any(|m| m.sector == i || out.data.sectors[m.sector].host == Some(i));
-        if !has_portal && !is_destination {
+        if !has_portal && !is_teleport_destination(out, i) {
             v.push(RuleViolation {
                 rule: "P27",
                 subject: room.id.clone(),
@@ -1258,6 +1262,35 @@ mod tests {
         );
     }
 
+    /// The hosted-pad disjunct of P26's destination check
+    /// (`SectorOut::host == Some(room_idx)`): the exit's room `b` has no
+    /// portal, and its only marker lands not on `b`'s own room sector but on
+    /// an island pad hosted inside it — `t1` (triggered from `a`) delivers
+    /// straight onto `t2`'s pad center in `b`, exactly the two-way-pair
+    /// shape `compile::teleports::a_two_way_pair_tags_the_other_pad` already
+    /// pins at the compiler level. No prior fixture exercised this branch of
+    /// the rule; every other destination in this file lands directly in the
+    /// room's own sector.
+    #[test]
+    fn p26_a_hosted_pad_destination_satisfies_the_exit_room() {
+        let json = format!(
+            r#"{} "portals":[],
+               "exits":[{{ "room":"b", "trigger":"teleport", "at":[448,256], "width":64 }}],
+               "teleports":[
+                 {{ "id":"t1", "room":"a", "pad":{{"island":[64,192]}},
+                    "to":{{"room":"b","at":[448,192],"angle":90}} }},
+                 {{ "id":"t2", "room":"b", "pad":{{"island":[448,192]}},
+                    "to":{{"room":"a","at":[200,200],"angle":0}} }}
+               ] }}"#,
+            TWO_ROOMS_HEAD.replace("THINGS_B", "")
+        );
+        assert!(
+            all_violations(&json).iter().all(|v| v.rule != "P26"),
+            "{:?}",
+            all_violations(&json)
+        );
+    }
+
     #[test]
     fn p27_a_sealed_room_with_monsters_is_rejected_unless_it_is_a_destination() {
         let sealed = format!(
@@ -1276,6 +1309,32 @@ mod tests {
             r#""teleports":[{ "id":"t", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[384,64],"angle":90} }]"#,
         );
         assert!(all_violations(&destination).iter().all(|v| v.rule != "P27"));
+    }
+
+    /// The hosted-pad disjunct of P27's destination check, mirroring
+    /// `p26_a_hosted_pad_destination_satisfies_the_exit_room` above: room
+    /// `b` is sealed (no portal) and holds an imp, but is a destination only
+    /// because another teleport (`t1`, triggered from `a`) delivers onto
+    /// `b`'s own island pad (`t2`'s), not into `b`'s room sector directly.
+    /// The imp sits well clear of the pad's grown square.
+    #[test]
+    fn p27_a_hosted_pad_destination_satisfies_the_sealed_room() {
+        let json = format!(
+            r#"{} "portals":[],
+               "exits":[{{ "room":"a", "trigger":"switch", "at":[128,0], "width":64 }}],
+               "teleports":[
+                 {{ "id":"t1", "room":"a", "pad":{{"island":[64,192]}},
+                    "to":{{"room":"b","at":[448,192],"angle":90}} }},
+                 {{ "id":"t2", "room":"b", "pad":{{"island":[448,192]}},
+                    "to":{{"room":"a","at":[200,200],"angle":0}} }}
+               ] }}"#,
+            TWO_ROOMS_HEAD.replace("THINGS_B", r#"{ "kind":"imp", "at":[384,64], "angle":0 }"#)
+        );
+        assert!(
+            all_violations(&json).iter().all(|v| v.rule != "P27"),
+            "{:?}",
+            all_violations(&json)
+        );
     }
 
     #[test]
