@@ -53,7 +53,8 @@ pub struct Buckets {
     pub unsupported_format: u64,
     /// Binary maps that failed strict assembly.
     pub assembly_refused: u64,
-    /// UDMF maps whose `TEXTMAP` is not UTF-8, unparseable, or unrenderable.
+    /// A `TEXTMAP` that is not UTF-8 or fails to parse, plus binary maps
+    /// that failed the UDMF round trip.
     pub textmap_unparseable: u64,
 }
 
@@ -157,11 +158,10 @@ pub fn sweep_dir(dir: &Path, vocab: &Vocabulary) -> Result<Sweep, CorpusError> {
     };
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for path in &candidates {
-        let label = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("?")
-            .to_owned();
+        let label = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
         if has_ext(path, "zip") {
             match Archive::from_path_with_options(path, archive_options()) {
                 Ok(archive) => {
@@ -211,6 +211,7 @@ fn survey_wad(
     let groups = wad.map_groups();
     if groups.is_empty() {
         sweep.buckets.no_maps += 1;
+        sweep.failures.push(format!("{source}: no map groups"));
         return;
     }
     for group in &groups {
