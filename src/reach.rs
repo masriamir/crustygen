@@ -357,11 +357,11 @@ pub struct BuiltGraph {
 ///
 /// Geometry comes from [`MapData`](crate::compile::MapData) — sectors as
 /// nodes, two-sided non-blocking linedefs as edges, plus one directed
-/// [`EdgeKind::Teleport`] edge per player-usable teleport line (tagged to the
-/// sector task 4 tagged as its destination) — never from authored intent, so
-/// the graph cannot drift from the map. Keys and the start use the
-/// room-index-equals-sector-index invariant [`crate::compile::things`]
-/// documents and verifies.
+/// [`EdgeKind::Teleport`] edge per player-usable teleport line, running to
+/// whichever sector task 4 tagged as that line's destination — never from
+/// authored intent, so the graph cannot drift from the map. Keys and the
+/// start use the room-index-equals-sector-index invariant
+/// [`crate::compile::things`] documents and verifies.
 ///
 /// This is also where [`check`]'s indexing preconditions are established.
 /// `check` indexes `nodes` by `start`, by every `goals` entry, and by each
