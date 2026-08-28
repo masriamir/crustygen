@@ -265,6 +265,12 @@ fn tag_destinations(
             marker.teleports.push(t.id.clone());
             line_tag[i] = *tag;
         } else {
+            // Unreachable today, and deliberately kept: no earlier pass can
+            // tag a sector a destination may land in. `emit_doors` tags only
+            // the door sector it creates, `emit_exits` writes no sector tag
+            // at all (its tag lives on the linedef), and a room sector is
+            // never tagged before this pass. The guard defends the invariant
+            // against a future tag-writing pass, not any input reachable now.
             if data.sectors[sector].tag != 0 {
                 return Err(CompileError::TeleportDestinationSectorTagged {
                     id: t.id.clone(),
@@ -656,6 +662,65 @@ mod tests {
     #[test]
     fn an_island_pad_in_a_room_does_not_trip_the_overlap_check() {
         compiled(ISLAND, "").expect("the host/pad pair is exempt");
+    }
+
+    #[test]
+    fn a_wall_pad_after_an_island_pad_keeps_the_islands_edge_indices() {
+        // The one fixture that pins phase 1 (every wall split) against phase
+        // 2 (every pad emitted). `split_wall_for_opening` does `Vec::remove`
+        // on a room wall, which sits *below* the island's freshly pushed
+        // edges and slides every recorded index down by one. Splitting
+        // per-pad instead would therefore stamp the special onto four wrong
+        // linedefs — but only when an island is emitted *before* a wall pad
+        // in the same room, which is exactly this fixture's order. Do not
+        // reorder the two teleports: with the wall pad first, the removal
+        // happens before anything is recorded and the bug hides.
+        let (data, markers, tags) = compiled(
+            r#"{ "id":"i", "room":"a", "pad":{"island":[64,192]},
+                 "to":{"room":"b","at":[448,128],"angle":90} },
+               { "id":"w", "room":"a", "pad":{"wall":[192,256]},
+                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
+            "",
+        )
+        .expect("compiles");
+        let tables = Tables::load().expect("tables");
+        // rooms a, b, the passage, the island pad, then the wall recess.
+        assert_eq!(data.sectors.len(), 5);
+        let (island, recess) = (3, 4);
+        let special = tables.teleport_special(false, true);
+        let tag = data.sectors[1].tag;
+        assert_ne!(tag, 0, "room b carries the shared destination tag");
+
+        let island_edges: Vec<_> = data
+            .linedefs
+            .iter()
+            .filter(|l| l.back.is_some_and(|b| data.sidedefs[b].sector == island))
+            .collect();
+        assert_eq!(island_edges.len(), 4);
+        for l in &island_edges {
+            assert_eq!(data.sidedefs[l.front].sector, 0, "front = host room");
+            assert_eq!(
+                (l.special, l.tag),
+                (special, tag),
+                "the island's own edges still carry the trigger after the wall split"
+            );
+        }
+
+        let threshold: Vec<_> = data
+            .linedefs
+            .iter()
+            .filter(|l| l.back.is_some_and(|b| data.sidedefs[b].sector == recess))
+            .collect();
+        assert_eq!(threshold.len(), 1, "a recess has one two-sided edge");
+        assert_eq!((threshold[0].special, threshold[0].tag), (special, tag));
+
+        let triggers = data.linedefs.iter().filter(|l| l.special != 0).count();
+        assert_eq!(
+            triggers, 5,
+            "four island edges and one threshold, nothing else"
+        );
+        assert_eq!(markers.len(), 1, "one destination, one marker");
+        assert_eq!(tags.manifest().len(), 1);
     }
 
     #[test]

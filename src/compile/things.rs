@@ -639,6 +639,86 @@ mod tests {
         );
     }
 
+    /// A destination 14 units from room `b`'s own west wall — inside the
+    /// player's 16-unit radius. Destinations are points, deliberately not
+    /// grid-snapped by `Ir::from_json`, so a fixture can sit at any offset.
+    const MARKER_TOO_CLOSE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[{ "kind":"player1_start", "at":[192,64], "angle":90 }] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+          "floor":16, "ceiling":144, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }],
+      "teleports":[{ "id":"t", "room":"a", "pad":{"island":[64,192]},
+                     "to":{"room":"b","at":[334,128],"angle":90} }] }"#;
+
+    #[test]
+    fn a_destination_inside_the_arriving_things_radius_is_rejected() {
+        let ir = Ir::from_json(MARKER_TOO_CLOSE).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let err = compile_reporting(&ir, &tables).expect_err("14 < the player's 16-unit radius");
+        let CompileError::TeleportMarkerTooClose {
+            id,
+            x,
+            y,
+            have,
+            need,
+        } = err
+        else {
+            panic!("expected TeleportMarkerTooClose, got {err}");
+        };
+        assert_eq!((id.as_str(), x, y, need), ("t", 334, 128, 16));
+        assert!(
+            (have - 14.0).abs() < f64::EPSILON,
+            "the west wall is 14 units away, got {have}"
+        );
+    }
+
+    /// A two-way pair whose far half lands on room `b`'s own pad. Room `b` is
+    /// exactly the player's height (56), which it may be — but the pad's
+    /// floor sits `PAD_FLOOR_STEP` above it, leaving the pad 48 units of
+    /// headroom, which the arriving player does not fit in.
+    const MARKER_NO_HEADROOM: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[{ "kind":"player1_start", "at":[192,64], "angle":90 }] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+          "floor":0, "ceiling":56, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }],
+      "teleports":[
+        { "id":"t1", "room":"a", "pad":{"island":[64,192]},
+          "to":{"room":"b","at":[448,128],"angle":90} },
+        { "id":"t2", "room":"b", "pad":{"island":[448,128]},
+          "to":{"room":"a","at":[128,128],"angle":0} }] }"#;
+
+    #[test]
+    fn a_destination_pad_too_short_for_the_arriving_thing_is_rejected() {
+        let tables = Tables::load().expect("tables");
+        assert_eq!(
+            (tables.player().height, crate::ir::Ir::PAD_FLOOR_STEP),
+            (56, 8),
+            "the fixture's 56-unit room and its 48-unit pad assume these"
+        );
+        let ir = Ir::from_json(MARKER_NO_HEADROOM).expect("ir");
+        let err = compile_reporting(&ir, &tables).expect_err("48 < the player's 56-unit height");
+        let CompileError::TeleportMarkerNoHeadroom { id, have, need } = err else {
+            panic!("expected TeleportMarkerNoHeadroom, got {err}");
+        };
+        assert_eq!(
+            (id.as_str(), have, need),
+            ("t1", 48, 56),
+            "named by the teleport delivering onto b's pad"
+        );
+    }
+
     #[test]
     fn a_thing_with_no_skills_specified_emits_all_five_true() {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
