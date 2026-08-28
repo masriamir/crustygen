@@ -237,7 +237,7 @@ struct LinedefFlags {
 }
 
 /// `[linedef.vanilla_specials]` — the membership list of every special the
-/// pinned engine dispatches; see the table's leading comment.
+/// pinned engine acts on; see the table's leading comment.
 #[derive(Debug, Deserialize)]
 struct VanillaSpecials {
     values: Vec<u16>,
@@ -676,7 +676,7 @@ impl Tables {
         ])
     }
 
-    /// Every linedef special the pinned vanilla engine dispatches
+    /// Every linedef special the pinned vanilla engine acts on
     /// (`engine.toml` `[linedef.vanilla_specials]`). Membership, not
     /// vocabulary: it defines the corpus's vanilla-only slice.
     #[must_use]

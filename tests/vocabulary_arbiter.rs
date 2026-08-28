@@ -174,7 +174,7 @@ fn the_vanilla_list_contains_every_emittable_special_and_matches_its_citation() 
     let vanilla = tables.vanilla_line_specials();
     assert_eq!(
         vanilla.len(),
-        138,
+        139,
         "distinct count recorded in the citation"
     );
     assert!(tables.emittable_line_specials().is_subset(&vanilla));
