@@ -2,9 +2,15 @@
 //! `Tables::named_sector_specials`: the curated sets must equal what the
 //! compiler really writes. Fixtures below cover every IR construct that
 //! emits a special — plain, door and locked portals (one per key color), the
-//! four exit kinds, and a secret room — so when a new pass starts emitting a
-//! special (teleports, lifts), this test fails until the curated set is
-//! updated.
+//! four exit kinds, and a secret room.
+//!
+//! These tests do not detect a new emitting pass on their own: no fixture can
+//! author a construct the IR cannot yet express, so a landed teleport pass
+//! leaves the fixtures' union unchanged. What they enforce is the other
+//! direction — adding a special to the curated set without a fixture that
+//! emits it breaks the equality assertion, and adding 62, 88 or 97 breaks
+//! `sourced_but_unemitted_specials_stay_out_of_the_emittable_set`. So a new
+//! pass lands its fixture and updates both tests by rule, not by detection.
 
 use std::collections::BTreeSet;
 
@@ -159,5 +165,24 @@ fn sourced_but_unemitted_specials_stay_out_of_the_emittable_set() {
         tables.teleport_special(),
     ] {
         assert!(!set.contains(&s), "special {s} has no compiler pass yet");
+    }
+}
+
+#[test]
+fn the_vanilla_list_contains_every_emittable_special_and_matches_its_citation() {
+    let tables = Tables::load().expect("tables");
+    let vanilla = tables.vanilla_line_specials();
+    assert_eq!(
+        vanilla.len(),
+        138,
+        "distinct count recorded in the citation"
+    );
+    assert!(tables.emittable_line_specials().is_subset(&vanilla));
+    for s in [
+        tables.lift_switch_special(),
+        tables.lift_walkover_special(),
+        tables.teleport_special(),
+    ] {
+        assert!(vanilla.contains(&s));
     }
 }

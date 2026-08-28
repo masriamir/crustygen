@@ -236,9 +236,17 @@ struct LinedefFlags {
     lower_unpegged: u16,
 }
 
+/// `[linedef.vanilla_specials]` — the membership list of every special the
+/// pinned engine dispatches; see the table's leading comment.
+#[derive(Debug, Deserialize)]
+struct VanillaSpecials {
+    values: Vec<u16>,
+}
+
 #[derive(Debug, Deserialize)]
 struct LinedefAttrs {
     flags: LinedefFlags,
+    vanilla_specials: VanillaSpecials,
 }
 
 /// The empirical distribution of `P_Random()`'s real 256-entry lookup table
@@ -628,8 +636,15 @@ impl Tables {
     /// the keyed doors, and the four exits. Curated rather than "every
     /// accessor" — lift and teleport specials are sourced in the table but
     /// no pass emits them yet. `tests/vocabulary_arbiter.rs` compiles a
-    /// fixture per construct and asserts this set equals what came out, so
-    /// a new emitting pass fails that test until this list grows.
+    /// fixture per construct and asserts this set equals what came out. That
+    /// does not detect a new pass on its own: no fixture can author a
+    /// construct the IR cannot yet express, so a landed teleport pass leaves
+    /// the fixtures' union unchanged. What it does enforce is that growing
+    /// this list without a fixture that emits the new special breaks the
+    /// equality — and that adding 62, 88 or 97 breaks
+    /// `sourced_but_unemitted_specials_stay_out_of_the_emittable_set` too.
+    /// A new pass therefore lands its fixture and updates both tests by
+    /// rule.
     #[must_use]
     pub fn emittable_line_specials(&self) -> BTreeSet<u16> {
         let mut set = BTreeSet::from([
@@ -659,6 +674,20 @@ impl Tables {
             s.light_effects.glow,
             s.light_effects.strobe_slow,
         ])
+    }
+
+    /// Every linedef special the pinned vanilla engine dispatches
+    /// (`engine.toml` `[linedef.vanilla_specials]`). Membership, not
+    /// vocabulary: it defines the corpus's vanilla-only slice.
+    #[must_use]
+    pub fn vanilla_line_specials(&self) -> BTreeSet<u16> {
+        self.engine
+            .linedef
+            .vanilla_specials
+            .values
+            .iter()
+            .copied()
+            .collect()
     }
 
     /// The sector special for a liquid's damage tier (`flats.liquid.damage_tier`:
