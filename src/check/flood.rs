@@ -102,11 +102,18 @@
 //! - **Directed** — a teleport relocates the player rather than opening a
 //!   way back, so [`reach::check`] expands the edge `a → b` alone.
 //!
-//! The edge is built *before* the `neighbor`/`passable` filters above: a
-//! teleport needs no back sector of its own, and its destination is
-//! wherever the tag points, not what the line happens to border.
-//! [`teleport_only_sectors`] builds the same graph twice, with and without
-//! these edges, to name the sectors a teleport is load-bearing for.
+//! The edge is built ahead of the `neighbor` filter above — a teleport
+//! needs no back sector of its own, since its destination is wherever the
+//! tag points rather than what the line happens to border — but it is
+//! still gated on
+//! [`Boundary::passable`](crate::check::scene::Boundary::passable), exactly
+//! as the walkover exits under "Exit goals" are: `PIT_CheckLine` rejects a
+//! one-sided or `ML_BLOCKING` line before `P_TryMove`'s `spechit`
+//! bookkeeping ever runs `P_CrossSpecialLine`, so a teleport line the
+//! player cannot cross fires no more than an exit line on the same
+//! boundary would. [`teleport_only_sectors`] builds the same graph twice,
+//! with and without these edges, to name the sectors a teleport is
+//! load-bearing for.
 //!
 //! # Key classes
 //!
@@ -363,10 +370,12 @@ pub(crate) fn resolve_teleport_destination(
 /// [`EdgeKind::Open`].
 ///
 /// Plus, when `teleports` is set, one directed [`EdgeKind::Teleport`] edge
-/// per `fronts_this` boundary carrying a player teleport special, from that
-/// boundary's own sector to whatever [`resolve_teleport_destination`]
-/// resolves its tag to — built ahead of the filters above, since a
-/// teleport's destination is its tag's, not its own back sector's. Passing
+/// per `fronts_this` **passable** boundary carrying a player teleport
+/// special, from that boundary's own sector to whatever
+/// [`resolve_teleport_destination`] resolves its tag to — built ahead of
+/// the `neighbor` filter above, since a teleport's destination is its
+/// tag's, not its own back sector's, but behind the same crossability gate
+/// every other edge answers to. Passing
 /// `false` builds the same graph with those edges left out, which is how
 /// [`teleport_only_sectors`] measures what a teleport is load-bearing for.
 fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool) -> Vec<Edge> {
@@ -378,10 +387,12 @@ fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool
             if !b.fronts_this {
                 continue;
             }
-            // Before the `neighbor`/`passable` filters below: a teleport
-            // needs no back sector of its own, and its destination is
-            // wherever the tag resolves, not what the line borders.
+            // Ahead of the `neighbor` filter below — a teleport's
+            // destination is wherever the tag resolves, not what the line
+            // borders — but still behind `passable()`: an uncrossable line
+            // never reaches `P_CrossSpecialLine` at all.
             if teleports
+                && b.passable()
                 && u16::try_from(b.special).is_ok_and(|s| player_teleports.contains(&s))
                 && let Some(dest) = resolve_teleport_destination(scene, tables, b.tag)
             {
@@ -1652,6 +1663,29 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
         assert!(
             findings.iter().any(|f| f.check == "V-P7"),
             "no walk reaches the exit: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_blocking_teleport_line_yields_no_edge() {
+        // `PIT_CheckLine` rejects the crossing before `P_CrossSpecialLine`
+        // ever runs, so the teleport fires no more than a walkover exit on
+        // the same line would.
+        let (scene, tables) = fixtures::scene_of(&TELEPORT_MAP.replace(
+            "special = 97; arg0 = 5; }",
+            "special = 97; arg0 = 5; blocking = true; }",
+        ));
+        let mut findings = Vec::new();
+        let reached = run_flood(&scene, &tables, &mut findings).expect("flood ran");
+        assert!(!reached[1], "an uncrossable teleport line moves nobody");
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"),
+            "no walk reaches the exit: {findings:?}"
+        );
+        let only = teleport_only_sectors(&scene, &tables).expect("both floods ran");
+        assert!(
+            only.iter().all(|&t| !t),
+            "no sector is reachable only by a teleport that never fires: {only:?}"
         );
     }
 

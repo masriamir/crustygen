@@ -1074,6 +1074,11 @@ pub fn check_recognized_specials(scene: &Scene, tables: &Tables, findings: &mut 
 /// `p_telept.c`), so the back mirror of a teleport line triggers nothing to
 /// check.
 ///
+/// Clearance is measured against the destination's **non-passable**
+/// boundary segments only, the same rule (and the same reason)
+/// [`check_starts`] applies to a player start: an open doorway cannot crush
+/// the player against it, so only a solid segment can deny the radius.
+///
 /// Headroom and clearance are sized for [`Tables::player`], including on a
 /// monsters-only line. That is a known gap in the *optimistic* direction: a
 /// species wider than the player (a pinky is 30 to the player's 16) can
@@ -1159,6 +1164,7 @@ pub fn check_teleport_pairing(scene: &Scene, tables: &Tables, findings: &mut Vec
             let clearance = d
                 .boundary
                 .iter()
+                .filter(|e| !e.passable())
                 .map(|e| dist_to_segment_f64(t.x, t.y, e.a.0, e.a.1, e.b.0, e.b.1))
                 .fold(f64::INFINITY, f64::min);
             if clearance < f64::from(player.radius) {
@@ -2260,6 +2266,11 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
     /// [`TELEPORT_MAP`]'s teleport destination marker, verbatim, for tests
     /// that remove it.
     const MARKER: &str = "thing { x = 320.0; y = 64.0; angle = 0; type = 14; single = true; }\n";
+    /// The same marker shifted east to `x = 372`, 12 units from sector 1's
+    /// two-sided alcove threshold at `x = 384` and 34.2 from the nearest
+    /// solid wall.
+    const MARKER_NEAR_DOORWAY: &str =
+        "thing { x = 372.0; y = 64.0; angle = 0; type = 14; single = true; }\n";
 
     #[test]
     fn v_p15_flags_a_dangling_marker_less_tag_and_an_ambiguous_one() {
@@ -2290,6 +2301,23 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
                 .iter()
                 .any(|f| f.check == "V-P15" && f.message.contains("2 markers")),
             "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn v_p15_measures_clearance_against_solid_walls_only() {
+        // The marker at (372, 64) is 12 units from the alcove threshold —
+        // a two-sided, open boundary — and 34.2 from the nearest solid
+        // wall. An open doorway cannot crush the player against it, so
+        // only the solid segments count and the player's radius (16) is
+        // clear.
+        let (scene, tables) =
+            fixtures::scene_of(&TELEPORT_MAP.replace(MARKER, MARKER_NEAR_DOORWAY));
+        let mut findings = Vec::new();
+        check_teleport_pairing(&scene, &tables, &mut findings);
+        assert!(
+            findings.is_empty(),
+            "an open boundary is not a wall to squeeze against: {findings:?}"
         );
     }
 
