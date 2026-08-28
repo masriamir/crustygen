@@ -4,7 +4,9 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
-use crate::geom::{Pt, facing_spans, find_facing_span};
+use crate::geom::{
+    Axis, Pt, clearance, contains, facing_spans, find_facing_span, outward_sign, wall_edges,
+};
 
 impl<'de> Deserialize<'de> for Pt {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -97,6 +99,10 @@ pub struct IrThing {
     /// the key is absent — see [`ThingSkills`].
     #[serde(default)]
     pub skills: ThingSkills,
+    /// `MTF_AMBUSH`: the thing wakes on sight only, never on sound
+    /// (`data/engine.toml` `[thing.flags]`). Emitted as UDMF `ambush`.
+    #[serde(default)]
+    pub ambush: bool,
 }
 
 /// One room: a closed footprint plus its surfaces and contents.
@@ -247,6 +253,10 @@ pub enum ExitTrigger {
     Switch,
     /// A line the player walks across.
     Walkover,
+    /// A walkover exit line in a room reachable only by teleport — the
+    /// player teleports in and steps across it (rule P26; TNT MAP23's
+    /// shape). Emits the same specials as [`Self::Walkover`].
+    Teleport,
 }
 
 /// The level exit: a linedef special carved into one wall of one room.
@@ -275,6 +285,72 @@ pub struct Exit {
     pub at: Pt,
 }
 
+/// Where a teleport pad sits relative to its room.
+///
+/// Both placements emit the same pad — see [`Ir::PAD_SIZE`] — so the choice
+/// is purely where the square goes: free-standing inside the room, or
+/// pushed into one of its walls with three sides solid. Retail id maps use
+/// both, islands about four times as often (51 % vs 14 % of trigger lines
+/// in DOOM + DOOM2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PadPlacement {
+    /// The center of a free-standing pad inside the room. Must be on the
+    /// grid, and the whole square must lie strictly inside the footprint.
+    Island(Pt),
+    /// A point on one of the room's axis-aligned walls; the pad is recessed
+    /// outward from it, exactly as a walkover exit's alcove is.
+    Wall(Pt),
+}
+
+/// Where a teleport delivers the thing that crosses it: a point in a room
+/// (or on one of that room's pads, for a two-way pair) and the facing the
+/// arrival takes (`EV_Teleport`: `thing->angle = m->angle`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Destination {
+    /// Identifier of the room the destination lies in.
+    pub room: String,
+    /// The arrival point, in map units; must lie inside `room`'s footprint
+    /// or inside one of `room`'s pad squares.
+    pub at: Pt,
+    /// The arrival facing, in degrees.
+    pub angle: u16,
+}
+
+/// Returns `true`, the serde default for [`Teleport::repeatable`].
+const fn repeatable_default() -> bool {
+    true
+}
+
+/// One teleporter: a pad in a room whose four trigger edges deliver to
+/// [`Self::to`].
+///
+/// The pad is always the trigger line's *back* sector: `EV_Teleport` refuses
+/// a back-side crossing (`if (side == 1) return 0;`), so entering the pad
+/// fires and leaving it does not — which is what lets a two-way pair land
+/// the arrival on the other pad. See `data/vocabulary.toml`
+/// `[specials.teleport]`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Teleport {
+    /// Unique identifier, used in error messages and the tag manifest.
+    pub id: String,
+    /// Identifier of the room the pad sits in.
+    pub room: String,
+    /// Where the pad goes.
+    pub pad: PadPlacement,
+    /// Where crossing the pad delivers.
+    pub to: Destination,
+    /// Emit the monsters-only special (126/125) rather than the one any
+    /// thing may cross (97/39). Retail uses it for pens the player never
+    /// enters (7 of 8 sealed DOOM + DOOM2 pens).
+    #[serde(default)]
+    pub monsters_only: bool,
+    /// Emit the repeatable ("WR") special rather than the one-shot ("W1")
+    /// form, which clears itself after its first crossing.
+    #[serde(default = "repeatable_default")]
+    pub repeatable: bool,
+}
+
 /// A complete room graph.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Ir {
@@ -292,6 +368,10 @@ pub struct Ir {
     /// normal exit alongside a separate secret exit).
     #[serde(default)]
     pub exits: Vec<Exit>,
+    /// The teleporters. Absent means none, so every pre-existing fixture
+    /// parses unchanged.
+    #[serde(default)]
+    pub teleports: Vec<Teleport>,
 }
 
 /// Errors raised while loading or validating an IR document.
@@ -513,6 +593,91 @@ pub enum IrError {
         /// `door_thickness + alcove_near + alcove_far`.
         needed: i32,
     },
+    /// Two teleports share an id.
+    #[error("duplicate teleport id `{id}`")]
+    DuplicateTeleport {
+        /// The repeated identifier.
+        id: String,
+    },
+    /// A teleport names a room that does not exist, as its pad's room or
+    /// its destination's.
+    #[error("teleport `{id}` references unknown room `{room}`")]
+    TeleportUnknownRoom {
+        /// The teleport's identifier.
+        id: String,
+        /// The unresolvable room identifier.
+        room: String,
+    },
+    /// An island pad's center is off the grid.
+    #[error("teleport `{id}` has an off-grid pad center ({x}, {y}); grid is {grid}")]
+    TeleportPadOffGrid {
+        /// The teleport's identifier.
+        id: String,
+        /// The X coordinate.
+        x: i32,
+        /// The Y coordinate.
+        y: i32,
+        /// The configured grid size.
+        grid: i32,
+    },
+    /// An island pad's square is not strictly inside its room.
+    #[error(
+        "teleport `{id}`: the pad centered at ({x}, {y}) does not lie strictly inside its room"
+    )]
+    TeleportPadOutsideRoom {
+        /// The teleport's identifier.
+        id: String,
+        /// The X coordinate of the pad's center.
+        x: i32,
+        /// The Y coordinate of the pad's center.
+        y: i32,
+    },
+    /// A wall pad's point is on no axis-aligned wall of its room, or its
+    /// 64-unit span runs past the wall's ends.
+    #[error(
+        "teleport `{id}`: ({x}, {y}) is not on an axis-aligned wall of its room with 64 units \
+         of wall around it"
+    )]
+    TeleportPadOffWall {
+        /// The teleport's identifier.
+        id: String,
+        /// The X coordinate of the wall point.
+        x: i32,
+        /// The Y coordinate of the wall point.
+        y: i32,
+    },
+    /// Two pads in one room overlap or touch (touching would emit coincident
+    /// linedefs).
+    #[error("teleports `{first}` and `{second}` have pads that overlap or touch")]
+    TeleportPadsOverlap {
+        /// The first teleport's identifier.
+        first: String,
+        /// The second teleport's identifier.
+        second: String,
+    },
+    /// A destination point is outside its room and on none of its pads.
+    #[error(
+        "teleport `{id}`: destination ({x}, {y}) is outside room `{room}` and on none of its pads"
+    )]
+    TeleportDestinationOutsideRoom {
+        /// The teleport's identifier.
+        id: String,
+        /// The destination's room identifier.
+        room: String,
+        /// The X coordinate of the destination.
+        x: i32,
+        /// The Y coordinate of the destination.
+        y: i32,
+    },
+    /// Two teleports deliver to different points of one sector; the engine
+    /// takes the first marker it finds, so the IR refuses the ambiguity.
+    #[error("teleports `{first}` and `{second}` deliver to different points of the same sector")]
+    TeleportDestinationsShareSector {
+        /// The first teleport's identifier.
+        first: String,
+        /// The second teleport's identifier.
+        second: String,
+    },
 }
 
 /// The inclusive coordinate and height range every Doom map format stores in
@@ -548,6 +713,22 @@ impl Ir {
     /// arbitrary one.
     pub const DOOR_DIMENSIONS: [i32; 3] = [8, 16, 32];
 
+    /// The side of every teleport pad, in map units.
+    ///
+    /// A compiler-construction constant fixed by measurement, not an engine
+    /// fact: 77 of the 83 free-standing pads in DOOM.WAD + DOOM2.WAD are
+    /// exactly 64×64, and 89 of 94 wall alcoves are 64 wide and 81 of 94 64
+    /// deep (docs/measurements/teleports-*.md, probe round 2). The corpus
+    /// does not vary it, so neither does the IR.
+    pub const PAD_SIZE: i32 = 64;
+    /// How far a pad's floor sits above its host room's, in map units.
+    ///
+    /// Same provenance as [`Self::PAD_SIZE`]: +8 is the most common retail
+    /// step (36 of 83 island pads; +24 and +16 follow with 22 and 13), and
+    /// it is well under the engine's step-up cap, so a pad is always
+    /// walkable onto. The 16/24 variants are a recorded follow-up.
+    pub const PAD_FLOOR_STEP: i32 = 8;
+
     /// Parses and validates an IR document.
     ///
     /// Every numeric field a later pass divides by, halves, or writes into a
@@ -581,8 +762,21 @@ impl Ir {
     /// [`IrError::DoorFieldsOnPlainPortal`] for a plain portal that sets any
     /// of those three fields, [`IrError::DoorGapMismatch`] for a door/locked
     /// portal whose facing-wall gap does not exactly equal `door_thickness +
-    /// alcove_near + alcove_far`, and the numeric-range variants listed
-    /// above (which an exit's `at` is also checked against).
+    /// alcove_near + alcove_far`, the numeric-range variants listed above
+    /// (which an exit's `at` is also checked against),
+    /// [`IrError::DuplicateTeleport`] for a repeated teleport id,
+    /// [`IrError::TeleportUnknownRoom`] for a teleport naming a room that
+    /// does not exist as its pad's room or its destination's,
+    /// [`IrError::TeleportPadOffGrid`] for an island pad whose center is not
+    /// a multiple of `grid`, [`IrError::TeleportPadOutsideRoom`] for an
+    /// island pad whose square does not lie strictly inside its room,
+    /// [`IrError::TeleportPadOffWall`] for a wall pad whose point is on no
+    /// axis-aligned wall or whose span runs past the wall's ends,
+    /// [`IrError::TeleportPadsOverlap`] for two pads in one room that overlap
+    /// or touch, [`IrError::TeleportDestinationOutsideRoom`] for a
+    /// destination outside its room and on none of its pads, and
+    /// [`IrError::TeleportDestinationsShareSector`] for two teleports that
+    /// deliver to different points of the same emitted sector.
     pub fn from_json(s: &str) -> Result<Self, IrError> {
         let ir: Self = serde_json::from_str(s)?;
 
@@ -598,6 +792,7 @@ impl Ir {
         Self::validate_door_dimensions(&ir)?;
         Self::validate_door_gap(&ir)?;
         Self::validate_exits(&ir, &seen)?;
+        Self::validate_teleports(&ir, &seen)?;
 
         Ok(ir)
     }
@@ -868,6 +1063,143 @@ impl Ir {
         Ok(())
     }
 
+    /// Validates every teleport: ids, rooms, pad placement, destination
+    /// containment, and one destination point per sector.
+    fn validate_teleports(ir: &Self, seen: &HashSet<&str>) -> Result<(), IrError> {
+        let mut ids = HashSet::new();
+        for t in &ir.teleports {
+            if !ids.insert(t.id.as_str()) {
+                return Err(IrError::DuplicateTeleport { id: t.id.clone() });
+            }
+            Self::validate_one_teleport(ir, seen, t)?;
+        }
+        Self::validate_pad_overlaps(ir)?;
+        Self::validate_destination_sectors(ir)?;
+        Ok(())
+    }
+
+    /// Validates one teleport's own room references, pad placement, and
+    /// destination containment — everything that does not require comparing
+    /// it against another teleport.
+    fn validate_one_teleport(ir: &Self, seen: &HashSet<&str>, t: &Teleport) -> Result<(), IrError> {
+        for room in [&t.room, &t.to.room] {
+            if !seen.contains(room.as_str()) {
+                return Err(IrError::TeleportUnknownRoom {
+                    id: t.id.clone(),
+                    room: room.clone(),
+                });
+            }
+        }
+        let room = ir.room(&t.room).expect("checked above");
+        let point = match t.pad {
+            PadPlacement::Island(c) | PadPlacement::Wall(c) => c,
+        };
+        if !MAP_RANGE.contains(&point.x) || !MAP_RANGE.contains(&point.y) {
+            return Err(IrError::CoordinateOutOfRange {
+                subject: format!("teleport `{}`", t.id),
+                x: point.x,
+                y: point.y,
+                min: *MAP_RANGE.start(),
+                max: *MAP_RANGE.end(),
+            });
+        }
+        match t.pad {
+            PadPlacement::Island(c) => {
+                // Checked before the grid: a pad flush against a wall (its
+                // edge, not its off-grid center, is what a mapper reasons
+                // about) is rejected for that reason even when its center
+                // also happens to be off-grid — the two conditions are
+                // independent authoring mistakes, and this order is what
+                // makes the "flush against the wall" case report the
+                // geometric problem rather than the coincidental grid one.
+                let (lo, hi) = pad_square(room, t.pad).expect("an island square always resolves");
+                let corners = [lo, Pt { x: lo.x, y: hi.y }, hi, Pt { x: hi.x, y: lo.y }];
+                let inside = corners
+                    .iter()
+                    .all(|&p| contains(&room.footprint, p) && clearance(&room.footprint, p) > 0.0);
+                let vertex_in_square = room.footprint.iter().any(|&v| square_contains(lo, hi, v));
+                if !inside || vertex_in_square {
+                    return Err(IrError::TeleportPadOutsideRoom {
+                        id: t.id.clone(),
+                        x: c.x,
+                        y: c.y,
+                    });
+                }
+                if c.x % ir.grid != 0 || c.y % ir.grid != 0 {
+                    return Err(IrError::TeleportPadOffGrid {
+                        id: t.id.clone(),
+                        x: c.x,
+                        y: c.y,
+                        grid: ir.grid,
+                    });
+                }
+            }
+            PadPlacement::Wall(at) => {
+                if pad_square(room, t.pad).is_none() {
+                    return Err(IrError::TeleportPadOffWall {
+                        id: t.id.clone(),
+                        x: at.x,
+                        y: at.y,
+                    });
+                }
+            }
+        }
+        if destination_sector_key(ir, &t.to).is_none() {
+            return Err(IrError::TeleportDestinationOutsideRoom {
+                id: t.id.clone(),
+                room: t.to.room.clone(),
+                x: t.to.at.x,
+                y: t.to.at.y,
+            });
+        }
+        Ok(())
+    }
+
+    /// Rejects any two pads in one room that overlap or touch — touching
+    /// squares would emit coincident linedefs.
+    fn validate_pad_overlaps(ir: &Self) -> Result<(), IrError> {
+        for (i, a) in ir.teleports.iter().enumerate() {
+            for b in &ir.teleports[i + 1..] {
+                if a.room != b.room {
+                    continue;
+                }
+                let room = ir.room(&a.room).expect("validated above");
+                let (Some(sa), Some(sb)) = (pad_square(room, a.pad), pad_square(room, b.pad))
+                else {
+                    continue;
+                };
+                if squares_overlap_or_touch(sa, sb) {
+                    return Err(IrError::TeleportPadsOverlap {
+                        first: a.id.clone(),
+                        second: b.id.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rejects two teleports that deliver to different points of one
+    /// emitted sector — the engine takes the first marker it finds, so an
+    /// ambiguous sector has no defined arrival.
+    fn validate_destination_sectors(ir: &Self) -> Result<(), IrError> {
+        for (i, a) in ir.teleports.iter().enumerate() {
+            for b in &ir.teleports[i + 1..] {
+                let (ka, kb) = (
+                    destination_sector_key(ir, &a.to),
+                    destination_sector_key(ir, &b.to),
+                );
+                if ka.is_some() && ka == kb && a.to != b.to {
+                    return Err(IrError::TeleportDestinationsShareSector {
+                        first: a.id.clone(),
+                        second: b.id.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Looks up a room by identifier.
     #[must_use]
     pub fn room(&self, id: &str) -> Option<&Room> {
@@ -875,9 +1207,110 @@ impl Ir {
     }
 }
 
+/// The axis-aligned square a pad occupies once emitted, as `(low corner,
+/// high corner)`, or `None` for a wall pad whose point is on no axis-aligned
+/// wall or whose 64-unit span runs past the wall's ends.
+///
+/// Shared by [`Ir::from_json`]'s validation and `compile::teleports`, so the
+/// two can never disagree about where a pad is — the same reason
+/// [`crate::geom::facing_spans`] is shared between portal validation and
+/// portal cutting.
+pub(crate) fn pad_square(room: &Room, pad: PadPlacement) -> Option<(Pt, Pt)> {
+    let half = Ir::PAD_SIZE / 2;
+    match pad {
+        PadPlacement::Island(c) => Some((
+            Pt {
+                x: c.x - half,
+                y: c.y - half,
+            },
+            Pt {
+                x: c.x + half,
+                y: c.y + half,
+            },
+        )),
+        PadPlacement::Wall(at) => {
+            let (axis, fixed, lo, hi, forward) =
+                wall_edges(&room.footprint).find(|&(axis, fixed, lo, hi, _)| {
+                    let (along, across) = axis.split(at);
+                    across == fixed && along > lo && along < hi
+                })?;
+            let (along, _) = axis.split(at);
+            let (open_lo, open_hi) = (along - half, along + half);
+            if open_lo < lo || open_hi > hi {
+                return None;
+            }
+            let far = fixed + outward_sign(axis, forward) * Ir::PAD_SIZE;
+            let (near_x, far_x) = (fixed.min(far), fixed.max(far));
+            Some(match axis {
+                Axis::Vertical => (
+                    Pt {
+                        x: near_x,
+                        y: open_lo,
+                    },
+                    Pt {
+                        x: far_x,
+                        y: open_hi,
+                    },
+                ),
+                Axis::Horizontal => (
+                    Pt {
+                        x: open_lo,
+                        y: near_x,
+                    },
+                    Pt {
+                        x: open_hi,
+                        y: far_x,
+                    },
+                ),
+            })
+        }
+    }
+}
+
+/// Whether `p` lies inside (or on) the closed square `(lo, hi)`.
+pub(crate) fn square_contains(lo: Pt, hi: Pt, p: Pt) -> bool {
+    p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y
+}
+
+/// Whether two axis-aligned closed squares, each given as `(low corner, high
+/// corner)`, overlap or share so much as a boundary edge or corner.
+///
+/// The squares are apart only when one lies strictly beyond the other along
+/// some axis (a real gap on that axis); anything else — including two
+/// squares that meet exactly along one edge, which would emit coincident
+/// linedefs — counts as touching.
+pub(crate) fn squares_overlap_or_touch(a: (Pt, Pt), b: (Pt, Pt)) -> bool {
+    let (alo, ahi) = a;
+    let (blo, bhi) = b;
+    let apart = alo.x > bhi.x || blo.x > ahi.x || alo.y > bhi.y || blo.y > ahi.y;
+    !apart
+}
+
+/// Which emitted sector a destination lands in: `(room index, Some(pad
+/// index))` when `to.at` lies on one of that room's pads, `(room index,
+/// None)` when it lies in the room proper; `None` when the room is unknown
+/// or the point is outside both.
+pub(crate) fn destination_sector_key(ir: &Ir, to: &Destination) -> Option<(usize, Option<usize>)> {
+    let room_idx = ir.rooms.iter().position(|r| r.id == to.room)?;
+    let room = &ir.rooms[room_idx];
+    let pad = ir
+        .teleports
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.room == to.room)
+        .find(|(_, t)| {
+            pad_square(room, t.pad).is_some_and(|(lo, hi)| square_contains(lo, hi, to.at))
+        })
+        .map(|(i, _)| i);
+    if pad.is_none() && !contains(&room.footprint, to.at) {
+        return None;
+    }
+    Some((room_idx, pad))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Ir, IrError, PortalKind};
+    use super::{ExitTrigger, Ir, IrError, PortalKind, Pt, destination_sector_key, pad_square};
 
     // Room `b` sits a full grid step (64 units, a clean multiple of
     // `Ir::MIN_PORTAL_GAP`) east of room `a`'s own east wall (still at
@@ -1409,5 +1842,166 @@ mod tests {
             "unmentioned keys default true"
         );
         assert!(!skills.skill5, "explicitly excluded");
+    }
+
+    const TELEPORT_BASE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[192,64], "angle":90, "ambush":true } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[],
+      "teleports":[ TELEPORTS ] }"#;
+
+    fn with_teleports(list: &str) -> Result<Ir, IrError> {
+        Ir::from_json(&TELEPORT_BASE.replace("TELEPORTS", list))
+    }
+
+    const ISLAND: &str = r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]},
+        "to":{"room":"b","at":[448,128],"angle":90} }"#;
+
+    #[test]
+    fn a_teleport_parses_with_defaults_and_the_pad_square_is_64_wide() {
+        let ir = with_teleports(ISLAND).expect("parses");
+        let t = &ir.teleports[0];
+        assert!(
+            t.repeatable && !t.monsters_only,
+            "defaults: repeatable, any thing"
+        );
+        assert!(ir.rooms[0].things[0].ambush, "the ambush flag parses");
+        let (lo, hi) = pad_square(&ir.rooms[0], t.pad).expect("island square");
+        assert_eq!((lo, hi), (Pt { x: 32, y: 160 }, Pt { x: 96, y: 224 }));
+        assert_eq!(Ir::PAD_SIZE, 64);
+        assert_eq!(Ir::PAD_FLOOR_STEP, 8);
+    }
+
+    #[test]
+    fn a_wall_pad_square_is_recessed_outward_from_the_wall() {
+        let ir = with_teleports(
+            r#"{ "id":"w", "room":"a", "pad":{"wall":[64,256]},
+                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
+        )
+        .expect("parses");
+        let (lo, hi) = pad_square(&ir.rooms[0], ir.teleports[0].pad).expect("wall square");
+        assert_eq!(
+            (lo, hi),
+            (Pt { x: 32, y: 256 }, Pt { x: 96, y: 320 }),
+            "north wall, recess to +y"
+        );
+    }
+
+    #[test]
+    fn a_wall_pad_off_any_wall_is_rejected() {
+        let err = with_teleports(
+            r#"{ "id":"w", "room":"a", "pad":{"wall":[64,64]},
+                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, IrError::TeleportPadOffWall { .. }), "{err}");
+    }
+
+    #[test]
+    fn an_island_pad_touching_the_room_wall_is_rejected() {
+        let err = with_teleports(
+            r#"{ "id":"t", "room":"a", "pad":{"island":[32,128]},
+                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, IrError::TeleportPadOutsideRoom { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_off_grid_island_center_is_rejected() {
+        let err = with_teleports(
+            r#"{ "id":"t", "room":"a", "pad":{"island":[70,192]},
+                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, IrError::TeleportPadOffGrid { .. }), "{err}");
+    }
+
+    #[test]
+    fn two_island_pads_touching_each_other_are_rejected() {
+        let err = with_teleports(
+            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[448,128],"angle":90} },
+               { "id":"t2", "room":"a", "pad":{"island":[128,192]}, "to":{"room":"b","at":[384,128],"angle":90} }"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, IrError::TeleportPadsOverlap { .. }), "{err}");
+    }
+
+    #[test]
+    fn duplicate_ids_and_unknown_rooms_are_rejected() {
+        let err = with_teleports(&format!("{ISLAND}, {ISLAND}")).unwrap_err();
+        assert!(matches!(err, IrError::DuplicateTeleport { .. }), "{err}");
+        let err = with_teleports(
+            r#"{ "id":"t", "room":"zzz", "pad":{"island":[64,192]}, "to":{"room":"b","at":[448,128],"angle":90} }"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, IrError::TeleportUnknownRoom { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_destination_outside_its_room_is_rejected() {
+        let err = with_teleports(
+            r#"{ "id":"t", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[100,100],"angle":90} }"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, IrError::TeleportDestinationOutsideRoom { .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn distinct_destinations_in_one_sector_are_rejected_but_identical_ones_share() {
+        let err = with_teleports(
+            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[448,128],"angle":90} },
+               { "id":"t2", "room":"a", "pad":{"island":[192,192]}, "to":{"room":"b","at":[384,64],"angle":0} }"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, IrError::TeleportDestinationsShareSector { .. }),
+            "{err}"
+        );
+        with_teleports(
+            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[448,128],"angle":90} },
+               { "id":"t2", "room":"a", "pad":{"island":[192,192]}, "to":{"room":"b","at":[448,128],"angle":90} }"#,
+        )
+        .expect("identical destinations share one marker");
+    }
+
+    #[test]
+    fn a_destination_on_another_pad_keys_to_that_pad() {
+        let ir = with_teleports(
+            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[448,128],"angle":90} },
+               { "id":"t2", "room":"b", "pad":{"island":[448,128]}, "to":{"room":"a","at":[64,192],"angle":0} }"#,
+        )
+        .expect("a two-way pair");
+        assert_eq!(
+            destination_sector_key(&ir, &ir.teleports[0].to),
+            Some((1, Some(1)))
+        );
+        assert_eq!(
+            destination_sector_key(&ir, &ir.teleports[1].to),
+            Some((0, Some(0)))
+        );
+    }
+
+    #[test]
+    fn the_teleport_exit_trigger_parses() {
+        let ir = Ir::from_json(&TELEPORT_BASE.replace("TELEPORTS", ISLAND).replace(
+            r#""portals":[],"#,
+            r#""portals":[], "exits":[{ "room":"b", "trigger":"teleport", "at":[448,256], "width":64 }],"#,
+        ))
+        .expect("parses");
+        assert_eq!(ir.exits[0].trigger, ExitTrigger::Teleport);
     }
 }

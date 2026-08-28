@@ -172,8 +172,15 @@ fn exit_special(tables: &Tables, exit: &Exit) -> u16 {
     match (exit.trigger, exit.secret) {
         (ExitTrigger::Switch, false) => tables.exit_switch_special(),
         (ExitTrigger::Switch, true) => tables.secret_exit_switch_special(),
-        (ExitTrigger::Walkover, false) => tables.exit_walkover_special(),
-        (ExitTrigger::Walkover, true) => tables.secret_exit_walkover_special(),
+        // TODO(#38 task 3): a teleport-only exit has no independent trigger
+        // special of its own — it is a walkover line in a room reachable
+        // only by teleport. Folded into the `Walkover` arm as a placeholder
+        // until task 3 finishes the wiring, which keeps the match
+        // exhaustive without duplicating the arm body.
+        (ExitTrigger::Walkover | ExitTrigger::Teleport, false) => tables.exit_walkover_special(),
+        (ExitTrigger::Walkover | ExitTrigger::Teleport, true) => {
+            tables.secret_exit_walkover_special()
+        }
     }
 }
 
@@ -243,7 +250,10 @@ pub fn emit_exits(
             ExitTrigger::Switch => {
                 emit_switch_exit(data, &cut, &plan, special, tag, &switch_tex, switch_width);
             }
-            ExitTrigger::Walkover => {
+            // TODO(#38 task 3): give `Teleport` its own construction; for
+            // now it emits the same walkover geometry as `Walkover`, which
+            // keeps this match exhaustive until task 3 finishes the wiring.
+            ExitTrigger::Walkover | ExitTrigger::Teleport => {
                 emit_walkover_exit(ir, data, &cut, &plan, &exit.room, special, tag)?;
             }
         }
