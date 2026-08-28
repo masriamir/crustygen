@@ -319,6 +319,7 @@ fn emit_walkover_exit(
             special: 0,
             tag: 0,
             wall_tex: room.wall_tex.clone(),
+            host: None,
         },
         exit_room,
     )?;

@@ -197,6 +197,7 @@ fn cut_one(
             special: 0,
             tag: 0,
             wall_tex: room_a.wall_tex.clone(),
+            host: None,
         };
         let segment = emit_gap_sector(
             data,
@@ -799,11 +800,6 @@ pub(crate) fn emit_side_wall(
 /// line that joins it to the host.
 pub(crate) struct Recess {
     /// Index of the recess's own sector.
-    #[allow(
-        dead_code,
-        reason = "unread by any caller until #38 task 4 wires a teleport pad's own sector \
-                  lookup onto it; emit_recess's own test already exercises it"
-    )]
     pub(crate) sector: usize,
     /// Index of the two-sided threshold (front = host, back = recess).
     pub(crate) threshold: usize,
@@ -1831,6 +1827,7 @@ mod tests {
             special: 0,
             tag: 0,
             wall_tex: "STARTAN3".into(),
+            host: None,
         };
         let recess = emit_recess(&mut data, &cut, 0, true, 64, sector_out, "a").expect("recess");
         assert_eq!(recess.sector, 1);

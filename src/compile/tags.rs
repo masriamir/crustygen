@@ -97,6 +97,7 @@ mod tests {
                 special: 0,
                 tag: 0,
                 wall_tex: String::new(),
+                host: None,
             }],
             sidedefs: vec![SidedefOut {
                 sector: 0,
