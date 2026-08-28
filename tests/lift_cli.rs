@@ -210,7 +210,7 @@ linedef { v1 = 3; v2 = 0; sidefront = 3; }
 sidedef { sector = 0; texturemiddle = "STARTAN2"; } sidedef { sector = 0; texturemiddle = "STARTAN2"; }
 sidedef { sector = 0; texturemiddle = "STARTAN2"; } sidedef { sector = 0; texturemiddle = "STARTAN2"; }
 sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; }
-thing { x = 64; y = 64; type = 1; } thing { x = 80; y = 64; type = 46; }
+thing { x = 64; y = 64; type = 1; } thing { x = 80; y = 64; type = 9999; }
 "#;
     let path = write_temp(&common::wad_with_textmap(textmap), "vocab-unknown");
     let out = bin()
@@ -221,8 +221,9 @@ thing { x = 64; y = 64; type = 1; } thing { x = 80; y = 64; type = 46; }
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("expressible: no"), "{stdout}");
     assert!(stdout.contains("line specials unknown: 97"), "{stdout}");
-    // 46 is not yet in [things]; Task B11 adds the decoration rows and
-    // should switch this literal to a doomednum no vanilla entry defines
-    // (e.g. 9999), noting the change in that task's commit.
-    assert!(stdout.contains("thing types unknown: 46"), "{stdout}");
+    // 46 (the tall red torch) used to stand in for an unknown thing type
+    // here; it is a real `[things]` row now, so this asserts on 9999 —
+    // a doomednum no vanilla mobjinfo entry defines, which keeps the test
+    // about the unknown-value path rather than about a vocabulary gap.
+    assert!(stdout.contains("thing types unknown: 9999"), "{stdout}");
 }

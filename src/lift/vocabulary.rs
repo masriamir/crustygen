@@ -173,11 +173,15 @@ mod tests {
         assert!(v.line_specials_ok && !v.sector_specials_ok && v.thing_kinds_ok);
         assert_eq!(v.unknown_sector_specials, vec![4]);
 
-        let v = vocab().classify(&telemetry(&[], 0, &[1, 46, 46, 54]));
+        // 9998 and 9999 are defined by no vanilla mobjinfo entry, so they
+        // stay unknown however far `[things]` grows. This block used to use
+        // 46 and 54 (the tall red torch and the big tree), which the
+        // complete decoration set turned into real rows.
+        let v = vocab().classify(&telemetry(&[], 0, &[1, 9999, 9999, 9998]));
         assert!(v.line_specials_ok && v.sector_specials_ok && !v.thing_kinds_ok);
         assert_eq!(
             v.unknown_thing_types,
-            vec![46, 54],
+            vec![9998, 9999],
             "sorted and deduplicated"
         );
     }

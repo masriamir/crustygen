@@ -254,6 +254,180 @@ blocks = true
 hangs = true
 source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC83]: doomednum = 78, spawnstate S_HANGTNOBRAIN, radius = 16*FRACUNIT, height = 64*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
 
+# The rest of the vanilla decoration set — see vocabulary.toml's
+# `# Hazards and scenery` and `# Gore` blocks and their
+# `decorations_source`/`gore_source` citations. Every one of these is
+# MF_SOLID, so every one lands here; the non-blocking rows of those two
+# blocks (the walk-through meat-hook twins on 59-63, `brain_stem`) carry
+# no entry, the same rule `candle` has always followed.
+
+[props.tall_green_column]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC32]: doomednum = 30, spawnstate S_TALLGRNCOL (sprite SPR_COL1), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.short_green_column]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC33]: doomednum = 31, spawnstate S_SHRTGRNCOL (sprite SPR_COL2), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.tall_red_column]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC34]: doomednum = 32, spawnstate S_TALLREDCOL (sprite SPR_COL3), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.short_red_column]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC35]: doomednum = 33, spawnstate S_SHRTREDCOL (sprite SPR_COL4), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.heart_column]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC37]: doomednum = 36, spawnstate S_HEARTCOL (sprite SPR_COL5), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.skull_column]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC36]: doomednum = 37, spawnstate S_SKULLCOL (sprite SPR_COL6), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.tech_pillar]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC48]: doomednum = 48, spawnstate S_TECHPILLAR (sprite SPR_ELEC), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.tall_blue_torch]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC41]: doomednum = 44, spawnstate S_BLUETORCH (sprite SPR_TBLU), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.tall_green_torch]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC42]: doomednum = 45, spawnstate S_GREENTORCH (sprite SPR_TGRN), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.tall_red_torch]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC43]: doomednum = 46, spawnstate S_REDTORCH (sprite SPR_TRED), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.short_blue_torch]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC44]: doomednum = 55, spawnstate S_BTORCHSHRT (sprite SPR_SMBT), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.short_green_torch]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC45]: doomednum = 56, spawnstate S_GTORCHSHRT (sprite SPR_SMGT), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.short_red_torch]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC46]: doomednum = 57, spawnstate S_RTORCHSHRT (sprite SPR_SMRT), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.torch_tree]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC40]: doomednum = 43, spawnstate S_TORCHTREE (sprite SPR_TRE1), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.big_tree]
+radius = 32
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC76]: doomednum = 54, spawnstate S_BIGTREE (sprite SPR_TRE2), radius = 32*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.stalagmite]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC47]: doomednum = 47, spawnstate S_STALAGTITE (sprite SPR_SMIT), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.short_techno_lamp]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC30]: doomednum = 86, spawnstate S_TECH2LAMP (sprite SPR_TLP2), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.evil_eye]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC38]: doomednum = 41, spawnstate S_EVILEYE (sprite SPR_CEYE), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.floating_skull]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC39]: doomednum = 42, spawnstate S_FLOATSKULL (sprite SPR_FSKU), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.burning_barrel]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC77]: doomednum = 70, spawnstate S_BBAR1 (sprite SPR_FCAN), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.impaled_body]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC74]: doomednum = 25, spawnstate S_DEADSTICK (sprite SPR_POL1), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.twitching_impaled_body]
+radius = 16
+height = 16
+blocks = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC75]: doomednum = 26, spawnstate S_LIVESTICK (sprite SPR_POL6), radius = 16*FRACUNIT, height = 16*FRACUNIT, flags = MF_SOLID (blocks), no MF_SPAWNCEILING (floor-standing). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.hanging_bloody_twitch]
+radius = 16
+height = 68
+blocks = true
+hangs = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC51]: doomednum = 49, spawnstate S_BLOODYTWITCH (sprite SPR_GOR1), radius = 16*FRACUNIT, height = 68*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY — MF_SPAWNCEILING per p_mobj.h: 'On level spawning (initial position), hang from ceiling instead of stand on floor.' https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.hanging_meat2]
+radius = 16
+height = 84
+blocks = true
+hangs = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC52]: doomednum = 50, spawnstate S_MEAT2 (sprite SPR_GOR2), radius = 16*FRACUNIT, height = 84*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY — MF_SPAWNCEILING per p_mobj.h: 'On level spawning (initial position), hang from ceiling instead of stand on floor.' https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.hanging_meat3]
+radius = 16
+height = 84
+blocks = true
+hangs = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC53]: doomednum = 51, spawnstate S_MEAT3 (sprite SPR_GOR3), radius = 16*FRACUNIT, height = 84*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY — MF_SPAWNCEILING per p_mobj.h: 'On level spawning (initial position), hang from ceiling instead of stand on floor.' https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.hanging_meat4]
+radius = 16
+height = 68
+blocks = true
+hangs = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC54]: doomednum = 52, spawnstate S_MEAT4 (sprite SPR_GOR4), radius = 16*FRACUNIT, height = 68*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY — MF_SPAWNCEILING per p_mobj.h: 'On level spawning (initial position), hang from ceiling instead of stand on floor.' https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
+[props.hanging_meat5]
+radius = 16
+height = 52
+blocks = true
+hangs = true
+source = "id-Software/DOOM linuxdoom-1.10/info.c mobjinfo[MT_MISC55]: doomednum = 53, spawnstate S_MEAT5 (sprite SPR_GOR5), radius = 16*FRACUNIT, height = 52*FRACUNIT, flags = MF_SOLID|MF_SPAWNCEILING|MF_NOGRAVITY — MF_SPAWNCEILING per p_mobj.h: 'On level spawning (initial position), hang from ceiling instead of stand on floor.' https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/info.c"
+
 # Health and armor pickup amounts and caps, from p_inter.c's
 # P_TouchSpecialThing pickup switch, keyed to match vocabulary.toml's
 # [things] entries of the same name (stimpack, medikit, health_bonus,
