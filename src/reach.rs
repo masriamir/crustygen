@@ -357,10 +357,11 @@ pub struct BuiltGraph {
 ///
 /// Geometry comes from [`MapData`](crate::compile::MapData) — sectors as
 /// nodes, two-sided non-blocking linedefs as edges, plus one directed
-/// [`EdgeKind::Teleport`] edge per player-usable teleport line, running to
-/// whichever sector task 4 tagged as that line's destination — never from
-/// authored intent, so the graph cannot drift from the map. Keys and the
-/// start use the room-index-equals-sector-index invariant
+/// [`EdgeKind::Teleport`] edge per distinct `(host sector, destination
+/// sector)` pair a player-usable teleport line reaches, where the
+/// destination is whichever sector [`crate::compile::teleports`] tagged —
+/// never from authored intent, so the graph cannot drift from the map. Keys
+/// and the start use the room-index-equals-sector-index invariant
 /// [`crate::compile::things`] documents and verifies.
 ///
 /// This is also where [`check`]'s indexing preconditions are established.
@@ -508,8 +509,8 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
 /// Directed [`EdgeKind::Teleport`] edges for every player-usable teleport
 /// line: player-usable specials only (a monster-only pad's trigger carries a
 /// different special the player vocabulary never matches), tagged to exactly
-/// the destination sector task 4 tags. The edge runs host → destination;
-/// `check` never expands it back.
+/// the destination sector [`crate::compile::teleports`] tags. The edge runs
+/// host → destination; `check` never expands it back.
 ///
 /// An island pad carries its special on all four boundary linedefs (any
 /// approach fires it), so the same host → destination pair recurs; a `seen`
