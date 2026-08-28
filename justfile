@@ -39,3 +39,8 @@ meta-check:
 # ref in .meta-manifest.toml first to adopt a canonical change.
 meta-sync:
     python3 scripts/meta_sync.py sync
+
+# Sweep a corpus sample directory into a dated measurement doc. JSON lands
+# beside it under target/ (never committed).
+corpus dir:
+    cargo run --release --bin crustygen-corpus -- {{dir}} --report docs/measurements/expressibility-$(date +%F).md --json target/expressibility-$(date +%F).json

@@ -170,3 +170,87 @@ fn a_udmf_wad_surveys_without_the_binary_origin_note() {
         "UDMF survey must not carry the binary-origin note: {stdout}"
     );
 }
+
+#[test]
+fn vocabulary_flag_appends_a_verdict_to_human_and_json_output() {
+    let path = write_temp(&common::binary_entrada_wad(), "vocab");
+    let human = bin()
+        .args([path.to_str().unwrap(), "--vocabulary"])
+        .output()
+        .expect("runs");
+    let json = bin()
+        .args([path.to_str().unwrap(), "--vocabulary", "--json"])
+        .output()
+        .expect("runs");
+    let plain = bin().arg(&path).output().expect("runs");
+    std::fs::remove_file(&path).ok();
+    assert_eq!(human.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        stdout.contains("; expressible: yes"),
+        "entrada uses only emittable vocabulary: {stdout}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json");
+    assert_eq!(value[0]["verdict"]["expressible"], true);
+    assert_eq!(value[0]["verdict"]["vanilla_only"], true);
+    assert!(
+        !String::from_utf8_lossy(&plain.stdout).contains("expressible"),
+        "no flag, no verdict"
+    );
+}
+
+#[test]
+fn vocabulary_flag_names_unknown_values() {
+    let textmap = r#"namespace = "doom";
+vertex { x = 0; y = 0; } vertex { x = 128; y = 0; } vertex { x = 128; y = 128; } vertex { x = 0; y = 128; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; special = 97; }
+linedef { v1 = 1; v2 = 2; sidefront = 1; }
+linedef { v1 = 2; v2 = 3; sidefront = 2; }
+linedef { v1 = 3; v2 = 0; sidefront = 3; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; } sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; } sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; }
+thing { x = 64; y = 64; type = 1; } thing { x = 80; y = 64; type = 9999; }
+"#;
+    let path = write_temp(&common::wad_with_textmap(textmap), "vocab-unknown");
+    let out = bin()
+        .args([path.to_str().unwrap(), "--vocabulary"])
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("expressible: no"), "{stdout}");
+    assert!(stdout.contains("line specials unknown: 97"), "{stdout}");
+    // 46 (the tall red torch) used to stand in for an unknown thing type
+    // here; it is a real `[things]` row now, so this asserts on 9999 —
+    // a doomednum no vanilla mobjinfo entry defines, which keeps the test
+    // about the unknown-value path rather than about a vocabulary gap.
+    assert!(stdout.contains("thing types unknown: 9999"), "{stdout}");
+}
+
+/// A linedef special outside the pinned engine's vanilla list flips
+/// `vanilla_only` off, which the human line reports as an `(outside
+/// vanilla)` note alongside the unknown-value breakdown.
+#[test]
+fn a_non_vanilla_line_special_is_noted_as_outside_vanilla() {
+    let textmap = r#"namespace = "doom";
+vertex { x = 0; y = 0; } vertex { x = 128; y = 0; } vertex { x = 128; y = 128; } vertex { x = 0; y = 128; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; special = 8192; }
+linedef { v1 = 1; v2 = 2; sidefront = 1; }
+linedef { v1 = 2; v2 = 3; sidefront = 2; }
+linedef { v1 = 3; v2 = 0; sidefront = 3; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; } sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; } sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; }
+thing { x = 64; y = 64; type = 1; }
+"#;
+    let path = write_temp(&common::wad_with_textmap(textmap), "vocab-nonvanilla");
+    let out = bin()
+        .args([path.to_str().unwrap(), "--vocabulary"])
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("line specials unknown: 8192"), "{stdout}");
+    assert!(stdout.contains("(outside vanilla)"), "{stdout}");
+}

@@ -2,15 +2,21 @@
 //!
 //! The lifter's charter is *recognition, not approximation*: it will emit
 //! map-spec constructs only where it can prove the geometry means them, and
-//! it measures everything it cannot express. This module ships the measuring
-//! half: [`survey`] reduces a parsed map to a [`MapTelemetry`] census — raw
-//! element counts and raw value histograms. It interprets **nothing**: no
-//! table lookups, no engine constants, no vocabulary judgments. Those arrive
-//! with the recognizers.
+//! it measures everything it cannot express. [`survey`] reduces a parsed map
+//! to a [`MapTelemetry`] census — raw element counts and raw value histograms
+//! — and interprets **nothing**: no table lookups, no engine constants, no
+//! vocabulary judgments. [`vocabulary`] is the first interpreting layer: a
+//! membership test against the compiler's emittable sets, and only an upper
+//! bound on what a geometry-aware lifter could express. [`corpus`] sweeps a
+//! directory of zips and WADs, surveying and classifying every map it finds.
+//! Recognizers proper — the ones that reason about geometry — arrive later.
 
 use std::collections::BTreeMap;
 
 use crustywad::map::udmf::UdmfMap;
+
+pub mod corpus;
+pub mod vocabulary;
 
 /// Raw element counts for one map.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]

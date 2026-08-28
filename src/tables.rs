@@ -1,6 +1,6 @@
 //! Loads the sourced engine-constant and vocabulary tables.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use serde::Deserialize;
 
@@ -236,9 +236,17 @@ struct LinedefFlags {
     lower_unpegged: u16,
 }
 
+/// `[linedef.vanilla_specials]` — the membership list of every special the
+/// pinned engine acts on; see the table's leading comment.
+#[derive(Debug, Deserialize)]
+struct VanillaSpecials {
+    values: Vec<u16>,
+}
+
 #[derive(Debug, Deserialize)]
 struct LinedefAttrs {
     flags: LinedefFlags,
+    vanilla_specials: VanillaSpecials,
 }
 
 /// The empirical distribution of `P_Random()`'s real 256-entry lookup table
@@ -622,6 +630,64 @@ impl Tables {
     #[must_use]
     pub fn secret_sector_special(&self) -> u16 {
         self.engine.sector.secret
+    }
+
+    /// Every linedef special a compiler pass writes today: the manual door,
+    /// the keyed doors, and the four exits. Curated rather than "every
+    /// accessor" — lift and teleport specials are sourced in the table but
+    /// no pass emits them yet. `tests/vocabulary_arbiter.rs` compiles a
+    /// fixture per construct and asserts this set equals what came out. That
+    /// does not detect a new pass on its own: no fixture can author a
+    /// construct the IR cannot yet express, so a landed teleport pass leaves
+    /// the fixtures' union unchanged. What it does enforce is that growing
+    /// this list without a fixture that emits the new special breaks the
+    /// equality — and that adding 62, 88 or 97 breaks
+    /// `sourced_but_unemitted_specials_stay_out_of_the_emittable_set` too.
+    /// A new pass therefore lands its fixture and updates both tests by
+    /// rule.
+    #[must_use]
+    pub fn emittable_line_specials(&self) -> BTreeSet<u16> {
+        let mut set = BTreeSet::from([
+            self.door_special(),
+            self.exit_switch_special(),
+            self.exit_walkover_special(),
+            self.secret_exit_switch_special(),
+            self.secret_exit_walkover_special(),
+        ]);
+        set.extend(self.locked_door_kinds().into_iter().map(|(_, s)| s));
+        set
+    }
+
+    /// Every sector special `engine.toml` names — secret, the three damage
+    /// tiers, the four light effects. "Nameable" is the expressibility
+    /// criterion; which IR field carries the value is irrelevant.
+    #[must_use]
+    pub fn named_sector_specials(&self) -> BTreeSet<u16> {
+        let s = &self.engine.sector;
+        BTreeSet::from([
+            s.secret,
+            s.damage.light,
+            s.damage.medium,
+            s.damage.heavy,
+            s.light_effects.blink,
+            s.light_effects.flicker,
+            s.light_effects.glow,
+            s.light_effects.strobe_slow,
+        ])
+    }
+
+    /// Every linedef special the pinned vanilla engine acts on
+    /// (`engine.toml` `[linedef.vanilla_specials]`). Membership, not
+    /// vocabulary: it defines the corpus's vanilla-only slice.
+    #[must_use]
+    pub fn vanilla_line_specials(&self) -> BTreeSet<u16> {
+        self.engine
+            .linedef
+            .vanilla_specials
+            .values
+            .iter()
+            .copied()
+            .collect()
     }
 
     /// The sector special for a liquid's damage tier (`flats.liquid.damage_tier`:
@@ -1256,12 +1322,19 @@ mod tests {
         assert_eq!(t.thing_id("deathmatch_start"), Some(11));
     }
 
-    /// The exploding barrel and every scenery/light-source prop must
-    /// resolve a doomednum; the four that block movement must also
-    /// resolve `[props.*]` dims (rules P3, P21, P22), and the two
-    /// non-blocking decorations must NOT carry a `[props.*]` entry —
-    /// asserting that distinction directly rather than only checking
-    /// `Some`/`None` loosely.
+    /// The exploding barrel and the four original scenery/light-source
+    /// props must resolve a doomednum, and the ones that block movement
+    /// must also resolve `[props.*]` dims (rules P3, P21, P22), while the
+    /// non-blocking ones must NOT carry a `[props.*]` entry — asserting
+    /// that distinction directly rather than only checking `Some`/`None`
+    /// loosely.
+    ///
+    /// This test covers the five rows that block was born with. The other
+    /// twenty rows of vocabulary.toml's `# Hazards and scenery` block — the
+    /// rest of the vanilla decoration set — are pinned by
+    /// [`every_decoration_prop_resolves`] below. Between them the two tests
+    /// cover all 25 rows and all 24 that block; `candle` is the single
+    /// non-blocking one.
     #[test]
     fn every_scenery_prop_resolves() {
         let t = Tables::load().expect("tables load");
@@ -1293,14 +1366,20 @@ mod tests {
     }
 
     /// Every gore prop `scenery.gore` (none | light | heavy) can place must
-    /// resolve a doomednum, checked individually across all four groups —
-    /// standing corpses, gib props, blood/bone floor decorations, and
-    /// hanging bodies. The nine that block (the three bone props and the
-    /// six hanging bodies) must also resolve `[props.*]` dims, and the six
-    /// hanging bodies specifically must report `hangs = true` (rule P22)
-    /// while the three bone props report `hangs = false` — floor-standing,
-    /// not `MF_SPAWNCEILING`, despite sharing `MF_SOLID` with the hanging
-    /// set.
+    /// resolve a doomednum, checked individually. vocabulary.toml's
+    /// `# Gore` block names six groups over 34 rows, sixteen of which
+    /// block; this test covers four of those groups — standing corpses (7),
+    /// gib props (3), blood/bone floor decorations (6), and hanging bodies
+    /// (6) — and the nine blocking rows among them (the three bone props
+    /// and the six hanging bodies) must also resolve `[props.*]` dims. The
+    /// six hanging bodies specifically must report `hangs = true` (rule
+    /// P22) while the three bone props report `hangs = false` —
+    /// floor-standing, not `MF_SPAWNCEILING`, despite sharing `MF_SOLID`
+    /// with the hanging set.
+    ///
+    /// The remaining two groups — impaled bodies (2) and the meat-hook set
+    /// (10), whose seven blocking rows complete the sixteen — are pinned by
+    /// [`every_impaled_and_meat_hook_prop_resolves`] below.
     #[test]
     fn every_gore_prop_resolves() {
         let t = Tables::load().expect("tables load");
@@ -1336,7 +1415,9 @@ mod tests {
         assert_eq!(gibs.len(), 3, "every gib prop was checked");
 
         // Blood floor decorations: non-blocking, no [props.*] entry.
-        let blood: &[(&str, u16)] = &[("small_pool", 80), ("colon_gibs", 79)];
+        // `brain_stem` (MF_NOBLOCKMAP) joined this group with the complete
+        // decoration set; vocabulary.toml files it beside the other two.
+        let blood: &[(&str, u16)] = &[("small_pool", 80), ("colon_gibs", 79), ("brain_stem", 81)];
         for (name, doomednum) in blood {
             assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
             assert!(
@@ -1344,7 +1425,7 @@ mod tests {
                 "`{name}` is a non-blocking blood decoration"
             );
         }
-        assert_eq!(blood.len(), 2, "every blood decoration was checked");
+        assert_eq!(blood.len(), 3, "every blood decoration was checked");
 
         // Bone floor decorations: blocking, floor-standing (hangs = false).
         let bone: &[(&str, u16)] = &[
@@ -1396,6 +1477,128 @@ mod tests {
             all_ids.len(),
             "all gore doomednums are distinct"
         );
+    }
+
+    /// The rest of the vanilla decoration set — the twenty rows the 2026-08
+    /// corpus measurement added to vocabulary.toml's `# Hazards and
+    /// scenery` block. Every one is `MF_SOLID` with no `MF_SPAWNCEILING`,
+    /// so every one must resolve `[props.*]` dims that block and do not
+    /// hang. The dims are the ones `mobjinfo` gives at the pinned commit:
+    /// 16x16 throughout, except `big_tree` at radius 32. A wrong radius
+    /// here yields a map that loads, renders, and quietly embeds a prop in
+    /// a wall — exactly the class of defect no other test catches, since
+    /// every other test reads the same table the compiler does (see
+    /// KNOWN-GAPS.md's sourcing rule).
+    #[test]
+    fn every_decoration_prop_resolves() {
+        let t = Tables::load().expect("tables load");
+        // (name, doomednum, radius, height) — all MF_SOLID, none hanging.
+        let columns: &[(&str, u16, i32, i32)] = &[
+            ("tall_green_column", 30, 16, 16),
+            ("short_green_column", 31, 16, 16),
+            ("tall_red_column", 32, 16, 16),
+            ("short_red_column", 33, 16, 16),
+            ("heart_column", 36, 16, 16),
+            ("skull_column", 37, 16, 16),
+            ("tech_pillar", 48, 16, 16),
+        ];
+        let torches: &[(&str, u16, i32, i32)] = &[
+            ("tall_blue_torch", 44, 16, 16),
+            ("tall_green_torch", 45, 16, 16),
+            ("tall_red_torch", 46, 16, 16),
+            ("short_blue_torch", 55, 16, 16),
+            ("short_green_torch", 56, 16, 16),
+            ("short_red_torch", 57, 16, 16),
+        ];
+        // Trees, cave rock, the second techno lamp, and the free-standing
+        // light/skull/fire props. `big_tree` is the one radius-32 entry.
+        let others: &[(&str, u16, i32, i32)] = &[
+            ("torch_tree", 43, 16, 16),
+            ("big_tree", 54, 32, 16),
+            ("stalagmite", 47, 16, 16),
+            ("short_techno_lamp", 86, 16, 16),
+            ("evil_eye", 41, 16, 16),
+            ("floating_skull", 42, 16, 16),
+            ("burning_barrel", 70, 16, 16),
+        ];
+
+        let mut checked = 0;
+        for (name, doomednum, radius, height) in columns.iter().chain(torches).chain(others) {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            let dims = t.prop(name).unwrap_or_else(|| panic!("`{name}` prop dims"));
+            assert_eq!(dims.radius, *radius, "`{name}` radius");
+            assert_eq!(dims.height, *height, "`{name}` height");
+            assert!(dims.blocks, "`{name}` blocks movement");
+            assert!(!dims.hangs, "`{name}` stands on the floor");
+            checked += 1;
+        }
+        assert_eq!(checked, 20, "every decoration was checked");
+    }
+
+    /// The two remaining gore groups: the impaled bodies (`MF_SOLID`,
+    /// floor-standing) and the ten-strong meat-hook set, which `mobjinfo`
+    /// splits down the middle — 49-53 carry `MF_SOLID` at radius 16 with
+    /// per-entry heights and hang from the ceiling, while 59-63 are the
+    /// same five sprites at radius 20 *without* `MF_SOLID`. That split is
+    /// the point of the test: the walk-through twins must resolve a
+    /// doomednum and still report no `[props.*]` entry at all, alongside
+    /// `brain_stem` (`MF_NOBLOCKMAP`). Together with
+    /// [`every_gore_prop_resolves`] this pins all sixteen blocking gore
+    /// rows.
+    #[test]
+    fn every_impaled_and_meat_hook_prop_resolves() {
+        let t = Tables::load().expect("tables load");
+
+        // Impaled bodies: blocking, floor-standing (hangs = false).
+        let impaled: &[(&str, u16, i32, i32)] = &[
+            ("impaled_body", 25, 16, 16),
+            ("twitching_impaled_body", 26, 16, 16),
+        ];
+        for (name, doomednum, radius, height) in impaled {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            let dims = t.prop(name).unwrap_or_else(|| panic!("`{name}` prop dims"));
+            assert_eq!(dims.radius, *radius, "`{name}` radius");
+            assert_eq!(dims.height, *height, "`{name}` height");
+            assert!(dims.blocks, "`{name}` blocks movement");
+            assert!(!dims.hangs, "`{name}` stands on the floor");
+        }
+        assert_eq!(impaled.len(), 2, "every impaled body was checked");
+
+        // Meat hooks, blocking half: hangs = true, P22-relevant.
+        let hooks: &[(&str, u16, i32, i32)] = &[
+            ("hanging_bloody_twitch", 49, 16, 68),
+            ("hanging_meat2", 50, 16, 84),
+            ("hanging_meat3", 51, 16, 84),
+            ("hanging_meat4", 52, 16, 68),
+            ("hanging_meat5", 53, 16, 52),
+        ];
+        for (name, doomednum, radius, height) in hooks {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            let dims = t.prop(name).unwrap_or_else(|| panic!("`{name}` prop dims"));
+            assert_eq!(dims.radius, *radius, "`{name}` radius");
+            assert_eq!(dims.height, *height, "`{name}` height");
+            assert!(dims.blocks, "`{name}` blocks movement");
+            assert!(dims.hangs, "`{name}` hangs from the ceiling");
+        }
+        assert_eq!(hooks.len(), 5, "every blocking meat hook was checked");
+
+        // The walk-through twins and `brain_stem`: real rows, no dims.
+        let no_props: &[(&str, u16)] = &[
+            ("hanging_meat2_passable", 59),
+            ("hanging_meat4_passable", 60),
+            ("hanging_meat3_passable", 61),
+            ("hanging_meat5_passable", 62),
+            ("hanging_bloody_twitch_passable", 63),
+            ("brain_stem", 81),
+        ];
+        for (name, doomednum) in no_props {
+            assert_eq!(t.thing_id(name), Some(*doomednum), "`{name}` doomednum");
+            assert!(
+                t.prop(name).is_none(),
+                "`{name}` lacks MF_SOLID and carries no [props.*] entry"
+            );
+        }
+        assert_eq!(no_props.len(), 6, "every non-blocking row was checked");
     }
 
     /// An exit switch needs a switch texture to render — the theme's
