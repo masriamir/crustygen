@@ -317,7 +317,7 @@ source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, P_UseSpecialLine, under th
 # selects the `!thing->player`-guarded pair, `repeatable` (default true)
 # the RETRIGGERS form. Retail id maps use 97 for 98 % of player teleport
 # lines and reserve 126/125 for pens the player never enters — see
-# docs/measurements/teleports-*.md.
+# docs/measurements/teleports-2026-08-28.md.
 #
 # Nuance worth recording: unlike most walkover specials, a teleport line is
 # *not* usable from its back side even though P_CrossSpecialLine (unlike
@@ -325,8 +325,13 @@ source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, P_UseSpecialLine, under th
 # checks: 'if (side == 1) return 0; // Don't teleport if hit back of line, so
 # you can get out of teleporter.' So the "front side only" rule this project
 # already treats as a use-special nuance also applies to these walkover
-# specials, deliberately, so a teleported thing has an exit route. The pad
-# is therefore always the trigger line's BACK sector.
+# specials, deliberately, so a teleported thing has an exit route. That side
+# gate is why crustygen's construction puts the pad on the trigger line's
+# BACK sector: entering the pad fires and leaving it does not, which is what
+# the engine rule requires of any pad that is to work at all. The engine
+# itself imposes no such geometry — it only refuses a back-side crossing —
+# and the corpus agrees with the construction rather than being bound by it
+# (back-side pads outnumber front-side ones about ten to one).
 [specials.teleport]
 repeatable = 97
 one_shot = 39
@@ -348,7 +353,7 @@ source = "Verified against tests/fixtures/freedoom/freedoom1.wad and freedoom2.w
 switch_width_source = "MEASURED, not sourced from the engine: the width in pixels of the `switch` texture's TEXTURE1 definition, read via crustywad::Wad::texture_set() from RETAIL/DOOM.WAD, RETAIL/DOOM2.WAD and RETAIL/freedoom2.wad — SW1STARG is 128x128 in all three. `compile::exits` needs it to centre the switch graphic on an exit line narrower than the texture: with no offset a 64-unit line shows texture columns 0..63, the left half, which is what a playtest reported as a mis-centred switch. Centring the TEXTURE (offsetx = (switch_width - width) / 2) rather than the switch graphic itself is deliberate: the graphic's own position inside the texture is an asset detail that varies between IWADs — measured by composing SW1STARG and SW2STARG and diffing, it spans columns 54..=72 (centre 63) in DOOM2.WAD but 55..=64 (centre 60) in freedoom2.wad — whereas the texture width agrees everywhere. Centring the texture puts the graphic within 1 pixel of the line's centre in DOOM2 and within 4 in Freedoom."
 switch_source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, alphSwitchList[]: {\"SW1STARG\", \"SW2STARG\", 1} — the trailing 1 is the episode number, and this table's episode-1 block (the tech-base episode) is where SW1STARG/SW2STARG live, pairing thematically with the STARTAN wall family already used for tech_base. P_ChangeSwitchTexture toggles a placed switch texture to `switchlist[i^1]`, its paired member in this same table, on activation — so the vocabulary only needs the initially-placed (SW1) name; the engine derives the pressed (SW2) counterpart itself via SWITCHES. SW1STARG confirmed present as a composite texture name in both tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad's TEXTURE1 lump via crustywad::Wad::texture_set(), same throwaway-binary method as the row above. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_switch.c"
 trim_source = "NOT sourced from the engine (nothing in linuxdoom-1.10 names a 'trim' texture role) — a compiler-construction choice, now informed by measurement. SUPPORT3 (64x128) is the standard flanking trim beside a doorway in Doom's own tech maps and sits in the same STARTAN family this theme already draws wall/switch from. It replaces STARGR2 (128x128), which was chosen on thematic grounds alone before any measurement and read as more wall rather than as door trim. Dimensions for SUPPORT3, STARGR2, DOORSTOP (8x128) and DOORTRAK (8x128) were read from the TEXTURE1 definitions of RETAIL/DOOM.WAD, RETAIL/DOOM2.WAD and RETAIL/freedoom2.wad via crustywad::Wad::texture_set(), and agree across all three. SUPPORT3 confirmed present in all three."
-pad_source = "NOT sourced from the engine (nothing in linuxdoom-1.10 names a teleporter flat) — a compiler-construction choice fixed by measurement: of 83 free-standing teleport pads in DOOM.WAD + DOOM2.WAD, 79 use a GATE1–GATE4 flat, GATE3 most often (33; GATE2 24, GATE4 11, GATE1 11), and GATE3 leads DOOM.WAD's own tech maps too (13 of 27) — docs/measurements/teleports-*.md, probe round 2 (2026-08-28). Confirmed present as a 4096-byte flat lump in tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad via `cwad list <wad> | grep GATE3` (the same fixture check [textures.tech_base].source used)."
+pad_source = "NOT sourced from the engine (nothing in linuxdoom-1.10 names a teleporter flat) — a compiler-construction choice fixed by measurement: of 83 free-standing teleport pads in DOOM.WAD + DOOM2.WAD, 79 use a GATE1–GATE4 flat, GATE3 most often (33; GATE2 24, GATE4 11, GATE1 11), and GATE3 leads DOOM.WAD's own tech maps too (13 of 27) — docs/measurements/teleports-2026-08-28.md, probe round 2 (2026-08-28). Confirmed present as a 4096-byte flat lump in tests/fixtures/freedoom/freedoom1.wad and freedoom2.wad via `cwad list <wad> | grep GATE3` (the same fixture check [textures.tech_base].source used)."
 
 # Which texture NAMES read as "a door" to a human mapper. This is deliberately
 # NOT a `source` field — see `curated` below in its place. Every value in

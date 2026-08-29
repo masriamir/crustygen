@@ -125,7 +125,7 @@ emits a thing there.
 
 ## The check catalog
 
-Fourteen ids. `V-Pn` re-derives playability rule `Pn` from §7.3; `V-S` is the
+Sixteen ids. `V-Pn` re-derives playability rule `Pn` from §7.3; `V-S` is the
 structural/unclassifiable-input family. Every finding names a subject (sector,
 linedef, or thing, by TEXTMAP declaration index — or the map as a whole) and
 prints as `{id} {severity} {subject}: {message}`.
@@ -142,10 +142,12 @@ prints as `{id} {severity} {subject}: {message}`.
 | `V-P11` | No door-special line carries `dontpegtop` or `dontpegbottom` on its own face. **A convention pin, not an engine rule** — `ML_DONTPEGBOTTOM` is inert on a typical door face, whose visible texture lives in the upper slot — which is why it is a Warning, the same downgrade §9 gives P10. Measured: 247 of 255 door-special lines in `DOOM2.WAD` carry neither. | Warning |
 | `V-P13` | An action line's tag resolves to at least one sector (a dead action otherwise). **The four exit specials are exempt** — `G_ExitLevel`/`G_SecretExitLevel` are `void (void)` and neither the switch nor the walkover path ever looks a tag up, so an unresolved tag there was never going to be read. Symmetrically, a sector carrying a tag no action line references is a stale tag. | Error for an unresolvable action tag; Warning for a stale sector tag |
 | `V-P14` | No action line carries tag 0. Tag 0 is not "no tag" — it is the tag every untagged sector already has, so one stray zero opens every door. | Error |
+| `V-P15` | Every teleport line's tag resolves the way `EV_Teleport` resolves it — the first sector, in declaration order, that both carries the tag and holds a `teleport_dest` marker — to a sector holding **exactly one** marker, with the player's headroom and radius clearance at the marker. Clearance is measured against the destination's **non-passable** boundary segments only, the same rule V-P25 applies to a start. Judged once per linedef, from its front mirror: `EV_Teleport` returns immediately on a back-side crossing, so the back mirror triggers nothing to check. A tag-0 teleport line is V-P14's finding, not repeated here. | Error |
 | `V-P19` | Every sector's `lightlevel` is inside `Tables::light_range()`. Unconditional, spec or no spec. | Error |
 | `V-P20` | **Embedding:** no collectible (pickup, ammo, weapon, `backpack`, key, or one of the eight powerups) sits inside a blocking prop's radius. **Reachability:** every collectible's sector is one the V-P7 flood actually reached; runs only when the flood ran. | Error |
 | `V-P24` | Every locked-door **class** present has at least one key of that colour placed, and every placed key opens at least one door present. Class-level, because `26` is all an emitted linedef retains — it opens to either `blue_card` or `blue_skull`. Doors dedupe by `(door sector, class)`, so one physical door with two faces reports once. | Error |
 | `V-P25` | Every player start clears its sector's **non-passable** walls by at least the player's radius (an open doorway cannot crush you against it); clears every other thing whose name resolves to a blocking prop on **both axes at once** by `prop.radius + player.radius` (`PIT_CheckThing`'s own axis-aligned `blockdist` box, not a circular distance); and no two starts of any kind are within telefrag distance (`2 × radius`) of each other. | Error |
+| `V-P27` | Every sector holding a monster has at least one two-sided boundary, or is a teleport destination. A fully one-sided monster sector can never be woken by sight or sound and is never entered, so its monsters are scenery the player never meets. **Two-sided**, not passable: sound and sight both travel through a two-sided line the player cannot walk across (a window, a fence), so a blocking two-sided boundary is still a way in for the wake-up this rule is about. | Error |
 
 Severity is a discipline, not a mood. **Error** means the map (or the input)
 is provably broken and the CLI exits 1. **Warning** means suspicious but not
@@ -420,15 +422,44 @@ positive.
 
 ## What the verifier deliberately does not check
 
-- **Lifts and teleports.** Their linedef specials (62/88 and 97) are sourced
-  and reachable through `Tables`, but this compiler emits neither and neither
-  `invariants.rs` nor `flood.rs` models their traversal semantics. They are
-  therefore kept **out** of the recognized-special set on purpose: a map
-  carrying one draws a `V-S` warning saying this checker does not model that
-  special and the flood cannot vouch for its effect on traversal, instead of a
-  silent pass. Recognizing them without understanding them would make the
-  flood optimistic — it could call a map finishable that a player diverted or
+- **Lifts.** Their linedef specials (62 and 88) are sourced and reachable
+  through `Tables`, but this compiler emits neither and neither
+  `invariants.rs` nor `flood.rs` models a moving floor. They are therefore
+  kept **out** of the recognized-special set on purpose: a map carrying one
+  draws a `V-S` warning saying this checker does not model that special and
+  the flood cannot vouch for its effect on traversal, instead of a silent
+  pass. Recognizing them without understanding them would make the flood
+  optimistic — it could call a map finishable that a player diverted or
   blocked by that line could not finish.
+
+  **Teleports are the opposite case, and the contrast is the rule.** All four
+  teleport specials (97/39/126/125) *are* in the recognized set, because the
+  flood does model them. What is modeled: a `fronts_this` boundary carrying
+  either **player** teleport special contributes one **directed**
+  `EdgeKind::Teleport` edge from its own sector to the sector its tag
+  resolves to. Front side only — `EV_Teleport` returns before doing anything
+  when `side == 1`, so the back mirror of the same linedef builds no edge.
+  Engine-style resolution — the destination is the first sector, in
+  declaration order, that both carries the tag and holds a `teleport_dest`
+  marker; a tag matching sectors that hold no marker resolves past them, and
+  a tag matching none at all yields no edge, because the line fires nothing
+  (which is V-P15's finding, not the flood's). Directed, because a teleport
+  relocates the player rather than opening a way back. The edge is gated on
+  `Boundary::passable`, exactly as the walkover exits are. V-P15 then checks
+  that every teleport line's tag pairs with exactly one marker that the
+  player fits at, and V-P27 that no monster sector is sealed away from both
+  sight and a teleport arrival.
+
+  What is **not** modeled: the monsters-only specials contribute no edge at
+  all, since they move no player. There is no acoustic or line-of-sight
+  model — whether a closet's monsters actually wake is a runtime behavior,
+  and the corpus measurement's audibility figures are a statistic, not a
+  rule (`docs/measurements/teleports-2026-08-28.md`). And V-P15 sizes
+  headroom and clearance for the **player** even on a monsters-only line,
+  which is optimistic in one direction: a species wider than the player can
+  arrive where this check calls the destination clear yet `P_TeleportMove`
+  would refuse. Sizing it properly needs the set of species that can reach
+  the trigger line — the acoustic model this checker does not have.
 - **Sector specials, liquids included — and these *do* pass silently.** The
   warning above is a *linedef*-special check: `check_recognized_specials`
   reads `Boundary::special`, and a damaging floor is a **sector** special
@@ -455,9 +486,13 @@ positive.
   emitted `26` names a colour class, not a card. The two rules deliberately
   disagree on a map that locks `"blue_card"` and places a `blue_skull`
   (`KNOWN-GAPS.md` records why neither should be "fixed" into agreement).
-- **The rest of the catalog.** P1 (retired), P5, P6, P10, P12, P15, P16, P17,
-  P18, P21, P22, P23 have no `V-` id — the set the compiler leaves uncovered,
-  less P20, which the verifier does cover. P18 is the near miss: its counting
+- **The rest of the catalog.** P1 (retired), P5, P6, P10, P12, P16, P17, P18,
+  P21, P22, P23 have no `V-` id — the set the compiler leaves uncovered, less
+  P20, which the verifier does cover. P26 is the one compiler-side rule with
+  no `V-` id: a teleport exit emits exactly a plain walkover exit's specials,
+  so nothing on the line distinguishes them, and the verifier grades P26's
+  shape as the `progression.exit.trigger` conformance row instead of raising
+  a finding. P18 is the other near miss: its counting
   rule ("emitted secret sectors equal `secrets.count`") lives here as the
   `secrets.count` conformance row rather than as a finding, so it needs a spec
   and it grades rather than fails.

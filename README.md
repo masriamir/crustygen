@@ -32,18 +32,24 @@ directly as JSON and built with `crustygen-build` (see
 [`docs/build.md`](docs/build.md)). See [Known gaps](#known-gaps).
 
 ```bash
-cargo test                                   # 513 tests
+cargo test                                   # 623 tests
 cargo run --bin crustygen-build -- tests/fixtures/entrada_base.json out.wad
 cargo run --bin crustygen-check -- maps/entrada.wad \
     --spec tests/fixtures/entrada.spec.md
 ```
 
-The sample map lives in `maps/`:
+The sample maps live in `maps/` — two maps, each shipped in both formats:
 
-- `maps/entrada.wad` — the **UDMF** build. Needs a ZDoom-family port (GZDoom,
-  Odamex, Eternity).
-- `maps/entrada_doom.wad` — the binary **Doom-format** twin. This is the one
-  for Chocolate Doom or anything else vanilla-accurate.
+- `maps/entrada.wad` — the **UDMF** build of entrada, the eight-room map with
+  a key, a locked door, a secret and a switch exit. Needs a ZDoom-family port
+  (GZDoom, Odamex, Eternity).
+- `maps/entrada_doom.wad` — entrada's binary **Doom-format** twin. This is the
+  one for Chocolate Doom or anything else vanilla-accurate.
+- `maps/salto.wad` — the **UDMF** build of salto, the five-room teleport map:
+  a two-way pad pair, a monsters-only ambush closet, and a one-shot pad into a
+  teleport-only exit room. Same ZDoom-family requirement.
+- `maps/salto_doom.wad` — salto's binary **Doom-format** twin, same guidance as
+  entrada's.
 
 Loading the UDMF build in a vanilla port dies with
 `W_LumpLength: <n> >= numlumps`, because `P_SetupLevel` addresses map data as
@@ -64,9 +70,9 @@ chain of up to three sectors. See [`docs/geometry.md`](docs/geometry.md).
 
 Compilation runs a fixed pass order, each pass depending on the last: emit
 room sectors, resolve secret specials, cut portals, emit doors, carve exits,
-check no two emitted sectors overlap, apply height textures, place things,
-check no action sits at tag 0, render `TEXTMAP`, then run the playability
-catalog. A violation is a hard error, not a warning — a door the player
+emit teleport pads and their destination markers (`emit_teleports`), check no
+two emitted sectors overlap, apply height textures, place things, check no
+action sits at tag 0, render `TEXTMAP`, then run the playability catalog. A violation is a hard error, not a warning — a door the player
 cannot fit through is a broken map, not a missed target.
 
 ## A second opinion on the built map
@@ -79,7 +85,8 @@ assembled and rendered to the same form — and re-derive the same invariants
 from the emitted geometry, reusing the sourced tables and the reachability
 core but nothing from `compile/` or `rules.rs` — the logic under
 cross-examination.
-Fourteen checks, from dangling cross-references to a key-aware flood that
+Sixteen checks, from dangling cross-references to a key-aware flood — with
+directed teleport edges resolved the way `EV_Teleport` resolves them — that
 proves the map can still be finished. Given a map-spec it also grades a fixed
 catalog of frontmatter parameters against their actual values — a parameter
 with no sourced geometric meaning is an explicit not-derivable row rather than
@@ -90,17 +97,21 @@ bad input. See [`docs/check.md`](docs/check.md).
 ## Surveying a WAD
 
 `crustygen-lift` is the first stage of decompiling a WAD's geometry back into
-a map-spec. Today it only surveys: reading a WAD's maps through the same
-shared ingest path `crustygen-check` uses, and reporting raw element counts
-and linedef/sector/thing-type histograms per map, human-readable or as
-`--json`. It interprets nothing yet — no table lookups, no spec emission. See
-[`docs/lift.md`](docs/lift.md).
+a map-spec. Its default output only surveys: reading a WAD's maps through the
+same shared ingest path `crustygen-check` uses, and reporting raw element
+counts and linedef/sector/thing-type histograms per map, human-readable or as
+`--json`. That layer interprets nothing — no table lookups, no spec emission.
+See [`docs/lift.md`](docs/lift.md).
 
-`crustygen-lift --vocabulary` adds a per-map verdict: whether every special
-and thing type is in the compiler's emittable vocabulary. `crustygen-corpus
-<dir>` sweeps a directory of idgames zips into the corpus expressibility
-report the vocabulary roadmap is re-ordered from — an upper bound, by
-membership only. See [`docs/corpus.md`](docs/corpus.md).
+`crustygen-lift --vocabulary` adds a per-map verdict on four axes: whether
+every special and thing type is in the compiler's emittable vocabulary, plus
+the **teleport recognizer**, which resolves every teleport line the way
+`EV_Teleport` does, classifies the pad shape it lands on, and refuses the
+shapes the IR cannot state. That fourth axis is the first thing here that
+reads geometry rather than a table. `crustygen-corpus <dir>` sweeps a
+directory of idgames zips into the corpus expressibility report the vocabulary
+roadmap is re-ordered from — still an upper bound. See
+[`docs/corpus.md`](docs/corpus.md).
 
 ## The data tables are the highest-stakes part
 
@@ -130,11 +141,11 @@ the four id/Final Doom IWADs. See
 | [`docs/map-spec.md`](docs/map-spec.md) | The map-spec document format, the parser's API, and the enforcement split |
 | [`docs/build.md`](docs/build.md) | The build stage: the `crustygen-build` CLI contract, its per-stage exit codes, and byte-reproducibility of the committed map |
 | [`docs/check.md`](docs/check.md) | The layer-4 verifier: the check catalog, the flood's construction rules, conformance verdicts, and the CLI contract |
-| [`docs/lift.md`](docs/lift.md) | The lifter's charter, its telemetry-skeleton scope, and the `crustygen-lift` CLI contract |
-| [`docs/corpus.md`](docs/corpus.md) | The corpus sweep: what "expressible" means (and does not), the `crustygen-corpus` CLI contract, and the per-release re-run procedure |
+| [`docs/lift.md`](docs/lift.md) | The lifter's charter, its telemetry and teleport-recognizer scope, and the `crustygen-lift` CLI contract |
+| [`docs/corpus.md`](docs/corpus.md) | The corpus sweep: what "expressible" means on its four axes (and does not), the `crustygen-corpus` CLI contract, and the per-release re-run procedure |
 | [`docs/geometry.md`](docs/geometry.md) | Worked coordinates for the gap and door-chain constructions |
 | [`docs/verticality.md`](docs/verticality.md) | Height differences, and the stairs/lifts phases that follow |
-| [`docs/measurements/`](docs/measurements/) | Corpus measurements: the retail-IWAD verticality survey and the idgames expressibility instrument |
+| [`docs/measurements/`](docs/measurements/) | Corpus measurements: the retail-IWAD verticality survey, the idgames expressibility instrument, and the teleport before/after |
 
 ## Known gaps
 
@@ -155,8 +166,11 @@ The honest list is [`KNOWN-GAPS.md`](KNOWN-GAPS.md). The headlines:
   a missing start or exit is a hard finding there, and V-P20 checks each
   pickup for prop embedding and flood reachability — but on a built WAD, one
   stage later.
-- **12 of 25 playability rules** are enforced by the compiler; the verifier
-  re-derives those twelve from the emitted map and adds P20.
+- **15 of 27 playability rules** are enforced by the compiler; the verifier
+  re-derives fourteen of them from the emitted map and adds P20. The exception
+  is P26 (teleport-only exit room), which the verifier grades as a conformance
+  row rather than as a check — a teleport exit emits exactly a plain walkover
+  exit's specials, so nothing on the line tells them apart.
 - **Texture alignment is minimal** — only an exit switch is centred; offsets
   do not accumulate across collinear runs.
 

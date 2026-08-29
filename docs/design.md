@@ -398,6 +398,17 @@ error and nothing is produced.
   ],
   "portals": [
     { "a": "entry", "b": "hall", "kind": "door", "lock": null, "width": 128, "at": [512, 128] }
+  ],
+  "teleports": [
+    { "id": "entry_to_vault",
+      "room": "entry",
+      "pad": { "island": [320, 192] },
+      "to": { "room": "vault", "at": [96, 96], "angle": 90 },
+      "monsters_only": false,
+      "repeatable": true }
+  ],
+  "exits": [
+    { "room": "vault", "trigger": "teleport", "secret": false, "width": 64, "at": [0, 64] }
   ]
 }
 ```
@@ -409,9 +420,22 @@ Clockwise is not a stylistic choice: a linedef's front (right) sidedef must face
 interior, and the right-hand side of a directed edge only faces inward when the boundary winds
 clockwise. Verified empirically rather than assumed — measuring the signed area of every sector
 boundary in nine Freedoom maps across both IWADs, oriented so the sector sits on the front side,
-gives 2611 clockwise and 0 counter-clockwise. Portal `kind` is one of `plain`, `door`, `locked`, `lift`; `lock` names a key when
-`kind` is `locked`. Texture names in the IR are concrete, having already been resolved from the
-template's high-level vocabulary.
+gives 2611 clockwise and 0 counter-clockwise. Portal `kind` is one of `plain`, `door`, `locked`;
+`lock` names a key when `kind` is `locked`. Texture names in the IR are concrete, having already
+been resolved from the template's high-level vocabulary.
+
+**Teleports are not portals.** A portal joins two rooms through their shared wall; a teleport
+relocates whatever crosses it, and the two rooms need not touch. They live in their own
+`teleports` list: `{ id, room, pad: { island | wall }, to: { room, at, angle }, monsters_only,
+repeatable }`. `pad` places a `PAD_SIZE` square — free-standing inside `room` (`island`) or
+recessed out of one of its walls (`wall`) — whose every edge carries the teleport special, and
+which is always the trigger line's *back* sector, because `EV_Teleport` refuses a back-side
+crossing. `to` is a point with a facing, not a pad: the compiler synthesizes a destination marker
+there and tags the sector that holds it. `monsters_only` selects the 126/125 pair over 97/39, and
+`repeatable` (default true) the retriggerable form over the one-shot one. A two-way pair is two
+independent one-way teleports whose destinations land on each other's pads. `exits[].trigger`
+gains `teleport` alongside `switch` and `walkover`: an exit the player can only arrive at by
+teleport.
 
 ## 7. Compiler contract
 
@@ -453,8 +477,11 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
 - **P1 — Step height.** A floor-height difference between adjacent sectors intended to be
   traversed on foot must not exceed the engine's maximum step height. Within a stair flight
   every step uses the same rise, and each tread is at least the player's diameter deep.
-  **Lift and teleport portals are exempt** — spanning a larger delta is precisely their purpose —
-  and are governed by P5 and P15 instead.
+  **Lift portals are exempt** — spanning a larger delta is precisely their purpose — and are
+  governed by P5 instead. Teleport pads are not exempt and do not need to be: a pad's floor sits
+  `Ir::PAD_FLOOR_STEP` (8) above its host's, well under the engine's step-up cap, so a pad is
+  always walkable onto. What a teleport spans is the gap between the pad and its *destination*,
+  and that is governed by P15.
 - **P2 — Headroom.** A walkable sector's ceiling-minus-floor gap must be at least the height of
   the tallest thing required to occupy or pass through it. The player is always in that set.
 - **P3 — Passage width.** A portal's clear width must be at least twice the largest radius among
@@ -511,9 +538,9 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
   Confirm against primary sources and record the finding in `engine.toml`; do not take the
   paragraph above as established.
 
-- **P15 — Teleport pairing.** Every teleport line's tag resolves to exactly one destination
-  sector, and that sector contains exactly one teleport destination thing with P2 headroom and
-  full radius clearance for the largest thing that will arrive.
+- **P15 — Teleport pairing** *(implemented)*. Every teleport line's tag resolves to exactly one
+  destination sector, and that sector contains exactly one teleport destination thing with P2
+  headroom and full radius clearance for the largest thing that will arrive.
 
 **Content coherence**
 
@@ -547,10 +574,17 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
 - **P25 — Start clearance.** Every player start — single-player and each coop start — has full
   radius clearance and P2 headroom, and no two starts overlap. Overlapping starts telefrag on
   spawn, which reads as a random coop crash rather than a map defect.
+- **P26 — Teleport-only exit room** *(implemented)*. An exit with `trigger: teleport` sits in a
+  room with no portal and at least one destination marker — the player arrives by teleport and
+  steps across the exit line. Retail's own instance of the shape is TNT MAP23.
+- **P27 — No sealed monster room** *(implemented)*. A room holding a monster has a portal or is a
+  teleport destination, so sight or sound can ever reach it. A sealed pen with no remote release
+  strip has no release at all; retail's sealed pens are all opened by tier-3 strip specials, which
+  are outside this vocabulary.
 
 ### 7.4 Engine constants and specials table
 
-The thresholds P1–P25 depend on live in `engine.toml` alongside `vocabulary.toml`: maximum step
+The thresholds P1–P27 depend on live in `engine.toml` alongside `vocabulary.toml`: maximum step
 height; player radius and height; per-species radius and height; the door clearance allowance;
 lift speeds; barrel blast radius and damage; decoration radii, heights, and blocking flags;
 sector damage specials by tier; the secret sector special; the sky flat name; the valid light
@@ -593,7 +627,7 @@ Human playtesting in GZDoom follows, but is not part of the automated gate.
 
 The deliverable of a run is the WAD *and* `report.md`: a table of every parameter, its target,
 its actual value, and a verdict, plus an explicit list of sacrifices made under the priority
-order. It also carries the playability invariant results (P1–P25, pass or fail with the offending
+order. It also carries the playability invariant results (P1–P27, pass or fail with the offending
 room, portal, or thing named) and the tag manifest. A run that produces a WAD but no passing report is
 not a result.
 

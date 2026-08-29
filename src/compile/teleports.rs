@@ -7,7 +7,7 @@
 //! line's *back* sector: `EV_Teleport` (pinned `p_telept.c`) returns before
 //! doing anything when `side == 1`, so only a front-to-back crossing —
 //! entering the pad — fires, and an arrival can walk off it. Retail id maps
-//! agree on every count that matters (docs/measurements/teleports-*.md): 82
+//! agree on every count that matters (docs/measurements/teleports-2026-08-28.md): 82
 //! of 83 DOOM + DOOM2 island pads trigger on every edge, 77 of 83 are
 //! exactly 64x64, and the pad is the back sector ten times out of eleven in
 //! idgames.

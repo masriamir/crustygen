@@ -62,8 +62,10 @@ the same graph from emitted `TEXTMAP` and must reuse the core untouched.
 The core owns an abstract traversal graph and the search over it:
 
 - **Nodes** are sectors: floor, ceiling, and the keys collectible there.
-- **Edges** are shared boundaries: two node indices and a kind — `Open`, or
-  `Door { lock: Option<KeyClass> }`.
+- **Edges** are two node indices and a kind — `Open`, `Door { lock:
+  Option<KeyClass> }`, or `Teleport`. The first two are shared boundaries and
+  expand in both directions; `Teleport` is the graph's one **directed** kind
+  and expands from `a` to `b` only.
 - **`start`** is the node holding the player 1 start; **`goals`** are the nodes from
   which an exit fires.
 - **Locks are interned by color, not by key kind.** `p_doors.c`'s `EV_VerticalDoor`
@@ -85,7 +87,13 @@ An edge is passable in a given direction when:
   clearance-when-open is P4's already-covered job; the flood asks only whether the door
   is unlockable. The step rule still applies to door floors, which is what catches a
   one-way passage *through* a door (a door sector floor is the `min` of its two rooms,
-  so the step out to a far room more than `max_step_height` above it is rejected).
+  so the step out to a far room more than `max_step_height` above it is rejected);
+- **`Teleport` edges skip both** the step cap and the crossing window, and are expanded
+  in one direction only. `EV_Teleport` relocates the thing rather than moving it, so
+  neither geometric rule between the two sectors governs the trip, and nothing leads
+  back. A one-shot (W1) line is the same edge: a walk uses an edge once, which is
+  exactly what W1 permits. Returning to reuse a spent W1 line is the unmodeled case —
+  recorded in `KNOWN-GAPS.md` as a P7 limitation, not a defect the flood catches.
 
 Node labels for messages are derived, not stored: a node index below `ir.rooms.len()`
 is that room's id — the room-index-equals-sector-index invariant
@@ -124,6 +132,16 @@ the enum, not speculative support now):
 
 - **Nodes** from `MapData.sectors` (floor, ceiling); **edges** from every linedef with
   a `back` sidedef, connecting the front and back sectors.
+- **Teleport edges** from every linedef carrying a **player** teleport special with a
+  non-zero tag (the monsters-only pair moves no player, so it contributes nothing to a
+  player flood), running the line's front sector → the sector that carries the tag. An
+  island pad puts the special on all four of its boundary linedefs, so the same
+  (front, destination) pair recurs; a `seen` set keeps it to one edge per distinct pair.
+  Unlike the boundary edges above, this builder applies no passability guard to the
+  trigger line — which is moot by construction here, since the compiler only ever emits
+  a pad whose edges are crossable and whose floor steps `Ir::PAD_FLOOR_STEP` (8) above
+  its host. The layer-4 twin in `check/flood.rs`, which reads maps this compiler did
+  not write, does gate its teleport edges on `Boundary::passable`.
 - **Door edges** recognized by the linedef special: `tables.door_special()` →
   `Door { lock: None }`; a keyed special → `Door { lock: Some(color) }`. The reverse
   lookup (built once per compile) is deliberately **many-to-one**: both key kinds of a

@@ -211,7 +211,7 @@ constraints:
     - "a small map whose whole vocabulary is the teleporter"
   must_include:
     - "a two-way teleport pair the player can ride in both directions"
-    - "a monsters-only pad that empties a sealed closet into the arena"
+    - "a monsters-only pad that empties an imp closet into the arena"
     - "an exit room reachable by nothing but a one-shot teleporter"
   priority:                  # highest first; resolves conflicts between everything above
     - progression_correctness
@@ -262,8 +262,10 @@ monsters-only one-shot form (125) is the one shape salto leaves out.
 Salto is the drift-guarded teleport fixture: `tests/build_cli.rs` rebuilds it
 and compares the bytes against the committed `maps/salto.wad`, and
 `tests/check_conformance.rs` judges the emitted TEXTMAP against this spec.
-Like `entrada.spec.md`, every derivable number here was hand-set to salto's
-own compiled actuals rather than to a design goal held independent of them.
+Like `entrada.spec.md`, every derivable number here was set from salto's own
+compiled output rather than from a design goal held independent of it — as the
+exact value where the row grades one, and as a bound that contains the measured
+value where the row grades a range.
 
 This spec was derived from `entrada.spec.md`; the keys that differ, and why:
 
