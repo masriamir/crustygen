@@ -9,7 +9,7 @@
 //! `ingest::load_map` gate, and `map_hash` deduplication — so the population
 //! reproduces the sweep's unique-map count — but it does not bucket failures:
 //! an unreadable archive, WAD or map group is named on stderr and skipped, and
-//! an unlistable directory is fatal.
+//! an unlistable directory is fatal (exit 2).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -83,8 +83,16 @@ pub(crate) fn sweep(dirs: &[String], mut visit: impl FnMut(&str, &UdmfMap)) -> u
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut maps = 0;
     for dir in dirs {
-        let mut candidates: Vec<PathBuf> = std::fs::read_dir(dir)
-            .unwrap_or_else(|e| panic!("cannot list {dir}: {e}"))
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                // A population that cannot be listed is not a partial result;
+                // fail plainly, with the usage exit code, rather than panic.
+                eprintln!("cannot list {dir}: {e}");
+                std::process::exit(2);
+            }
+        };
+        let mut candidates: Vec<PathBuf> = entries
             .filter_map(Result::ok)
             .map(|e| e.path())
             .filter(|p| p.is_file() && (has_ext(p, "zip") || has_ext(p, "wad")))
