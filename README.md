@@ -40,16 +40,16 @@ cargo run --bin crustygen-check -- maps/entrada.wad \
 
 The sample maps live in `maps/` — two maps, each shipped in both formats:
 
-- `maps/entrada.wad` — the **UDMF** build of entrada, the eight-room map with
-  a key, a locked door, a secret and a switch exit. Needs a ZDoom-family port
-  (GZDoom, Odamex, Eternity).
-- `maps/entrada_doom.wad` — entrada's binary **Doom-format** twin. This is the
-  one for Chocolate Doom or anything else vanilla-accurate.
-- `maps/salto.wad` — the **UDMF** build of salto, the five-room teleport map:
-  a two-way pad pair, a monsters-only ambush closet, and a one-shot pad into a
-  teleport-only exit room. Same ZDoom-family requirement.
-- `maps/salto_doom.wad` — salto's binary **Doom-format** twin, same guidance as
-  entrada's.
+- `maps/entrada.wad` — the **UDMF** build of entrada, the eight-room map
+  with a key, a locked door, a secret and a switch exit. Needs a
+  ZDoom-family port (GZDoom, Odamex, Eternity).
+- `maps/entrada_doom.wad` — entrada's binary **Doom-format** twin. This is
+  the one for Chocolate Doom or anything else vanilla-accurate.
+- `maps/salto.wad` — the **UDMF** build of salto, the five-room teleport
+  map: a two-way pad pair, a monsters-only ambush closet, and a one-shot pad
+  into a teleport-only exit room. Same ZDoom-family requirement.
+- `maps/salto_doom.wad` — salto's binary **Doom-format** twin, same guidance
+  as entrada's.
 
 Loading the UDMF build in a vanilla port dies with
 `W_LumpLength: <n> >= numlumps`, because `P_SetupLevel` addresses map data as
@@ -72,8 +72,9 @@ Compilation runs a fixed pass order, each pass depending on the last: emit
 room sectors, resolve secret specials, cut portals, emit doors, carve exits,
 emit teleport pads and their destination markers (`emit_teleports`), check no
 two emitted sectors overlap, apply height textures, place things, check no
-action sits at tag 0, render `TEXTMAP`, then run the playability catalog. A violation is a hard error, not a warning — a door the player
-cannot fit through is a broken map, not a missed target.
+action sits at tag 0, render `TEXTMAP`, then run the playability catalog. A
+violation is a hard error, not a warning — a door the player cannot fit
+through is a broken map, not a missed target.
 
 ## A second opinion on the built map
 
@@ -100,8 +101,8 @@ bad input. See [`docs/check.md`](docs/check.md).
 a map-spec. Its default output only surveys: reading a WAD's maps through the
 same shared ingest path `crustygen-check` uses, and reporting raw element
 counts and linedef/sector/thing-type histograms per map, human-readable or as
-`--json`. That layer interprets nothing — no table lookups, no spec emission.
-See [`docs/lift.md`](docs/lift.md).
+`--json`. That layer interprets nothing — no table lookups, no spec
+emission. See [`docs/lift.md`](docs/lift.md).
 
 `crustygen-lift --vocabulary` adds a per-map verdict on four axes: whether
 every special and thing type is in the compiler's emittable vocabulary, plus
@@ -109,8 +110,8 @@ the **teleport recognizer**, which resolves every teleport line the way
 `EV_Teleport` does, classifies the pad shape it lands on, and refuses the
 shapes the IR cannot state. That fourth axis is the first thing here that
 reads geometry rather than a table. `crustygen-corpus <dir>` sweeps a
-directory of idgames zips into the corpus expressibility report the vocabulary
-roadmap is re-ordered from — still an upper bound. See
+directory of idgames zips into the corpus expressibility report the
+vocabulary roadmap is re-ordered from — still an upper bound. See
 [`docs/corpus.md`](docs/corpus.md).
 
 ## The data tables are the highest-stakes part
@@ -167,10 +168,10 @@ The honest list is [`KNOWN-GAPS.md`](KNOWN-GAPS.md). The headlines:
   pickup for prop embedding and flood reachability — but on a built WAD, one
   stage later.
 - **15 of 27 playability rules** are enforced by the compiler; the verifier
-  re-derives fourteen of them from the emitted map and adds P20. The exception
-  is P26 (teleport-only exit room), which the verifier grades as a conformance
-  row rather than as a check — a teleport exit emits exactly a plain walkover
-  exit's specials, so nothing on the line tells them apart.
+  re-derives fourteen of them from the emitted map and adds P20. The
+  exception is P26 (teleport-only exit room), which the verifier grades as a
+  conformance row rather than as a check — a teleport exit emits exactly a
+  plain walkover exit's specials, so nothing on the line tells them apart.
 - **Texture alignment is minimal** — only an exit switch is centred; offsets
   do not accumulate across collinear runs.
 

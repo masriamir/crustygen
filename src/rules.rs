@@ -407,8 +407,9 @@ fn check_teleport_exit_rooms(ir: &Ir, out: &Compiled, v: &mut Vec<RuleViolation>
 
 /// P27: no sealed monster room — a room holding a monster has a portal or is
 /// a teleport destination, so sight or sound can ever reach it. A sealed pen
-/// with no remote strip has no release (retail's sealed pens all use tier-3
-/// strip specials, out of this vocabulary).
+/// with no remote release strip has no release at all; retail seals a pen
+/// only where a monsters-only teleport or a tier-3 strip special empties it,
+/// and the strip specials are out of this vocabulary.
 fn check_sealed_monster_rooms(
     ir: &Ir,
     tables: &Tables,

@@ -317,7 +317,7 @@ Closet sectors (same proxy as round 1):
 | tagged and referenced by another special | 267 (11.1 %) | 1 (1.0 %) | 3 (2.0 %) | 6 (5.5 %) |
 
 The retail split is the design rule: of the 8 genuinely sealed DOOM+DOOM2 pens, **7 use the
-monsters-only special**; the open holding rooms (59 of 97 closet sectors) use 97. The
+monsters-only special**; the open holding rooms (59 of 97 closet sectors) mostly use 97 (52 of the 59). The
 "tagged and referenced by another special" row above reads as "closet release is behavioral" —
 round 3 below shows that reading is an artifact of looking at the pen's own sector rather than
 its neighbor's. Closet monsters

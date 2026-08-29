@@ -579,8 +579,8 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
   steps across the exit line. Retail's own instance of the shape is TNT MAP23.
 - **P27 — No sealed monster room** *(implemented)*. A room holding a monster has a portal or is a
   teleport destination, so sight or sound can ever reach it. A sealed pen with no remote release
-  strip has no release at all; retail's sealed pens are all opened by tier-3 strip specials, which
-  are outside this vocabulary.
+  strip has no release at all: retail seals a pen only where a monsters-only teleport or a tier-3
+  strip special empties it, and the strip specials are outside this vocabulary.
 
 ### 7.4 Engine constants and specials table
 
