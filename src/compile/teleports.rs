@@ -484,6 +484,63 @@ mod tests {
     const ISLAND: &str = r#"{ "id":"t", "room":"a", "pad":{"island":[64,192]},
         "to":{"room":"b","at":[448,128],"angle":90} }"#;
 
+    /// Two rooms far to the east, `a`'s own east wall one pad-depth short of
+    /// `i16::MAX`, with a wall pad on it. No portal: the pass chain here is
+    /// only sectors then teleports, so nothing else needs the two joined.
+    const AT_THE_EDGE: &str = r#"{ "seed":1, "grid":64, "theme":"THEME",
+      "rooms":[
+        { "id":"a", "footprint":[[32448,0],[32448,256],[32704,256],[32704,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[32512,64], "angle":90 } ] },
+        { "id":"b", "footprint":[[32000,0],[32000,256],[32256,256],[32256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[],
+      "teleports":[{ "id":"w", "room":"a", "pad":{"wall":[32704,128]},
+                     "to":{"room":"b","at":[32128,128],"angle":90} }] }"#;
+
+    /// Runs `emit_sectors` then `emit_teleports` over `json` and returns
+    /// whatever the second raises — the shortest chain that reaches this
+    /// pass, for the two failures no full compile can stage.
+    fn teleports_only(json: &str) -> Result<Vec<Marker>, CompileError> {
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = sectors::emit_sectors(&ir).expect("sectors");
+        let mut tags = TagAllocator::new();
+        emit_teleports(&ir, &tables, &mut data, &mut tags)
+    }
+
+    #[test]
+    fn a_wall_pad_whose_recess_runs_past_the_map_range_is_rejected() {
+        // The recess is 64 deep outward from x = 32704, putting its far wall
+        // at 32768 — one past `i16::MAX`, which a binary WAD's `VERTEXES`
+        // lump cannot hold. Nothing in the IR catches it: the pad's own
+        // point is in range, and the recess is the compiler's geometry.
+        let err = teleports_only(&AT_THE_EDGE.replace("THEME", "tech_base"))
+            .expect_err("32704 + 64 > i16::MAX");
+        assert!(
+            matches!(&err, CompileError::RecessOutOfRange { host, x, .. }
+                if host == "a" && *x == 32768),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_unknown_theme_is_rejected_before_any_pad_is_emitted() {
+        // The `pad` flat is the one texture this pass resolves by theme, and
+        // it resolves before anything is planned. `emit_sectors` never looks
+        // a theme up at all — a room's own textures are concrete in the IR —
+        // so this is the first pass an unknown theme can fail in.
+        let err = teleports_only(&AT_THE_EDGE.replace("THEME", "nope"))
+            .expect_err("`nope` names no texture set");
+        assert!(
+            matches!(&err, CompileError::UnknownTheme { theme } if theme == "nope"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn an_island_pad_is_a_hosted_sector_with_four_trigger_edges_facing_the_room() {
         let (data, markers, tags) = compiled(ISLAND, "").expect("compiles");

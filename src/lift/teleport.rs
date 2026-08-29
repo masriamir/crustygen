@@ -377,6 +377,22 @@ mod tests {
     }
 
     #[test]
+    fn a_tag_of_zero_is_broken() {
+        // Tag 0 is not "sector 0": `EV_Teleport` walks the sectors whose tag
+        // *equals* the line's, and `P_FindSectorFromLineTag` is never called
+        // with a meaningful 0 — a teleport line tagged 0 addresses nothing
+        // and can never fire, which is the same `Broken` a dangling tag is.
+        let (scene, tables) = scene_of(&TELEPORT_MAP.replace("arg0 = 5;", "arg0 = 0;"));
+        let r = recognize(&scene, &tables);
+        assert_eq!(r.counts.broken, 4);
+        assert!(
+            r.lines
+                .iter()
+                .all(|l| l.refusal == Some(Refusal::Broken) && l.destination.is_none())
+        );
+    }
+
+    #[test]
     fn a_dangling_tag_is_broken_and_a_self_referencing_line_is_refused() {
         let (scene, tables) = scene_of(&TELEPORT_MAP.replace("arg0 = 5;", "arg0 = 9;"));
         let r = recognize(&scene, &tables);

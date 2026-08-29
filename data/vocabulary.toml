@@ -315,9 +315,9 @@ source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, P_UseSpecialLine, under th
 # cross (any thing vs monsters only) and whether the line survives its first
 # use (repeatable "WR" vs one-shot "W1"). The IR picks: `monsters_only`
 # selects the `!thing->player`-guarded pair, `repeatable` (default true)
-# the RETRIGGERS form. Retail id maps use 97 for 98 % of player teleport
-# lines and reserve 126/125 for pens the player never enters — see
-# docs/measurements/teleports-2026-08-28.md.
+# the RETRIGGERS form. Retail id maps use 97 for 651 of the 657 player
+# teleport lines in DOOM + DOOM2, and reserve 126/125 for pens the player
+# never enters — see docs/measurements/teleports-2026-08-28.md.
 #
 # Nuance worth recording: unlike most walkover specials, a teleport line is
 # *not* usable from its back side even though P_CrossSpecialLine (unlike

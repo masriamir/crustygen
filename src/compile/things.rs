@@ -86,8 +86,8 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// [`CompileError::ThingTooClose`] when radius clearance fails,
 /// [`CompileError::NoHeadroom`] when the room is too short — for the
 /// tallest placed thing, or for the player if the room is empty or shorter
-/// than the player alone — [`CompileError::UnboundedRoom`] when a room's or
-/// a marker's sector has no emitted linedef to measure against,
+/// than the player alone — [`CompileError::UnboundedRoom`] when a room's
+/// sector has no emitted linedef to measure against,
 /// [`CompileError::OverlappingStarts`] for coincident player starts,
 /// [`CompileError::TeleportMarkerTooClose`] when a destination is closer to
 /// its sector's walls than the arriving thing's radius, and
@@ -209,16 +209,26 @@ pub fn place_things(
 /// send. Clearance is measured against the marker's *sector*, which for the
 /// far half of a two-way pair is another pad rather than a room.
 ///
+/// [`emitted_clearance`] counts **every** linedef bordering that sector, an
+/// open threshold included, while the verifier's V-P15
+/// (`check::invariants::check_teleport_pairing`) measures only the
+/// destination's non-passable segments — a doorway cannot crush an arrival,
+/// so it does not deny the radius. The compile side is therefore strictly
+/// stricter, which is the safe direction for the pass that decides what gets
+/// written: nothing this accepts can fail V-P15 for clearance.
+///
 /// # Errors
-/// Returns [`CompileError::UnboundedRoom`] when the marker's sector has no
-/// emitted linedef to measure against,
-/// [`CompileError::TeleportMarkerTooClose`] when it stands closer to that
-/// sector's walls than the arriving thing's radius, and
+/// Returns [`CompileError::TeleportMarkerTooClose`] when the marker stands
+/// closer to its sector's walls than the arriving thing's radius, and
 /// [`CompileError::TeleportMarkerNoHeadroom`] when the sector is too short
 /// for it.
 ///
 /// # Panics
-/// Panics if `teleport_dest` is absent from the vocabulary table.
+/// Panics if `teleport_dest` is absent from the vocabulary table, or if a
+/// marker's sector has no bordering linedef at all — impossible, since every
+/// destination sector is one `compile::sectors` or `compile::teleports`
+/// emitted as a closed polygon, and neither can emit a sector without
+/// pushing its own boundary linedefs.
 fn place_markers(
     tables: &Tables,
     data: &MapData,
@@ -230,10 +240,8 @@ fn place_markers(
     let mut out = Vec::with_capacity(markers.len());
     for m in markers {
         let id = m.teleports.join(", ");
-        let have =
-            emitted_clearance(data, m.sector, m.at).ok_or_else(|| CompileError::UnboundedRoom {
-                room: format!("teleport {id} destination"),
-            })?;
+        let have = emitted_clearance(data, m.sector, m.at)
+            .expect("every emitted sector is closed, so it has bordering linedefs");
         if have < f64::from(m.need.radius) {
             return Err(CompileError::TeleportMarkerTooClose {
                 id,
@@ -661,20 +669,14 @@ mod tests {
         let ir = Ir::from_json(MARKER_TOO_CLOSE).expect("ir");
         let tables = Tables::load().expect("tables");
         let err = compile_reporting(&ir, &tables).expect_err("14 < the player's 16-unit radius");
-        let CompileError::TeleportMarkerTooClose {
-            id,
-            x,
-            y,
-            have,
-            need,
-        } = err
-        else {
-            panic!("expected TeleportMarkerTooClose, got {err}");
-        };
-        assert_eq!((id.as_str(), x, y, need), ("t", 334, 128, 16));
         assert!(
-            (have - 14.0).abs() < f64::EPSILON,
-            "the west wall is 14 units away, got {have}"
+            matches!(
+                &err,
+                CompileError::TeleportMarkerTooClose { id, x, y, have, need }
+                    if (id.as_str(), *x, *y, *need) == ("t", 334, 128, 16)
+                        && (have - 14.0).abs() < f64::EPSILON
+            ),
+            "expected TeleportMarkerTooClose at (334, 128) with have = 14, got {err}"
         );
     }
 
@@ -709,13 +711,14 @@ mod tests {
         );
         let ir = Ir::from_json(MARKER_NO_HEADROOM).expect("ir");
         let err = compile_reporting(&ir, &tables).expect_err("48 < the player's 56-unit height");
-        let CompileError::TeleportMarkerNoHeadroom { id, have, need } = err else {
-            panic!("expected TeleportMarkerNoHeadroom, got {err}");
-        };
-        assert_eq!(
-            (id.as_str(), have, need),
-            ("t1", 48, 56),
-            "named by the teleport delivering onto b's pad"
+        assert!(
+            matches!(
+                &err,
+                CompileError::TeleportMarkerNoHeadroom { id, have, need }
+                    if (id.as_str(), *have, *need) == ("t1", 48, 56)
+            ),
+            "expected TeleportMarkerNoHeadroom naming the teleport delivering onto b's pad, \
+             got {err}"
         );
     }
 

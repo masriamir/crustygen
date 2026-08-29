@@ -2259,8 +2259,8 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         );
     }
 
-    // --- Task 7: teleport pairing (V-P15), sealed monster sectors (V-P27),
-    // and the four teleport specials joining the recognized set. ---
+    // --- Teleport pairing (V-P15), sealed monster sectors (V-P27), and the
+    // four teleport specials joining the recognized set. ---
 
     /// The alcove threshold of [`TELEPORT_MAP`], verbatim — sector 1's only
     /// two-sided boundary.

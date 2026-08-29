@@ -47,6 +47,15 @@
 //! unlockable. The step rule still applies to door floors, which is what
 //! catches a one-way passage *through* a door.
 //!
+//! [`EdgeKind::Teleport`] edges skip **both** rules. Neither describes a
+//! teleport: `EV_Teleport` calls `P_TeleportMove`, not `P_TryMove`, so no
+//! step cap and no crossing window is ever consulted between the pad and the
+//! destination — the arriving thing is unlinked and relinked at the marker,
+//! taking its floor and ceiling from whatever subsector it lands in. What
+//! the destination must clear is checked instead where it belongs, as rule
+//! P15 over the marker (`compile::things`, `check::invariants`). These edges
+//! are also the graph's only directed ones (see [`Edge`]).
+//!
 //! # The vacuous-pass gate
 //!
 //! P7 runs only when the map has a player 1 start and at least one exit;
@@ -515,6 +524,12 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
 /// An island pad carries its special on all four boundary linedefs (any
 /// approach fires it), so the same host → destination pair recurs; a `seen`
 /// set keeps the result to one edge per distinct pair.
+///
+/// # Panics
+/// Panics if a teleport line's tag resolves to no sector. Unreachable on
+/// compiled output: [`crate::compile::teleports`] writes a line's tag and
+/// the destination sector's tag from the same [`crate::compile::tags`]
+/// allocation, in one pass, so a tagged trigger line always has its sector.
 fn teleport_edges(tables: &Tables, out: &Compiled) -> Vec<Edge> {
     let player_teleports = tables.player_teleport_specials();
     let mut seen: HashSet<(NodeIdx, NodeIdx)> = HashSet::new();
@@ -523,9 +538,12 @@ fn teleport_edges(tables: &Tables, out: &Compiled) -> Vec<Edge> {
         if !player_teleports.contains(&line.special) || line.tag == 0 {
             continue;
         }
-        let Some(dest) = out.data.sectors.iter().position(|s| s.tag == line.tag) else {
-            continue;
-        };
+        let dest = out
+            .data
+            .sectors
+            .iter()
+            .position(|s| s.tag == line.tag)
+            .expect("the compiler tags every destination");
         let from = out.data.sidedefs[line.front].sector;
         if seen.insert((from, dest)) {
             edges.push(Edge {

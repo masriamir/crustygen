@@ -1628,7 +1628,9 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
         );
     }
 
-    // --- Task 7: teleport edges. `TELEPORT_MAP` and its `scene_of` live in
+    // --- Teleport edges: the directed edge a trigger line adds, and the
+    // teleport-only predicate built from running the flood twice.
+    // `TELEPORT_MAP` and its `scene_of` live in
     // `check::fixtures` so the invariants and conformance tests read the
     // same text; `fixtures::scene_of` is spelled out here rather than
     // imported bare because this module already has a `scene_of` of its own

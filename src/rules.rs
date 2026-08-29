@@ -1247,11 +1247,8 @@ mod tests {
                "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,192]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
             TWO_ROOMS_HEAD.replace("THINGS_B", "")
         );
-        assert!(
-            all_violations(&ok).iter().all(|v| v.rule != "P26"),
-            "{:?}",
-            all_violations(&ok)
-        );
+        let clean = all_violations(&ok);
+        assert!(clean.iter().all(|v| v.rule != "P26"), "{clean:?}");
         let with_portal = ok.replace(
             r#""portals":[]"#,
             r#""portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }]"#,
@@ -1298,11 +1295,8 @@ mod tests {
                ] }}"#,
             TWO_ROOMS_HEAD.replace("THINGS_B", "")
         );
-        assert!(
-            all_violations(&json).iter().all(|v| v.rule != "P26"),
-            "{:?}",
-            all_violations(&json)
-        );
+        let v = all_violations(&json);
+        assert!(v.iter().all(|v| v.rule != "P26"), "{v:?}");
     }
 
     #[test]
@@ -1344,11 +1338,8 @@ mod tests {
                ] }}"#,
             TWO_ROOMS_HEAD.replace("THINGS_B", r#"{ "kind":"imp", "at":[384,64], "angle":0 }"#)
         );
-        assert!(
-            all_violations(&json).iter().all(|v| v.rule != "P27"),
-            "{:?}",
-            all_violations(&json)
-        );
+        let v = all_violations(&json);
+        assert!(v.iter().all(|v| v.rule != "P27"), "{v:?}");
     }
 
     #[test]
