@@ -1875,11 +1875,10 @@ thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
         // The one walkover exit line made blocking: `P_CrossSpecialLine`
         // never fires on it, so no sector holds a *crossable* walkover exit
         // and the teleport-only test would otherwise run `all` over an empty
-        // set, which answers `true`. Two independent things stop that from
-        // reading `teleport` — `resolve_goals` finds no goal at all and
-        // `teleport_only_sectors` returns `None`, and the emptiness clause
-        // in the row itself. This pins the outcome so neither can be removed
-        // silently.
+        // set, which answers `true`. Two independent guards stop it reading
+        // `teleport`: `teleport_only_sectors` returns `None` (its own
+        // `resolve_goals` finds no goal), and the emptiness clause in the
+        // row. This pins the outcome so neither can be dropped silently.
         let blocked = crate::check::fixtures::TELEPORT_MAP.replace(
             "twosided = true; special = 52; arg0 = 1;",
             "twosided = true; blocking = true; special = 52; arg0 = 1;",

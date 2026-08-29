@@ -1629,12 +1629,12 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
     }
 
     // --- Teleport edges: the directed edge a trigger line adds, and the
-    // teleport-only predicate built from running the flood twice.
-    // `TELEPORT_MAP` and its `scene_of` live in
-    // `check::fixtures` so the invariants and conformance tests read the
-    // same text; `fixtures::scene_of` is spelled out here rather than
-    // imported bare because this module already has a `scene_of` of its own
-    // (a different return shape). ---
+    // teleport-only predicate built by running the flood twice.
+    // `TELEPORT_MAP` and its `scene_of` live in `check::fixtures` so the
+    // invariants and conformance tests read the same text;
+    // `fixtures::scene_of` is spelled out here rather than imported bare
+    // because this module already has a `scene_of` of its own (a different
+    // return shape). ---
 
     #[test]
     fn a_teleport_line_adds_a_one_way_edge_to_the_marker_sector() {
