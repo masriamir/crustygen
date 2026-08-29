@@ -1,0 +1,36 @@
+//! `liftprobe` — the corpus measurement behind Project G sub-project 3
+//! (lifts). Not a shipped tool: a reproducible probe, kept so the numbers in
+//! `docs/measurements/lift-shapes-2026-08-29.md` can be re-derived when the
+//! sample or the loader changes.
+//!
+//! ```text
+//! cargo run --release --example liftprobe -- census <label> <dir>...
+//! cargo run --release --example liftprobe -- shapes <label> <dir>...
+//! ```
+//!
+//! `census` is the first pass (usage, rest, travel, topology, triggers,
+//! rendering, conflicts, arbiter); `shapes` the second (per-shape facts and
+//! multi-sector tag groups). Each `<dir>` is swept non-recursively for
+//! `.zip` and `.wad` files exactly as `crustygen-corpus` sweeps a sample;
+//! several directories form one population. Both passes print Markdown to
+//! stdout; load failures go to stderr.
+
+mod census;
+mod common;
+mod shapes;
+
+fn main() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.as_slice() {
+        [pass, label, dirs @ ..] if !dirs.is_empty() && pass == "census" => {
+            census::run(label, dirs);
+        }
+        [pass, label, dirs @ ..] if !dirs.is_empty() && pass == "shapes" => {
+            shapes::run(label, dirs);
+        }
+        _ => {
+            eprintln!("usage: liftprobe <census|shapes> <label> <dir>...");
+            std::process::exit(2);
+        }
+    }
+}
