@@ -352,13 +352,30 @@ fn teleports_and_the_ambush_flag_survive_the_round_trip() {
             .count(),
         4
     );
-    for l in &island_edges {
+    // Every teleport trigger line, player-crossable or monsters-only alike,
+    // is tagged non-zero, two-sided, and its tag names exactly one sector.
+    let teleport_specials: Vec<i32> = tables
+        .teleport_specials()
+        .into_iter()
+        .map(i32::from)
+        .collect();
+    let triggers: Vec<_> = map
+        .linedefs()
+        .iter()
+        .filter(|l| teleport_specials.contains(&l.special.special))
+        .collect();
+    assert_eq!(
+        triggers.len(),
+        9,
+        "five player-crossable edges plus the pen's four monsters-only edges"
+    );
+    for l in &triggers {
         assert_ne!(l.special.args[0], 0, "every trigger names a real tag");
         assert!(map.linedef_left(l).is_some(), "two-sided");
     }
     // Every tag on a trigger is a sector tag holding exactly one marker.
     let marker = tables.thing_id("teleport_dest").expect("thing id");
-    for tag in island_edges.iter().map(|l| l.special.args[0]) {
+    for tag in triggers.iter().map(|l| l.special.args[0]) {
         let sectors: Vec<usize> = (0..map.sectors().len())
             .filter(|&i| map.sectors()[i].tag == tag)
             .collect();
