@@ -430,12 +430,30 @@ relocates whatever crosses it, and the two rooms need not touch. They live in th
 repeatable }`. `pad` places a `PAD_SIZE` square — free-standing inside `room` (`island`) or
 recessed out of one of its walls (`wall`) — whose every edge carries the teleport special, and
 which is always the trigger line's *back* sector, because `EV_Teleport` refuses a back-side
-crossing. `to` is a point with a facing, not a pad: the compiler synthesizes a destination marker
-there and tags the sector that holds it. `monsters_only` selects the 126/125 pair over 97/39, and
+crossing. **A pad is addressed by its low corner**, never its center: an `island` point is the
+square's minimum-x/minimum-y corner (the square is `[x, x+64] x [y, y+64]`), and a `wall` point is
+where the pad's 64-unit span *starts* along that wall. `to` is a point with a facing, not a pad:
+the compiler synthesizes a destination marker there and tags the sector that holds it — a two-way
+pair therefore names the other pad's center itself, since nothing centers an arrival for you. `monsters_only` selects the 126/125 pair over 97/39, and
 `repeatable` (default true) the retriggerable form over the one-shot one. A two-way pair is two
 independent one-way teleports whose destinations land on each other's pads. `exits[].trigger`
 gains `teleport` alongside `switch` and `walkover`: an exit the player can only arrive at by
 teleport.
+
+Corners, because the flat grid is the *renderer's* and it is not centered on anything. `R_MapPlane`
+(`linuxdoom-1.10/r_plane.c`, pinned `a77dfb96`) gives a flat span the world coordinates themselves —
+`ds_xfrac = viewx + FixedMul(finecosine[angle], length);` / `ds_yfrac = -viewy - FixedMul(finesine[angle], length);`
+— and `R_DrawSpan` (`r_draw.c`) indexes the 64x64 flat with the low six bits of each:
+`spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);`. A flat therefore wraps every 64 units of
+world space, and a 64x64 `GATE` pad reads as exactly one tile only when its corners are multiples
+of 64. Both the island corner and the wall pad's span start — and the wall's own fixed coordinate,
+which is the recess's near edge — must be multiples of `Ir::FLAT_TILE` (64), or `Ir::from_json`
+rejects the pad with `TeleportPadOffFlatGrid`. `ir.grid` plays no part: 64 subsumes every grid that
+divides it, and a grid that does not divide 64 cannot excuse a pad off the flat grid. The corpus
+agrees with the renderer rather than merely permitting it: 321 of 321 `GATE*`-flatted 64x64 pads
+across DOOM, DOOM2, TNT and PLUTONIA have their bounding-box minimum congruent to (0,0) mod 64,
+against an 80.1 % baseline for DOOM+DOOM2 64x64 sectors at large and 97.9 % for `GATE*` pads in the
+idgames sample (`docs/measurements/teleports-2026-08-28.md`).
 
 A `wall` pad's recess is real geometry carved into the void rooms are authored apart across, so
 the IR holds it to the same neighbor rules a portal gap obeys: the recess must clear every other

@@ -288,6 +288,24 @@ flat: 79 of 83 are `GATE1`–`GATE4` (`GATE3` 33, `GATE2` 24, `GATE4` 11, `GATE1
 follows the same convention for 723 of 1,395. Pad sector special 0 on 61 of 83 (idgames: 1,019 of
 1,395).
 
+**Pad alignment on the 64-unit flat grid** (a follow-up probe, 2026-08-29, over the same
+populations and the same pad predicate, bucketing each 64x64 pad's bounding-box minimum by
+`(min_x mod 64, min_y mod 64)`). Every one of the **321** `GATE*`-flatted 64x64 island/alcove pads
+across DOOM, DOOM2, TNT and PLUTONIA is `(0,0)`; the `(32,32)` half-offset bucket is **empty in
+every id IWAD**. Counting non-`GATE*` flats too, DOOM+DOOM2 is 153 of 155 (98.7 %) and
+TNT+PLUTONIA 174 of 179 (97.2 %) — and all seven misaligned id pads carry an ordinary flat
+(`FLOOR6_1`, `LAVA4`, `TLITE6_5`, `CEIL4_2`, `RROCK01`, `FWATER1`) rather than a `GATE` tile. The
+contrast with the baseline is the point: over *all* 64x64 sectors in DOOM+DOOM2, pads or not, only
+611 of 763 (**80.1 %**) are aligned, so this is discipline applied to pads specifically rather than
+a global grid habit. idgames is looser — only 38 % of its pads are 64x64 at all, and 1,536 of 1,716
+island/alcove ones (89.5 %) are aligned — but the flat still predicts alignment there too: 97.9 %
+for `GATE*` against 66.8 % for everything else. What this settles is a renderer fact, not a corpus
+one: `R_MapPlane` gives a flat span the world coordinates themselves and `R_DrawSpan` masks six
+bits per axis, so a 64x64 pad reads as exactly one `GATE` tile only when its corners are multiples
+of 64. The corpus rows above are the evidence that id built to that fact. Acting on it, the IR now
+addresses a pad by its low corner (`Ir::FLAT_TILE`, `IrError::TeleportPadOffFlatGrid`); center
+addressing had put every pad the compiler emitted half a tile off on both axes.
+
 Alcove pads: 94 in DOOM+DOOM2, of which opening width 64 on 89, depth 64 on 81 (32 on 8), bbox
 ≤ 64 on 91, floor +8 on 38 and flush on 30. idgames: 1,088 alcoves, opening width 33–64 on 74.7 %,
 depth 33–64 on 79.1 %.

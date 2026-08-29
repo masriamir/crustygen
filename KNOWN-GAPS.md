@@ -628,6 +628,32 @@ the room, back the alcove) is passable. A switch exit needs none of this:
 `P_UseSpecialLine` fires from a raycast, not a crossing, so the exit stays a
 normal solid one-sided wall.
 
+**Teleport pads are addressed by their low corner, on the 64-unit flat grid —
+and the arrival marker is not centered on the pad for you.**
+`PadPlacement::Island` names the pad square's minimum-x/minimum-y corner and
+`PadPlacement::Wall` the start of its span along the wall; neither is the
+center or the midpoint each once was. The reason is the renderer, not taste:
+`R_MapPlane` (`r_plane.c`) gives a flat span the world coordinates themselves
+(`ds_xfrac = viewx + FixedMul(finecosine[angle], length);` and the `finesine`
+twin for `ds_yfrac`) and `R_DrawSpan` (`r_draw.c`) indexes the 64x64 flat with
+the low six bits of each (`spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);`),
+so a flat wraps every 64 units of *world* space and a 64x64 `GATE` pad reads as
+one tile only when its corners are multiples of 64. Center addressing put every
+pad the compiler emitted half a tile off on both axes — the first playtest of
+`maps/salto.wad` came back with four quarter-tiles on every pad — and a square
+whose corners are aligned never has an aligned center, so the two cannot both be
+the address. Corners win, and `IrError::TeleportPadOffFlatGrid` enforces it;
+`ir.grid` plays no part, since 64 subsumes every grid that divides it. Retail
+confirms the choice rather than merely permitting it: 321 of 321 `GATE*`-flatted
+64x64 pads across DOOM, DOOM2, TNT and PLUTONIA sit on the grid, against an
+80.1 % baseline for all DOOM+DOOM2 64x64 sectors
+(`docs/measurements/teleports-2026-08-28.md`). **The consequence for authors:**
+`to.at` stays a free point, so a two-way pair must name the other pad's center
+itself. Naming its *corner* instead is the trap the rewrite of every fixture hit
+repeatedly — a corner point is inside the closed pad square (so it tags the pad's
+sector rather than the room's) and zero units from two of that pad's walls (so
+P15's clearance check fails).
+
 **A walkover exit's alcove gets neither of the neighbor checks a wall
 teleport pad's recess does.** `Ir::from_json` holds a `wall` pad's 64-deep
 recess to `MIN_PORTAL_GAP` clearance from every other room
