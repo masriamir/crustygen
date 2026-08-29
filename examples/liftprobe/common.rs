@@ -762,3 +762,485 @@ pub(crate) fn analyze_plat(
         neighbors,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::fmt::Write as _;
+
+    use crustygen::tables::Tables;
+    use crustywad::map::udmf::parse_udmf;
+
+    use super::*;
+
+    /// A row of 128×128 boxes, room `i` spanning `x ∈ [i·128, (i+1)·128]`,
+    /// `y ∈ [0, 128]`, ceilings at 256. `floors[i]` and `tags[i]` are room
+    /// `i`'s floor and sector tag. `links[i]` describes the two-sided line
+    /// between rooms `i` and `i+1` as `(special, arg0, front_is_east)`: with
+    /// `front_is_east` false the line runs top-to-bottom so its front (right)
+    /// side is the west room, the natural clockwise orientation; `true` flips
+    /// it so the east room is the front. Every link sidedef carries
+    /// `SUPPORT3` as its lower; every one-sided wall is `STARTAN2`. `extra` is
+    /// appended verbatim.
+    fn chain(floors: &[i32], tags: &[i32], links: &[(i32, i32, bool)], extra: &str) -> String {
+        let n = floors.len();
+        assert_eq!(tags.len(), n);
+        assert_eq!(links.len(), n - 1);
+        let mut text = String::from("namespace = \"doom\";\n");
+        for i in 0..=n {
+            let x = i * 128;
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = 0.000; }}");
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = 128.000; }}");
+        }
+        let mut sidedefs = String::new();
+        let mut next = 0usize;
+        let mut side = |sidedefs: &mut String, sector: usize, lower: bool| {
+            let tex = if lower {
+                "texturemiddle = \"-\"; texturebottom = \"SUPPORT3\";"
+            } else {
+                "texturemiddle = \"STARTAN2\";"
+            };
+            let _ = writeln!(sidedefs, "sidedef {{ sector = {sector}; {tex} }}");
+            next += 1;
+            next - 1
+        };
+        for (i, &(special, tag, east_front)) in links.iter().enumerate() {
+            let (top, bottom) = (2 * i + 3, 2 * i + 2);
+            let (v1, v2, front, back) = if east_front {
+                (bottom, top, i + 1, i)
+            } else {
+                (top, bottom, i, i + 1)
+            };
+            let sf = side(&mut sidedefs, front, true);
+            let sb = side(&mut sidedefs, back, true);
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {sf}; sideback = {sb}; twosided = true; special = {special}; arg0 = {tag}; }}"
+            );
+        }
+        for i in 0..n {
+            let (bl, tl, br, tr) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
+            let mut wall = |text: &mut String, v1: usize, v2: usize| {
+                let s = side(&mut sidedefs, i, false);
+                let _ = writeln!(
+                    text,
+                    "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {s}; blocking = true; }}"
+                );
+            };
+            if i == 0 {
+                wall(&mut text, bl, tl);
+            }
+            wall(&mut text, tl, tr);
+            if i == n - 1 {
+                wall(&mut text, tr, br);
+            }
+            wall(&mut text, br, bl);
+        }
+        text.push_str(&sidedefs);
+        for (floor, tag) in floors.iter().zip(tags) {
+            let _ = writeln!(
+                text,
+                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; heightfloor = {floor}; heightceiling = 256; lightlevel = 160; id = {tag}; }}"
+            );
+        }
+        text.push_str(extra);
+        text
+    }
+
+    struct Fixture {
+        map: UdmfMap,
+        scene: Scene,
+        step: i32,
+    }
+
+    fn fixture(text: &str) -> Fixture {
+        let tables = Tables::load().expect("tables");
+        let map = parse_udmf(text, Limits::default()).expect("fixture parses");
+        let scene = Scene::build(&map, &tables, &mut Vec::new());
+        Fixture {
+            map,
+            scene,
+            step: tables.step_height(),
+        }
+    }
+
+    fn analyze(f: &Fixture, plat: usize) -> Option<PlatFacts> {
+        let index = MapIndex::build(&f.map, &f.scene);
+        analyze_plat(&f.map, &f.scene, &index, plat, f.step)
+    }
+
+    // The low room is the front of the riser line, the plat its back: the
+    // corpus's dominant `S OnPlatBack` form. Room 2 is the level landing.
+    const LIFT_FLOORS: [i32; 3] = [0, 128, 128];
+    const LIFT_TAGS: [i32; 3] = [0, 7, 0];
+
+    #[test]
+    fn a_riser_switch_from_the_low_room_is_a_core_lift() {
+        let f = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        ));
+        let p = analyze(&f, 1).expect("the plat is analyzed");
+        assert!(p.has_geometry);
+        assert_eq!(p.rest, Rest::Top);
+        assert_eq!(
+            p.travel, 128,
+            "travel is the plat's floor minus the lowest neighbor's"
+        );
+        assert_eq!(p.shape, Shape::Core);
+        assert_eq!(p.neighbors, BTreeSet::from([0, 2]));
+        assert_eq!(p.two_nb_is_level_and_low, Some(true));
+        assert!(p.callable_low && !p.callable_level && !p.callable_level_only);
+        assert_eq!(p.low_activator_nbs, 1);
+        assert_eq!(p.triggers.len(), 1);
+        let t = &p.triggers[0];
+        assert_eq!(t.special, 62);
+        assert_eq!(t.placement, Placement::OnPlatBack);
+        assert_eq!(t.activators, vec![Activator::Low]);
+        assert_eq!(t.low_sides, vec![0]);
+        assert!(!t.one_sided);
+        assert!(
+            t.switch_slots.is_empty(),
+            "no switch texture on a bare riser"
+        );
+        assert_eq!(p.risers.len(), 1, "one neighbor below the plat");
+        assert_eq!(p.risers[0].texture, "SUPPORT3");
+        assert!(!p.risers[0].unpegged);
+        assert!(
+            p.risers[0].plat_side_nonblank,
+            "the plat's own lower is set too"
+        );
+        assert_eq!(p.flat_same_as_level_nb, Some(true));
+        assert_eq!((p.bbox_w, p.bbox_h), (128, 128));
+        assert!(p.aligned64(), "the plat's low corner is (128, 0)");
+        assert!(!p.island(), "the plat has one-sided top and bottom walls");
+        assert_eq!(p.shared_tag_n, 1);
+    }
+
+    #[test]
+    fn a_walkover_on_the_top_face_adds_a_level_activator_and_keeps_the_shape() {
+        let f = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(62, 7, false), (88, 7, false)],
+            "",
+        ));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.shape, Shape::Core);
+        assert!(p.callable_low && p.callable_level && p.callable_level_only);
+        let top = &p.triggers[1];
+        assert_eq!(top.special, 88);
+        assert_eq!(top.placement, Placement::OnPlatFront);
+        // Equal floors: the crossing works from either side.
+        assert_eq!(top.activators, vec![Activator::Level, Activator::Plat]);
+        assert!(top.low_sides.is_empty());
+    }
+
+    #[test]
+    fn a_walkover_on_the_low_face_cannot_fire_from_below() {
+        let f = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(88, 7, false), (0, 0, false)],
+            "",
+        ));
+        let p = analyze(&f, 1).expect("analyzed");
+        // `P_TryMove` refuses the 128-unit climb, so only the plat side can
+        // cross the line — the lift is not callable from the low room.
+        assert_eq!(p.triggers[0].activators, vec![Activator::Plat]);
+        assert!(!p.callable_low);
+        assert!(p.callable_level && !p.callable_level_only);
+        assert_eq!(p.shape, Shape::Other);
+    }
+
+    #[test]
+    fn a_switch_only_on_the_level_side_is_top_only_and_refused() {
+        let f = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(0, 0, false), (62, 7, true)],
+            "",
+        ));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.triggers[0].placement, Placement::OnPlatBack);
+        assert_eq!(p.triggers[0].activators, vec![Activator::Level]);
+        assert!(!p.callable_low && p.callable_level_only);
+        assert_eq!(p.rest, Rest::Top);
+        assert_eq!(p.shape, Shape::Other);
+    }
+
+    #[test]
+    fn a_use_line_fires_from_its_front_side_only() {
+        // The same riser line, flipped so the plat is its front: a use from
+        // the low room hits the back side and `P_UseSpecialLine` refuses it.
+        let f = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(62, 7, true), (0, 0, false)],
+            "",
+        ));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.triggers[0].placement, Placement::OnPlatFront);
+        assert_eq!(p.triggers[0].activators, vec![Activator::Plat]);
+        assert!(!p.callable_low);
+        assert_eq!(p.shape, Shape::Other);
+    }
+
+    #[test]
+    fn a_raised_block_with_one_low_neighbor_is_a_pedestal() {
+        let f = fixture(&chain(&[0, 128], &[0, 7], &[(62, 7, false)], ""));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.rest, Rest::AboveAll);
+        assert_eq!(p.max_nb_delta, -128);
+        assert_eq!(p.distinct_nb_floors, 1);
+        assert_eq!(p.shape, Shape::Pedestal);
+        assert_eq!(p.low_activator_nbs, 1);
+    }
+
+    #[test]
+    fn a_raised_block_between_two_low_rooms_is_a_barrier_when_both_can_call_it() {
+        let f = fixture(&chain(
+            &[0, 96, 0],
+            &[0, 7, 0],
+            &[(62, 7, false), (62, 7, true)],
+            "",
+        ));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.rest, Rest::AboveAll);
+        assert_eq!(p.travel, 96);
+        assert_eq!(p.shape, Shape::Barrier);
+        assert_eq!(p.low_activator_nbs, 2, "callable from both neighbors");
+        assert!(
+            p.triggers
+                .iter()
+                .all(|t| t.activators == vec![Activator::Low])
+        );
+    }
+
+    #[test]
+    fn a_block_above_neighbors_at_several_floors_is_neither_pedestal_nor_barrier() {
+        let f = fixture(&chain(
+            &[0, 160, 64],
+            &[0, 7, 0],
+            &[(62, 7, false), (62, 7, true)],
+            "",
+        ));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.rest, Rest::AboveAll);
+        assert_eq!(p.distinct_nb_floors, 2);
+        assert_eq!(p.shape, Shape::Other);
+    }
+
+    #[test]
+    fn a_middle_landing_rests_intermediate() {
+        let f = fixture(&chain(
+            &[0, 64, 160],
+            &[0, 7, 0],
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        ));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.rest, Rest::Intermediate);
+        assert_eq!(p.max_nb_delta, 96);
+        assert_eq!(p.shape, Shape::Other);
+    }
+
+    #[test]
+    fn a_plat_at_its_lowest_neighbors_height_is_dead() {
+        let f = fixture(&chain(
+            &[0, 0, 0],
+            &[0, 7, 0],
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        ));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.travel, 0);
+        assert_eq!(p.rest, Rest::Dead);
+        assert!(!p.moving());
+        assert_eq!(p.shape, Shape::Other);
+        assert!(p.risers.is_empty(), "no neighbor is below a dead plat");
+    }
+
+    #[test]
+    fn one_shot_and_mixed_speed_triggers_refuse_an_otherwise_core_lift() {
+        let one_shot = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(21, 7, false), (0, 0, false)],
+            "",
+        ));
+        let p = analyze(&one_shot, 1).expect("analyzed");
+        assert!(p.callable_low, "the S1 form still fires from below");
+        assert_eq!(p.shape, Shape::Other, "but the one-shot form is refused");
+
+        let mixed = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(62, 7, false), (120, 7, false)],
+            "",
+        ));
+        let p = analyze(&mixed, 1).expect("analyzed");
+        assert!(p.any_blaze && !p.all_blaze);
+        assert_eq!(p.shape, Shape::Other);
+
+        let fast = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(123, 7, false), (120, 7, false)],
+            "",
+        ));
+        let p = analyze(&fast, 1).expect("analyzed");
+        assert!(p.any_blaze && p.all_blaze);
+        assert_eq!(p.shape, Shape::Core, "one speed throughout is fine");
+    }
+
+    #[test]
+    fn another_tagged_action_on_the_plat_refuses_it() {
+        // A floor-lower special (23) naming the plat's tag from the level room's wall.
+        let extra = "linedef { v1 = 5; v2 = 4; sidefront = 99; blocking = true; special = 23; arg0 = 7; }\n";
+        let mut text = chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        );
+        // Give the extra line a sidedef in room 2 (index 99 is replaced by the real next index).
+        let sidedef_count = text.matches("sidedef {").count();
+        text.push_str(&extra.replace("99", &sidedef_count.to_string()));
+        text.push_str("sidedef { sector = 2; texturemiddle = \"STARTAN2\"; }\n");
+        let f = fixture(&text);
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.other_tagged_specials, vec![23]);
+        assert_eq!(p.shape, Shape::Other);
+    }
+
+    #[test]
+    fn a_tag_naming_several_sectors_is_counted_on_each() {
+        let f = fixture(&chain(
+            &[0, 128, 128],
+            &[0, 7, 7],
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        ));
+        let index = MapIndex::build(&f.map, &f.scene);
+        assert_eq!(index.plat_sectors(&f.map), BTreeSet::from([1, 2]));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.shared_tag_n, 2);
+    }
+
+    #[test]
+    fn a_tag_zero_lift_line_names_no_plat() {
+        let f = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(62, 0, false), (0, 0, false)],
+            "",
+        ));
+        let index = MapIndex::build(&f.map, &f.scene);
+        assert!(index.plat_sectors(&f.map).is_empty());
+    }
+
+    #[test]
+    fn dangling_side_references_are_non_activatable_not_fatal() {
+        let mut f = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        ));
+        assert!(sidedef(&f.map, -1).is_none());
+        assert!(sidedef(&f.map, 9_999).is_none());
+        assert!(side_sector(&f.map, 0).is_some());
+        // A sidedef whose sector reference dangles.
+        f.map.sidedefs[0].sector = 9_999;
+        assert!(side_sector(&f.map, 0).is_none());
+        // The riser line's front side dangles: the line contributes no
+        // trigger, so the plat has none and is not analyzed — and nothing
+        // panics on the way.
+        f.map.linedefs[0].sidefront = 9_999;
+        let index = MapIndex::build(&f.map, &f.scene);
+        assert!(analyze_plat(&f.map, &f.scene, &index, 1, f.step).is_none());
+    }
+
+    #[test]
+    fn a_sector_with_no_boundary_is_a_dead_plat_without_geometry() {
+        // A fourth sector no linedef references, tagged 9, named by the far link.
+        let extra = "sector { texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; heightfloor = 0; heightceiling = 256; lightlevel = 160; id = 9; }\n";
+        let f = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(62, 7, false), (62, 9, false)],
+            extra,
+        ));
+        let index = MapIndex::build(&f.map, &f.scene);
+        assert!(index.plat_sectors(&f.map).contains(&3));
+        let p = analyze(&f, 3).expect("a trigger names it, so it is analyzed");
+        assert!(!p.has_geometry);
+        assert_eq!(p.rest, Rest::Dead);
+        assert!(p.neighbors.is_empty());
+        assert_eq!((p.bbox_w, p.bbox_h, p.bbox_min), (0, 0, (0, 0)));
+        assert_eq!(p.shape, Shape::Other);
+        assert_eq!(p.triggers[0].placement, Placement::Remote);
+    }
+
+    #[test]
+    fn things_are_counted_on_the_plat_that_holds_them() {
+        let extra = "thing { x = 192.000; y = 64.000; type = 3001; single = true; }\n";
+        let f = fixture(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(62, 7, false), (0, 0, false)],
+            extra,
+        ));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.things, 1);
+        assert_eq!(p.thing_names, vec!["imp".to_owned()]);
+    }
+
+    #[test]
+    fn the_step_boundary_is_exact() {
+        // 24 units is one step (`tmfloorz - thing->z > 24*FRACUNIT` rejects
+        // only beyond it): the low room is Level, the plat a step, not a lift.
+        let step = fixture(&chain(
+            &[0, 24, 24],
+            &LIFT_TAGS,
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        ));
+        let p = analyze(&step, 1).expect("analyzed");
+        assert_eq!(p.rest, Rest::Top);
+        assert_eq!(p.triggers[0].activators, vec![Activator::Level]);
+        assert!(!p.callable_low);
+        // 25 units is not.
+        let lift = fixture(&chain(
+            &[0, 25, 25],
+            &LIFT_TAGS,
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        ));
+        let p = analyze(&lift, 1).expect("analyzed");
+        assert_eq!(p.triggers[0].activators, vec![Activator::Low]);
+        assert!(p.callable_low);
+        assert_eq!(p.shape, Shape::Core);
+    }
+
+    #[test]
+    fn helpers_format_shares_and_percentiles() {
+        assert_eq!(pct(1, 4), "25.0 %");
+        assert_eq!(pct(0, 0), "n/a");
+        assert_eq!(percentiles(Vec::new()), "n/a");
+        assert_eq!(
+            percentiles(vec![5, 1, 3]),
+            "min 1 · p10 1 · median 3 · p90 5 · max 5"
+        );
+        let mut h = Hist::default();
+        for k in ["b", "a", "b", "c"] {
+            h.add(k);
+        }
+        assert_eq!(h.top(2), "b:2, a:1");
+        assert_eq!(h.all(), "a: 1 · b: 2 · c: 1");
+        assert_eq!(h.shares(4), "a: 1 (25.0 %) · b: 2 (50.0 %) · c: 1 (25.0 %)");
+        assert!(is_lift(62) && is_lift(121) && !is_lift(97));
+    }
+}

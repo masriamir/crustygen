@@ -29,3 +29,11 @@ missing_docs = "deny"
 [lints.clippy]
 all = "warn"
 pedantic = "warn"
+
+# The lift shape probe (docs/measurements/lift-shapes-2026-08-29.md). An
+# explicit target so its classification core can carry unit tests; `cargo
+# test --all-targets` runs them alongside the crate's own.
+[[example]]
+name = "liftprobe"
+path = "examples/liftprobe/main.rs"
+test = true

@@ -891,3 +891,71 @@ fn report_arbiter(agg: &Agg, moving: &[&PlatFacts], nmv: u64) {
         pct(agg.expr_ext, agg.maps)
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn trigger(special: i32, placement: Placement, activators: &[Activator]) -> common::Trigger {
+        common::Trigger {
+            special,
+            placement,
+            activators: activators.to_vec(),
+            low_sides: Vec::new(),
+            one_sided: false,
+            switch_slots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn combo_labels_name_the_side_a_player_fires_from() {
+        assert_eq!(
+            combo_label(&trigger(62, Placement::OnPlatBack, &[Activator::Low])),
+            "S@plat/Low"
+        );
+        assert_eq!(
+            combo_label(&trigger(120, Placement::Adjacent, &[Activator::Low])),
+            "W!@adj/Low"
+        );
+        // A walkover on the plat's edge crossable from the plat and from a
+        // level neighbor is labeled by the neighbor, not the plat.
+        assert_eq!(
+            combo_label(&trigger(
+                88,
+                Placement::OnPlatFront,
+                &[Activator::Level, Activator::Plat]
+            )),
+            "W@plat/Level"
+        );
+        // Fireable from above and from the plat: the plat is the fallback only.
+        assert_eq!(
+            combo_label(&trigger(
+                88,
+                Placement::OnPlatFront,
+                &[Activator::Plat, Activator::Above]
+            )),
+            "W@plat/Above"
+        );
+        assert_eq!(
+            combo_label(&trigger(88, Placement::Remote, &[Activator::Plat])),
+            "W@remote/Plat"
+        );
+        assert_eq!(
+            combo_label(&trigger(88, Placement::Remote, &[Activator::None])),
+            "W@remote/None"
+        );
+    }
+
+    #[test]
+    fn special_families_are_named_and_tracked() {
+        assert_eq!(family(62), "DWUS");
+        assert_eq!(family(123), "blaze DWUS");
+        assert_eq!(family(87), "perpetual/stop");
+        assert_eq!(family(20), "raise&change (plat)");
+        assert_eq!(family(18), "floor raise-to-nearest");
+        assert_eq!(family(23), "floor lower");
+        assert!(tracked(62) && tracked(23) && !tracked(97) && !tracked(1));
+        assert_eq!(bucket_nb(0), "0");
+        assert_eq!(bucket_nb(4), "4+");
+    }
+}
