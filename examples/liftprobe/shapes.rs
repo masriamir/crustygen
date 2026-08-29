@@ -26,6 +26,8 @@ struct ShapeAgg {
     riser_tex: Hist,
     aligned64: u64,
     sides64: u64,
+    /// Plats with a resolved boundary — the denominator for the size facts.
+    geometry_n: u64,
     min_side: Hist,
     host_light_eq: u64,
     host_flat_eq: u64,
@@ -153,6 +155,7 @@ fn record(p: &PlatFacts, agg: &mut Agg) {
         sa.riser_tex.add(r.texture.clone());
     }
     if p.has_geometry {
+        sa.geometry_n += 1;
         sa.aligned64 += u64::from(p.aligned64());
         sa.sides64 += u64::from(p.bbox_w % 64 == 0 && p.bbox_h % 64 == 0);
         sa.min_side.add(match lo {
@@ -193,12 +196,13 @@ fn report(label: &str, agg: &Agg) {
         println!("\n## {shape:?} — {} plats\n", sa.n);
         println!("- bbox dims top 10: {}", sa.dims.top(10));
         println!(
-            "- min side: {} · bbox min corner ≡ (0,0) mod 64: {} ({}) · both sides ≡ 0 mod 64: {} ({})",
+            "- plats with geometry: {} · min side: {} · bbox min corner ≡ (0,0) mod 64: {} ({}) · both sides ≡ 0 mod 64: {} ({})",
+            sa.geometry_n,
             sa.min_side.all(),
             sa.aligned64,
-            pct(sa.aligned64, sa.n),
+            pct(sa.aligned64, sa.geometry_n),
             sa.sides64,
-            pct(sa.sides64, sa.n)
+            pct(sa.sides64, sa.geometry_n)
         );
         println!("- travel (rise): {}", percentiles(sa.travel.clone()));
         println!(

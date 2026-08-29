@@ -81,7 +81,10 @@ fn survey_map(
         verdict = verdict.with_teleports(&report);
     }
 
-    // Naïve arbiter: every lift line accepted.
+    // Naïve arbiter: every repeatable lift line accepted — first 62/88, then
+    // 120/123 as well. The one-shot forms (21/10/122/121) stay unknown, as the
+    // design keeps them out of the emittable set; a map carrying one still
+    // fails the line axis here.
     let others_ok = verdict.sector_specials_ok && verdict.thing_kinds_ok && verdict.teleports_ok;
     let unknown: BTreeSet<i32> = verdict.unknown_line_specials.iter().copied().collect();
     let dwus_set: BTreeSet<i32> = [62, 88].into_iter().collect();
