@@ -23,6 +23,10 @@ use crustywad::{Wad, WadBuilder, WadKind, WriteOptions};
 /// The entrada base IR fixture, shared with `check_cli.rs`.
 pub const ENTRADA: &str = include_str!("../fixtures/entrada_base.json");
 
+/// The salto base IR fixture — the teleport playtest map, paired with the
+/// committed `maps/salto.wad`.
+pub const SALTO: &str = include_str!("../fixtures/salto_base.json");
+
 /// Compiles entrada and packs it as a minimal un-noded UDMF PWAD.
 pub fn udmf_entrada_wad() -> Vec<u8> {
     let tables = Tables::load().expect("tables load");
