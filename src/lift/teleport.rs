@@ -147,6 +147,31 @@ impl TeleportCounts {
     pub fn refusals(&self) -> u64 {
         self.broken + self.self_referencing
     }
+
+    /// Field-wise sum, for rolling per-map counts into a corpus total.
+    ///
+    /// Saturating rather than wrapping: a corpus large enough to overflow a
+    /// `u64` line count cannot exist, and a pinned ceiling is a better
+    /// report than a wrapped one if that ever stops being true.
+    #[must_use]
+    pub fn add(&self, other: &Self) -> Self {
+        Self {
+            lines: self.lines.saturating_add(other.lines),
+            player: self.player.saturating_add(other.player),
+            monsters_only: self.monsters_only.saturating_add(other.monsters_only),
+            one_shot: self.one_shot.saturating_add(other.one_shot),
+            closet: self.closet.saturating_add(other.closet),
+            exit: self.exit.saturating_add(other.exit),
+            paired: self.paired.saturating_add(other.paired),
+            island: self.island.saturating_add(other.island),
+            alcove: self.alcove.saturating_add(other.alcove),
+            boundary: self.boundary.saturating_add(other.boundary),
+            other: self.other.saturating_add(other.other),
+            ambiguous: self.ambiguous.saturating_add(other.ambiguous),
+            broken: self.broken.saturating_add(other.broken),
+            self_referencing: self.self_referencing.saturating_add(other.self_referencing),
+        }
+    }
 }
 
 /// What [`recognize`] says about one map's teleport lines.

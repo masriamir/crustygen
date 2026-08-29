@@ -5,7 +5,8 @@
 //!
 //! Surveys every `.zip`/`.wad` in `<dir>` (non-recursive) through the shared
 //! ingestion path, deduplicates maps by content hash, classifies each against
-//! crustygen's emittable vocabulary, and renders the aggregate as Markdown —
+//! crustygen's emittable vocabulary and the teleport recognizer, and renders
+//! the aggregate as Markdown —
 //! to stdout by default, to `--report FILE` when given. `--json FILE` writes
 //! the full document, per-map rows included.
 //!
@@ -88,7 +89,7 @@ fn real_main() -> i32 {
 fn run(args: &Args) -> Result<i32, String> {
     let tables = Tables::load().map_err(|e| format!("tables: {e}"))?;
     let vocab = Vocabulary::from_tables(&tables);
-    let sweep = corpus::sweep_dir(&args.dir, &vocab).map_err(|e| e.to_string())?;
+    let sweep = corpus::sweep_dir(&args.dir, &vocab, &tables).map_err(|e| e.to_string())?;
     for line in &sweep.failures {
         eprintln!("crustygen-corpus: {line}");
     }
