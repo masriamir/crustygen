@@ -134,17 +134,29 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
                 }
                 let telemetry = lift::survey(&group.name, &loaded.map);
                 let verdict = vocab.as_ref().map(|(tables, vocabulary)| {
-                    // `Scene::build`'s findings are dropped: this is a
-                    // survey, not a verification run. The recognizer reads
-                    // whatever boundaries resolved and refuses what it
-                    // cannot state — `crustygen-check` is where structural
-                    // faults get reported.
-                    let scene = Scene::build(&loaded.map, tables, &mut Vec::new());
-                    let report = teleport::recognize(&scene, tables);
-                    (
-                        vocabulary.classify(&telemetry).with_teleports(&report),
-                        report.counts,
-                    )
+                    let verdict = vocabulary.classify(&telemetry);
+                    // The histogram is already computed: a map with none of
+                    // the four teleport specials among its linedef specials
+                    // has no teleport line for the recognizer to recognize,
+                    // so skip building a `Scene` and running it — `verdict`
+                    // stays `classify`'s own (`teleports_ok == true`) and the
+                    // counts are the all-zero default.
+                    let has_teleports = tables
+                        .teleport_specials()
+                        .into_iter()
+                        .any(|s| telemetry.linedef_specials.contains_key(&i32::from(s)));
+                    if has_teleports {
+                        // `Scene::build`'s findings are dropped: this is a
+                        // survey, not a verification run. The recognizer reads
+                        // whatever boundaries resolved and refuses what it
+                        // cannot state — `crustygen-check` is where structural
+                        // faults get reported.
+                        let scene = Scene::build(&loaded.map, tables, &mut Vec::new());
+                        let report = teleport::recognize(&scene, tables);
+                        (verdict.with_teleports(&report), report.counts)
+                    } else {
+                        (verdict, TeleportCounts::default())
+                    }
                 });
                 records.push((telemetry, loaded.origin, verdict));
             }

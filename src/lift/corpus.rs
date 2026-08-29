@@ -278,15 +278,30 @@ fn survey_wad(
                     continue;
                 }
                 let telemetry = lift::survey(&group.name, &loaded.map);
-                // `Scene::build`'s findings are discarded on purpose:
-                // structural findings are the verifier's business, and this
-                // sweep is not verifying anything. The recognizer reads
-                // whatever boundaries resolved and refuses what it cannot
-                // recognize — a map the verifier would fault still yields an
-                // honest teleport census.
-                let scene = Scene::build(&loaded.map, tables, &mut Vec::new());
-                let report = lift::teleport::recognize(&scene, tables);
-                let verdict = vocab.classify(&telemetry).with_teleports(&report);
+                let verdict = vocab.classify(&telemetry);
+                // The histogram is already computed: a map with none of the
+                // four teleport specials among its linedef specials has no
+                // teleport line for the recognizer to recognize, so skip
+                // building a `Scene` and running it — `verdict` stays
+                // `classify`'s own (`teleports_ok == true`) and the counts
+                // are the all-zero default.
+                let has_teleports = tables
+                    .teleport_specials()
+                    .into_iter()
+                    .any(|s| telemetry.linedef_specials.contains_key(&i32::from(s)));
+                let (verdict, teleports) = if has_teleports {
+                    // `Scene::build`'s findings are discarded on purpose:
+                    // structural findings are the verifier's business, and this
+                    // sweep is not verifying anything. The recognizer reads
+                    // whatever boundaries resolved and refuses what it cannot
+                    // recognize — a map the verifier would fault still yields an
+                    // honest teleport census.
+                    let scene = Scene::build(&loaded.map, tables, &mut Vec::new());
+                    let report = lift::teleport::recognize(&scene, tables);
+                    (verdict.with_teleports(&report), report.counts)
+                } else {
+                    (verdict, TeleportCounts::default())
+                };
                 sweep.maps.push(MapRecord {
                     source: source.to_owned(),
                     map: group.name.clone(),
@@ -297,7 +312,7 @@ fn survey_wad(
                     hash,
                     telemetry,
                     verdict,
-                    teleports: report.counts,
+                    teleports,
                 });
             }
             Err(err) => {
