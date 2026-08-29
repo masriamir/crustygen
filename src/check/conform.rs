@@ -605,6 +605,12 @@ fn exit_kind_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conformanc
 /// A map whose only walkover exit is one-sided or blocking has an exit
 /// `P_CrossSpecialLine` would never fire, and grades `walkover`, which fails
 /// against a `teleport` target instead of passing by accident.
+///
+/// [`crate::check::flood::teleport_only_sectors`] runs two full reachability
+/// floods (with and without teleport edges), so it is only ever invoked
+/// behind `has_walkover && !has_switch` — a switch exit, or a map with no
+/// walkover exit at all, settles the trigger without paying for either
+/// flood.
 fn exit_trigger_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> ConformanceRow {
     let target = exit_trigger_name(fm.progression.exit.trigger).to_owned();
     let switches = [
@@ -617,7 +623,6 @@ fn exit_trigger_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conform
     ];
     let has_switch = any_special_present(scene, &switches);
     let has_walkover = any_special_present(scene, &walkovers);
-    let teleport_only = crate::check::flood::teleport_only_sectors(scene, tables);
     let walkover_goal_sectors: Vec<usize> = scene
         .sectors
         .iter()
@@ -629,9 +634,12 @@ fn exit_trigger_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conform
         })
         .map(|(i, _)| i)
         .collect();
+    // `&&` short-circuits: the flood call below only runs once `has_walkover
+    // && !has_switch` is known true (see the function doc for why that
+    // matters).
     let is_teleport_exit = has_walkover
         && !has_switch
-        && teleport_only.as_ref().is_some_and(|only| {
+        && crate::check::flood::teleport_only_sectors(scene, tables).is_some_and(|only| {
             !walkover_goal_sectors.is_empty() && walkover_goal_sectors.iter().all(|&s| only[s])
         });
     let actual_trigger = match (has_switch, has_walkover, is_teleport_exit) {
@@ -1980,6 +1988,34 @@ thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
         };
         let r = exit_trigger_row(&doc.spec.frontmatter, &both, &tables);
         assert_eq!(r.actual, "both switch and walkover present", "got {r:?}");
+    }
+
+    /// A switch-only exit has no walkover special at all, so
+    /// `has_walkover && !has_switch` is `false` on its first operand and the
+    /// flood-backed teleport check short-circuits away entirely — this pins
+    /// the `switch` reading through that short-circuited path.
+    #[test]
+    fn exit_trigger_row_reports_switch_only() {
+        let tables = Tables::load().expect("tables");
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+
+        let switch_only = Scene {
+            sectors: vec![SceneSector {
+                floor: 0,
+                ceiling: 128,
+                light: 160,
+                special: 0,
+                tag: 0,
+                boundary: vec![boundary_with_special(i32::from(
+                    tables.exit_switch_special(),
+                ))],
+                closed: true,
+            }],
+            things: vec![],
+        };
+        let r = exit_trigger_row(&doc.spec.frontmatter, &switch_only, &tables);
+        assert_eq!(r.actual, "switch", "got {r:?}");
+        assert_eq!(r.verdict, Verdict::Pass, "got {r:?}");
     }
 
     #[test]
