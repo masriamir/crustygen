@@ -547,7 +547,18 @@ fn combo_label(t: &common::Trigger) -> String {
         "W"
     };
     let blaze = if BLAZE.contains(&t.special) { "!" } else { "" };
-    let activator = t.activators.first().copied().unwrap_or(Activator::None);
+    // The side a player fires it from: prefer a sector other than the plat
+    // itself when a line fires from several, so a walkover on the plat's
+    // edge is labeled by the side it is entered from.
+    let activator = [
+        Activator::Low,
+        Activator::Level,
+        Activator::Above,
+        Activator::Plat,
+    ]
+    .into_iter()
+    .find(|a| t.activators.contains(a))
+    .unwrap_or(Activator::None);
     let place = match t.placement {
         Placement::Remote => "remote",
         Placement::Adjacent => "adj",
