@@ -56,9 +56,19 @@ fn has_ext(path: &Path, ext: &str) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case(ext))
 }
 
-/// A UDMF index stored as `i32`, as a `usize`.
-pub(crate) fn idx(i: i32) -> usize {
-    usize::try_from(i).expect("UDMF indices are non-negative")
+/// The sidedef a linedef's `sidefront`/`sideback` names, or `None` when the
+/// reference is negative or dangling — a UDMF map parses without
+/// cross-reference validation, and a corrupt one must not abort a sweep.
+pub(crate) fn sidedef(map: &UdmfMap, side: i32) -> Option<&crustywad::map::udmf::UdmfSidedef> {
+    usize::try_from(side).ok().and_then(|i| map.sidedefs.get(i))
+}
+
+/// The sector behind a linedef's side, or `None` when the side or its sector
+/// reference dangles.
+pub(crate) fn side_sector(map: &UdmfMap, side: i32) -> Option<usize> {
+    sidedef(map, side)
+        .and_then(|sd| usize::try_from(sd.sector).ok())
+        .filter(|&s| s < map.sectors.len())
 }
 
 /// Walks every `.zip`/`.wad` in `dirs` (non-recursively, like
@@ -432,8 +442,12 @@ fn activator_sides(
     step: i32,
 ) -> Vec<(usize, Activator)> {
     let l = &map.linedefs[line_idx];
-    let front = idx(map.sidedefs[idx(l.sidefront)].sector);
-    let back = l.sideback.map(|b| idx(map.sidedefs[idx(b)].sector));
+    // A dangling side or sector reference cannot fire anything: the engine
+    // would read garbage, and `Scene::build` skips such a boundary.
+    let Some(front) = side_sector(map, l.sidefront) else {
+        return Vec::new();
+    };
+    let back = l.sideback.and_then(|b| side_sector(map, b));
     let mut out = Vec::new();
     if USE_LIFT.contains(&l.special) {
         // `P_UseSpecialLine`: front side only.
@@ -485,8 +499,12 @@ fn triggers_of(
         if !is_lift(l.special) || l.args[0] != tag {
             continue;
         }
-        let front = idx(map.sidedefs[idx(l.sidefront)].sector);
-        let back = l.sideback.map(|b| idx(map.sidedefs[idx(b)].sector));
+        // A lift line whose front side dangles contributes no trigger: there
+        // is no sector a player could fire it from.
+        let Some(front) = side_sector(map, l.sidefront) else {
+            continue;
+        };
+        let back = l.sideback.and_then(|b| side_sector(map, b));
         let placement = if front == plat {
             Placement::OnPlatFront
         } else if back == Some(plat) {
@@ -497,8 +515,9 @@ fn triggers_of(
             Placement::Remote
         };
         let mut switch_slots = Vec::new();
-        if USE_LIFT.contains(&l.special) {
-            let sd = &map.sidedefs[idx(l.sidefront)];
+        if USE_LIFT.contains(&l.special)
+            && let Some(sd) = sidedef(map, l.sidefront)
+        {
             for (slot, tex) in [
                 ("top", &sd.texturetop),
                 ("mid", &sd.texturemiddle),
@@ -592,16 +611,20 @@ pub(crate) fn analyze_plat(
             // The visible lower is on the sidedef whose sector has the lower
             // floor (`r_segs.c`, `R_StoreWallRange`): the neighbor's.
             let l = &map.linedefs[b.linedef];
-            let nb_side = if idx(map.sidedefs[idx(l.sidefront)].sector) == n {
-                idx(l.sidefront)
+            let nb_side = if side_sector(map, l.sidefront) == Some(n) {
+                sidedef(map, l.sidefront)
             } else {
-                idx(l.sideback.expect("a two-sided boundary has a back sidedef"))
+                l.sideback.and_then(|s| sidedef(map, s))
             };
-            risers.push(Riser {
-                texture: map.sidedefs[nb_side].texturebottom.clone(),
-                unpegged: b.lower_unpegged,
-                plat_side_nonblank: map.sidedefs[b.sidedef].texturebottom != "-",
-            });
+            // `Scene` resolved this boundary, so its own sidedef is in range;
+            // the neighbor's side is looked up defensively all the same.
+            if let Some(nb_side) = nb_side {
+                risers.push(Riser {
+                    texture: nb_side.texturebottom.clone(),
+                    unpegged: b.lower_unpegged,
+                    plat_side_nonblank: map.sidedefs[b.sidedef].texturebottom != "-",
+                });
+            }
         }
     }
     let nb_floors: Vec<i32> = neighbors.iter().map(|&n| scene.sectors[n].floor).collect();

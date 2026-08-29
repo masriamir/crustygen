@@ -229,7 +229,11 @@ fn survey_lift_lines(map: &UdmfMap, index: &common::MapIndex<'_>, agg: &mut Agg)
         }
         if USE_LIFT.contains(&l.special) {
             agg.switch_lines += 1;
-            let sd = &map.sidedefs[common::idx(l.sidefront)];
+            // A dangling front side still counts as a switch line; it just has
+            // no texture to inspect.
+            let Some(sd) = common::sidedef(map, l.sidefront) else {
+                continue;
+            };
             for (slot, tex) in [
                 ("top", &sd.texturetop),
                 ("mid", &sd.texturemiddle),
