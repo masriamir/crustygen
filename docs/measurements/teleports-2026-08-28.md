@@ -532,6 +532,16 @@ sector, which round 2 says id never once needed.
   tag. Neither is established as the cause; the discrepancy is recorded rather than smoothed, and
   it moves the headline conjunction by at most the 3 maps that separate the honest
   figure from the naïve one, though it could move the teleport axis share itself by more.
+- **The recognizer counts a blocking two-sided trigger as fireable; the flood does not.**
+  `Refusal::Broken` covers tag 0, a tag resolving to no marker-holding sector, and a one-sided
+  line, but not a two-sided line flagged `ML_BLOCKING` — `recognize` reads `Boundary::neighbor`
+  and the special, never `blocking`. The verifier's flood does gate on
+  `Boundary::passable` (`two_sided && !blocking`), because `PIT_CheckLine` rejects a blocking
+  line for any non-missile before `P_CrossSpecialLine` is ever reached, so such a line can never
+  fire. The two therefore disagree on that one shape, and every teleport count here — and with
+  it the teleport axis of the expressibility conjunction — is optimistic by however many
+  blocking two-sided trigger lines the corpus holds. That number is unmeasured: settling it
+  needs a re-run, which is why this is recorded rather than corrected.
 - **The conjunction curve's population changed.** Stated above and repeated here because it is the
   easiest number in this document to mis-read: the 2026-08-28 curve and this one walk different
   populations, so their checkpoints are not comparable.
