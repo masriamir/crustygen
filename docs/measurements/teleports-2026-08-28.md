@@ -179,7 +179,8 @@ box over the endpoints of the sector's linedefs, never a true area.
 
 Retail populations, used by rounds 2 and 3: `RETAIL/DOOM.WAD` + `RETAIL/DOOM2.WAD` is the
 **headline** (68 map groups, all Doom-format, all assembled); `TNT.WAD` and `PLUTONIA.WAD` are
-secondary columns (32 each). BFG duplicates, Freedoom and every non-Doom-format WAD were excluded
+secondary columns (32 each) — round 2 keeps them apart, round 3 reports them as one
+`TNT+PLUTONIA` column. BFG duplicates, Freedoom and every non-Doom-format WAD were excluded
 deliberately.
 
 ### Probe round 1 — idgames only (1,282 maps; T = 797 maps with a teleport line; L = 20,491 lines)
@@ -316,30 +317,130 @@ Closet sectors (same proxy as round 1):
 | tagged and referenced by another special | 267 (11.1 %) | 1 (1.0 %) | 3 (2.0 %) | 6 (5.5 %) |
 
 The retail split is the design rule: of the 8 genuinely sealed DOOM+DOOM2 pens, **7 use the
-monsters-only special**; the open holding rooms (59 of 97 closet sectors) use 97. Closet monsters
+monsters-only special**; the open holding rooms (59 of 97 closet sectors) use 97. The
+"tagged and referenced by another special" row above reads as "closet release is behavioral" —
+round 3 below shows that reading is an artifact of looking at the pen's own sector rather than
+its neighbor's. Closet monsters
 carrying the ambush flag: 251 of 564 (44.5 %) in DOOM+DOOM2 against 2,619 of 22,258 (11.8 %) in
 idgames.
 
 Exit-by-teleport: 55 instances in 52 idgames maps; 1 in DOOM+DOOM2 (DOOM2 MAP08 — DOOM.WAD has
 none); TNT 3; PLUTONIA 1.
 
-### Probe round 3 — closet release (a model, not a rule)
+### Probe round 3 — can a pen hear the player? (a model, not an engine quotation)
 
-Round 3 asked how a sealed or semi-sealed pen actually gets woken, and its answer is explicitly a
-**statistic, not an engine verdict**. The "acoustic model" is a geometric proxy — a join whose
-opening `min(ceilings) − max(floors)` is greater than zero and which is free of the
-sound-blocking flag — and `data/engine.toml` quotes the engine only for the flag's behavior, never
-for an opening-range cutoff. Nothing in crustygen is a rule derived from these rows:
+Round 3 asked how a sealed or semi-sealed pen gets woken, and ran one propagation rule over each
+map's **level-load** geometry: sound crosses a linedef when the line is two-sided and the opening
+between its sectors, `min(ceilings) − max(floors)`, is greater than zero; a `ML_SOUNDBLOCK` line
+may be crossed at most once along any path. **Only the second half is an engine quotation** —
+`data/engine.toml` quotes `P_RecursiveSound` for the soundblock counter and `doomdata.h` for the
+flag values, and cites nothing for an opening cutoff. The `opening > 0` gate is the probe's own
+modeling choice. Every closet is therefore also scored under a **permissive variant** — same
+soundblock rule, every two-sided line passable regardless of opening — so both readings are
+available, and the gap between them is the set of pens gated purely by a currently-closed door or
+lift. A "no reach" verdict means *the player's first noise, standing on their start at t = 0,
+cannot reach this pen* — not that the monsters never wake. Sight is not modeled at all.
 
-| | idgames | DOOM+DOOM2 |
-|---|---:|---:|
-| closets audible from the player start at load (acoustic model) | 38.2 % | 22.7 % |
-| unreachable pens with a remotely referenced *neighbor* strip | 52.5 % | 45.3 % |
-| closet monsters ambush-flagged | 11.8 % | 43.5 % vs 44.9 % (audible vs not) |
+Populations are round 2's closet sectors (the front sector of a teleport line holding ≥ 1 standard
+monster). Every map carrying a closet has a locatable player-1 start in all three populations.
 
-The strip specials the retail pens' neighbors carry are 62, 36, 109, 20, 2, 123, 103 and 102 —
-tier-3 floor and door values outside this vocabulary, which is why "sealed pen released by a
-remote strip" is a recorded follow-up rather than a construct.
+Aggregate — can the pen hear the player start?
+
+| | DOOM+DOOM2 (97 closets) | TNT+PLUTONIA (260) | idgames (2,415) |
+|---|---:|---:|---:|
+| **reaches a player-1 start** | **22 (22.7 %)** | 37 (14.2 %) | 923 (38.2 %) |
+| does not | 75 (77.3 %) | 223 (85.8 %) | 1,492 (61.8 %) |
+| reaches under the permissive variant | 66 (68.0 %) | 155 (59.6 %) | 1,766 (73.1 %) |
+| …i.e. gated only by a closed opening | 44 (45.4 %) | 118 (45.4 %) | 843 (34.9 %) |
+| **unreachable even permissively** | 31 (32.0 %) | 105 (40.4 %) | 649 (26.9 %) |
+
+By round-2 category (reaching / total): sealed **2 / 8** in DOOM+DOOM2, 6 / 78 in TNT+PLUTONIA,
+191 / 468 in idgames; zero-opening **0 / 12**, 0 / 16, 7 / 137; open 20 / 77, 31 / 166,
+725 / 1,810.
+
+Acoustic exits directly out of the pen:
+
+| | DOOM+DOOM2 | TNT+PLUTONIA | idgames |
+|---|---:|---:|---:|
+| no acoustic exit at all | 6 (6.2 %) | 20 (7.7 %) | 76 (3.1 %) |
+| **only exit(s) are trigger back sectors** | **17 (17.5 %)** | 79 (30.4 %) | 557 (23.1 %) |
+| exits exist, none via a trigger line | 13 (13.4 %) | 29 (11.2 %) | 556 (23.0 %) |
+| mixed (trigger + other) | 61 (62.9 %) | 132 (50.8 %) | 1,226 (50.8 %) |
+
+Of the 17 DOOM+DOOM2 "only via the trigger" pens, 2 reach the player and 15 do not (TNT+PLUTONIA
+7 / 72; idgames 202 / 355). The trigger line is itself two-sided, so it is an ordinary acoustic
+edge: a pen with no other opening can still hear through its own trigger into the pad.
+
+The pens that reach nothing — what else the geometry shows:
+
+| | DOOM+DOOM2 (75) | TNT+PLUTONIA (223) | idgames (1,492) |
+|---|---:|---:|---:|
+| the pen's **own** tag is referenced by another special | 1 (1.3 %) | 6 (2.7 %) | 189 (12.7 %) |
+| a **neighbor** sector's tag is referenced by another special | **34 (45.3 %)** | 91 (40.8 %) | 783 (52.5 %) |
+| no such neighbor | 41 (54.7 %) | 132 (59.2 %) | 709 (47.5 %) |
+| the pen carries a non-teleport special on its own boundary | 27 (36.0 %) | 38 (17.0 %) | 322 (21.6 %) |
+
+**This corrects round 2.** Round 2 asked only whether the pen's *own* tag was referenced and
+concluded that 1 of 97 retail closets is remotely triggered — hence "release is behavioral". The
+release mechanism usually sits on the **neighbor**: the thin strip between the pen and the
+teleport line, or the door sector beside it. The construct is *pen + tagged strip + teleport line
+across the strip*, not *pen carrying the tag*. Top raw special values on other linedefs
+referencing a neighbor's tag in DOOM+DOOM2, by pens affected: 62 (5), 36 (4), 109 (4), 20 (3),
+2 (3), 123 (3), 103 (3), 102 (3), 88 (2), 83 (2), 23 (2), 120 (2) — tier-3 floor and door values
+outside this vocabulary, which is why "sealed pen released by a remote strip" is a recorded
+follow-up rather than a construct.
+
+Ambush flags do **not** track acoustic reachability:
+
+| | closets | monsters | ambush-flagged |
+|---|---:|---:|---:|
+| DOOM+DOOM2, reaches | 22 | 161 | 70 (43.5 %) |
+| DOOM+DOOM2, no reach | 75 | 403 | 181 (44.9 %) |
+| TNT+PLUTONIA, reaches | 37 | 275 | 30 (10.9 %) |
+| TNT+PLUTONIA, no reach | 223 | 1,281 | 278 (21.7 %) |
+
+In DOOM+DOOM2 the two shares are indistinguishable (43.5 % against 44.9 %). The tempting reading —
+that id flags the audible pens deaf so they must see you — is not what the data shows. Do not
+derive the flag from the acoustics.
+
+Every sealed and zero-opening DOOM+DOOM2 pen, with its verdict. `exits` counts distinct sectors
+directly audible from the pen:
+
+| WAD | map | sector | bbox | category | monsters | ambush | trigger | exits | only via trigger | reaches | hops |
+|---|---|---:|---|---|---:|---:|---:|---:|---|---|---:|
+| DOOM | E2M1 | 3 | 640×576 | sealed | 6 | 5 | 97 ×2 | 1 | yes | no | — |
+| DOOM | E4M1 | 35 | 128×112 | sealed | 4 | 0 | 126 | 1 | yes | **yes** | 4 |
+| DOOM | E4M1 | 38 | 128×104 | sealed | 4 | 0 | 126 | **0** | — | no | — |
+| DOOM | E4M1 | 42 | 200×264 | sealed | 8 | 0 | 126 ×2 | **0** | — | no | — |
+| DOOM | E4M1 | 80 | 128×120 | sealed | 4 | 0 | 126 | 1 | yes | **yes** | 4 |
+| DOOM | E4M7 | 258 | 160×192 | sealed | 2 | 0 | 125 | 1 | yes | no | — |
+| DOOM2 | MAP08 | 57 | 232×96 | sealed | 2 | 0 | 125 | **0** | — | no | — |
+| DOOM2 | MAP29 | 185 | 480×320 | sealed | 1 | 0 | 126 ×2 | 1 | yes | no | — |
+| DOOM | E2M5 | 238 | 272×272 | zero-opening | 12 | 0 | 97 ×4 | 1 | yes | no | — |
+| DOOM | E4M3 | 52 | 64×64 | zero-opening | 1 | 0 | 97 | 1 | yes | no | — |
+| DOOM2 | MAP04 | 103 | 64×120 | zero-opening | 2 | 0 | 97 | 1 | yes | no | — |
+| DOOM2 | MAP04 | 117 | 64×120 | zero-opening | 2 | 0 | 97 | 1 | yes | no | — |
+| DOOM2 | MAP08 | 10 | 576×696 | zero-opening | 1 | 0 | 97 ×2 | 1 | yes | no | — |
+| DOOM2 | MAP12 | 129 | 752×240 | zero-opening | 3 | 0 | 97 ×4 | 1 | yes | no | — |
+| DOOM2 | MAP16 | 48 | 248×72 | zero-opening | 5 | 0 | 126 ×2 | 1 | yes | no | — |
+| DOOM2 | MAP18 | 87 | 304×176 | zero-opening | 7 | 0 | 97 | **0** | — | no | — |
+| DOOM2 | MAP19 | 133 | 128×64 | zero-opening | 2 | 0 | 39 | **0** | — | no | — |
+| DOOM2 | MAP20 | 159 | 128×256 | zero-opening | 2 | 2 | 97 ×2 | 1 | yes | no | — |
+| DOOM2 | MAP23 | 18 | 832×808 | zero-opening | 6 | 0 | 97 ×4 | 1 | yes | no | — |
+| DOOM2 | MAP28 | 51 | 96×128 | zero-opening | 1 | 0 | 97 | **0** | — | no | — |
+
+Six of the twenty are totally deaf — not even their trigger line is passable to sound. Twelve hear
+exactly one sector: the pad on the far side of their own trigger. Only two hear the player, and
+both hear out **through their own teleport trigger line** (E4M1 sectors 35 and 80) — the pad is an
+acoustic hole, which is the mechanism the round was pointed at. Where the pad has no onward joins
+of its own, pen and pad form a sealed two-sector bubble that reaches nothing: in DOOM+DOOM2, 13 of
+the 19 back sectors behind an "only via the trigger" pen have zero onward joins and 14 of 19 are
+≤ 64 on a side. TNT and PLUTONIA are the opposite — 64 of their 85 such back sectors are > 256,
+open arenas rather than pads.
+
+Nothing in crustygen derives a rule from any row above. `ML_SOUNDBLOCK` barely matters at this
+scale — round 2 found it on 14 of 729 DOOM+DOOM2 closet joins; what decides audibility under the
+model is the opening height, which is exactly the part the model assumes rather than quotes.
 
 ## The recognizer reproduces the probe
 
@@ -414,9 +515,14 @@ sector, which round 2 says id never once needed.
   and a ZDoom-namespace map using the Hexen-style teleport special is invisible to every number
   here. This is a small undercount of "teleport usage" and never a miscount of 97/39/125/126. All
   132 retail maps are binary Doom format, so the retail columns are unaffected.
-- **The acoustic model is a statistic.** Round 3's audibility shares are a geometric proxy for a
-  behavior the engine decides at runtime. No rule, check or compiler pass in crustygen derives
-  anything from them, and none should without a primary source for the cutoff.
+- **The acoustic model is a model, and its load-bearing rule is unsourced.** Round 3's
+  `opening > 0` gate is the probe's own choice; `engine.toml` quotes `P_RecursiveSound` only for
+  the `ML_SOUNDBLOCK` counter. If the engine applies no opening cutoff, every "gated only by a
+  closed opening" verdict flips — 44 of the 75 unreachable DOOM+DOOM2 pens — which is why the
+  permissive variant is reported beside every headline share. The graph is also static
+  level-load geometry, so it says nothing about doors that open during play, and sight is not
+  modeled at all. No rule, check or compiler pass in crustygen derives anything from those rows,
+  and none should without a primary source for the cutoff.
 - **The `broken` refusal count is higher than the probe's tag-resolution failures.** The probe put
   lines that can never fire at 493 by tag resolution (84 + 342 + 67) plus up to 90 one-sided
   lines; the recognizer refuses 748. The two locate a marker's sector by different means — the
