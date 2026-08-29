@@ -2322,6 +2322,59 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
     }
 
     #[test]
+    fn v_p15_flags_a_destination_the_player_does_not_fit_in() {
+        // Sector 1 is the destination (`id = 5`). Drop its ceiling to 32,
+        // well under the player's height, and the arrival is inside the
+        // ceiling. Every trigger edge of the island pad resolves to the
+        // same sector, so each one reports it.
+        let squashed = TELEPORT_MAP.replace(
+            "sector { heightfloor = 0; heightceiling = 128; texturefloor = \"FLOOR4_8\"; \
+             textureceiling = \"CEIL3_5\"; lightlevel = 160; id = 5; }",
+            "sector { heightfloor = 0; heightceiling = 32; texturefloor = \"FLOOR4_8\"; \
+             textureceiling = \"CEIL3_5\"; lightlevel = 160; id = 5; }",
+        );
+        assert_ne!(squashed, TELEPORT_MAP, "the destination sector was edited");
+        let (scene, tables) = fixtures::scene_of(&squashed);
+        let mut findings = Vec::new();
+        check_teleport_pairing(&scene, &tables, &mut findings);
+        let headroom: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == "V-P15" && f.message.contains("units of headroom"))
+            .collect();
+        assert_eq!(headroom.len(), 4, "one per trigger edge: {findings:?}");
+        assert!(
+            headroom
+                .iter()
+                .all(|f| f.severity == Severity::Error && matches!(f.subject, Subject::Sector(1))),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn v_p15_flags_a_destination_pressed_against_a_solid_wall() {
+        // The companion to `v_p15_measures_clearance_against_solid_walls_only`:
+        // sector 1's west wall is solid and sits at `x = 256`, so a marker
+        // at `x = 260` leaves 4 units where the player's radius needs 16.
+        let (scene, tables) = fixtures::scene_of(&TELEPORT_MAP.replace(
+            MARKER,
+            "thing { x = 260.0; y = 64.0; angle = 0; type = 14; single = true; }\n",
+        ));
+        let mut findings = Vec::new();
+        check_teleport_pairing(&scene, &tables, &mut findings);
+        let clearance: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == "V-P15" && f.message.contains("units of clearance"))
+            .collect();
+        assert_eq!(clearance.len(), 4, "one per trigger edge: {findings:?}");
+        assert!(
+            clearance
+                .iter()
+                .all(|f| f.severity == Severity::Error && matches!(f.subject, Subject::Thing(_))),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
     fn v_p27_flags_a_sealed_monster_sector_but_not_a_destination() {
         // Seal sector 1 — its only two-sided boundary is the alcove
         // threshold — and stand an imp (3001) in it. Sector 1 still holds

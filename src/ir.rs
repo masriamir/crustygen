@@ -718,7 +718,7 @@ impl Ir {
     /// A compiler-construction constant fixed by measurement, not an engine
     /// fact: 77 of the 83 free-standing pads in DOOM.WAD + DOOM2.WAD are
     /// exactly 64×64, and 89 of 94 wall alcoves are 64 wide and 81 of 94 64
-    /// deep (docs/measurements/teleports-*.md, probe round 2). The corpus
+    /// deep (docs/measurements/teleports-2026-08-28.md, probe round 2). The corpus
     /// does not vary it, so neither does the IR.
     pub const PAD_SIZE: i32 = 64;
     /// How far a pad's floor sits above its host room's, in map units.
@@ -1891,6 +1891,25 @@ mod tests {
             (lo, hi),
             (Pt { x: 32, y: 256 }, Pt { x: 96, y: 320 }),
             "north wall, recess to +y"
+        );
+    }
+
+    /// The other half of [`pad_square`]'s wall arm: a pad on a wall whose
+    /// **x** is fixed. The test above pins the horizontal (north) wall; this
+    /// one pins the vertical (west) wall, where the recess runs along -x and
+    /// the square's span is the y one.
+    #[test]
+    fn a_wall_pad_on_a_vertical_wall_recesses_along_x() {
+        let ir = with_teleports(
+            r#"{ "id":"w", "room":"a", "pad":{"wall":[0,128]},
+                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
+        )
+        .expect("parses");
+        let (lo, hi) = pad_square(&ir.rooms[0], ir.teleports[0].pad).expect("wall square");
+        assert_eq!(
+            (lo, hi),
+            (Pt { x: -64, y: 96 }, Pt { x: 0, y: 160 }),
+            "west wall, recess to -x"
         );
     }
 

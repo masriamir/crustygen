@@ -1260,6 +1260,19 @@ mod tests {
             v.iter().any(|v| v.rule == "P26" && v.subject == "b"),
             "{v:?}"
         );
+        // The rule's other half: `b` stays portal-less, but nothing
+        // teleports into it, so the exit is unreachable by any means.
+        let no_destination = ok.replace(
+            r#""to":{"room":"b","at":[448,128],"angle":90}"#,
+            r#""to":{"room":"a","at":[192,192],"angle":90}"#,
+        );
+        let v = all_violations(&no_destination);
+        assert!(
+            v.iter().any(|v| v.rule == "P26"
+                && v.subject == "b"
+                && v.detail.contains("holds no teleport destination")),
+            "{v:?}"
+        );
     }
 
     /// The hosted-pad disjunct of P26's destination check
