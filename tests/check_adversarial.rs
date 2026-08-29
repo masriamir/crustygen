@@ -10,14 +10,15 @@
 //! broken.
 
 use crustygen::check::{Finding, Severity, Subject, run};
-use crustygen::compile::compile;
 use crustygen::compile::textmap::emit_textmap;
+use crustygen::compile::{compile, compile_reporting};
 use crustygen::ir::Ir;
 use crustygen::tables::Tables;
 use crustywad::Limits;
 use crustywad::map::udmf::{UdmfMap, parse_udmf};
 
 const ENTRADA: &str = include_str!("fixtures/entrada_base.json");
+const TELEPORTS: &str = include_str!("golden/teleports.json");
 
 /// Compiles entrada, emits its TEXTMAP, and parses it back — the same
 /// compile -> emit -> parse round trip `tests/check_conformance.rs` uses, so
@@ -26,6 +27,20 @@ const ENTRADA: &str = include_str!("fixtures/entrada_base.json");
 fn entrada_udmf() -> (UdmfMap, Tables) {
     let tables = Tables::load().expect("tables");
     let ir = Ir::from_json(ENTRADA).expect("ir");
+    let compiled = compile(&ir, &tables).expect("compiles");
+    let text = emit_textmap(&compiled.data, &compiled.things);
+    (
+        parse_udmf(&text, Limits::default()).expect("parses"),
+        tables,
+    )
+}
+
+/// Compiles the teleport golden fixture (island pad, wall alcove, monsters-
+/// only pen — see `tests/golden/teleports.json`), emits its TEXTMAP, and
+/// parses it back, the same round trip `entrada_udmf` uses.
+fn teleports_udmf() -> (UdmfMap, Tables) {
+    let tables = Tables::load().expect("tables");
+    let ir = Ir::from_json(TELEPORTS).expect("ir");
     let compiled = compile(&ir, &tables).expect("compiles");
     let text = emit_textmap(&compiled.data, &compiled.things);
     (
@@ -395,5 +410,194 @@ fn reintroducing_a_scale_factor_is_caught_as_p9() {
         1,
         "no unrelated finding joins it: {:?}",
         report.findings
+    );
+}
+
+/// V-P15, the tag side: retagging one of the island pad's four `special 97`
+/// (`WR Teleport`, player, repeatable) edges to a dangling tag makes its own
+/// destination unresolvable, while the other three edges — still on the
+/// original tag — keep resolving fine. `check_tags` (V-P13) independently
+/// flags the same dangling tag on the same linedef (`args[0]` names no
+/// sector), so this mutation is deliberately a double hit; only V-P15's
+/// count is asserted.
+#[test]
+fn retagging_a_teleport_line_is_caught_as_v_p15() {
+    let (mut map, tables) = teleports_udmf();
+    let baseline = count(&run(&map, "MAP01", &tables, None).findings, "V-P15");
+    assert_eq!(baseline, 0, "the teleport fixture starts P15-clean");
+
+    let special97 = i32::from(tables.teleport_special(false, true));
+    let linedef = map
+        .linedefs
+        .iter()
+        .position(|l| l.special == special97)
+        .expect("the fixture has at least one player, repeatable teleport line");
+    let dangling_tag = 9;
+    assert_ne!(
+        map.linedefs[linedef].args[0], dangling_tag,
+        "the retag must actually change the tag"
+    );
+    map.linedefs[linedef].args[0] = dangling_tag;
+
+    let report = run(&map, "MAP01", &tables, None);
+    let p15: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.check == "V-P15")
+        .collect();
+    assert_eq!(p15.len(), 1, "exactly the one line retagged: {p15:?}");
+    assert_eq!(p15[0].severity, Severity::Error);
+    assert!(
+        matches!(p15[0].subject, Subject::Linedef(l) if l == linedef),
+        "expected the finding to name linedef {linedef}: {p15:?}"
+    );
+    assert!(
+        count(&report.findings, "V-P15") > baseline,
+        "0 -> >0 for V-P15"
+    );
+    assert!(
+        report.findings.iter().any(|f| f.check == "V-P13"),
+        "V-P13 also fires on the same dangling tag, which this test does not gate on: {:?}",
+        report.findings
+    );
+}
+
+/// V-P15, the marker side: deleting the island pad's destination marker
+/// (`type 14` at `(448, 192)`, the only `teleport_dest` in the sector the
+/// island's four edges tag) leaves that tag resolving to no marker at all,
+/// so every one of the island's four edges — not just one — reports broken.
+/// The island's four edges are derived rather than hand-indexed: among the
+/// fixture's `special 97` (player, repeatable) lines, they are the only tag
+/// group with four members (the wall pad's threshold is the other `special
+/// 97` line, alone on its own tag).
+#[test]
+fn removing_the_marker_is_caught_as_v_p15() {
+    let (mut map, tables) = teleports_udmf();
+    let baseline = count(&run(&map, "MAP01", &tables, None).findings, "V-P15");
+    assert_eq!(baseline, 0, "the teleport fixture starts P15-clean");
+
+    let special97 = i32::from(tables.teleport_special(false, true));
+    let mut by_tag: std::collections::HashMap<i32, Vec<usize>> = std::collections::HashMap::new();
+    for (i, l) in map.linedefs.iter().enumerate() {
+        if l.special == special97 {
+            by_tag.entry(l.args[0]).or_default().push(i);
+        }
+    }
+    let mut island_edges: Vec<usize> = by_tag
+        .values()
+        .find(|group| group.len() == 4)
+        .expect("the island pad's four edges share one tag")
+        .clone();
+    island_edges.sort_unstable();
+    assert_eq!(island_edges.len(), 4);
+
+    let marker_id = i32::from(
+        tables
+            .thing_id("teleport_dest")
+            .expect("teleport_dest thing id"),
+    );
+    let before = map.things.len();
+    map.things.retain(|t| {
+        !(t.type_id == marker_id
+            && (t.x - 448.0).abs() < f64::EPSILON
+            && (t.y - 192.0).abs() < f64::EPSILON)
+    });
+    assert_eq!(
+        before - map.things.len(),
+        1,
+        "exactly one marker sits at the island's destination"
+    );
+
+    let report = run(&map, "MAP01", &tables, None);
+    let mut p15: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.check == "V-P15")
+        .collect();
+    assert_eq!(
+        p15.len(),
+        4,
+        "the destination marker is gone, so every island edge is broken: {p15:?}"
+    );
+    p15.sort_unstable_by_key(|f| match f.subject {
+        Subject::Linedef(l) => l,
+        _ => usize::MAX,
+    });
+    let found: Vec<usize> = p15
+        .iter()
+        .map(|f| match f.subject {
+            Subject::Linedef(l) => l,
+            other => panic!("expected a Linedef subject, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        found, island_edges,
+        "expected exactly the island's four edges named: {p15:?}"
+    );
+    assert!(p15.iter().all(|f| f.severity == Severity::Error));
+    assert!(
+        count(&report.findings, "V-P15") > baseline,
+        "0 -> >0 for V-P15"
+    );
+}
+
+/// V-P27: a third room with no portal and no teleport destination, holding
+/// a monster, is a sealed pen — nothing can ever wake it. Built as a
+/// separate IR fixture (spliced onto the golden teleport map's own JSON,
+/// after room `b`, so the existing island/wall/pen teleports are exercised
+/// alongside it) rather than by mutating the parsed `UdmfMap` directly: a
+/// whole new connected sector with its own walls, vertices, and sidedefs is
+/// exactly what the compiler builds from a room declaration, and
+/// `UdmfSector`/`UdmfLinedef` are `#[non_exhaustive]`, so assembling one by
+/// hand outside the crate is not an option. `compile_reporting` is used
+/// (not `compile`) because the sealed room is *also* a compile-side P27
+/// violation (`src/rules.rs`, covered by task 6) that would otherwise fail
+/// the compile outright before a TEXTMAP is ever emitted for the checker to
+/// examine.
+#[test]
+fn sealing_the_pen_is_caught_as_v_p27() {
+    let (baseline_map, tables) = teleports_udmf();
+    let baseline = count(
+        &run(&baseline_map, "MAP01", &tables, None).findings,
+        "V-P27",
+    );
+    assert_eq!(baseline, 0, "the teleport fixture starts P27-clean");
+
+    let room_b_tail = "\"things\": [ { \"kind\": \"imp\", \"at\": [384,64], \"angle\": 0, \
+                        \"ambush\": true } ] }\n  ],\n  \"portals\":";
+    let sealed_room_c = "\"things\": [ { \"kind\": \"imp\", \"at\": [384,64], \"angle\": 0, \
+                          \"ambush\": true } ] },\n    { \"id\": \"c\", \"footprint\": \
+                          [[640,0],[640,256],[896,256],[896,0]], \"floor\": 0, \"ceiling\": 128, \
+                          \"light\": 160, \"floor_tex\": \"FLOOR4_8\", \"ceil_tex\": \
+                          \"CEIL3_5\", \"wall_tex\": \"STARTAN3\", \"things\": [ { \"kind\": \
+                          \"imp\", \"at\": [768,128], \"angle\": 0 } ] }\n  ],\n  \"portals\":";
+    let sealed_json = TELEPORTS.replacen(room_b_tail, sealed_room_c, 1);
+    assert_ne!(sealed_json, TELEPORTS, "the splice changed nothing");
+
+    let ir = Ir::from_json(&sealed_json).expect("ir");
+    let (compiled, _violations) =
+        compile_reporting(&ir, &tables).expect("geometry compiles despite the P27 violation");
+    let text = emit_textmap(&compiled.data, &compiled.things);
+    let map = parse_udmf(&text, Limits::default()).expect("parses");
+
+    let report = run(&map, "MAP01", &tables, None);
+    let p27: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.check == "V-P27")
+        .collect();
+    assert_eq!(
+        p27.len(),
+        1,
+        "only room c's imp is sealed — room b's is still behind its portal: {p27:?}"
+    );
+    assert_eq!(p27[0].severity, Severity::Error);
+    assert!(
+        matches!(p27[0].subject, Subject::Sector(_)),
+        "expected the finding to name a sector: {p27:?}"
+    );
+    assert!(
+        p27[0].message.contains("nothing can ever wake them"),
+        "expected the sealed-room message: {p27:?}"
     );
 }
