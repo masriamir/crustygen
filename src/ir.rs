@@ -2171,28 +2171,40 @@ mod tests {
         );
     }
 
-    /// Half a tile off on both axes: the very address this pad had before
-    /// the IR moved to corners, and the offset vanilla's world-space flat
-    /// wrap turns into four quarter-tiles.
+    /// The `(authored point, square's low corner)` an off-flat-grid rejection
+    /// reports, or `None` for any other outcome — a clean parse included.
+    ///
+    /// The two points differ only for a pad recessed toward -x or -y, where
+    /// the square's low corner is the recess's *far* corner and appears
+    /// nowhere in the IR. Reporting both is what keeps the message pointing at
+    /// something the author actually wrote.
+    fn off_flat_grid(result: &Result<Ir, IrError>) -> Option<((i32, i32), (i32, i32))> {
+        match result {
+            Err(IrError::TeleportPadOffFlatGrid {
+                at_x, at_y, x, y, ..
+            }) => Some(((*at_x, *at_y), (*x, *y))),
+            _ => None,
+        }
+    }
+
+    /// Half a tile off on both axes: the very address this pad had before the
+    /// IR moved to corners, and the offset vanilla's world-space flat wrap
+    /// turns into four quarter-tiles. The same square addressed by its corner
+    /// is the control.
     #[test]
     fn an_island_pad_half_a_tile_off_the_flat_grid_is_rejected() {
-        let err = with_teleports(
-            r#"{ "id":"t", "room":"a", "pad":{"island":[96,160]},
-                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                IrError::TeleportPadOffFlatGrid {
-                    at_x: 96,
-                    at_y: 160,
-                    x: 96,
-                    y: 160,
-                    ..
-                }
-            ),
-            "an island pad's authored point is its square's low corner: {err}"
+        assert_eq!(
+            off_flat_grid(&with_teleports(
+                r#"{ "id":"t", "room":"a", "pad":{"island":[96,160]},
+                     "to":{"room":"b","at":[448,128],"angle":90} }"#
+            )),
+            Some(((96, 160), (96, 160))),
+            "an island pad's authored point is its square's low corner"
+        );
+        assert_eq!(
+            off_flat_grid(&with_teleports(ISLAND)),
+            None,
+            "the same square addressed by its corner parses"
         );
     }
 
@@ -2200,49 +2212,28 @@ mod tests {
     /// even though the wall it is cut into is itself on the grid.
     #[test]
     fn a_wall_pad_whose_span_starts_off_the_flat_grid_is_rejected() {
-        let err = with_teleports(
-            r#"{ "id":"w", "room":"a", "pad":{"wall":[96,256]},
-                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                IrError::TeleportPadOffFlatGrid {
-                    at_x: 96,
-                    at_y: 256,
-                    x: 96,
-                    y: 256,
-                    ..
-                }
-            ),
-            "a pad recessed toward +y keeps the authored point as its low corner: {err}"
+        assert_eq!(
+            off_flat_grid(&with_teleports(
+                r#"{ "id":"w", "room":"a", "pad":{"wall":[96,256]},
+                     "to":{"room":"b","at":[448,128],"angle":90} }"#
+            )),
+            Some(((96, 256), (96, 256))),
+            "a pad recessed toward +y keeps the authored point as its low corner"
         );
     }
 
     /// The other half of the reported pair: this pad is recessed toward -x,
-    /// so its square's low corner (-64, 96) is the recess's *far* corner and
+    /// so its square's low corner (-64, 96) is the recess's far corner and
     /// appears nowhere in the IR. The error names the authored point (0, 96)
     /// as well, so the message points at something the author wrote.
     #[test]
     fn a_wall_pad_recessed_backward_reports_both_its_point_and_its_corner() {
-        let err = with_teleports(
-            r#"{ "id":"w", "room":"a", "pad":{"wall":[0,96]},
-                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
-        )
-        .unwrap_err();
-        assert!(
-            matches!(
-                err,
-                IrError::TeleportPadOffFlatGrid {
-                    at_x: 0,
-                    at_y: 96,
-                    x: -64,
-                    y: 96,
-                    ..
-                }
-            ),
-            "{err}"
+        assert_eq!(
+            off_flat_grid(&with_teleports(
+                r#"{ "id":"w", "room":"a", "pad":{"wall":[0,96]},
+                     "to":{"room":"b","at":[448,128],"angle":90} }"#
+            )),
+            Some(((0, 96), (-64, 96)))
         );
     }
 
@@ -2266,19 +2257,9 @@ mod tests {
             { "id":"w", "room":"a", "pad":{"wall":[64,264]},
               "to":{"room":"b","at":[448,128],"angle":90} }
           ] }"#;
-        let err = Ir::from_json(json).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                IrError::TeleportPadOffFlatGrid {
-                    at_x: 64,
-                    at_y: 264,
-                    x: 64,
-                    y: 264,
-                    ..
-                }
-            ),
-            "{err}"
+        assert_eq!(
+            off_flat_grid(&Ir::from_json(json)),
+            Some(((64, 264), (64, 264)))
         );
     }
 
