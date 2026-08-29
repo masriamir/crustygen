@@ -437,6 +437,13 @@ independent one-way teleports whose destinations land on each other's pads. `exi
 gains `teleport` alongside `switch` and `walkover`: an exit the player can only arrive at by
 teleport.
 
+A `wall` pad's recess is real geometry carved into the void rooms are authored apart across, so
+the IR holds it to the same neighbor rules a portal gap obeys: the recess must clear every other
+room by at least `MIN_PORTAL_GAP` (`TeleportPadRecessTooClose`), and its span on its host wall
+must not overlap or even touch another opening cut into that same wall — a portal's opening or
+the level exit's segment (`TeleportPadBesideOpening`). A walkover exit's own alcove is not yet
+held to either rule; see `KNOWN-GAPS.md`.
+
 ## 7. Compiler contract
 
 ### 7.1 Invariants enforced

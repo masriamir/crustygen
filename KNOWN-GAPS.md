@@ -619,6 +619,17 @@ the room, back the alcove) is passable. A switch exit needs none of this:
 `P_UseSpecialLine` fires from a raycast, not a crossing, so the exit stays a
 normal solid one-sided wall.
 
+**A walkover exit's alcove gets neither of the neighbor checks a wall
+teleport pad's recess does.** `Ir::from_json` holds a `wall` pad's 64-deep
+recess to `MIN_PORTAL_GAP` clearance from every other room
+(`TeleportPadRecessTooClose`) and refuses a span that overlaps or touches
+another opening on the same wall (`TeleportPadBesideOpening`). The exit
+alcove is the same construction and is held to neither: an exit whose alcove
+lands flush on a neighbor room, or whose segment abuts a portal opening on
+the same wall, still compiles. Pre-existing, not introduced with teleports,
+and the checks generalize directly — the fix is to run the same two tests
+over `Exit` in `validate_exits`.
+
 **Every exit is tagged, even though neither `G_ExitLevel` nor
 `G_SecretExitLevel` reads a tag.** Mirrors the existing precedent for manual
 doors (above): uniform tagging keeps `tags::check_no_action_at_tag_zero` a

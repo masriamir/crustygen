@@ -41,8 +41,10 @@ use crate::compile::portals::{Cut, emit_recess, split_wall_for_opening};
 use crate::compile::sectors::vertex_index;
 use crate::compile::tags::TagAllocator;
 use crate::compile::{CompileError, LinedefOut, MapData, SectorOut, SidedefOut};
-use crate::geom::{Pt, wall_edges};
-use crate::ir::{Ir, PadPlacement, Teleport, destination_sector_key, pad_square, square_contains};
+use crate::geom::Pt;
+use crate::ir::{
+    Ir, PadPlacement, Teleport, destination_sector_key, pad_square, square_contains, wall_cut,
+};
 use crate::tables::{Tables, ThingDims};
 
 /// A synthesized `teleport_dest` thing, placed by
@@ -345,20 +347,14 @@ fn resolve_pad(ir: &Ir, tables: &Tables, t: &Teleport) -> Result<PadPlan, Compil
     let kind = match t.pad {
         PadPlacement::Island(_) => PadKind::Island { lo, hi },
         PadPlacement::Wall(at) => {
-            let (axis, fixed, _, _, forward) = wall_edges(&room.footprint)
-                .find(|&(axis, fixed, lo, hi, _)| {
-                    let (along, across) = axis.split(at);
-                    across == fixed && along > lo && along < hi
-                })
-                .expect("validated in Ir::from_json");
-            let (along, _) = axis.split(at);
-            let half = Ir::PAD_SIZE / 2;
+            let (axis, fixed, forward, open_lo, open_hi) =
+                wall_cut(room, at).expect("validated in Ir::from_json");
             PadKind::Wall {
                 cut: Cut {
                     axis,
                     fixed,
-                    open_lo: along - half,
-                    open_hi: along + half,
+                    open_lo,
+                    open_hi,
                 },
                 forward,
             }
