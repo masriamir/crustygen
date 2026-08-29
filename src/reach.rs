@@ -1242,8 +1242,8 @@ mod tests {
               "portals":[],
               "exits":[{ "room":"b", "trigger":"walkover", "at":[448,256], "width":64 }],
               "teleports":[
-                { "id":"go", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[448,128],"angle":90} },
-                { "id":"pen", "room":"b", "pad":{"island":[384,192]}, "to":{"room":"a","at":[128,128],"angle":0}, "monsters_only":true }
+                { "id":"go", "room":"a", "pad":{"island":[64,128]}, "to":{"room":"b","at":[512,128],"angle":90} },
+                { "id":"pen", "room":"b", "pad":{"island":[384,128]}, "to":{"room":"a","at":[192,192],"angle":0}, "monsters_only":true }
               ] }"#,
         )
         .expect("ir");

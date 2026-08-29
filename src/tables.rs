@@ -147,6 +147,11 @@ struct Door {
 }
 
 #[derive(Debug, Deserialize)]
+struct Flat {
+    tile: i32,
+}
+
+#[derive(Debug, Deserialize)]
 struct LightRange {
     min: i32,
     max: i32,
@@ -334,6 +339,7 @@ struct ThingAttrs {
 struct Engine {
     movement: Movement,
     door: Door,
+    flat: Flat,
     light: LightRange,
     player: ThingDims,
     species: HashMap<String, SpeciesEntry>,
@@ -479,6 +485,18 @@ impl Tables {
     #[must_use]
     pub fn door_clearance_allowance(&self) -> i32 {
         self.engine.door.clearance_allowance
+    }
+
+    /// The side of one flat tile in world space, in map units.
+    ///
+    /// The renderer wraps a flat every `tile` units of world space, so a
+    /// sector shows a 64x64 flat as exactly one tile only when its corners
+    /// are multiples of it — the rule teleport pads are placed by. See
+    /// [`crate::ir::Ir::FLAT_TILE`], which carries the same value for the
+    /// table-free IR validation, and `data/engine.toml`'s `[flat]` citation.
+    #[must_use]
+    pub fn flat_tile(&self) -> i32 {
+        self.engine.flat.tile
     }
 
     /// The inclusive range of valid sector light levels.
@@ -1042,6 +1060,11 @@ mod tests {
             "theme wall texture resolves"
         );
         assert!(t.door_clearance_allowance() >= 0, "door allowance loads");
+        assert_eq!(
+            t.flat_tile(),
+            crate::ir::Ir::FLAT_TILE,
+            "the engine table's flat tile and the IR's own copy cannot drift"
+        );
         assert!(
             t.light_range().contains(&128),
             "a mid light level is in range"

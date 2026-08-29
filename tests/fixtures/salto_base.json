@@ -77,10 +77,10 @@
     { "room": "exit", "trigger": "teleport", "at": [1344, 256], "width": 64 }
   ],
   "teleports": [
-    { "id": "hub_to_vault", "room": "hub", "pad": { "island": [128, 384] },
-      "to": { "room": "vault", "at": [832, 288], "angle": 270 } },
+    { "id": "hub_to_vault", "room": "hub", "pad": { "island": [64, 384] },
+      "to": { "room": "vault", "at": [864, 288], "angle": 270 } },
     { "id": "vault_to_hub", "room": "vault", "pad": { "wall": [832, 256] },
-      "to": { "room": "hub", "at": [128, 384], "angle": 0 } },
+      "to": { "room": "hub", "at": [96, 416], "angle": 0 } },
     { "id": "ambush", "room": "closet", "pad": { "island": [832, 704] },
       "to": { "room": "arena", "at": [256, 896], "angle": 270 }, "monsters_only": true },
     { "id": "hub_to_exit", "room": "hub", "pad": { "wall": [384, 0] },

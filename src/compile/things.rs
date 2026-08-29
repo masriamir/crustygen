@@ -608,7 +608,7 @@ mod tests {
           "things":[{ "kind":"imp", "at":[384,64], "angle":0, "ambush":true }] }
       ],
       "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }],
-      "teleports":[{ "id":"t", "room":"a", "pad":{"island":[64,192]},
+      "teleports":[{ "id":"t", "room":"a", "pad":{"island":[64,128]},
                      "to":{"room":"b","at":[448,128],"angle":90} }] }"#;
 
     #[test]
@@ -661,7 +661,7 @@ mod tests {
           "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
       ],
       "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }],
-      "teleports":[{ "id":"t", "room":"a", "pad":{"island":[64,192]},
+      "teleports":[{ "id":"t", "room":"a", "pad":{"island":[64,128]},
                      "to":{"room":"b","at":[334,128],"angle":90} }] }"#;
 
     #[test]
@@ -696,10 +696,10 @@ mod tests {
       ],
       "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }],
       "teleports":[
-        { "id":"t1", "room":"a", "pad":{"island":[64,192]},
-          "to":{"room":"b","at":[448,128],"angle":90} },
+        { "id":"t1", "room":"a", "pad":{"island":[64,128]},
+          "to":{"room":"b","at":[480,160],"angle":90} },
         { "id":"t2", "room":"b", "pad":{"island":[448,128]},
-          "to":{"room":"a","at":[128,128],"angle":0} }] }"#;
+          "to":{"room":"a","at":[192,192],"angle":0} }] }"#;
 
     #[test]
     fn a_destination_pad_too_short_for_the_arriving_thing_is_rejected() {

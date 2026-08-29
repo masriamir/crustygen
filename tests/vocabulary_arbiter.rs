@@ -31,7 +31,7 @@ const BASE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
       "floor":0, "ceiling":128, "light":160,
       "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
       "things":[
-        { "kind":"player1_start", "at":[128,128], "angle":90 }{KEY}
+        { "kind":"player1_start", "at":[192,64], "angle":90 }{KEY}
       ] },
     { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
       "floor":0, "ceiling":128, "light":160, "secret": true,
@@ -46,10 +46,13 @@ const PLAIN: &str = r#"{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[25
 const DOOR: &str = r#"{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128],
   "door_thickness":32, "alcove_near":16, "alcove_far":16 }"#;
 
-/// A free-standing pad in room `a` (square 32..96 × 160..224, clear of both
+/// A free-standing pad in room `a` (square 64..128 × 128..192, clear of both
 /// the player start and the west wall) delivering into room `b`. Repeatable
-/// and crossable by anything: the `97` special.
-const TELEPORT_ISLAND: &str = r#"{ "id":"i", "room":"a", "pad":{"island":[64,192]},
+/// and crossable by anything: the `97` special. The pad is addressed by its
+/// low corner, on the 64-unit flat grid — every aligned pad in this 256x256
+/// room reaches the room's center, which is why the player start sits at
+/// (192, 64) rather than there.
+const TELEPORT_ISLAND: &str = r#"{ "id":"i", "room":"a", "pad":{"island":[64,128]},
   "to":{"room":"b","at":[448,128],"angle":90} }"#;
 /// The same delivery from a pad recessed into room `a`'s north wall, fired
 /// once: the `39` special.
@@ -63,10 +66,10 @@ const TELEPORT_WALL_ONE_SHOT: &str = r#"{ "id":"w", "room":"a", "pad":{"wall":[6
 /// [`IMP_B`], whose species sets the clearance the destination must offer
 /// (`teleports::arriving_dims` takes the largest species in the pad's own
 /// room).
-const TELEPORT_MONSTERS: &str = r#"{ "id":"m", "room":"b", "pad":{"island":[448,192]},
+const TELEPORT_MONSTERS: &str = r#"{ "id":"m", "room":"b", "pad":{"island":[448,128]},
   "to":{"room":"a","at":[64,64],"angle":0}, "monsters_only":true }"#;
 /// [`TELEPORT_MONSTERS`] fired once: the `125` special.
-const TELEPORT_MONSTERS_ONE_SHOT: &str = r#"{ "id":"mo", "room":"b", "pad":{"island":[448,192]},
+const TELEPORT_MONSTERS_ONE_SHOT: &str = r#"{ "id":"mo", "room":"b", "pad":{"island":[448,128]},
   "to":{"room":"a","at":[64,64],"angle":0}, "monsters_only":true, "repeatable":false }"#;
 /// A monster in room `b`, clear of the pad square there. Rule P27 wants a
 /// monster-holding room to have a portal or be a teleport destination, so

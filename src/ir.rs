@@ -296,11 +296,19 @@ pub struct Exit {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PadPlacement {
-    /// The center of a free-standing pad inside the room. Must be on the
-    /// grid, and the whole square must lie strictly inside the footprint.
+    /// The **low corner** (minimum x, minimum y) of a free-standing pad
+    /// inside the room: the square is `[x, x + PAD_SIZE] x [y, y +
+    /// PAD_SIZE]`. It must sit on the 64-unit flat grid (see
+    /// [`Ir::FLAT_TILE`]) and the whole square must lie strictly inside the
+    /// footprint.
     Island(Pt),
-    /// A point on one of the room's axis-aligned walls; the pad is recessed
-    /// outward from it, exactly as a walkover exit's alcove is.
+    /// A point on one of the room's axis-aligned walls, naming the **start**
+    /// of the pad's span along that wall (its low `along` coordinate): the
+    /// span is `[along, along + PAD_SIZE]`. The pad is recessed
+    /// [`Ir::PAD_SIZE`] outward from the wall, exactly as a walkover exit's
+    /// alcove is, so the wall's own fixed coordinate is the square's near
+    /// edge; both it and the span's start must be multiples of
+    /// [`Ir::FLAT_TILE`].
     Wall(Pt),
 }
 
@@ -609,42 +617,42 @@ pub enum IrError {
         /// The unresolvable room identifier.
         room: String,
     },
-    /// An island pad's center is off the grid.
-    #[error("teleport `{id}` has an off-grid pad center ({x}, {y}); grid is {grid}")]
-    TeleportPadOffGrid {
+    /// A pad's square does not sit on the 64-unit flat grid.
+    #[error(
+        "teleport `{id}`: pad corner ({x}, {y}) is not on the 64-unit flat grid; vanilla wraps a \
+         flat every 64 units in world space, so a 64x64 pad reads as one tile only when its \
+         corners are multiples of 64"
+    )]
+    TeleportPadOffFlatGrid {
         /// The teleport's identifier.
         id: String,
-        /// The X coordinate.
+        /// The X coordinate of the pad square's low corner.
         x: i32,
-        /// The Y coordinate.
+        /// The Y coordinate of the pad square's low corner.
         y: i32,
-        /// The configured grid size.
-        grid: i32,
     },
     /// An island pad's square is not strictly inside its room.
-    #[error(
-        "teleport `{id}`: the pad centered at ({x}, {y}) does not lie strictly inside its room"
-    )]
+    #[error("teleport `{id}`: the pad at corner ({x}, {y}) does not lie strictly inside its room")]
     TeleportPadOutsideRoom {
         /// The teleport's identifier.
         id: String,
-        /// The X coordinate of the pad's center.
+        /// The X coordinate of the pad's low corner.
         x: i32,
-        /// The Y coordinate of the pad's center.
+        /// The Y coordinate of the pad's low corner.
         y: i32,
     },
-    /// A wall pad's point is on no axis-aligned wall of its room, or its
-    /// 64-unit span runs past the wall's ends.
+    /// A wall pad's point is on no axis-aligned wall of its room, or the
+    /// 64-unit span starting there runs past that wall's far end.
     #[error(
         "teleport `{id}`: ({x}, {y}) is not on an axis-aligned wall of its room with 64 units \
-         of wall around it"
+         of wall running on from it"
     )]
     TeleportPadOffWall {
         /// The teleport's identifier.
         id: String,
-        /// The X coordinate of the wall point.
+        /// The X coordinate of the span's start on the wall.
         x: i32,
-        /// The Y coordinate of the wall point.
+        /// The Y coordinate of the span's start on the wall.
         y: i32,
     },
     /// A wall pad's 64-deep recess would come within [`Ir::MIN_PORTAL_GAP`]
@@ -750,6 +758,36 @@ impl Ir {
     /// walkable onto. The 16/24 variants are a recorded follow-up.
     pub const PAD_FLOOR_STEP: i32 = 8;
 
+    /// The side of one flat tile in world space, in map units.
+    ///
+    /// An engine fact, unlike the corpus-measured [`Self::PAD_SIZE`] beside
+    /// it — two separate facts that happen to coincide. Vanilla maps a flat
+    /// onto the world by absolute coordinates and wraps it every 64 units:
+    /// `R_MapPlane` derives each span's world position
+    /// (`linuxdoom-1.10/r_plane.c`, pinned commit a77dfb96),
+    ///
+    /// ```text
+    /// ds_xfrac = viewx + FixedMul(finecosine[angle], length);
+    /// ds_yfrac = -viewy - FixedMul(finesine[angle], length);
+    /// ```
+    ///
+    /// and `R_DrawSpan` indexes the 64x64 flat with the low six bits of each
+    /// (`linuxdoom-1.10/r_draw.c`),
+    ///
+    /// ```text
+    /// spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);
+    /// ```
+    ///
+    /// so a 64x64 sector shows the flat as exactly one tile only when its
+    /// corners are multiples of 64. Had the corpus put [`Self::PAD_SIZE`] at
+    /// 128 this constant would still be 64.
+    ///
+    /// The same value is carried in `data/engine.toml`'s `[flat] tile` with
+    /// its citation, and `tables::tests` asserts the two agree; the IR keeps
+    /// its own copy because [`Self::from_json`] validates without loading
+    /// any table.
+    pub const FLAT_TILE: i32 = 64;
+
     /// Parses and validates an IR document.
     ///
     /// Every numeric field a later pass divides by, halves, or writes into a
@@ -788,11 +826,12 @@ impl Ir {
     /// [`IrError::DuplicateTeleport`] for a repeated teleport id,
     /// [`IrError::TeleportUnknownRoom`] for a teleport naming a room that
     /// does not exist as its pad's room or its destination's,
-    /// [`IrError::TeleportPadOffGrid`] for an island pad whose center is not
-    /// a multiple of `grid`, [`IrError::TeleportPadOutsideRoom`] for an
+    /// [`IrError::TeleportPadOffFlatGrid`] for a pad whose square's low
+    /// corner is not a multiple of [`Self::FLAT_TILE`],
+    /// [`IrError::TeleportPadOutsideRoom`] for an
     /// island pad whose square does not lie strictly inside its room,
     /// [`IrError::TeleportPadOffWall`] for a wall pad whose point is on no
-    /// axis-aligned wall or whose span runs past the wall's ends,
+    /// axis-aligned wall or whose span runs past that wall's far end,
     /// [`IrError::TeleportPadBesideOpening`] for a wall pad whose span
     /// overlaps or touches a portal opening or the exit segment on the same
     /// wall, [`IrError::TeleportPadRecessTooClose`] for a wall pad whose
@@ -1135,13 +1174,6 @@ impl Ir {
         }
         match t.pad {
             PadPlacement::Island(c) => {
-                // Checked before the grid: a pad flush against a wall (its
-                // edge, not its off-grid center, is what a mapper reasons
-                // about) is rejected for that reason even when its center
-                // also happens to be off-grid — the two conditions are
-                // independent authoring mistakes, and this order is what
-                // makes the "flush against the wall" case report the
-                // geometric problem rather than the coincidental grid one.
                 let (lo, hi) = pad_square(room, t.pad).expect("an island square always resolves");
                 let corners = [lo, Pt { x: lo.x, y: hi.y }, hi, Pt { x: hi.x, y: lo.y }];
                 let inside = corners
@@ -1163,14 +1195,6 @@ impl Ir {
                         y: c.y,
                     });
                 }
-                if c.x % ir.grid != 0 || c.y % ir.grid != 0 {
-                    return Err(IrError::TeleportPadOffGrid {
-                        id: t.id.clone(),
-                        x: c.x,
-                        y: c.y,
-                        grid: ir.grid,
-                    });
-                }
             }
             PadPlacement::Wall(at) => {
                 let Some((axis, fixed, _, open_lo, open_hi)) = wall_cut(room, at) else {
@@ -1183,6 +1207,23 @@ impl Ir {
                 Self::validate_wall_pad_openings(ir, t, axis, fixed, (open_lo, open_hi))?;
                 Self::validate_wall_pad_neighbors(ir, t, room)?;
             }
+        }
+        // Last of the pad checks, in both arms, for the reason the island
+        // arm's geometry tests come first: a pad flush against a wall, or
+        // one straddling an opening, is an independent authoring mistake
+        // from a pad half a tile off the flat grid, and reporting the
+        // geometric problem is more useful than reporting the coincidental
+        // alignment one. `ir.grid` plays no part — 64 subsumes every grid
+        // that divides it, and a grid that does *not* divide 64 (48, say)
+        // still cannot excuse a pad off the flat grid, since it is the
+        // renderer, not the author's grid, that wraps the flat.
+        let (lo, _) = pad_square(room, t.pad).expect("resolved by the arm above");
+        if lo.x % Self::FLAT_TILE != 0 || lo.y % Self::FLAT_TILE != 0 {
+            return Err(IrError::TeleportPadOffFlatGrid {
+                id: t.id.clone(),
+                x: lo.x,
+                y: lo.y,
+            });
         }
         if destination_sector_key(ir, &t.to).is_none() {
             return Err(IrError::TeleportDestinationOutsideRoom {
@@ -1368,21 +1409,26 @@ fn wall_openings(ir: &Ir, room: &str, axis: Axis, fixed: i32) -> Vec<(String, (i
 /// Where a wall pad's point cuts its room's wall: `(axis, fixed coordinate,
 /// whether the host's own edge runs in the increasing-`along` direction, the
 /// cut's low end, its high end)`, or `None` when the point is on no
-/// axis-aligned wall or its 64-unit span runs past that wall's ends.
+/// axis-aligned wall or its 64-unit span runs past that wall's high end.
+///
+/// The point is the span's **start**, not its midpoint: the cut runs
+/// `[along, along + PAD_SIZE]`. Only the high end can overrun, since the
+/// wall lookup already requires the start to lie strictly inside the wall's
+/// own extent — a start exactly on a corner would belong to two edges at
+/// once.
 ///
 /// Shared by [`pad_square`] and `compile::teleports::resolve_pad`, which
 /// would otherwise re-derive the same wall lookup from the same predicate
 /// and could drift apart.
 pub(crate) fn wall_cut(room: &Room, at: Pt) -> Option<(Axis, i32, bool, i32, i32)> {
-    let half = Ir::PAD_SIZE / 2;
-    let (axis, fixed, lo, hi, forward) =
+    let (axis, fixed, _, hi, forward) =
         wall_edges(&room.footprint).find(|&(axis, fixed, lo, hi, _)| {
             let (along, across) = axis.split(at);
             across == fixed && along > lo && along < hi
         })?;
     let (along, _) = axis.split(at);
-    let (open_lo, open_hi) = (along - half, along + half);
-    if open_lo < lo || open_hi > hi {
+    let (open_lo, open_hi) = (along, along + Ir::PAD_SIZE);
+    if open_hi > hi {
         return None;
     }
     Some((axis, fixed, forward, open_lo, open_hi))
@@ -1390,23 +1436,22 @@ pub(crate) fn wall_cut(room: &Room, at: Pt) -> Option<(Axis, i32, bool, i32, i32
 
 /// The axis-aligned square a pad occupies once emitted, as `(low corner,
 /// high corner)`, or `None` for a wall pad whose point is on no axis-aligned
-/// wall or whose 64-unit span runs past the wall's ends.
+/// wall or whose 64-unit span runs past that wall's far end.
+///
+/// An island pad's point *is* the low corner, so its arm is pure addition;
+/// see [`PadPlacement`].
 ///
 /// Shared by [`Ir::from_json`]'s validation and `compile::teleports`, so the
 /// two can never disagree about where a pad is — the same reason
 /// [`crate::geom::facing_spans`] is shared between portal validation and
 /// portal cutting.
 pub(crate) fn pad_square(room: &Room, pad: PadPlacement) -> Option<(Pt, Pt)> {
-    let half = Ir::PAD_SIZE / 2;
     match pad {
         PadPlacement::Island(c) => Some((
+            c,
             Pt {
-                x: c.x - half,
-                y: c.y - half,
-            },
-            Pt {
-                x: c.x + half,
-                y: c.y + half,
+                x: c.x + Ir::PAD_SIZE,
+                y: c.y + Ir::PAD_SIZE,
             },
         )),
         PadPlacement::Wall(at) => {
@@ -2033,7 +2078,7 @@ mod tests {
         Ir::from_json(&TELEPORT_BASE.replace("TELEPORTS", list))
     }
 
-    const ISLAND: &str = r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]},
+    const ISLAND: &str = r#"{ "id":"t1", "room":"a", "pad":{"island":[64,128]},
         "to":{"room":"b","at":[448,128],"angle":90} }"#;
 
     #[test]
@@ -2046,9 +2091,14 @@ mod tests {
         );
         assert!(ir.rooms[0].things[0].ambush, "the ambush flag parses");
         let (lo, hi) = pad_square(&ir.rooms[0], t.pad).expect("island square");
-        assert_eq!((lo, hi), (Pt { x: 32, y: 160 }, Pt { x: 96, y: 224 }));
+        assert_eq!(
+            (lo, hi),
+            (Pt { x: 64, y: 128 }, Pt { x: 128, y: 192 }),
+            "the authored point is the square's low corner"
+        );
         assert_eq!(Ir::PAD_SIZE, 64);
         assert_eq!(Ir::PAD_FLOOR_STEP, 8);
+        assert_eq!(Ir::FLAT_TILE, 64);
     }
 
     #[test]
@@ -2061,8 +2111,8 @@ mod tests {
         let (lo, hi) = pad_square(&ir.rooms[0], ir.teleports[0].pad).expect("wall square");
         assert_eq!(
             (lo, hi),
-            (Pt { x: 32, y: 256 }, Pt { x: 96, y: 320 }),
-            "north wall, recess to +y"
+            (Pt { x: 64, y: 256 }, Pt { x: 128, y: 320 }),
+            "north wall, span starting at the authored point, recess to +y"
         );
     }
 
@@ -2080,7 +2130,7 @@ mod tests {
         let (lo, hi) = pad_square(&ir.rooms[0], ir.teleports[0].pad).expect("wall square");
         assert_eq!(
             (lo, hi),
-            (Pt { x: -64, y: 96 }, Pt { x: 0, y: 160 }),
+            (Pt { x: -64, y: 128 }, Pt { x: 0, y: 192 }),
             "west wall, recess to -x"
         );
     }
@@ -2097,8 +2147,10 @@ mod tests {
 
     #[test]
     fn an_island_pad_touching_the_room_wall_is_rejected() {
+        // On the flat grid, so the geometric rule is the only one that can
+        // fire: the square's west edge lies exactly on room `a`'s own.
         let err = with_teleports(
-            r#"{ "id":"t", "room":"a", "pad":{"island":[32,128]},
+            r#"{ "id":"t", "room":"a", "pad":{"island":[0,128]},
                  "to":{"room":"b","at":[448,128],"angle":90} }"#,
         )
         .unwrap_err();
@@ -2108,14 +2160,62 @@ mod tests {
         );
     }
 
+    /// Half a tile off on both axes: the very address this pad had before
+    /// the IR moved to corners, and the offset vanilla's world-space flat
+    /// wrap turns into four quarter-tiles.
     #[test]
-    fn an_off_grid_island_center_is_rejected() {
+    fn an_island_pad_half_a_tile_off_the_flat_grid_is_rejected() {
         let err = with_teleports(
-            r#"{ "id":"t", "room":"a", "pad":{"island":[70,192]},
+            r#"{ "id":"t", "room":"a", "pad":{"island":[96,160]},
                  "to":{"room":"b","at":[448,128],"angle":90} }"#,
         )
         .unwrap_err();
-        assert!(matches!(err, IrError::TeleportPadOffGrid { .. }), "{err}");
+        assert!(
+            matches!(err, IrError::TeleportPadOffFlatGrid { x: 96, y: 160, .. }),
+            "{err}"
+        );
+    }
+
+    /// The wall arm's `along` half: the span starts 32 units into a tile,
+    /// even though the wall it is cut into is itself on the grid.
+    #[test]
+    fn a_wall_pad_whose_span_starts_off_the_flat_grid_is_rejected() {
+        let err = with_teleports(
+            r#"{ "id":"w", "room":"a", "pad":{"wall":[96,256]},
+                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, IrError::TeleportPadOffFlatGrid { x: 96, y: 256, .. }),
+            "{err}"
+        );
+    }
+
+    /// The wall arm's *across* half, which the span alone cannot express:
+    /// room `a`'s north wall sits at y = 264, so the recess's own low corner
+    /// is 8 units off the tile grid however the span is placed.
+    #[test]
+    fn a_wall_pad_on_a_wall_off_the_flat_grid_is_rejected() {
+        let json = r#"{ "seed":1, "grid":8, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,264],[256,264],[256,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[ { "kind":"player1_start", "at":[192,64], "angle":90 } ] },
+            { "id":"b", "footprint":[[320,0],[320,264],[576,264],[576,0]],
+              "floor":0, "ceiling":128, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[],
+          "teleports":[
+            { "id":"w", "room":"a", "pad":{"wall":[64,264]},
+              "to":{"room":"b","at":[448,128],"angle":90} }
+          ] }"#;
+        let err = Ir::from_json(json).unwrap_err();
+        assert!(
+            matches!(err, IrError::TeleportPadOffFlatGrid { x: 64, y: 264, .. }),
+            "{err}"
+        );
     }
 
     #[test]
@@ -2124,8 +2224,8 @@ mod tests {
         // `TeleportDestinationsShareSector` cannot fire and the overlap rule
         // is the only one under test.
         let err = with_teleports(
-            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[448,128],"angle":90} },
-               { "id":"t2", "room":"a", "pad":{"island":[128,192]}, "to":{"room":"b","at":[448,128],"angle":90} }"#,
+            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,64]}, "to":{"room":"b","at":[448,128],"angle":90} },
+               { "id":"t2", "room":"a", "pad":{"island":[128,64]}, "to":{"room":"b","at":[448,128],"angle":90} }"#,
         )
         .unwrap_err();
         assert!(matches!(err, IrError::TeleportPadsOverlap { .. }), "{err}");
@@ -2136,7 +2236,7 @@ mod tests {
         let err = with_teleports(&format!("{ISLAND}, {ISLAND}")).unwrap_err();
         assert!(matches!(err, IrError::DuplicateTeleport { .. }), "{err}");
         let err = with_teleports(
-            r#"{ "id":"t", "room":"zzz", "pad":{"island":[64,192]}, "to":{"room":"b","at":[448,128],"angle":90} }"#,
+            r#"{ "id":"t", "room":"zzz", "pad":{"island":[64,128]}, "to":{"room":"b","at":[448,128],"angle":90} }"#,
         )
         .unwrap_err();
         assert!(matches!(err, IrError::TeleportUnknownRoom { .. }), "{err}");
@@ -2145,7 +2245,7 @@ mod tests {
     #[test]
     fn a_destination_outside_its_room_is_rejected() {
         let err = with_teleports(
-            r#"{ "id":"t", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[100,100],"angle":90} }"#,
+            r#"{ "id":"t", "room":"a", "pad":{"island":[64,128]}, "to":{"room":"b","at":[100,100],"angle":90} }"#,
         )
         .unwrap_err();
         assert!(
@@ -2156,9 +2256,14 @@ mod tests {
 
     #[test]
     fn distinct_destinations_in_one_sector_are_rejected_but_identical_ones_share() {
+        // One pad per room: two 64-unit pads on the flat grid cannot both
+        // fit inside a 256x256 room without touching, and touching is its
+        // own error. Both teleports still deliver into room `b` proper —
+        // neither point lands on `t2`'s own pad, which spans 448..512 x
+        // 128..192.
         let err = with_teleports(
-            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[448,128],"angle":90} },
-               { "id":"t2", "room":"a", "pad":{"island":[192,192]}, "to":{"room":"b","at":[384,64],"angle":0} }"#,
+            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,128]}, "to":{"room":"b","at":[448,64],"angle":90} },
+               { "id":"t2", "room":"b", "pad":{"island":[448,128]}, "to":{"room":"b","at":[384,192],"angle":0} }"#,
         )
         .unwrap_err();
         assert!(
@@ -2166,8 +2271,8 @@ mod tests {
             "{err}"
         );
         with_teleports(
-            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[448,128],"angle":90} },
-               { "id":"t2", "room":"a", "pad":{"island":[192,192]}, "to":{"room":"b","at":[448,128],"angle":90} }"#,
+            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,128]}, "to":{"room":"b","at":[448,64],"angle":90} },
+               { "id":"t2", "room":"b", "pad":{"island":[448,128]}, "to":{"room":"b","at":[448,64],"angle":90} }"#,
         )
         .expect("identical destinations share one marker");
     }
@@ -2175,8 +2280,8 @@ mod tests {
     #[test]
     fn a_destination_on_another_pad_keys_to_that_pad() {
         let ir = with_teleports(
-            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[448,128],"angle":90} },
-               { "id":"t2", "room":"b", "pad":{"island":[448,128]}, "to":{"room":"a","at":[64,192],"angle":0} }"#,
+            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,128]}, "to":{"room":"b","at":[480,160],"angle":90} },
+               { "id":"t2", "room":"b", "pad":{"island":[448,128]}, "to":{"room":"a","at":[96,160],"angle":0} }"#,
         )
         .expect("a two-way pair");
         assert_eq!(
@@ -2201,14 +2306,14 @@ mod tests {
 
     #[test]
     fn a_wall_pad_whose_span_overruns_the_wall_is_rejected() {
-        // (16, 256) is on room a's north wall (fixed=256, span 0..256), so
+        // (224, 256) is on room a's north wall (fixed=256, span 0..256), so
         // the `wall_edges().find(..)` lookup itself succeeds — unlike
         // `a_wall_pad_off_any_wall_is_rejected`'s [64,64], which is on no
         // wall at all. What fails here is the second, narrower check: a
-        // 64-wide pad centered on along=16 spans -16..48, and open_lo=-16
-        // runs past the wall's own lo=0 end.
+        // 64-wide span starting at along=224 ends at 288, past the wall's
+        // own hi=256 end.
         let err = with_teleports(
-            r#"{ "id":"w", "room":"a", "pad":{"wall":[16,256]},
+            r#"{ "id":"w", "room":"a", "pad":{"wall":[224,256]},
                  "to":{"room":"b","at":[448,128],"angle":90} }"#,
         )
         .unwrap_err();
@@ -2218,17 +2323,17 @@ mod tests {
     #[test]
     fn an_island_pad_enclosing_a_concave_room_vertex_is_rejected() {
         // Room `a` is a 256x256 square with a rectangular notch bitten out
-        // of the south wall (x in 112..144, up to y=112), so it has two
-        // reflex vertices at (112,112) and (144,112). The pad centered at
-        // (128,128) spans (96,96)-(160,160): all four corners test as
-        // strictly inside the room (contains + positive clearance) — the
-        // notch is well below the pad's own footprint — yet both reflex
-        // vertices land strictly inside the pad square, so the pad would
-        // straddle solid wall that the four-corner check alone cannot see.
+        // of the south wall (x in 144..176, up to y=144), so it has two
+        // reflex vertices at (144,144) and (176,144). The pad at corner
+        // (128,128) spans (128,128)-(192,192): all four corners test as
+        // strictly inside the room (contains + positive clearance) — each is
+        // 16 units clear of the notch — yet both reflex vertices land
+        // strictly inside the pad square, so the pad would straddle solid
+        // wall that the four-corner check alone cannot see.
         let json = r#"{ "seed":1, "grid":16, "theme":"tech_base",
           "rooms":[
             { "id":"a",
-              "footprint":[[0,0],[0,256],[256,256],[256,0],[144,0],[144,112],[112,112],[112,0]],
+              "footprint":[[0,0],[0,256],[256,256],[256,0],[176,0],[176,144],[144,144],[144,0]],
               "floor":0, "ceiling":128, "light":160,
               "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
               "things":[ { "kind":"player1_start", "at":[192,64], "angle":90 } ] },
@@ -2250,10 +2355,10 @@ mod tests {
 
     /// The slab case neither the four-corner test nor the vertex test sees.
     /// Room `a` is a 256x256 square with a 32-wide spur of solid material
-    /// driven up from its south wall to y = 208, so the room's own boundary
-    /// runs clean *through* the pad square (96,96)-(160,160): the spur's
+    /// driven up from its south wall to y = 224, so the room's own boundary
+    /// runs clean *through* the pad square (128,128)-(192,192): the spur's
     /// four vertices all sit outside that square (two at y = 0, two at
-    /// y = 208) and all four pad corners sit strictly inside the room, one
+    /// y = 224) and all four pad corners sit strictly inside the room, one
     /// pair on each side of the spur. Before the edge test this IR passed
     /// `Ir::from_json` and every compile pass, and died in the nodebuilder
     /// at pack time.
@@ -2262,7 +2367,7 @@ mod tests {
         let json = r#"{ "seed":1, "grid":16, "theme":"tech_base",
           "rooms":[
             { "id":"a",
-              "footprint":[[0,0],[0,256],[256,256],[256,0],[144,0],[144,208],[112,208],[112,0]],
+              "footprint":[[0,0],[0,256],[256,256],[256,0],[176,0],[176,224],[144,224],[144,0]],
               "floor":0, "ceiling":128, "light":160,
               "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
               "things":[ { "kind":"player1_start", "at":[192,64], "angle":90 } ] },
@@ -2322,32 +2427,29 @@ mod tests {
         east_wall_pad(r#""portals":[],"#, EAST_WALL_PAD).expect("8 units of wall is enough");
     }
 
-    /// A plain portal on room `a`'s east wall, 64 wide about (256,128) — an
-    /// opening spanning y 96..160.
+    /// A plain portal on room `a`'s east wall, 64 wide about (256,96) — an
+    /// opening spanning y 64..128.
     const EAST_PORTAL: &str = r#""portals":[
-        { "a":"a", "b":"b", "kind":"plain", "width":64, "at":[256,128] }],"#;
+        { "a":"a", "b":"b", "kind":"plain", "width":64, "at":[256,96] }],"#;
 
     #[test]
     fn a_wall_pad_touching_a_portal_opening_on_the_same_wall_is_rejected() {
-        // Span 160..224 meets the opening's high end exactly, which would
-        // leave the recess's south jamb coincident with the passage's north
-        // one.
-        let err = east_wall_pad(
-            EAST_PORTAL,
-            r#"{ "id":"w", "room":"a", "pad":{"wall":[256,192]},
-                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
-        )
-        .unwrap_err();
+        // [`EAST_WALL_PAD`]'s span 128..192 meets the opening's high end
+        // exactly, which would leave the recess's south jamb coincident with
+        // the passage's north one.
+        let err = east_wall_pad(EAST_PORTAL, EAST_WALL_PAD).unwrap_err();
         assert!(
             matches!(err, IrError::TeleportPadBesideOpening { .. }),
             "{err}"
         );
         // The same opening read from room `b`'s side of the gap — the
         // `FacingSpan::far` half of the lookup — with `b`'s own west wall
-        // carrying the pad.
+        // carrying the pad. That wall sits at x = 328, off the flat grid, so
+        // this case also pins the check order: the opening conflict is the
+        // authoring mistake worth reporting, not the alignment one.
         let err = east_wall_pad(
             EAST_PORTAL,
-            r#"{ "id":"w", "room":"b", "pad":{"wall":[328,192]},
+            r#"{ "id":"w", "room":"b", "pad":{"wall":[328,128]},
                  "to":{"room":"a","at":[128,128],"angle":90} }"#,
         )
         .unwrap_err();
@@ -2359,10 +2461,10 @@ mod tests {
 
     #[test]
     fn a_wall_pad_clear_of_the_portal_opening_on_its_wall_is_accepted() {
-        // Span 192..256, a full 32 units clear of the opening's 96..160.
+        // Span 192..256, a full 64 units clear of the opening's 64..128.
         east_wall_pad(
             EAST_PORTAL,
-            r#"{ "id":"w", "room":"a", "pad":{"wall":[256,224]},
+            r#"{ "id":"w", "room":"a", "pad":{"wall":[256,192]},
                  "to":{"room":"b","at":[448,128],"angle":90} }"#,
         )
         .expect("clear of the opening");
@@ -2370,11 +2472,11 @@ mod tests {
 
     #[test]
     fn a_wall_pad_touching_an_exit_span_on_the_same_wall_is_rejected() {
-        // The exit spans y 32..96 on room `a`'s east wall; the pad's span
-        // 96..160 meets it exactly.
+        // The exit spans y 64..128 on room `a`'s east wall; the pad's span
+        // 128..192 meets it exactly.
         let err = east_wall_pad(
             r#""portals":[],
-               "exits":[{ "room":"a", "trigger":"walkover", "at":[256,64], "width":64 }],"#,
+               "exits":[{ "room":"a", "trigger":"walkover", "at":[256,96], "width":64 }],"#,
             EAST_WALL_PAD,
         )
         .unwrap_err();
@@ -2386,11 +2488,11 @@ mod tests {
 
     #[test]
     fn a_wall_pad_clear_of_the_exit_span_on_its_wall_is_accepted() {
-        // The same exit, with the pad one grid step further along the wall:
-        // span 160..224 against the exit's 32..96.
+        // The same exit, with the pad one tile further along the wall:
+        // span 192..256 against the exit's 64..128.
         east_wall_pad(
             r#""portals":[],
-               "exits":[{ "room":"a", "trigger":"walkover", "at":[256,64], "width":64 }],"#,
+               "exits":[{ "room":"a", "trigger":"walkover", "at":[256,96], "width":64 }],"#,
             r#"{ "id":"w", "room":"a", "pad":{"wall":[256,192]},
                  "to":{"room":"b","at":[448,128],"angle":90} }"#,
         )
@@ -2413,7 +2515,7 @@ mod tests {
         // sees rather than the vaguer "outside room `b`" it would otherwise
         // fall through to.
         let err = with_teleports(
-            r#"{ "id":"t", "room":"a", "pad":{"island":[64,192]},
+            r#"{ "id":"t", "room":"a", "pad":{"island":[64,128]},
                  "to":{"room":"b","at":[448,40000],"angle":90} }"#,
         )
         .unwrap_err();

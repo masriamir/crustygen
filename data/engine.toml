@@ -21,6 +21,10 @@ source = "id-Software/DOOM linuxdoom-1.10/p_local.h: '#define PLAYERRADIUS 16*FR
 clearance_allowance = 4
 source = "id-Software/DOOM linuxdoom-1.10/p_doors.c, EV_DoDoor: 'door->topheight = P_FindLowestCeilingSurrounding(sec); door->topheight -= 4*FRACUNIT;' https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_doors.c — matches placeholder, unchanged"
 
+[flat]
+tile = 64
+source = "id-Software/DOOM linuxdoom-1.10/r_plane.c, R_MapPlane: 'ds_xfrac = viewx + FixedMul(finecosine[angle], length); ds_yfrac = -viewy - FixedMul(finesine[angle], length);' — a flat span's texture coordinates are the world coordinates themselves; linuxdoom-1.10/r_draw.c, R_DrawSpan: 'spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);' — which masks 6 bits per axis, so the 64x64 flat repeats every 64 map units in world space. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/r_plane.c and .../r_draw.c"
+
 [light]
 min = 0
 max = 255

@@ -12,7 +12,7 @@
   "portals": [ { "a": "a", "b": "b", "kind": "plain", "width": 128, "at": [256,128] } ],
   "exits": [ { "room": "a", "trigger": "switch", "at": [128,0], "width": 64 } ],
   "teleports": [
-    { "id": "island", "room": "a", "pad": { "island": [64,192] }, "to": { "room": "b", "at": [448,192], "angle": 270 } },
-    { "id": "wall", "room": "b", "pad": { "wall": [448,256] }, "to": { "room": "a", "at": [64,192], "angle": 90 } },
-    { "id": "pen", "room": "b", "pad": { "island": [512,64] }, "to": { "room": "a", "at": [128,128], "angle": 0 }, "monsters_only": true }
+    { "id": "island", "room": "a", "pad": { "island": [64,128] }, "to": { "room": "b", "at": [448,192], "angle": 270 } },
+    { "id": "wall", "room": "b", "pad": { "wall": [448,256] }, "to": { "room": "a", "at": [96,160], "angle": 90 } },
+    { "id": "pen", "room": "b", "pad": { "island": [448,64] }, "to": { "room": "a", "at": [192,192], "angle": 0 }, "monsters_only": true }
   ] }

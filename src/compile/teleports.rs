@@ -481,7 +481,7 @@ mod tests {
         Ok((data, markers, tags))
     }
 
-    const ISLAND: &str = r#"{ "id":"t", "room":"a", "pad":{"island":[64,192]},
+    const ISLAND: &str = r#"{ "id":"t", "room":"a", "pad":{"island":[64,128]},
         "to":{"room":"b","at":[448,128],"angle":90} }"#;
 
     /// Two rooms far to the east, `a`'s own east wall one pad-depth short of
@@ -579,28 +579,28 @@ mod tests {
         );
         assert_eq!(tags.manifest().len(), 1);
         assert!(tags.manifest()[0].purpose.contains("teleport t"));
-        // The pad's corners: center (64,192) +/- 32.
+        // The pad's corners: low corner (64,128) plus PAD_SIZE.
         let xs: Vec<i32> = edges
             .iter()
             .flat_map(|l| [data.vertices[l.v1].x, data.vertices[l.v2].x])
             .collect();
         assert_eq!(
             (xs.iter().min(), xs.iter().max()),
-            (Some(&32), Some(&96)),
-            "the pad square spans x = 32..96"
+            (Some(&64), Some(&128)),
+            "the pad square spans x = 64..128"
         );
     }
 
     #[test]
     fn island_edges_wind_so_the_host_is_on_the_right() {
         // The right-hand side of v1->v2 must face the host: for the edge
-        // along the pad's south side (y = 160) walking +x, the right side
-        // is -y, which is the host — so that edge runs from x=32 to x=96.
+        // along the pad's south side (y = 128) walking +x, the right side
+        // is -y, which is the host — so that edge runs from x=64 to x=128.
         let (data, _, _) = compiled(ISLAND, "").expect("compiles");
         let south = data
             .linedefs
             .iter()
-            .find(|l| data.vertices[l.v1].y == 160 && data.vertices[l.v2].y == 160)
+            .find(|l| data.vertices[l.v1].y == 128 && data.vertices[l.v2].y == 128)
             .expect("south edge");
         assert!(
             data.vertices[south.v1].x < data.vertices[south.v2].x,
@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn monsters_only_pads_take_the_largest_species_as_the_arriving_thing() {
         let (_, markers, _) = compiled(
-            r#"{ "id":"m", "room":"b", "pad":{"island":[448,192]},
+            r#"{ "id":"m", "room":"b", "pad":{"island":[448,128]},
                  "to":{"room":"a","at":[128,128],"angle":0}, "monsters_only":true }"#,
             r#"{ "kind":"imp", "at":[384,64], "angle":0 },
                { "kind":"pinky", "at":[512,64], "angle":0 }"#,
@@ -660,11 +660,13 @@ mod tests {
 
     #[test]
     fn identical_destinations_share_one_tag_and_marker() {
+        // One pad per room: two flat-grid pads cannot both fit in a 256x256
+        // room without touching, which is its own error.
         let (data, markers, tags) = compiled(
-            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]},
-                 "to":{"room":"b","at":[448,128],"angle":90} },
-               { "id":"t2", "room":"a", "pad":{"island":[192,192]},
-                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
+            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,128]},
+                 "to":{"room":"b","at":[448,64],"angle":90} },
+               { "id":"t2", "room":"b", "pad":{"island":[448,128]},
+                 "to":{"room":"b","at":[448,64],"angle":90} }"#,
             "",
         )
         .expect("compiles");
@@ -682,10 +684,10 @@ mod tests {
     #[test]
     fn a_two_way_pair_tags_the_other_pad() {
         let (data, markers, _) = compiled(
-            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,192]},
-                 "to":{"room":"b","at":[448,128],"angle":90} },
+            r#"{ "id":"t1", "room":"a", "pad":{"island":[64,128]},
+                 "to":{"room":"b","at":[480,160],"angle":90} },
                { "id":"t2", "room":"b", "pad":{"island":[448,128]},
-                 "to":{"room":"a","at":[64,192],"angle":0} }"#,
+                 "to":{"room":"a","at":[96,160],"angle":0} }"#,
             "",
         )
         .expect("compiles");
@@ -701,9 +703,9 @@ mod tests {
     #[test]
     fn a_thing_standing_on_a_pad_is_rejected() {
         let err = compiled(
-            r#"{ "id":"m", "room":"b", "pad":{"island":[448,192]},
+            r#"{ "id":"m", "room":"b", "pad":{"island":[448,128]},
                  "to":{"room":"a","at":[128,128],"angle":0} }"#,
-            r#"{ "kind":"imp", "at":[448,192], "angle":0 }"#,
+            r#"{ "kind":"imp", "at":[480,160], "angle":0 }"#,
         )
         .expect_err("a thing on the pad square must be rejected");
         assert!(
@@ -729,7 +731,7 @@ mod tests {
         // reorder the two teleports: with the wall pad first, the removal
         // happens before anything is recorded and the bug hides.
         let (data, markers, tags) = compiled(
-            r#"{ "id":"i", "room":"a", "pad":{"island":[64,192]},
+            r#"{ "id":"i", "room":"a", "pad":{"island":[64,128]},
                  "to":{"room":"b","at":[448,128],"angle":90} },
                { "id":"w", "room":"a", "pad":{"wall":[192,256]},
                  "to":{"room":"b","at":[448,128],"angle":90} }"#,

@@ -1244,7 +1244,7 @@ mod tests {
         let ok = format!(
             r#"{} "portals":[],
                "exits":[{{ "room":"b", "trigger":"teleport", "at":[448,256], "width":64 }}],
-               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,192]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
+               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,128]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
             TWO_ROOMS_HEAD.replace("THINGS_B", "")
         );
         let clean = all_violations(&ok);
@@ -1288,9 +1288,9 @@ mod tests {
             r#"{} "portals":[],
                "exits":[{{ "room":"b", "trigger":"teleport", "at":[448,256], "width":64 }}],
                "teleports":[
-                 {{ "id":"t1", "room":"a", "pad":{{"island":[64,192]}},
-                    "to":{{"room":"b","at":[448,192],"angle":90}} }},
-                 {{ "id":"t2", "room":"b", "pad":{{"island":[448,192]}},
+                 {{ "id":"t1", "room":"a", "pad":{{"island":[64,128]}},
+                    "to":{{"room":"b","at":[480,160],"angle":90}} }},
+                 {{ "id":"t2", "room":"b", "pad":{{"island":[448,128]}},
                     "to":{{"room":"a","at":[200,200],"angle":0}} }}
                ] }}"#,
             TWO_ROOMS_HEAD.replace("THINGS_B", "")
@@ -1314,7 +1314,7 @@ mod tests {
         );
         let destination = sealed.replace(
             r#""teleports":[]"#,
-            r#""teleports":[{ "id":"t", "room":"a", "pad":{"island":[64,192]}, "to":{"room":"b","at":[384,64],"angle":90} }]"#,
+            r#""teleports":[{ "id":"t", "room":"a", "pad":{"island":[64,128]}, "to":{"room":"b","at":[384,64],"angle":90} }]"#,
         );
         assert!(all_violations(&destination).iter().all(|v| v.rule != "P27"));
     }
@@ -1331,9 +1331,9 @@ mod tests {
             r#"{} "portals":[],
                "exits":[{{ "room":"a", "trigger":"switch", "at":[128,0], "width":64 }}],
                "teleports":[
-                 {{ "id":"t1", "room":"a", "pad":{{"island":[64,192]}},
-                    "to":{{"room":"b","at":[448,192],"angle":90}} }},
-                 {{ "id":"t2", "room":"b", "pad":{{"island":[448,192]}},
+                 {{ "id":"t1", "room":"a", "pad":{{"island":[64,128]}},
+                    "to":{{"room":"b","at":[480,160],"angle":90}} }},
+                 {{ "id":"t2", "room":"b", "pad":{{"island":[448,128]}},
                     "to":{{"room":"a","at":[200,200],"angle":0}} }}
                ] }}"#,
             TWO_ROOMS_HEAD.replace("THINGS_B", r#"{ "kind":"imp", "at":[384,64], "angle":0 }"#)
@@ -1349,7 +1349,7 @@ mod tests {
         let json = format!(
             r#"{} "portals":[{{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }}],
                "exits":[{{ "room":"a", "trigger":"switch", "at":[128,0], "width":64 }}],
-               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,192]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
+               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,128]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
             TWO_ROOMS_HEAD.replace("THINGS_B", "")
         );
         assert!(all_violations(&json).iter().all(|v| v.rule != "P15"));
@@ -1366,7 +1366,7 @@ mod tests {
         let json = format!(
             r#"{} "portals":[{{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }}],
                "exits":[{{ "room":"a", "trigger":"switch", "at":[128,0], "width":64 }}],
-               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,192]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
+               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,128]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
             TWO_ROOMS_HEAD.replace("THINGS_B", "")
         );
         let ir = Ir::from_json(&json).expect("ir");
@@ -1406,7 +1406,7 @@ mod tests {
         let json = format!(
             r#"{} "portals":[{{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }}],
                "exits":[{{ "room":"a", "trigger":"switch", "at":[128,0], "width":64 }}],
-               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,192]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
+               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,128]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
             TWO_ROOMS_HEAD.replace("THINGS_B", "")
         );
         let ir = Ir::from_json(&json).expect("ir");
