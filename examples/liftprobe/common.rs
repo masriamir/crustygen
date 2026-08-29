@@ -4,8 +4,12 @@
 //! (`linuxdoom-1.10` at `a77dfb96`): the `case N:` labels in
 //! `P_UseSpecialLine` (`p_switch.c`), `P_CrossSpecialLine` and
 //! `P_ShootSpecialLine` (`p_spec.c`), and the `EV_DoPlat` / `EV_DoFloor` type
-//! each dispatches to. Load, dedup and `Scene` rules are byte-identical to
-//! `crustygen-corpus` (`src/lift/corpus.rs`).
+//! each dispatches to. The loader shares `crustygen-corpus`'s pieces
+//! (`src/lift/corpus.rs`): the same lenient archive options, the same
+//! `ingest::load_map` gate, and `map_hash` deduplication — so the population
+//! reproduces the sweep's unique-map count — but it does not bucket failures:
+//! an unreadable archive, WAD or map group is named on stderr and skipped, and
+//! an unlistable directory is fatal.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -57,9 +61,10 @@ pub(crate) fn idx(i: i32) -> usize {
     usize::try_from(i).expect("UDMF indices are non-negative")
 }
 
-/// Walks every `.zip`/`.wad` in `dirs` exactly as `crustygen-corpus` does and
-/// calls `visit` once per unique loaded map. Returns the unique-map count.
-/// Unreadable archives and WADs are named on stderr and skipped.
+/// Walks every `.zip`/`.wad` in `dirs` (non-recursively, like
+/// `crustygen-corpus`) and calls `visit` once per unique loaded map. Returns
+/// the unique-map count. Unreadable archives, WADs and map groups are named
+/// on stderr and skipped.
 pub(crate) fn sweep(dirs: &[String], mut visit: impl FnMut(&str, &UdmfMap)) -> u64 {
     let options = ParseOptions {
         strictness: Strictness::Lenient,
@@ -84,18 +89,20 @@ pub(crate) fn sweep(dirs: &[String], mut visit: impl FnMut(&str, &UdmfMap)) -> u
                             .iter()
                             .filter(|m| has_ext(Path::new(m.path()), "wad"))
                         {
+                            let source = format!("{}!{}", path.display(), member.path());
                             match archive.wad(member) {
-                                Ok(wad) => maps += survey_wad(&wad, &mut seen, &mut visit),
-                                Err(e) => eprintln!("{}!{}: {e}", path.display(), member.path()),
+                                Ok(wad) => maps += survey_wad(&wad, &source, &mut seen, &mut visit),
+                                Err(e) => eprintln!("{source}: {e}"),
                             }
                         }
                     }
                     Err(e) => eprintln!("{}: {e}", path.display()),
                 }
             } else {
+                let source = path.display().to_string();
                 match Wad::from_path(path) {
-                    Ok(wad) => maps += survey_wad(&wad, &mut seen, &mut visit),
-                    Err(e) => eprintln!("{}: {e}", path.display()),
+                    Ok(wad) => maps += survey_wad(&wad, &source, &mut seen, &mut visit),
+                    Err(e) => eprintln!("{source}: {e}"),
                 }
             }
         }
@@ -105,13 +112,20 @@ pub(crate) fn sweep(dirs: &[String], mut visit: impl FnMut(&str, &UdmfMap)) -> u
 
 fn survey_wad(
     wad: &Wad,
+    source: &str,
     seen: &mut BTreeSet<String>,
     visit: &mut impl FnMut(&str, &UdmfMap),
 ) -> u64 {
     let mut maps = 0;
     for group in &wad.map_groups() {
-        let Ok(loaded) = ingest::load_map(wad, group) else {
-            continue;
+        let loaded = match ingest::load_map(wad, group) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                // Named, never silently dropped: a skipped map changes the
+                // population, and the count must be explainable.
+                eprintln!("{source} {}: {e}", group.name);
+                continue;
+            }
         };
         if !seen.insert(map_hash(wad, group)) {
             continue;

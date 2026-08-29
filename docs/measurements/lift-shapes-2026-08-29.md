@@ -19,9 +19,11 @@ the compiler, rule P5 and the recognizer state the same thing.
 
 ## Method and its limits
 
-Population and load rules are byte-identical to `crustygen-corpus`: every `*.zip` opens through
-crustywad's archive reader under lenient options, every `.wad` member is read, every map group
-passes through `ingest::load_map`, and maps are deduplicated by the same `sha256:` hash. Retail
+The population is drawn the way `crustygen-corpus` draws it: every `*.zip` opens through
+crustywad's archive reader under the same lenient options, every `.wad` member is read, every map
+group passes through the same `ingest::load_map` gate, and maps are deduplicated by the same
+`sha256:` hash (`map_hash`). The probe does not bucket failures the way the sweep does — an
+unreadable archive, WAD or map group is named on stderr and skipped. Retail
 WADs are read as bare files through strict `Wad::from_path`. **1,282 unique sample maps load**,
 matching the 2026-08-28 expressibility run and the teleport probe exactly. Three sample zips are
 not archives (`10817-noreturn`, `3370-teledoom`, `9470-rocket1`) — the same three every sweep
