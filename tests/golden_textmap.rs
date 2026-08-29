@@ -8,6 +8,7 @@ use crustywad::{Wad, WadBuilder, WadKind};
 
 const TWO_ROOM: &str = include_str!("golden/two_room.json");
 const STEPPED: &str = include_str!("golden/stepped_rooms.json");
+const TELEPORTS: &str = include_str!("golden/teleports.json");
 
 #[test]
 fn compiler_output_matches_the_golden_fixture() {
@@ -282,4 +283,102 @@ fn regenerate_stepped_golden() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/stepped_rooms.textmap");
     std::fs::write(path, &out.textmap).expect("write golden");
+}
+
+#[test]
+fn teleport_output_matches_the_golden_fixture() {
+    let ir = Ir::from_json(TELEPORTS).expect("ir");
+    let tables = Tables::load().expect("tables");
+    let out = compile(&ir, &tables).expect("compiles");
+    assert_eq!(
+        out.textmap,
+        include_str!("golden/teleports.textmap"),
+        "compiler output drifted from the teleports golden fixture"
+    );
+}
+
+/// Rewrites `tests/golden/teleports.textmap` from the current compiler.
+///
+/// Ignored by default so a drifting compiler fails the test above rather than
+/// silently rewriting its own expectation. Run deliberately with
+/// `cargo test --test golden_textmap regenerate_teleports_golden -- --ignored`,
+/// then read the diff before committing it.
+#[test]
+#[ignore = "regenerates a golden fixture; run explicitly"]
+fn regenerate_teleports_golden() {
+    let ir = Ir::from_json(TELEPORTS).expect("ir");
+    let tables = Tables::load().expect("tables");
+    let out = compile(&ir, &tables).expect("compiles");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/teleports.textmap");
+    std::fs::write(path, &out.textmap).expect("write golden");
+}
+
+#[test]
+#[expect(
+    clippy::float_cmp,
+    reason = "the arrival's x/y come straight from an integer-valued JSON fixture through the \
+              compiler and back through crustywad's UDMF reader; an exact match is the point, \
+              not an approximation"
+)]
+fn teleports_and_the_ambush_flag_survive_the_round_trip() {
+    let ir = Ir::from_json(TELEPORTS).expect("ir");
+    let tables = Tables::load().expect("tables");
+    let out = compile(&ir, &tables).expect("compiles");
+    let mut builder = WadBuilder::new(WadKind::Pwad);
+    builder.add_lump("MAP01", b"");
+    builder.add_lump("TEXTMAP", out.textmap.as_bytes());
+    builder.add_lump("ENDMAP", b"");
+    let wad = Wad::from_bytes(builder.build().expect("serializes")).expect("parses");
+    let group = wad.map_group("MAP01").expect("group");
+    let map = Map::assemble(&wad, &group).expect("assembles");
+
+    let player = i32::from(tables.teleport_special(false, true));
+    let monsters = i32::from(tables.teleport_special(true, true));
+    let island_edges: Vec<_> = map
+        .linedefs()
+        .iter()
+        .filter(|l| l.special.special == player)
+        .collect();
+    assert_eq!(
+        island_edges.len(),
+        5,
+        "four island edges plus the wall pad's threshold"
+    );
+    assert_eq!(
+        map.linedefs()
+            .iter()
+            .filter(|l| l.special.special == monsters)
+            .count(),
+        4
+    );
+    for l in &island_edges {
+        assert_ne!(l.special.args[0], 0, "every trigger names a real tag");
+        assert!(map.linedef_left(l).is_some(), "two-sided");
+    }
+    // Every tag on a trigger is a sector tag holding exactly one marker.
+    let marker = tables.thing_id("teleport_dest").expect("thing id");
+    for tag in island_edges.iter().map(|l| l.special.args[0]) {
+        let sectors: Vec<usize> = (0..map.sectors().len())
+            .filter(|&i| map.sectors()[i].tag == tag)
+            .collect();
+        assert_eq!(sectors.len(), 1, "tag {tag} names one sector");
+    }
+    assert_eq!(
+        map.things().iter().filter(|t| t.type_id == marker).count(),
+        3,
+        "three distinct destinations"
+    );
+    let imp = map
+        .things()
+        .iter()
+        .find(|t| t.type_id == tables.thing_id("imp").unwrap())
+        .expect("imp");
+    assert_ne!(imp.flags & 0b1000, 0, "ambush → bit 3 (ADR-0019)");
+    let arrival = map
+        .things()
+        .iter()
+        .find(|t| t.type_id == marker && t.x == 448.0 && t.y == 192.0)
+        .expect("island's marker");
+    assert_eq!(arrival.angle, 270);
 }
