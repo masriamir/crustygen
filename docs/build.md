@@ -53,9 +53,17 @@ failure never leaves a partial `<out.wad>` behind.
 Emission order is fixed (`docs/design.md` §7.1), so the same IR yields the
 same bytes: `crustygen-build tests/fixtures/entrada_base.json out.wad` writes
 a file byte-identical to the committed `maps/entrada.wad`, and
-`tests/build_cli.rs` pins that. The committed map's binary Doom-format twin,
-`maps/entrada_doom.wad`, is not produced here — it is the `cwad convert`
-downconvert described in `tests/first_map.rs`.
+`crustygen-build tests/fixtures/salto_base.json out.wad` to `maps/salto.wad`.
+`tests/build_cli.rs` pins both. The binary Doom-format twins are not produced
+here — they are `cwad convert` downconverts. `maps/entrada_doom.wad` is the
+one described in `tests/first_map.rs` (`cwad convert --to doom --nodes` on the
+un-noded twin `pack::pack_udmf` writes); `maps/salto_doom.wad` was produced by
+running that downconvert against the committed UDMF build itself,
+`cwad convert maps/salto.wad --to doom --nodes --lenient -o maps/salto_doom.wad`,
+which drops the `ZNODES` lump with a warning rather than refusing and rebuilds
+the node lumps for the Doom format regardless. The two routes agree: the same
+command over `maps/entrada.wad` reproduces the committed `maps/entrada_doom.wad`
+byte-for-byte.
 
 ## Tests
 

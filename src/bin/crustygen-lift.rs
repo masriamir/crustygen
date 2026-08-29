@@ -6,19 +6,28 @@
 //! Surveys every map group (or just `--map NAME`) through the shared
 //! ingestion path — UDMF or classic Doom binary — and prints one
 //! human-readable census line per map, or a JSON array with `--json`.
-//! `--vocabulary` appends a per-map verdict from `crustygen::lift::vocabulary`.
+//! `--vocabulary` appends a per-map verdict from `crustygen::lift::vocabulary`,
+//! with `crustygen::lift::teleport`'s refusals folded in as a fourth axis
+//! (and its per-map counts alongside the verdict under `--json`).
 //! Groups that fail to load are named on stderr and skipped; survivors are
 //! still reported. Exit 0 when every selected group surveyed, 1 when some
 //! failed, 2 on a usage, I/O, or WAD-level failure (every such failure
 //! names what failed on stderr).
 
+use crustygen::check::scene::Scene;
 use crustygen::ingest::{self, MapOrigin};
+use crustygen::lift::teleport::{self, TeleportCounts};
 use crustygen::lift::vocabulary::{Verdict, Vocabulary};
 use crustygen::lift::{self, MapTelemetry};
 use crustygen::tables::Tables;
 use crustywad::Wad;
 
 const USAGE: &str = "usage: crustygen-lift <wad> [--map NAME] [--json] [--vocabulary]";
+
+/// One surveyed map's row: its census, which ingest path produced it, and —
+/// only under `--vocabulary` — its verdict paired with the teleport counts
+/// standing behind that verdict's fourth axis.
+type Record = (MapTelemetry, MapOrigin, Option<(Verdict, TeleportCounts)>);
 
 fn main() {
     std::process::exit(real_main());
@@ -100,16 +109,18 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
     }
 
     // Loaded once, up front, when `--vocabulary` is set — `classify` is
-    // cheap and the same `Vocabulary` classifies every surveyed map.
+    // cheap and the same `Vocabulary` classifies every surveyed map. The
+    // `Tables` are kept alongside it: the teleport recognizer reads them
+    // directly, not through the vocabulary's membership sets.
     let vocab = if args.vocabulary {
-        Some(Vocabulary::from_tables(
-            &Tables::load().map_err(|err| format!("tables: {err}"))?,
-        ))
+        let tables = Tables::load().map_err(|err| format!("tables: {err}"))?;
+        let vocabulary = Vocabulary::from_tables(&tables);
+        Some((tables, vocabulary))
     } else {
         None
     };
 
-    let mut records: Vec<(MapTelemetry, MapOrigin, Option<Verdict>)> = Vec::new();
+    let mut records: Vec<Record> = Vec::new();
     let mut failures = 0usize;
     for group in &groups {
         match ingest::load_map(&wad, group) {
@@ -122,7 +133,31 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
                     eprintln!("crustygen-lift: note: map `{}`: {note}", group.name);
                 }
                 let telemetry = lift::survey(&group.name, &loaded.map);
-                let verdict = vocab.as_ref().map(|v| v.classify(&telemetry));
+                let verdict = vocab.as_ref().map(|(tables, vocabulary)| {
+                    let verdict = vocabulary.classify(&telemetry);
+                    // The histogram is already computed: a map with none of
+                    // the four teleport specials among its linedef specials
+                    // has no teleport line for the recognizer to recognize,
+                    // so skip building a `Scene` and running it — `verdict`
+                    // stays `classify`'s own (`teleports_ok == true`) and the
+                    // counts are the all-zero default.
+                    let has_teleports = tables
+                        .teleport_specials()
+                        .into_iter()
+                        .any(|s| telemetry.linedef_specials.contains_key(&i32::from(s)));
+                    if has_teleports {
+                        // `Scene::build`'s findings are dropped: this is a
+                        // survey, not a verification run. The recognizer reads
+                        // whatever boundaries resolved and refuses what it
+                        // cannot state — `crustygen-check` is where structural
+                        // faults get reported.
+                        let scene = Scene::build(&loaded.map, tables, &mut Vec::new());
+                        let report = teleport::recognize(&scene, tables);
+                        (verdict.with_teleports(&report), report.counts)
+                    } else {
+                        (verdict, TeleportCounts::default())
+                    }
+                });
                 records.push((telemetry, loaded.origin, verdict));
             }
             Err(err) => {
@@ -138,17 +173,22 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
             for (telemetry, _, verdict) in &records {
                 let mut value = serde_json::to_value(telemetry)
                     .map_err(|err| format!("failed to serialize telemetry: {err}"))?;
-                let verdict = verdict
+                let (verdict, teleports) = verdict
                     .as_ref()
                     .expect("--vocabulary set: every record carries a verdict");
-                value
+                let object = value
                     .as_object_mut()
-                    .expect("MapTelemetry serializes to a JSON object")
-                    .insert(
-                        "verdict".to_owned(),
-                        serde_json::to_value(verdict)
-                            .map_err(|err| format!("failed to serialize verdict: {err}"))?,
-                    );
+                    .expect("MapTelemetry serializes to a JSON object");
+                object.insert(
+                    "verdict".to_owned(),
+                    serde_json::to_value(verdict)
+                        .map_err(|err| format!("failed to serialize verdict: {err}"))?,
+                );
+                object.insert(
+                    "teleports".to_owned(),
+                    serde_json::to_value(teleports)
+                        .map_err(|err| format!("failed to serialize teleport counts: {err}"))?,
+                );
                 values.push(value);
             }
             serde_json::to_string_pretty(&values)
@@ -160,7 +200,10 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
         println!("{text}");
     } else {
         for (telemetry, origin, verdict) in &records {
-            let suffix = verdict.as_ref().map(verdict_suffix).unwrap_or_default();
+            let suffix = verdict
+                .as_ref()
+                .map(|(v, counts)| verdict_suffix(v, counts))
+                .unwrap_or_default();
             println!("{}{suffix}", human_line(telemetry, *origin));
         }
     }
@@ -191,9 +234,13 @@ fn human_line(t: &MapTelemetry, origin: MapOrigin) -> String {
 }
 
 /// The `--vocabulary` suffix appended to a [`human_line`] census line: the
-/// overall verdict, an ok/unknown breakdown per axis, and a vanilla-only
-/// note when the map leaves the pinned engine's vanilla special list.
-fn verdict_suffix(v: &Verdict) -> String {
+/// overall verdict, an ok/unknown breakdown per membership axis, a
+/// vanilla-only note when the map leaves the pinned engine's vanilla special
+/// list, and — only when the teleport recognizer refused something — how
+/// many of its lines it refused. A map with no teleport line, and a map
+/// whose every teleport line was recognized, both read the same: silence on
+/// that axis, because there is nothing there the lifter would have to drop.
+fn verdict_suffix(v: &Verdict, teleports: &TeleportCounts) -> String {
     use std::fmt::Write as _;
 
     let mut s = format!(
@@ -221,6 +268,9 @@ fn verdict_suffix(v: &Verdict) -> String {
     part("thing types", v.thing_kinds_ok, &v.unknown_thing_types);
     if !v.vanilla_only {
         s.push_str(" (outside vanilla)");
+    }
+    if !v.teleports_ok {
+        let _ = write!(s, " (teleports refused: {})", teleports.refusals());
     }
     s
 }

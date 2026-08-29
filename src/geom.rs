@@ -86,6 +86,57 @@ pub fn contains(poly: &[Pt], p: Pt) -> bool {
     inside
 }
 
+/// Twice the signed area of triangle `abc`; positive when `c` lies to the
+/// left of the directed line `ab`.
+///
+/// Widened to `i64` before subtracting, like every other predicate here, so
+/// no difference can overflow. The products stay well inside `i64` because
+/// every coordinate reaching this has already been bounded to the binary
+/// map's signed 16-bit range by [`crate::ir::Ir::from_json`].
+fn orient(a: Pt, b: Pt, c: Pt) -> i64 {
+    let (abx, aby) = (
+        i64::from(b.x) - i64::from(a.x),
+        i64::from(b.y) - i64::from(a.y),
+    );
+    let (acx, acy) = (
+        i64::from(c.x) - i64::from(a.x),
+        i64::from(c.y) - i64::from(a.y),
+    );
+    abx * acy - aby * acx
+}
+
+/// Whether the segment `a`–`b` enters the *open* axis-aligned rectangle
+/// spanning `lo` to `hi` — its boundary excluded, so a segment running
+/// exactly along one edge, or touching only a corner, does not count.
+///
+/// A separating-axis test in exact integer arithmetic over the only three
+/// axes a segment and an axis-aligned rectangle need: the rectangle's own
+/// two, and the segment's normal. The two shapes miss each other exactly
+/// when one of those three separates them, so the negation below is a
+/// decision, not an approximation — unlike a proper-crossing test against
+/// the rectangle's four edges, which misses a segment running corner to
+/// corner through it (every crossing is then at an endpoint, so none is
+/// proper).
+///
+/// A vertex lying strictly inside the rectangle needs no separate test: it
+/// is on the line of both edges that meet there, and an interior point has
+/// rectangle points on both sides of that line, so the normal axis cannot
+/// separate either edge.
+///
+/// `pub(crate)` so [`crate::ir::Ir::from_json`] can reject a pad square a
+/// wall runs through and a wall recess that crowds a neighboring room, both
+/// of which are "does this rectangle collide with that boundary" questions
+/// no point test can answer.
+pub(crate) fn segment_enters_open_rect(a: Pt, b: Pt, lo: Pt, hi: Pt) -> bool {
+    if a.x.max(b.x) <= lo.x || a.x.min(b.x) >= hi.x || a.y.max(b.y) <= lo.y || a.y.min(b.y) >= hi.y
+    {
+        return false;
+    }
+    let corners = [lo, Pt { x: lo.x, y: hi.y }, hi, Pt { x: hi.x, y: lo.y }];
+    let sides = corners.map(|c| orient(a, b, c));
+    !(sides.iter().all(|&s| s >= 0) || sides.iter().all(|&s| s <= 0))
+}
+
 /// The axis a wall runs along.
 ///
 /// `pub(crate)` so [`crate::ir`] can validate a portal's facing-wall gap with
@@ -324,7 +375,10 @@ pub fn clearance(poly: &[Pt], p: Pt) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pt, clearance, contains, is_axis_or_diagonal, is_clockwise, shoelace2};
+    use super::{
+        Pt, clearance, contains, is_axis_or_diagonal, is_clockwise, segment_enters_open_rect,
+        shoelace2,
+    };
 
     /// A 256-unit square wound clockwise, matching the Doom convention.
     fn square() -> Vec<Pt> {
@@ -381,6 +435,55 @@ mod tests {
         assert!(!contains(
             &[Pt { x: 0, y: 0 }, Pt { x: 64, y: 0 }],
             Pt { x: 32, y: 0 }
+        ));
+    }
+
+    #[test]
+    fn a_segment_crossing_clean_through_a_rectangle_enters_it() {
+        let (lo, hi) = (Pt { x: 96, y: 96 }, Pt { x: 160, y: 160 });
+        // Straight through, both endpoints outside and neither inside the
+        // rectangle — the case a "is any endpoint inside" test misses.
+        assert!(segment_enters_open_rect(
+            Pt { x: 128, y: 0 },
+            Pt { x: 128, y: 256 },
+            lo,
+            hi
+        ));
+        // Corner to corner: every intersection with the rectangle's own
+        // edges is at an endpoint of one of them, so no crossing is
+        // *proper*, yet the segment plainly passes through the interior.
+        assert!(segment_enters_open_rect(
+            Pt { x: 0, y: 0 },
+            Pt { x: 256, y: 256 },
+            lo,
+            hi
+        ));
+    }
+
+    #[test]
+    fn a_segment_only_touching_a_rectangle_does_not_enter_it() {
+        let (lo, hi) = (Pt { x: 96, y: 96 }, Pt { x: 160, y: 160 });
+        // Flush along the west edge.
+        assert!(!segment_enters_open_rect(
+            Pt { x: 96, y: 0 },
+            Pt { x: 96, y: 256 },
+            lo,
+            hi
+        ));
+        // Through the north-east corner and no further: the diagonal's only
+        // shared point is that corner.
+        assert!(!segment_enters_open_rect(
+            Pt { x: 128, y: 192 },
+            Pt { x: 192, y: 128 },
+            lo,
+            hi
+        ));
+        // Clear of it altogether.
+        assert!(!segment_enters_open_rect(
+            Pt { x: 0, y: 0 },
+            Pt { x: 0, y: 256 },
+            lo,
+            hi
         ));
     }
 

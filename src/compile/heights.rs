@@ -283,6 +283,7 @@ mod tests {
                     special: 0,
                     tag: 0,
                     wall_tex: "FRONT_TEX".to_owned(),
+                    host: None,
                 },
                 SectorOut {
                     floor: 0,
@@ -293,6 +294,7 @@ mod tests {
                     special: 0,
                     tag: 0,
                     wall_tex: "BACK_TEX".to_owned(),
+                    host: None,
                 },
             ],
             sidedefs: vec![

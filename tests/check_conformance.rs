@@ -1,9 +1,11 @@
-//! Conformance e2e: entrada's emitted TEXTMAP judged against its hand-paired
-//! spec (`tests/fixtures/entrada.spec.md`). Every derivable frontmatter
-//! number in that spec was hand-set to entrada's own compiled actuals, so a
-//! clean run must show zero `Fail` rows — proving `check::run`'s
-//! `conform::rows` end to end against a real compiled map, not just the unit
-//! fixtures `src/check/conform.rs` already carries.
+//! Conformance e2e: each committed fixture's emitted TEXTMAP judged against
+//! its hand-paired spec — entrada against `tests/fixtures/entrada.spec.md`,
+//! salto (the teleport playtest map) against
+//! `tests/fixtures/salto.spec.md`. Every derivable frontmatter number in
+//! those specs was hand-set to that map's own compiled actuals, so a clean
+//! run must show zero `Fail` rows — proving `check::run`'s `conform::rows`
+//! end to end against real compiled maps, not just the unit fixtures
+//! `src/check/conform.rs` already carries.
 
 use crustygen::check::{ConformanceRow, Severity, Subject, Verdict, run};
 use crustygen::compile::compile;
@@ -16,16 +18,18 @@ use crustywad::map::udmf::parse_udmf;
 
 const ENTRADA: &str = include_str!("fixtures/entrada_base.json");
 const ENTRADA_SPEC: &str = include_str!("fixtures/entrada.spec.md");
+const SALTO: &str = include_str!("fixtures/salto_base.json");
+const SALTO_SPEC: &str = include_str!("fixtures/salto.spec.md");
 
-/// Compiles entrada, emits its TEXTMAP, parses it back, and runs
+/// Compiles `ir_json`, emits its TEXTMAP, parses it back, and runs
 /// [`crustygen::check::run`] against `spec_text` parsed through
 /// [`Spec::from_markdown`]. Panics (via `expect`) on any stage failure —
-/// entrada and `spec_text` are known-good inputs in every call site here, so
-/// a failure is this test's own setup being wrong, not something a caller
-/// should have to handle.
-fn conformance_rows_for(spec_text: &str) -> Vec<ConformanceRow> {
+/// every call site here passes a committed fixture and its paired spec, both
+/// known-good, so a failure is this test's own setup being wrong, not
+/// something a caller should have to handle.
+fn conformance_rows_for(ir_json: &str, spec_text: &str) -> Vec<ConformanceRow> {
     let tables = Tables::load().expect("tables");
-    let ir = Ir::from_json(ENTRADA).expect("ir parses");
+    let ir = Ir::from_json(ir_json).expect("ir parses");
     let compiled = compile(&ir, &tables).expect("compiles");
     let text = emit_textmap(&compiled.data, &compiled.things);
     let map = parse_udmf(&text, Limits::default()).expect("emitted TEXTMAP parses");
@@ -36,7 +40,7 @@ fn conformance_rows_for(spec_text: &str) -> Vec<ConformanceRow> {
 
 #[test]
 fn entrada_conforms_to_its_paired_spec() {
-    let rows = conformance_rows_for(ENTRADA_SPEC);
+    let rows = conformance_rows_for(ENTRADA, ENTRADA_SPEC);
 
     let failed: Vec<_> = rows.iter().filter(|r| r.verdict == Verdict::Fail).collect();
     assert!(failed.is_empty(), "unexpected Fail rows: {failed:?}");
@@ -64,8 +68,8 @@ fn a_wrong_secret_count_fails_its_row() {
     );
     assert_ne!(wrong, ENTRADA_SPEC, "the patch changed nothing");
 
-    let good_rows = conformance_rows_for(ENTRADA_SPEC);
-    let bad_rows = conformance_rows_for(&wrong);
+    let good_rows = conformance_rows_for(ENTRADA, ENTRADA_SPEC);
+    let bad_rows = conformance_rows_for(ENTRADA, &wrong);
     assert_eq!(
         good_rows.len(),
         bad_rows.len(),
@@ -151,7 +155,7 @@ fn a_structurally_broken_scene_marks_every_conformance_row_not_run() {
         "every row's `actual` must name the failure: {broken_rows:?}"
     );
 
-    let healthy_rows = conformance_rows_for(ENTRADA_SPEC);
+    let healthy_rows = conformance_rows_for(ENTRADA, ENTRADA_SPEC);
     let broken_params: Vec<&str> = broken_rows.iter().map(|r| r.parameter.as_str()).collect();
     let healthy_params: Vec<&str> = healthy_rows.iter().map(|r| r.parameter.as_str()).collect();
     assert_eq!(
@@ -221,4 +225,50 @@ fn a_misplaced_thing_v_s_error_does_not_trigger_containment() {
         "a misplaced-thing V-S error must not trip containment: no row should be NotRun: \
          {rows:?}"
     );
+}
+
+/// Salto's own conformance run: the teleport playtest map judged against
+/// `tests/fixtures/salto.spec.md`, the same hand-paired shape entrada has.
+/// Zero `Fail` rows, plus the four rows the teleport toolchain actually
+/// produces — the teleport exit trigger, the player-crossable pad count, the
+/// monsters-only ambush pad, and the deaf ratio the closet's three imps give
+/// it — named explicitly so a regression in any one of them fails here by
+/// name rather than only inside the blanket "no Fail rows" assertion.
+#[test]
+fn salto_conforms_to_its_paired_spec_including_the_four_teleport_rows() {
+    let rows = conformance_rows_for(SALTO, SALTO_SPEC);
+
+    let failed: Vec<_> = rows.iter().filter(|r| r.verdict == Verdict::Fail).collect();
+    assert!(failed.is_empty(), "unexpected Fail rows: {failed:?}");
+
+    let not_run: Vec<_> = rows
+        .iter()
+        .filter(|r| r.verdict == Verdict::NotRun)
+        .collect();
+    assert!(
+        not_run.is_empty(),
+        "unexpected NotRun rows (broken scene): {not_run:?}"
+    );
+
+    for parameter in [
+        "progression.exit.trigger",
+        "progression.teleports.count",
+        "combat.ambush.teleport_ambushes",
+    ] {
+        let row = rows
+            .iter()
+            .find(|r| r.parameter == parameter)
+            .expect(parameter);
+        assert_eq!(row.verdict, Verdict::Pass, "{row:?}");
+    }
+
+    // `deaf_ratio` is an `info_row`, so its verdict is `Info` by
+    // construction and can never be `Pass` — the measurement itself is the
+    // assertion: all three imps carry the ambush flag.
+    let deaf = rows
+        .iter()
+        .find(|r| r.parameter == "combat.ambush.deaf_ratio")
+        .expect("deaf ratio");
+    assert_eq!(deaf.verdict, Verdict::Info, "{deaf:?}");
+    assert!(deaf.actual.starts_with("1.000"), "{deaf:?}");
 }

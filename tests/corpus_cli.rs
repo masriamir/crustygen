@@ -106,6 +106,11 @@ fn a_mixed_directory_sweeps_dedups_and_buckets() {
     assert!(report["provenance"].is_null());
     assert_eq!(report["maps"].as_array().unwrap().len(), 2);
     assert_eq!(report["maps"][0]["origin"], "udmf");
+    // Entrada has no teleport line, so the fourth axis passes vacuously and
+    // the teleport aggregate is empty.
+    assert_eq!(report["aggregate"]["teleports"]["maps_with_teleports"], 0);
+    assert_eq!(report["maps"][0]["verdict"]["teleports_ok"], true);
+    assert_eq!(report["maps"][0]["teleports"]["lines"], 0);
 }
 
 #[test]
@@ -116,6 +121,7 @@ fn report_goes_to_stdout_by_default_and_to_a_file_with_the_flag() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.starts_with("# Corpus expressibility"), "{stdout}");
     assert!(stdout.contains("upper bound"));
+    assert!(stdout.contains("## Teleports"), "{stdout}");
     let md = dir.join("r.md");
     let out = bin()
         .args([dir.to_str().unwrap(), "--report", md.to_str().unwrap()])

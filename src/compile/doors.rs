@@ -219,6 +219,7 @@ pub fn emit_doors(
             special: 0,
             tag: 0,
             wall_tex: room.wall_tex.clone(),
+            host: None,
         };
 
         let near_alcove = (alcove_near > 0).then(|| {
@@ -245,6 +246,7 @@ pub fn emit_doors(
             special: 0,
             tag,
             wall_tex: room_a.wall_tex.clone(),
+            host: None,
         });
 
         // The door's own two faces — whichever segment stands immediately

@@ -6,6 +6,7 @@ pub mod heights;
 pub mod portals;
 pub mod sectors;
 pub mod tags;
+pub mod teleports;
 pub mod textmap;
 pub mod things;
 
@@ -38,6 +39,11 @@ pub struct SectorOut {
     /// recess), which belong to no room and so have no
     /// [`crate::ir::Room::wall_tex`] of their own to read.
     pub wall_tex: String,
+    /// For an island teleport pad, the index of the room sector it is carved
+    /// inside. [`sectors::check_no_sector_overlaps`] exempts exactly that
+    /// pair — a pad lies inside its host by construction — and tests every
+    /// other pair as usual. `None` for every other sector.
+    pub host: Option<usize>,
 }
 
 /// A sidedef as it will be emitted.
@@ -326,14 +332,15 @@ pub enum CompileError {
         /// The available wall length.
         available: i32,
     },
-    /// A walkover exit's alcove would place a vertex outside the 16-bit map
-    /// range every Doom map format uses.
+    /// A recess (a walkover exit's alcove, or a teleport's wall pad) would
+    /// place a vertex outside the 16-bit map range every Doom map format
+    /// uses.
     #[error(
-        "exit in room `{room}`: the walkover alcove would place a vertex at ({x}, {y}), outside the map range"
+        "the recess behind room `{host}` (an exit alcove or a teleport pad) would place a vertex at ({x}, {y}), outside the map range"
     )]
-    ExitAlcoveOutOfRange {
+    RecessOutOfRange {
         /// The host room.
-        room: String,
+        host: String,
         /// The out-of-range vertex's X coordinate.
         x: i32,
         /// The out-of-range vertex's Y coordinate.
@@ -431,6 +438,58 @@ pub enum CompileError {
         /// The room.
         room: String,
     },
+    /// An authored thing stands on a teleport pad's square; it would sit in
+    /// the pad sector, not the room that declares it.
+    #[error("thing `{kind}` at ({x}, {y}) stands on teleport `{id}`'s pad")]
+    TeleportThingOnPad {
+        /// The teleport whose pad it stands on.
+        id: String,
+        /// The vocabulary name.
+        kind: String,
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+    },
+    /// A teleport destination lands in a sector that already carries a tag
+    /// for another purpose.
+    #[error("teleport `{id}`: destination sector {sector} already carries a tag")]
+    TeleportDestinationSectorTagged {
+        /// The teleport whose destination it is.
+        id: String,
+        /// The already-tagged sector index.
+        sector: usize,
+    },
+    /// A destination marker sits closer to its sector's walls than the
+    /// largest arriving thing's radius (rule P15).
+    #[error(
+        "teleport `{id}`: destination ({x}, {y}) has {have:.1} units of clearance but the largest arriving thing needs {need}"
+    )]
+    TeleportMarkerTooClose {
+        /// The teleport(s) delivering here.
+        id: String,
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+        /// Available clearance.
+        have: f64,
+        /// Required radius.
+        need: i32,
+    },
+    /// A destination sector is too short for the largest arriving thing
+    /// (rule P15 / P2).
+    #[error(
+        "teleport `{id}`: the destination sector has {have} units of headroom but the largest arriving thing needs {need}"
+    )]
+    TeleportMarkerNoHeadroom {
+        /// The teleport(s) delivering here.
+        id: String,
+        /// Available floor-to-ceiling gap.
+        have: i32,
+        /// Required height.
+        need: i32,
+    },
     /// Two player starts occupy the same spot.
     #[error("two player starts overlap at ({x}, {y}); they would telefrag on spawn")]
     OverlappingStarts {
@@ -469,6 +528,8 @@ pub struct Compiled {
     pub things: Vec<ThingOut>,
     /// The tag manifest.
     pub tags: TagAllocator,
+    /// The teleport destination markers, for rule P15.
+    pub markers: Vec<teleports::Marker>,
 }
 
 /// Compiles a room graph into UDMF `TEXTMAP` text.
@@ -500,29 +561,36 @@ pub struct Compiled {
 ///    construction.
 /// 5. [`exits::emit_exits`] carves every level exit into its host room's own
 ///    wall, using the same [`TagAllocator`]. Runs after doors so a thing's
-///    clearance (step 7) is measured against the exit's final geometry too.
-/// 6. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
+///    clearance (step 9) is measured against the exit's final geometry too.
+/// 6. [`teleports::emit_teleports`] emits every pad (a hosted island sector
+///    or a 64-deep recess), tags each destination sector from the same
+///    [`TagAllocator`], and returns the destination markers. Runs after
+///    exits so a wall pad and an exit compete for wall spans through
+///    `portals::split_wall_for_opening` like any two openings, and before
+///    the overlap check since it emits sectors.
+/// 7. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
 ///    that overlap in 2-D — a gap sector driven through a third room, or two
 ///    gap sectors from unrelated portals crossing each other. Must run after
-///    every sector-emitting pass (steps 1, 3, 4, 5) and before anything that
-///    trusts the geometry is sound, which is everything from here on.
-/// 7. [`heights::apply_height_textures`] writes the upper and lower textures
+///    every sector-emitting pass (steps 1, 3, 4, 5, 6) and before anything
+///    that trusts the geometry is sound, which is everything from here on.
+/// 8. [`heights::apply_height_textures`] writes the upper and lower textures
 ///    every height difference exposes, on the one side `r_segs.c` draws.
 ///    Runs after every sector-emitting pass because it reads final floor and
 ///    ceiling heights, and after the overlap check because it trusts the
 ///    geometry it walks.
-/// 8. [`things::place_things`] places every thing, measuring clearance and
-///    headroom against the geometry emitted by steps 1–5 — not the IR's
+/// 9. [`things::place_things`] places every thing, measuring clearance and
+///    headroom against the geometry emitted by steps 1–6 — not the IR's
 ///    declared footprints, which an exit alcove can still make stale even
-///    though a door no longer does — so it must run after doors and exits
-///    are carved, not before.
-/// 9. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
-///    at tag 0, which would match every untagged sector in-engine.
-/// 10. [`textmap::emit_textmap`] renders the final, validated geometry.
-/// 11. [`crate::rules::check_all`] runs the playability catalog over the
+///    though a door no longer does — so it must run after doors, exits, and
+///    teleport pads are carved, not before. It also places step 6's
+///    markers, holding each to the clearance its arriving thing needs.
+/// 10. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
+///     at tag 0, which would match every untagged sector in-engine.
+/// 11. [`textmap::emit_textmap`] renders the final, validated geometry.
+/// 12. [`crate::rules::check_all`] runs the playability catalog over the
 ///     result and fails the compile if anything is violated.
 ///
-/// Step 11 is part of `compile` rather than a separate call the caller may
+/// Step 12 is part of `compile` rather than a separate call the caller may
 /// forget, because the design makes playability violations hard errors: "a
 /// door the player cannot fit through is a broken map, not a missed target".
 /// Leaving `check_all` optional meant every rule in `rules` was inert unless
@@ -566,9 +634,10 @@ pub fn compile_reporting(
     let mut tags = TagAllocator::new();
     doors::emit_doors(ir, tables, &mut data, &mut tags)?;
     exits::emit_exits(ir, tables, &mut data, &mut tags)?;
+    let markers = teleports::emit_teleports(ir, tables, &mut data, &mut tags)?;
     sectors::check_no_sector_overlaps(ir, &data)?;
     heights::apply_height_textures(&mut data);
-    let things = things::place_things(ir, tables, &data)?;
+    let things = things::place_things(ir, tables, &data, &markers)?;
     tags::check_no_action_at_tag_zero(&data)?;
     let textmap = textmap::emit_textmap(&data, &things);
     let compiled = Compiled {
@@ -576,6 +645,7 @@ pub fn compile_reporting(
         data,
         things,
         tags,
+        markers,
     };
     let violations = check_all(ir, tables, &compiled);
     Ok((compiled, violations))

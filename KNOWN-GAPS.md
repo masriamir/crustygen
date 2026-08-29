@@ -5,38 +5,49 @@ reassembles through crustywad, plus the layer-4 verifier that re-checks the
 emitted map (`src/check`, `crustygen-check` — see `docs/check.md`), plus the
 shared `crustygen::ingest` path and the `crustygen-lift` telemetry skeleton
 (`src/lift`, `src/ingest.rs` — see `docs/lift.md`), plus `lift::vocabulary`'s
-membership verdict and the `crustygen-corpus` corpus sweep (see
-`docs/corpus.md`), plus the `crustygen-build` CLI over the compiler
+membership verdict, `lift::teleport`'s shape recognizer and the
+`crustygen-corpus` corpus sweep (see `docs/corpus.md`), plus the
+`crustygen-build` CLI over the compiler
 (`src/bin/crustygen-build.rs` — see `docs/build.md`).
-546 tests (457 lib + 3 crustygen-build unit + 15 build_cli + 7 check_adversarial + 16 check_cli + 4
-check_conformance + 9 corpus_cli + 1 first_map + 6 golden_textmap + 13 lift_cli + 3
-spec_documents + 4 vanilla_wad + 4 vocabulary_arbiter + 3 vocabulary_tables + 1
-walking_skeleton), plus a separately-run `#[ignore]`d golden-regeneration
-generator not included in that count. This file records what is deliberately
-absent, what is known-fragile, and the decisions a future contributor would
-otherwise have to re-derive.
+623 tests (524 lib + 3 crustygen-build unit + 16 build_cli + 10 check_adversarial + 16 check_cli +
+5 check_conformance + 9 corpus_cli + 1 first_map + 8 golden_textmap + 15 lift_cli + 3
+spec_documents + 1 teleport_recognizer + 4 vanilla_wad + 4 vocabulary_arbiter + 3
+vocabulary_tables + 1 walking_skeleton), plus two separately-run `#[ignore]`d
+golden-regeneration generators not included in that count. This file records
+what is deliberately absent, what is known-fragile, and the decisions a future
+contributor would otherwise have to re-derive.
 
 ## Not implemented, by design
 
 The compiler covers structural invariants S1–S6 and playability rules P2,
-P3, P4, P7, P8, P9, P11, P13, P14, P19, P24, P25. **P1** is retired — see
-`rules.rs`'s module doc and `CompileError::PortalNoHeadroom`, and the gap
-entry below. The layer-4 verifier (`src/check`, `docs/check.md`)
-independently re-derives those same twelve from the *emitted* map, as
-`V-P2`…`V-P25`, and adds `V-P20`.
+P3, P4, P7, P8, P9, P11, P13, P14, P15, P19, P24, P25, P26, P27. **P1** is
+retired — see `rules.rs`'s module doc and `CompileError::PortalNoHeadroom`,
+and the gap entry below. The layer-4 verifier (`src/check`, `docs/check.md`)
+independently re-derives fourteen of those fifteen from the *emitted* map, as
+`V-P2`…`V-P27`, and adds `V-P20`. The one it does not is **P26**: a teleport
+exit emits exactly a plain walkover exit's specials, so nothing on the line
+tells them apart, and the verifier grades P26's shape as the
+`progression.exit.trigger` conformance row instead of as a finding.
 
 Deliberately absent, deferred to the next stage: **P5** (lifts), **P6**
 (monster mobility), **P10** (clean vertical tiling), **P12** (sky
-coherence), **P15** (teleport pairing), **P16**/**P17** (liquids and damage
-survivability), **P18** (secret accounting), **P20** (pickup accessibility —
-compiler-side only; the verifier covers it, below), **P21** (light sources),
-**P22** (hanging decorations), **P23** (barrel safety).
+coherence), **P16**/**P17** (liquids and damage survivability), **P18**
+(secret accounting), **P20** (pickup accessibility — compiler-side only; the
+verifier covers it, below), **P21** (light sources), **P22** (hanging
+decorations), **P23** (barrel safety).
 
-**Expressibility is membership, not geometry.** `lift::vocabulary` and
-`crustygen-corpus` decide expressibility by set membership on three axes;
-nothing reads geometry, flags, tags, or texture names. The number is an
-upper bound on lift yield and every report says so. A geometry-aware
-recognizer is the lifter's next stage.
+**Expressibility is mostly membership, and now partly geometry.**
+`lift::vocabulary` and `crustygen-corpus` decide expressibility on **four**
+axes. Three are set membership — line specials, sector specials, thing
+kinds — and read no geometry at all. The fourth is the teleport recognizer
+(`lift::teleport`), which resolves every teleport line the way `EV_Teleport`
+does and refuses the shapes the IR cannot state; it reads the map's tags,
+sector adjacency and destination-marker placement, so on that one axis the
+verdict is geometric rather than table-driven. Everything else about a map —
+room shape, linedef flags, tags outside the teleport resolution, texture
+names — is still unmeasured, so the number remains an upper bound on lift
+yield and every report says so. The remaining recognizers are the lifter's
+next stage.
 
 **P20's per-pickup check now exists, at layer 4 rather than in the compiler.**
 `check::invariants::check_prop_embedding` measures every collectible against
@@ -96,11 +107,25 @@ WAD. (The verifier itself — `docs/design.md` §8 layer 4 — shipped with issu
 #2 and is no longer absent, as did the packer, `pack::pack_udmf` and
 `pack::pack_udmf_with_nodes`, and an authored map,
 `tests/fixtures/entrada_base.json`, built into `maps/entrada.wad`.)
-Specials for lifts, teleports, and liquid sector effects, monster
-`spawnhealth`, health/armor pickup amounts and caps, the gore prop set, and
-the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef flags are all **sourced and
+Specials for lifts and liquid sector effects, monster `spawnhealth`,
+health/armor pickup amounts and caps, the gore prop set, and the
+`ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef flags are all **sourced and
 accessible** but nothing emits any of them yet. Doors, exits
-(`compile::exits`), and the secret sector special are wired end to end.
+(`compile::exits`), the secret sector special, and the four teleport specials
+(`compile::teleports`, with `lift::teleport` recognizing them on the way back
+in) are wired end to end. Lifts are the largest remaining unemitted group and
+the next construct the corpus blocker table names — see
+`docs/measurements/teleports-2026-08-28.md`.
+
+**The sealed monster pen with a remote release strip is deferred, and P27 is
+why it has to be.** Retail's genuinely sealed pens — 8 of the 97 closet
+sectors in DOOM + DOOM2 — are opened either by a monsters-only teleport
+(7 of the 8) or by a remote linedef special aimed at a zero-height strip
+beside the pen. The first shape crustygen can build today; the second needs
+floor and door specials (the corpus finds 62, 36, 109, 20, 2, 123, 103 and
+102 on those strips) that are outside this vocabulary entirely. Until they
+land, P27 refuses a sealed monster room rather than let the compiler emit
+monsters nothing can ever wake. The measurement records the shares.
 
 **The map-spec parser exists now, and deliberately stops at parsing.**
 `src/spec` turns a filled `map-spec.template.md` copy into a typed
@@ -314,12 +339,13 @@ than restarting at each piece. Proper alignment is a separate piece of work;
 what exists here is the narrowest fix for the one surface a playtest showed
 reading wrong.
 
-**Two map artifacts ship, and only one of them loads in a vanilla engine.**
-`maps/entrada.wad` is the **UDMF** build — `MAP01`, `TEXTMAP`, `ZNODES`,
-`ENDMAP` — and needs a ZDoom-family port (GZDoom, Odamex, Eternity).
-`maps/entrada_doom.wad` is the binary **Doom-format** twin, carrying real
-`THINGS` through `BLOCKMAP`, and is the one to load in Chocolate Doom, DOSBox,
-or anything else vanilla-accurate.
+**Two maps ship as four artifacts, and only half of them load in a vanilla
+engine.** `maps/entrada.wad` and `maps/salto.wad` are the **UDMF** builds —
+`MAP01`, `TEXTMAP`, `ZNODES`, `ENDMAP` — and need a ZDoom-family port
+(GZDoom, Odamex, Eternity). `maps/entrada_doom.wad` and
+`maps/salto_doom.wad` are their binary **Doom-format** twins, carrying real
+`THINGS` through `BLOCKMAP`, and are the ones to load in Chocolate Doom,
+DOSBox, or anything else vanilla-accurate.
 
 Loading the UDMF build in a vanilla port does not report a helpful error; it
 dies with `W_LumpLength: <n> >= numlumps`. The reason is `P_SetupLevel`, which
@@ -331,12 +357,26 @@ Chocolate Doom 3.1.1 over `DOOM2.WAD` (2,919 lumps): `MAP01` landed at index
 2919, and the engine asked for 2919 + 10 = **2929** against a `numlumps` of
 2923.
 
-Both artifacts are produced from the same compiled output — `pack::pack_udmf`
+Each pair is produced from one compiled output. For entrada: `pack::pack_udmf`
 for the un-noded bytes, `pack::pack_udmf_with_nodes` for the UDMF build, and
 `cwad convert --to doom --nodes` on the un-noded twin for the Doom build (see
-`tests/first_map.rs` and the map-generation report). Neither is redundant: the
-UDMF one is the compiler's native output, and the Doom one is the proof that
-output survives a downconvert into the format every engine can read.
+`tests/first_map.rs`). `maps/salto_doom.wad` was produced by running the same
+downconvert against the committed UDMF build directly —
+`cwad convert maps/salto.wad --to doom --nodes --lenient -o maps/salto_doom.wad`
+— which drops the `ZNODES` lump with a warning instead of refusing, and
+rebuilds the node lumps for the Doom format anyway. The two routes are
+equivalent, and that is checked rather than assumed: the same command over
+`maps/entrada.wad` reproduces the committed `maps/entrada_doom.wad`
+byte-for-byte. Both twins pass `cwad validate`. Neither half of a pair is
+redundant: the UDMF one is the compiler's native output, and the Doom one is
+the proof that output survives a downconvert into the format every engine can
+read.
+
+Neither Doom-format twin is drift-guarded by a test, for the same reason:
+regenerating one shells out to a prebuilt `cwad` binary whose path this crate
+does not control. `tests/first_map.rs` and `tests/build_cli.rs` pin the two
+UDMF builds byte-for-byte, so a stale twin is always downstream of a UDMF
+build the tests would have caught first.
 
 **Sector footprints wind clockwise.** A linedef's front (right) sidedef only
 faces the sector interior under clockwise winding. Verified empirically: 2611
@@ -512,9 +552,55 @@ square walls (the common real case) already works today, both proved by
 `portals::tests::a_portal_works_on_the_axis_aligned_wall_of_a_diagonally_shaped_room`
 and the equivalent exit/door fixtures.
 
-**Lifts and teleports are repeatable, not one-shot.** A design choice, not a
-source fact: P5 requires a lift be operable from both ends, and a one-shot lift
-can strand a player. Recorded in the citations; disagree there if you prefer.
+**Teleports default to repeatable; lifts will be repeatable-only.** A design
+choice, not a source fact. For a teleport it is only a *default*:
+`Teleport::repeatable` is `true` when absent, and setting it to `false` emits
+the one-shot ("W1") form — 39 for a player pad, 125 for a monsters-only one —
+which the engine clears after its first crossing. That is a recorded IR
+choice about which special to write, not a claim about what the corpus does.
+For lifts the constraint is harder and still stands: P5 requires a lift be
+operable from both ends, and a one-shot lift can strand a player, so the lift
+construct will not offer the one-shot form at all. Recorded in the citations;
+disagree there if you prefer.
+
+**P7 treats a one-shot teleport as an ordinary edge.** The flood's directed
+teleport edge is the same whether the line is 97 or 39: a walk uses an edge
+once, which is exactly what the W1 form permits, so the flood never claims
+something a one-shot line cannot do. What it does not model is *reuse* —
+returning to a spent 39 and expecting it to fire again. A map that needs the
+second crossing is unfinishable in a way P7 will not catch. Modeling it would
+mean carrying per-edge consumption through the `(sector, keys-held)` state
+space, which is a different search; recorded rather than built.
+
+**The flood's teleport edge originates in the front sector and ignores the
+pad's own step height.** `check::flood` adds the edge from the sector the
+trigger line fronts to the sector its tag resolves to, with no check that the
+crosser could climb onto the pad in the first place. For a crustygen-emitted
+map that is moot by construction — a pad's floor sits `Ir::PAD_FLOOR_STEP`
+(8) above its host's, well under the engine's step-up cap — but for a lifted
+or hand-authored map with a taller pad the flood is optimistic: it will walk
+onto a pad the player cannot reach. The same optimism sits in `src/reach.rs`,
+whose compiled-side `teleport_edges` carries no `passable()` guard at all;
+there it is moot for a stronger reason, since the compiler only ever emits
+crossable pad edges.
+
+**V-P15 sizes the destination for the player, even on a monsters-only line.**
+Headroom and radius clearance at the marker are measured against
+`Tables::player`, so a species wider than the player (a pinky is 30 to the
+player's 16) can arrive at a destination this check calls clear and land
+embedded in the wall. The engine does not refuse that arrival:
+`P_TeleportMove` (pinned `p_map.c`) sets `tmbbox` from the arriving thing's
+radius, takes floor and ceiling from `R_PointInSubsector (x,y)`, runs
+`P_BlockThingsIterator(bx,by,PIT_StompThing)` over *things* only, then links
+the thing and returns true — it consults no line, and its one false return is
+`PIT_StompThing` refusing a non-player stomp (`if ( !tmthing->player &&
+gamemap != 30) return false;`). The consequence is a stuck mobj rather than a
+rejected teleport: `PIT_CheckLine` fails every later `P_TryMove` whose
+destination box still straddles the wall (`if (!ld->backsector) return false;
+// one sided line`). Sizing this properly needs the set of species that can
+actually reach the trigger line, which is the acoustic model this project
+deliberately does not have. Optimistic in one direction only, and recorded in
+`check_teleport_pairing`'s own doc comment.
 
 **Odd portal widths are rejected rather than rounded**, per the spec's
 reject-don't-degrade posture. The same posture governs
@@ -541,6 +627,67 @@ solid wall instead of a second threshold) — so only the near threshold (front
 the room, back the alcove) is passable. A switch exit needs none of this:
 `P_UseSpecialLine` fires from a raycast, not a crossing, so the exit stays a
 normal solid one-sided wall.
+
+**Teleport pads are addressed by their low corner, on the 64-unit flat grid —
+with three consequences an author has to know.**
+`PadPlacement::Island` names the pad square's minimum-x/minimum-y corner and
+`PadPlacement::Wall` the start of its span along the wall; neither is the
+center or the midpoint each once was. The reason is the renderer, not taste:
+`R_MapPlane` (`r_plane.c`) gives a flat span the world coordinates themselves
+(`ds_xfrac = viewx + FixedMul(finecosine[angle], length);` and the `finesine`
+twin for `ds_yfrac`) and `R_DrawSpan` (`r_draw.c`) indexes the 64x64 flat with
+the low six bits of each (`spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);`),
+so a flat wraps every 64 units of *world* space and a 64x64 `GATE` pad reads as
+one tile only when its corners are multiples of 64. Center addressing put every
+pad the compiler emitted off by half a tile on **at least one** axis: on both
+axes for an island pad, and on the along axis alone for a wall pad, whose across
+coordinate is the wall's own and so stayed aligned — salto's four old low corners
+were (96, 352) and (800, 672) for its islands, (800, 256) and (352, -64) for its
+wall pads. The first playtest of `maps/salto.wad` came back with every pad's
+`GATE` flat broken across tile boundaries, which the wrap says is four
+quarter-tiles on an island and two half-tiles on a wall pad. A square whose
+corners are aligned never has an aligned center, so the two cannot both be the
+address. Corners win, and `IrError::TeleportPadOffFlatGrid` enforces it;
+`ir.grid` plays no part, since 64 subsumes every grid that divides it. Retail
+confirms the choice rather than merely permitting it: 321 of 321 `GATE*`-flatted
+64x64 pads across DOOM, DOOM2, TNT and PLUTONIA sit on the grid, against an
+80.1 % baseline for all DOOM+DOOM2 64x64 sectors
+(`docs/measurements/teleports-2026-08-28.md`).
+
+**Three consequences for authors**, none of them visible in the rule itself:
+
+1. `to.at` stays a free point, so a two-way pair must name the other pad's
+   center itself. Naming its *corner* instead is the trap the rewrite of every
+   fixture hit repeatedly — a corner point is inside the closed pad square (so it
+   tags the pad's sector rather than the room's) and zero units from two of that
+   pad's walls (so P15's clearance check fails).
+2. A wall pad flush with its wall's **low** corner is no longer expressible, and
+   the rule is asymmetric. `wall_cut` finds the wall with
+   `along > lo && along < hi` and then rejects only `open_hi > hi`, so a span
+   flush with the wall's *high* corner (`along == hi - 64`) is accepted while
+   one flush with the low corner (`along == lo`) is refused as
+   `TeleportPadOffWall` — for a point that is genuinely on the wall. Under the
+   old midpoint semantics `[lo, lo + 64]` was authorable, since its midpoint
+   `lo + 32` satisfies `along > lo`, so this is a real expressiveness
+   regression. It is kept deliberately: a point exactly on a corner matches two
+   wall edges at once, and silently picking one is worse than refusing. Start
+   the span a tile in.
+3. A 256x256 room holds at most **one** aligned island pad. The only aligned low
+   corners strictly inside it are `{64, 128} x {64, 128}`; a square at 0 or 192
+   touches a wall (`TeleportPadOutsideRoom`), and any two of the four survivors
+   share an edge or a corner (`TeleportPadsOverlap`). Several fixtures in this
+   repo spread their pads across rooms for exactly that reason.
+
+**A walkover exit's alcove gets neither of the neighbor checks a wall
+teleport pad's recess does.** `Ir::from_json` holds a `wall` pad's 64-deep
+recess to `MIN_PORTAL_GAP` clearance from every other room
+(`TeleportPadRecessTooClose`) and refuses a span that overlaps or touches
+another opening on the same wall (`TeleportPadBesideOpening`). The exit
+alcove is the same construction and is held to neither: an exit whose alcove
+lands flush on a neighbor room, or whose segment abuts a portal opening on
+the same wall, still compiles. Pre-existing, not introduced with teleports,
+and the checks generalize directly — the fix is to run the same two tests
+over `Exit` in `validate_exits`.
 
 **Every exit is tagged, even though neither `G_ExitLevel` nor
 `G_SecretExitLevel` reads a tag.** Mirrors the existing precedent for manual

@@ -114,6 +114,9 @@ pub fn emit_textmap(data: &MapData, things: &[ThingOut]) -> String {
                 let _ = write!(s, " {name} = true;");
             }
         }
+        if t.ambush {
+            s.push_str(" ambush = true;");
+        }
         s.push_str(" single = true; }\n");
     }
 
@@ -122,9 +125,26 @@ pub fn emit_textmap(data: &MapData, things: &[ThingOut]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::compile::compile;
-    use crate::ir::Ir;
+    use crate::compile::things::ThingOut;
+    use crate::compile::{MapData, compile};
+    use crate::ir::{Ir, ThingSkills};
     use crate::tables::Tables;
+
+    /// One thing and nothing else, so the assertions below pin the exact
+    /// field order this function writes rather than merely its presence.
+    fn one_thing(ambush: bool) -> String {
+        super::emit_textmap(
+            &MapData::default(),
+            &[ThingOut {
+                x: 128,
+                y: 64,
+                angle: 90,
+                kind: 3001,
+                skills: ThingSkills::default(),
+                ambush,
+            }],
+        )
+    }
 
     const TWO_ROOM: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
       "rooms":[
@@ -175,6 +195,24 @@ mod tests {
             "skill1 = true; skill2 = true; skill3 = true; skill4 = true; skill5 = true; \
              single = true;"
         ));
+    }
+
+    #[test]
+    fn an_ambush_thing_writes_the_flag_immediately_before_single() {
+        assert!(
+            one_thing(true).contains(" skill5 = true; ambush = true; single = true; }"),
+            "`ambush` follows the skills and precedes `single`"
+        );
+    }
+
+    #[test]
+    fn a_thing_without_the_ambush_flag_writes_no_ambush_field() {
+        let out = one_thing(false);
+        assert!(!out.contains("ambush"), "state true, omit false");
+        assert!(
+            out.contains(" skill5 = true; single = true; }"),
+            "the pre-existing byte sequence is unchanged"
+        );
     }
 
     #[test]

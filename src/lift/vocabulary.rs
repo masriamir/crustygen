@@ -7,10 +7,17 @@
 //! flags, tags, or texture names. The verdict is therefore an **upper
 //! bound** on what a geometry-aware lifter could express, and every report
 //! built on it says so.
+//!
+//! [`Verdict::with_teleports`] is where a recognizer narrows that bound: it
+//! folds [`crate::lift::teleport`]'s refusals in as a fourth axis, so a map
+//! whose every value is nameable can still be refused for a teleport line
+//! the IR could not state. Membership can only ever say "yes"; a recognizer
+//! is what turns a "yes" into a "no".
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::lift::MapTelemetry;
+use crate::lift::teleport::TeleportReport;
 use crate::tables::Tables;
 
 /// The emittable line set, the named sector set, the thing set, plus the
@@ -27,10 +34,11 @@ pub struct Vocabulary {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "these five booleans are independent per-axis verdicts (three membership checks) \
-              plus two derived roll-ups (the conjunction and the stricter vanilla-only check) \
-              over the same census, not state-machine flags — and their names are the \
-              documented, load-bearing JSON field names later tasks and reports key off of"
+    reason = "these six booleans are independent per-axis verdicts (three membership checks \
+              plus the teleport recognizer's) and two derived roll-ups (the four-axis \
+              conjunction and the stricter vanilla-only check) over the same census, not \
+              state-machine flags — and their names are the documented, load-bearing JSON \
+              field names later tasks and reports key off of"
 )]
 pub struct Verdict {
     /// Every non-zero linedef special is emittable.
@@ -39,7 +47,11 @@ pub struct Verdict {
     pub sector_specials_ok: bool,
     /// Every thing type is in `[things]`.
     pub thing_kinds_ok: bool,
-    /// The conjunction of the three axes.
+    /// Every teleport line resolves to a destination and is not
+    /// self-referencing ([`crate::lift::teleport`]); `true` until
+    /// [`Verdict::with_teleports`] is applied.
+    pub teleports_ok: bool,
+    /// The conjunction of the four axes.
     pub expressible: bool,
     /// Every non-zero linedef special is one the pinned vanilla engine
     /// dispatches.
@@ -91,6 +103,9 @@ impl Vocabulary {
             line_specials_ok,
             sector_specials_ok,
             thing_kinds_ok,
+            // Membership knows nothing about geometry: the teleport axis
+            // starts clean and only `with_teleports` can refuse it.
+            teleports_ok: true,
             expressible: line_specials_ok && sector_specials_ok && thing_kinds_ok,
             vanilla_only: t
                 .linedef_specials
@@ -103,12 +118,27 @@ impl Vocabulary {
     }
 }
 
+impl Verdict {
+    /// Folds a recognizer report in: `teleports_ok` is "no refused line",
+    /// and `expressible` is the conjunction of all four axes.
+    #[must_use]
+    pub fn with_teleports(mut self, report: &TeleportReport) -> Self {
+        self.teleports_ok = report.counts.refusals() == 0;
+        self.expressible = self.line_specials_ok
+            && self.sector_specials_ok
+            && self.thing_kinds_ok
+            && self.teleports_ok;
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fmt::Write as _;
 
     use super::*;
     use crate::lift::survey;
+    use crate::lift::teleport::TeleportCounts;
     use crustywad::Limits;
     use crustywad::map::udmf::parse_udmf;
 
@@ -155,13 +185,13 @@ mod tests {
 
     #[test]
     fn each_axis_flips_independently() {
-        let v = vocab().classify(&telemetry(&[97], 0, &[1]));
+        let v = vocab().classify(&telemetry(&[62], 0, &[1]));
         assert!(!v.line_specials_ok && v.sector_specials_ok && v.thing_kinds_ok);
         assert!(!v.expressible);
-        assert_eq!(v.unknown_line_specials, vec![97]);
+        assert_eq!(v.unknown_line_specials, vec![62]);
         assert!(
             v.vanilla_only,
-            "97 is a vanilla special even though it is not emittable"
+            "62 is a vanilla special even though it is not emittable"
         );
 
         let v = vocab().classify(&telemetry(&[], 4, &[1]));
@@ -196,10 +226,46 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_teleport_line_flips_the_verdict_off_without_touching_the_axes() {
+        let v = vocab().classify(&telemetry(&[97], 0, &[1, 14]));
+        assert!(
+            v.teleports_ok && v.expressible,
+            "97 is emittable now; membership alone passes"
+        );
+        let refused = TeleportReport {
+            lines: vec![],
+            counts: TeleportCounts {
+                lines: 1,
+                broken: 1,
+                ..TeleportCounts::default()
+            },
+        };
+        let v = v.with_teleports(&refused);
+        assert!(!v.teleports_ok && !v.expressible && v.line_specials_ok);
+        let json = serde_json::to_value(&v).unwrap();
+        assert_eq!(json["teleports_ok"], false);
+    }
+
+    /// A report with no refusal leaves the verdict exactly as membership
+    /// found it — including a `false` `expressible` that an out-of-set value
+    /// already earned, which `with_teleports` must not resurrect.
+    #[test]
+    fn a_clean_report_leaves_the_membership_verdict_alone() {
+        let v = vocab()
+            .classify(&telemetry(&[62], 0, &[1]))
+            .with_teleports(&TeleportReport {
+                lines: vec![],
+                counts: TeleportCounts::default(),
+            });
+        assert!(v.teleports_ok);
+        assert!(!v.expressible && !v.line_specials_ok);
+    }
+
+    #[test]
     fn verdict_serializes_with_the_documented_field_names() {
-        let json = serde_json::to_value(vocab().classify(&telemetry(&[97], 0, &[1]))).unwrap();
+        let json = serde_json::to_value(vocab().classify(&telemetry(&[62], 0, &[1]))).unwrap();
         assert_eq!(json["expressible"], false);
-        assert_eq!(json["unknown_line_specials"], serde_json::json!([97]));
+        assert_eq!(json["unknown_line_specials"], serde_json::json!([62]));
         assert_eq!(json["vanilla_only"], true);
     }
 }

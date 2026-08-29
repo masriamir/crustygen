@@ -74,6 +74,7 @@ pub fn emit_sectors(ir: &Ir) -> Result<MapData, CompileError> {
             special: room.special.unwrap_or(0),
             tag: 0,
             wall_tex: room.wall_tex.clone(),
+            host: None,
         });
 
         for (a, b) in edges(&room.footprint) {
@@ -148,10 +149,10 @@ fn sector_label(ir: &Ir, sector: usize) -> String {
 /// are never reshaped by portal, door, or exit construction (see
 /// `KNOWN-GAPS.md`'s wall-thickness entry). A compiler-generated sector (a
 /// portal's gap sector, built by `portals::emit_gap_sector`, or a walkover
-/// exit's alcove, built by `exits::emit_walkover_exit`) has no IR footprint;
-/// every one of them is an axis-aligned rectangle by construction, so the
-/// bounding box of every vertex on a linedef bordering it *is* its exact
-/// shape.
+/// exit's alcove, built by `exits::emit_walkover_exit`, or a teleport pad,
+/// built by `teleports::emit_teleports`) has no IR footprint; every one of
+/// them is an axis-aligned rectangle by construction, so the bounding box of
+/// every vertex on a linedef bordering it *is* its exact shape.
 fn sector_polygon(ir: &Ir, data: &MapData, sector: usize) -> Vec<Pt> {
     if let Some(room) = ir.rooms.get(sector) {
         return room.footprint.clone();
@@ -202,8 +203,15 @@ fn sector_polygon(ir: &Ir, data: &MapData, sector: usize) -> Vec<Pt> {
 /// different, unrelated portals crossing each other at a right angle —
 /// neither involves two room footprints overlapping, so nothing upstream
 /// complains. Must run after every sector-emitting pass (`emit_sectors`,
-/// `cut_portals`, `emit_doors`, `emit_exits`), since it inspects the final
-/// sector count and the final emitted geometry, not the IR alone.
+/// `cut_portals`, `emit_doors`, `emit_exits`,
+/// `teleports::emit_teleports`), since it inspects the final sector count
+/// and the final emitted geometry, not the IR alone.
+///
+/// One pair is exempt: an island teleport pad against the room sector it
+/// names in [`SectorOut::host`](crate::compile::SectorOut::host). That pad
+/// is a hole carved inside its host by construction, so it overlaps it by
+/// design. The exemption is that pair only — a *third* sector intruding on
+/// the hole still overlaps the host's own polygon and is caught here.
 ///
 /// # Errors
 /// Returns [`CompileError::SectorOverlap`] naming both sectors and a
@@ -221,6 +229,9 @@ pub fn check_no_sector_overlaps(ir: &Ir, data: &MapData) -> Result<(), CompileEr
         .collect();
     for (i, poly_i) in polygons.iter().enumerate() {
         for (j, poly_j) in polygons.iter().enumerate().skip(i + 1) {
+            if data.sectors[j].host == Some(i) || data.sectors[i].host == Some(j) {
+                continue;
+            }
             if overlaps(poly_i, poly_j) {
                 let pi = *poly_i.first().expect("a sector's polygon has a vertex");
                 let pj = *poly_j.first().expect("a sector's polygon has a vertex");

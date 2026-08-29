@@ -9,13 +9,17 @@
 //! membership test against the compiler's emittable sets, and only an upper
 //! bound on what a geometry-aware lifter could express. [`corpus`] sweeps a
 //! directory of zips and WADs, surveying and classifying every map it finds.
-//! Recognizers proper — the ones that reason about geometry — arrive later.
+//! [`teleport`] is the first recognizer proper: it reads geometry through
+//! the verifier's `Scene` and classifies every teleport line by engine
+//! semantics; the remaining recognizers (rooms, doors, keys, exits) arrive
+//! with Project B.
 
 use std::collections::BTreeMap;
 
 use crustywad::map::udmf::UdmfMap;
 
 pub mod corpus;
+pub mod teleport;
 pub mod vocabulary;
 
 /// Raw element counts for one map.

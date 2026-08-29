@@ -1,12 +1,15 @@
 //! CLI tests for `crustygen-build`: exit codes per pipeline stage, the
-//! stdout summary, and byte-identity with the committed `maps/entrada.wad`.
+//! stdout summary, and byte-identity with the committed `maps/entrada.wad`
+//! and `maps/salto.wad`.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
 
 use crustywad::Wad;
 
-const ENTRADA: &str = include_str!("fixtures/entrada_base.json");
+mod common;
+
+use common::{ENTRADA, SALTO};
 
 fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_crustygen-build"))
@@ -135,6 +138,27 @@ fn the_entrada_fixture_builds_byte_identical_to_the_committed_wad() {
         "got: {stdout}"
     );
     assert!(stdout.contains("18 sectors"), "got: {stdout}");
+    assert!(out.stderr.is_empty(), "stderr: {}", stderr(&out));
+}
+
+/// Salto, the teleport playtest map: the same drift guard entrada carries,
+/// over the fixture that exercises every teleport shape the compiler emits.
+/// 14 sectors = 5 rooms + 1 door + 2 door alcoves + 1 passage + 1
+/// walkover-exit alcove + 4 teleport pads.
+#[test]
+fn the_salto_fixture_builds_byte_identical_to_the_committed_wad() {
+    let (out, wad) = build(SALTO, "salto", &[]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let committed =
+        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("maps/salto.wad"))
+            .expect("read maps/salto.wad");
+    assert_eq!(wad.expect("a WAD was written"), committed);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with("MAP01: 5 rooms, 2 portals"),
+        "got: {stdout}"
+    );
+    assert!(stdout.contains("14 sectors"), "got: {stdout}");
     assert!(out.stderr.is_empty(), "stderr: {}", stderr(&out));
 }
 

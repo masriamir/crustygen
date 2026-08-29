@@ -203,7 +203,7 @@ fn vocabulary_flag_appends_a_verdict_to_human_and_json_output() {
 fn vocabulary_flag_names_unknown_values() {
     let textmap = r#"namespace = "doom";
 vertex { x = 0; y = 0; } vertex { x = 128; y = 0; } vertex { x = 128; y = 128; } vertex { x = 0; y = 128; }
-linedef { v1 = 0; v2 = 1; sidefront = 0; special = 97; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; special = 62; }
 linedef { v1 = 1; v2 = 2; sidefront = 1; }
 linedef { v1 = 2; v2 = 3; sidefront = 2; }
 linedef { v1 = 3; v2 = 0; sidefront = 3; }
@@ -220,7 +220,7 @@ thing { x = 64; y = 64; type = 1; } thing { x = 80; y = 64; type = 9999; }
     std::fs::remove_file(&path).ok();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("expressible: no"), "{stdout}");
-    assert!(stdout.contains("line specials unknown: 97"), "{stdout}");
+    assert!(stdout.contains("line specials unknown: 62"), "{stdout}");
     // 46 (the tall red torch) used to stand in for an unknown thing type
     // here; it is a real `[things]` row now, so this asserts on 9999 —
     // a doomednum no vanilla mobjinfo entry defines, which keeps the test
@@ -253,4 +253,70 @@ thing { x = 64; y = 64; type = 1; }
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("line specials unknown: 8192"), "{stdout}");
     assert!(stdout.contains("(outside vanilla)"), "{stdout}");
+}
+
+/// A teleport line that can never fire refuses the map on the fourth axis:
+/// membership alone would pass (97 is emittable, the player start is in
+/// vocabulary), but the recognizer's refusal flips `expressible` off. The
+/// trigger here is two-sided and tagged 9, and no sector carries tag 9 —
+/// `EV_Teleport` would find no destination, so `Refusal::Broken`.
+#[test]
+fn a_broken_teleport_line_refuses_the_map_on_the_teleport_axis() {
+    let textmap = r#"namespace = "doom";
+vertex { x = 0; y = 0; } vertex { x = 256; y = 0; } vertex { x = 256; y = 256; } vertex { x = 0; y = 256; }
+vertex { x = 64; y = 64; } vertex { x = 192; y = 64; } vertex { x = 192; y = 192; } vertex { x = 64; y = 192; }
+linedef { v1 = 0; v2 = 1; sidefront = 0; blocking = true; }
+linedef { v1 = 1; v2 = 2; sidefront = 1; blocking = true; }
+linedef { v1 = 2; v2 = 3; sidefront = 2; blocking = true; }
+linedef { v1 = 3; v2 = 0; sidefront = 3; blocking = true; }
+linedef { v1 = 4; v2 = 5; sidefront = 4; sideback = 5; twosided = true; special = 97; arg0 = 9; }
+linedef { v1 = 5; v2 = 6; sidefront = 6; sideback = 7; twosided = true; }
+linedef { v1 = 6; v2 = 7; sidefront = 8; sideback = 9; twosided = true; }
+linedef { v1 = 7; v2 = 4; sidefront = 10; sideback = 11; twosided = true; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; } sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; } sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; } sidedef { sector = 1; }
+sidedef { sector = 0; } sidedef { sector = 1; }
+sidedef { sector = 0; } sidedef { sector = 1; }
+sidedef { sector = 0; } sidedef { sector = 1; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling = 128; }
+thing { x = 32; y = 32; type = 1; }
+"#;
+    let path = write_temp(&common::wad_with_textmap(textmap), "teleport-broken");
+    let human = bin()
+        .args([path.to_str().unwrap(), "--vocabulary"])
+        .output()
+        .expect("runs");
+    let json = bin()
+        .args([path.to_str().unwrap(), "--vocabulary", "--json"])
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("; expressible: no"), "{stdout}");
+    assert!(stdout.contains("(teleports refused: 1)"), "{stdout}");
+    assert!(
+        stdout.contains("(line specials ok)"),
+        "membership is untouched: {stdout}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json");
+    assert_eq!(value[0]["verdict"]["teleports_ok"], false);
+    assert_eq!(value[0]["verdict"]["line_specials_ok"], true);
+    assert_eq!(value[0]["teleports"]["lines"], 1);
+    assert_eq!(value[0]["teleports"]["broken"], 1);
+}
+
+/// Without a refusal, the human line carries no teleport note at all.
+#[test]
+fn a_teleport_free_map_gets_no_teleport_note() {
+    let path = write_temp(&common::binary_entrada_wad(), "teleport-none");
+    let out = bin()
+        .args([path.to_str().unwrap(), "--vocabulary"])
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("; expressible: yes"), "{stdout}");
+    assert!(!stdout.contains("teleports refused"), "{stdout}");
 }

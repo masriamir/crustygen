@@ -30,12 +30,14 @@
 //! true for that linedef.
 //!
 //! A walkover exit (`P_CrossSpecialLine`, pinned `p_spec.c`) has **no side
-//! gate** — unlike the teleport special (97), which is also walkover-
-//! triggered yet deliberately checks `side == 1` in `EV_Teleport` to stay
-//! front-only (`data/vocabulary.toml`'s `[specials.teleport]` `source` field
-//! records this exact contrast: "`EV_Teleport`... gates activation to the
-//! line's front side despite being walkover-triggered"). A walkover exit
-//! carries no such override, so crossing it from *either* side fires
+//! gate** — unlike the teleport specials, also walkover-triggered yet
+//! deliberately checking `side == 1` in `EV_Teleport` to stay front-only
+//! (`data/vocabulary.toml`'s `[specials.teleport]` `source` field records
+//! this exact contrast: "`EV_Teleport`... gates activation to the line's
+//! front side despite being walkover-triggered"), a gate "Edges" below now
+//! models: the teleport specials *are* in the flood's graph, as directed
+//! front-side edges. A walkover exit carries no such override, so crossing
+//! it from *either* side fires
 //! `G_ExitLevel`/`G_SecretExitLevel`. Both sectors bordering the line are
 //! therefore goals here — both mirrors [`Scene`] files under their own
 //! sector, so this falls out of "any boundary carrying the special, in any
@@ -76,7 +78,42 @@
 //! filter passes does the special matter: [`Tables::door_special`] or a
 //! locked special from [`Tables::locked_door_kinds`] becomes
 //! [`reach::EdgeKind::Door`]; anything else becomes
-//! [`reach::EdgeKind::Open`].
+//! [`reach::EdgeKind::Open`] — a teleport line's own two sides included,
+//! since walking across the pad's rim is an ordinary crossing whatever the
+//! line also triggers.
+//!
+//! **Teleport edges**, on top of that and independent of it. A
+//! `fronts_this` boundary carrying either *player* teleport special
+//! ([`Tables::player_teleport_specials`]; the two monsters-only forms move
+//! no player, so they add nothing to a player flood) also contributes one
+//! directed [`reach::EdgeKind::Teleport`] edge from that boundary's own
+//! sector to the sector its tag resolves to. Three engine facts shape it,
+//! all from `EV_Teleport` (pinned `p_telept.c`):
+//!
+//! - **Front side only** — "`if (side == 1) return 0;`" — so only the
+//!   `fronts_this` mirror builds an edge, and the back mirror of the same
+//!   linedef builds none.
+//! - **Engine-style resolution** — the destination is the *first* sector,
+//!   in declaration order, that both carries the tag and holds a
+//!   `teleport_dest` marker, which is what `resolve_teleport_destination`
+//!   re-derives. A tag matching sectors that hold no marker resolves past
+//!   them; a tag matching none at all yields no edge, because the line
+//!   fires nothing (that is V-P15's finding, not the flood's).
+//! - **Directed** — a teleport relocates the player rather than opening a
+//!   way back, so [`reach::check`] expands the edge `a → b` alone.
+//!
+//! The edge is built ahead of the `neighbor` filter above — a teleport
+//! needs no back sector of its own, since its destination is wherever the
+//! tag points rather than what the line happens to border — but it is
+//! still gated on
+//! [`Boundary::passable`](crate::check::scene::Boundary::passable), exactly
+//! as the walkover exits under "Exit goals" are: `PIT_CheckLine` rejects a
+//! one-sided or `ML_BLOCKING` line before `P_TryMove`'s `spechit`
+//! bookkeeping ever runs `P_CrossSpecialLine`, so a teleport line the
+//! player cannot cross fires no more than an exit line on the same
+//! boundary would. [`teleport_only_sectors`] builds the same graph twice,
+//! with and without these edges, to name the sectors a teleport is
+//! load-bearing for.
 //!
 //! # Key classes
 //!
@@ -290,6 +327,34 @@ fn build_nodes(scene: &Scene, specials: &[u16], kinds: &[(String, u16)]) -> Vec<
     nodes
 }
 
+/// Resolves a teleport line's `tag` the way `EV_Teleport` does (pinned
+/// `p_telept.c`): walk the sectors in declaration order and take the first
+/// whose tag matches *and* which holds a `teleport_dest` thing ("`if
+/// (m->type != MT_TELEPORTMAN) continue;`" ... "`if (sector-sectors != i)
+/// continue;`"). `None` when no such sector exists — the line can never
+/// fire, which is V-P15's finding, not an edge.
+pub(crate) fn resolve_teleport_destination(
+    scene: &Scene,
+    tables: &Tables,
+    tag: i32,
+) -> Option<usize> {
+    if tag == 0 {
+        return None;
+    }
+    let marker = i32::from(
+        tables
+            .thing_id("teleport_dest")
+            .expect("`teleport_dest` is in the vocabulary"),
+    );
+    scene.sectors.iter().enumerate().position(|(i, s)| {
+        s.tag == tag
+            && scene
+                .things
+                .iter()
+                .any(|t| t.type_id == marker && t.sector == Some(i))
+    })
+}
+
 /// Builds one [`Edge`] per `fronts_this` boundary with a resolved neighbor,
 /// per "Edges" above: a boundary that fails
 /// [`Boundary::passable`](crate::check::scene::Boundary::passable) —
@@ -303,14 +368,51 @@ fn build_nodes(scene: &Scene, specials: &[u16], kinds: &[(String, u16)]) -> Vec<
 /// class ([`Tables::locked_door_kinds`]) becomes
 /// [`EdgeKind::Door`]`{ lock: Some(class) }`; anything else becomes
 /// [`EdgeKind::Open`].
-fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16]) -> Vec<Edge> {
+///
+/// Plus, when `teleports` is set, one directed [`EdgeKind::Teleport`] edge
+/// per distinct (front, destination) pair among the `fronts_this`
+/// **passable** boundaries carrying a player teleport special — several
+/// boundaries of the same pad can share a trigger special and tag, and this
+/// dedupes them exactly as `reach::teleport_edges` already does, rather than
+/// pushing one identical edge per triggering boundary. Each edge runs from
+/// its shared front sector to whatever [`resolve_teleport_destination`]
+/// resolves the tag to — built ahead of the `neighbor` filter above, since a
+/// teleport's destination is its tag's, not its own back sector's, but
+/// behind the same crossability gate every other edge answers to. Passing
+/// `false` builds the same graph with those edges left out, which is how
+/// [`teleport_only_sectors`] measures what a teleport is load-bearing for.
+fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool) -> Vec<Edge> {
     let plain_door = tables.door_special();
+    let player_teleports = tables.player_teleport_specials();
     let mut edges = Vec::new();
+    // Dedupes teleport edges by (front sector, destination sector), mirroring
+    // `reach::teleport_edges`'s own `HashSet<(NodeIdx, NodeIdx)>`: several
+    // boundaries of the same pad (e.g. all four sides of an island) share one
+    // trigger special and one tag, so without this, one identical edge would
+    // be pushed per triggering boundary rather than once per distinct pair.
+    let mut teleport_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (i, sector) in scene.sectors.iter().enumerate() {
         for b in &sector.boundary {
             if !b.fronts_this {
                 continue;
             }
+            // Ahead of the `neighbor` filter below — a teleport's
+            // destination is wherever the tag resolves, not what the line
+            // borders — but still behind `passable()`: an uncrossable line
+            // never reaches `P_CrossSpecialLine` at all.
+            if teleports
+                && b.passable()
+                && u16::try_from(b.special).is_ok_and(|s| player_teleports.contains(&s))
+                && let Some(dest) = resolve_teleport_destination(scene, tables, b.tag)
+                && teleport_pairs.insert((i, dest))
+            {
+                edges.push(Edge {
+                    a: i,
+                    b: dest,
+                    kind: EdgeKind::Teleport,
+                });
+            }
+            // The line itself is still an ordinary boundary below.
             let Some(neighbor) = b.neighbor else {
                 continue;
             };
@@ -411,7 +513,7 @@ pub fn run_flood(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) ->
 
     let kinds = tables.locked_door_kinds();
     let nodes = build_nodes(scene, &specials, &kinds);
-    let edges = build_edges(scene, tables, &specials);
+    let edges = build_edges(scene, tables, &specials, true);
 
     let graph = ReachGraph {
         nodes,
@@ -431,6 +533,51 @@ pub fn run_flood(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) ->
         reached[node] = false;
     }
     Some(reached)
+}
+
+/// Sectors reachable from the player start *only* through a teleport: one
+/// entry per sector, `true` when the flood with teleport edges reaches it
+/// and the flood without them does not. `None` when the flood cannot run
+/// (no start or no exit) — the reasons [`run_flood`] already reports, so
+/// this pass stays silent rather than reporting them twice.
+///
+/// This is `progression.exit.trigger = teleport`'s measurement: a walkover
+/// exit whose sector is teleport-only is a teleport exit.
+#[must_use]
+pub fn teleport_only_sectors(scene: &Scene, tables: &Tables) -> Option<Vec<bool>> {
+    let mut sink = Vec::new();
+    let start = resolve_start(scene, &mut sink)?;
+    let goals = resolve_goals(scene, tables, &mut sink)?;
+    // COVERAGE: unreachable — see `intern_lock_classes`'s own comment on
+    // its identical `None` branch; the pinned vocabulary never triggers it.
+    let (specials, _) = intern_lock_classes(tables)?;
+    let kinds = tables.locked_door_kinds();
+    let nodes = build_nodes(scene, &specials, &kinds);
+    let limits = Limits {
+        player_height: tables.player().height,
+        max_step: tables.step_height(),
+    };
+    let reachable_with = |teleports: bool| {
+        let graph = ReachGraph {
+            nodes: nodes.clone(),
+            edges: build_edges(scene, tables, &specials, teleports),
+            start,
+            goals: goals.clone(),
+        };
+        let result = reach::check(&graph, &limits);
+        let mut reached = vec![true; scene.sectors.len()];
+        for &node in &result.unreachable {
+            reached[node] = false;
+        }
+        reached
+    };
+    let (with, without) = (reachable_with(true), reachable_with(false));
+    Some(
+        with.iter()
+            .zip(&without)
+            .map(|(&w, &wo)| w && !wo)
+            .collect(),
+    )
 }
 
 /// V-P24 (engine form): every locked-door special present has at least one
@@ -572,6 +719,7 @@ pub fn check_key_lock_coherence(scene: &Scene, tables: &Tables, findings: &mut V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::check::fixtures::{self, TELEPORT_MAP};
     use crate::check::scene::{Boundary, SceneSector, SceneThing};
     use crustywad::map::udmf::parse_udmf;
 
@@ -1483,10 +1631,103 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             sectors: vec![front, empty_sector()],
             things: vec![],
         };
-        let edges = build_edges(&scene, &tables, &specials);
+        let edges = build_edges(&scene, &tables, &specials, true);
         assert!(
             edges.is_empty(),
             "a blocking twosided boundary is a wall to the flood: {edges:?}"
         );
+    }
+
+    #[test]
+    fn build_edges_dedupes_teleport_edges_by_destination() {
+        let (scene, tables) = fixtures::scene_of(TELEPORT_MAP);
+        let (specials, _class_names) = intern_lock_classes(&tables).expect("small vocabulary");
+        let edges = build_edges(&scene, &tables, &specials, true);
+        let teleports: Vec<&Edge> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Teleport)
+            .collect();
+        assert_eq!(
+            teleports.len(),
+            1,
+            "the island pad's four boundaries share one (front, destination) pair: {edges:?}"
+        );
+        assert_eq!(teleports[0].a, 0, "the pad's front sector is sector 0");
+        assert_eq!(teleports[0].b, 1, "the tag resolves to the marker sector");
+    }
+
+    // --- Teleport edges: the directed edge a trigger line adds, and the
+    // teleport-only predicate built by running the flood twice.
+    // `TELEPORT_MAP` and its `scene_of` live in `check::fixtures` so the
+    // invariants and conformance tests read the same text;
+    // `fixtures::scene_of` is spelled out here rather than imported bare
+    // because this module already has a `scene_of` of its own (a different
+    // return shape). ---
+
+    #[test]
+    fn a_teleport_line_adds_a_one_way_edge_to_the_marker_sector() {
+        let (scene, tables) = fixtures::scene_of(TELEPORT_MAP);
+        let mut findings = Vec::new();
+        let reached = run_flood(&scene, &tables, &mut findings).expect("flood ran");
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(reached[1], "the marker sector is reached by teleport");
+        assert!(reached[2], "and the exit alcove beyond it");
+        let only = teleport_only_sectors(&scene, &tables).expect("both floods ran");
+        assert_eq!(
+            only,
+            vec![false, true, true, false],
+            "sectors 1 and 2 are reachable only by teleport"
+        );
+    }
+
+    #[test]
+    fn a_monsters_only_line_adds_no_player_edge() {
+        let (scene, tables) =
+            fixtures::scene_of(&TELEPORT_MAP.replace("special = 97;", "special = 126;"));
+        let mut findings = Vec::new();
+        let reached = run_flood(&scene, &tables, &mut findings).expect("flood ran");
+        assert!(
+            !reached[1],
+            "a monsters-only teleport moves no player, so the marker sector stays unreached"
+        );
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"),
+            "no walk reaches the exit: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_blocking_teleport_line_yields_no_edge() {
+        // `PIT_CheckLine` rejects the crossing before `P_CrossSpecialLine`
+        // ever runs, so the teleport fires no more than a walkover exit on
+        // the same line would.
+        let (scene, tables) = fixtures::scene_of(&TELEPORT_MAP.replace(
+            "special = 97; arg0 = 5; }",
+            "special = 97; arg0 = 5; blocking = true; }",
+        ));
+        let mut findings = Vec::new();
+        let reached = run_flood(&scene, &tables, &mut findings).expect("flood ran");
+        assert!(!reached[1], "an uncrossable teleport line moves nobody");
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"),
+            "no walk reaches the exit: {findings:?}"
+        );
+        let only = teleport_only_sectors(&scene, &tables).expect("both floods ran");
+        assert!(
+            only.iter().all(|&t| !t),
+            "no sector is reachable only by a teleport that never fires: {only:?}"
+        );
+    }
+
+    #[test]
+    fn resolution_takes_the_first_tagged_sector_holding_a_marker() {
+        // Give sector 0 the same tag as sector 1: sector 0 holds no marker,
+        // so sector 1 still resolves — EV_Teleport's own order.
+        let (scene, tables) = fixtures::scene_of(&TELEPORT_MAP.replacen(
+            "lightlevel = 160; }",
+            "lightlevel = 160; id = 5; }",
+            1,
+        ));
+        assert_eq!(resolve_teleport_destination(&scene, &tables, 5), Some(1));
     }
 }

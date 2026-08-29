@@ -47,6 +47,15 @@
 //! unlockable. The step rule still applies to door floors, which is what
 //! catches a one-way passage *through* a door.
 //!
+//! [`EdgeKind::Teleport`] edges skip **both** rules. Neither describes a
+//! teleport: `EV_Teleport` calls `P_TeleportMove`, not `P_TryMove`, so no
+//! step cap and no crossing window is ever consulted between the pad and the
+//! destination — the arriving thing is unlinked and relinked at the marker,
+//! taking its floor and ceiling from whatever subsector it lands in. What
+//! the destination must clear is checked instead where it belongs, as rule
+//! P15 over the marker (`compile::things`, `check::invariants`). These edges
+//! are also the graph's only directed ones (see [`Edge`]).
+//!
 //! # The vacuous-pass gate
 //!
 //! P7 runs only when the map has a player 1 start and at least one exit;
@@ -56,6 +65,8 @@
 //! [`ReachGraph`] from compiled geometry; it is documented here so that its
 //! absence from an exit-less map's violations reads as a decision rather than
 //! an oversight.
+
+use std::collections::HashSet;
 
 use crate::compile::Compiled;
 use crate::ir::Ir;
@@ -105,10 +116,22 @@ pub enum EdgeKind {
         /// The key class that opens this door; `None` for a plain door.
         lock: Option<KeyClass>,
     },
+    /// A teleport: crossing `a`'s trigger edge relocates the player to `b`.
+    ///
+    /// The first directed edge in the graph — `EV_Teleport` (pinned
+    /// `p_telept.c`) fires only for a front-side crossing (`if (side == 1)
+    /// return 0;`) and relocates rather than moves, so neither the step cap
+    /// nor the crossing window applies, and nothing leads back. `check`
+    /// expands it in one direction only. A one-shot (W1) line is the same
+    /// edge: a walk uses an edge once, which is exactly what W1 permits; the
+    /// unmodeled case — returning to reuse it — is recorded in
+    /// `KNOWN-GAPS.md` as a P7 limitation.
+    Teleport,
 }
 
-/// An undirected boundary between two nodes; passability is evaluated
-/// per crossing direction.
+/// A boundary between two nodes. Undirected — passability is evaluated per
+/// crossing direction — except for [`EdgeKind::Teleport`], which `check`
+/// expands `a → b` only.
 #[derive(Debug, Clone)]
 pub struct Edge {
     /// One side.
@@ -175,26 +198,29 @@ pub struct Findings {
 ///   `min(ceilings) - max(floors)`, and `tmceilingz - tmfloorz <
 ///   thing->height` rejects (`p_map.c:468-469`).
 fn passable(from: &Node, to: &Node, kind: &EdgeKind, mask: KeyMask, limits: &Limits) -> bool {
-    if to.floor - from.floor > limits.max_step {
-        return false;
-    }
     match kind {
         EdgeKind::Open => {
-            to.ceiling.min(from.ceiling) - to.floor.max(from.floor) >= limits.player_height
+            to.floor - from.floor <= limits.max_step
+                && to.ceiling.min(from.ceiling) - to.floor.max(from.floor) >= limits.player_height
         }
-        EdgeKind::Door { lock } => lock.is_none_or(|k| {
-            // A class at or past the mask's width would shift its bit off the
-            // end: a debug panic, but in release `1u8 << 8` wraps to `1u8 << 0`
-            // and silently aliases the class onto class 0 — a locked door that
-            // opens to the wrong key, with no test able to see it. Interning
-            // must keep classes under this cap.
-            debug_assert!(
-                u32::from(k) < KeyMask::BITS,
-                "key class {k} does not fit a {}-class KeyMask",
-                KeyMask::BITS
-            );
-            mask & (1 << k) != 0
-        }),
+        EdgeKind::Door { lock } => {
+            to.floor - from.floor <= limits.max_step
+                && lock.is_none_or(|k| {
+                    // A class at or past the mask's width would shift its bit
+                    // off the end: a debug panic, but in release `1u8 << 8`
+                    // wraps to `1u8 << 0` and silently aliases the class onto
+                    // class 0 — a locked door that opens to the wrong key,
+                    // with no test able to see it. Interning must keep
+                    // classes under this cap.
+                    debug_assert!(
+                        u32::from(k) < KeyMask::BITS,
+                        "key class {k} does not fit a {}-class KeyMask",
+                        KeyMask::BITS
+                    );
+                    mask & (1 << k) != 0
+                })
+        }
+        EdgeKind::Teleport => true,
     }
 }
 
@@ -229,7 +255,9 @@ pub fn check(graph: &ReachGraph, limits: &Limits) -> Findings {
     let mut adj: Vec<Vec<(NodeIdx, &EdgeKind)>> = vec![Vec::new(); n];
     for e in &graph.edges {
         adj[e.a].push((e.b, &e.kind));
-        adj[e.b].push((e.a, &e.kind));
+        if e.kind != EdgeKind::Teleport {
+            adj[e.b].push((e.a, &e.kind));
+        }
     }
     let norm = |node: NodeIdx, mask: KeyMask| mask | graph.nodes[node].keys;
     // A state index packs (node, mask); a KeyMask is 8 bits by construction.
@@ -337,10 +365,13 @@ pub struct BuiltGraph {
 /// Derives the traversal graph from what was actually emitted.
 ///
 /// Geometry comes from [`MapData`](crate::compile::MapData) — sectors as
-/// nodes, two-sided non-blocking linedefs as edges — never from authored
-/// intent, so the graph cannot drift from the map. Keys and the start use the
-/// room-index-equals-sector-index invariant [`crate::compile::things`]
-/// documents and verifies.
+/// nodes, two-sided non-blocking linedefs as edges, plus one directed
+/// [`EdgeKind::Teleport`] edge per distinct `(host sector, destination
+/// sector)` pair a player-usable teleport line reaches, where the
+/// destination is whichever sector [`crate::compile::teleports`] tagged —
+/// never from authored intent, so the graph cannot drift from the map. Keys
+/// and the start use the room-index-equals-sector-index invariant
+/// [`crate::compile::things`] documents and verifies.
 ///
 /// This is also where [`check`]'s indexing preconditions are established.
 /// `check` indexes `nodes` by `start`, by every `goals` entry, and by each
@@ -471,6 +502,8 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
         });
     }
 
+    edges.extend(teleport_edges(tables, out));
+
     Some(BuiltGraph {
         graph: ReachGraph {
             nodes,
@@ -482,9 +515,52 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
     })
 }
 
+/// Directed [`EdgeKind::Teleport`] edges for every player-usable teleport
+/// line: player-usable specials only (a monster-only pad's trigger carries a
+/// different special the player vocabulary never matches), tagged to exactly
+/// the destination sector [`crate::compile::teleports`] tags. The edge runs
+/// host → destination; `check` never expands it back.
+///
+/// An island pad carries its special on all four boundary linedefs (any
+/// approach fires it), so the same host → destination pair recurs; a `seen`
+/// set keeps the result to one edge per distinct pair.
+///
+/// # Panics
+/// Panics if a teleport line's tag resolves to no sector. Unreachable on
+/// compiled output: [`crate::compile::teleports`] writes a line's tag and
+/// the destination sector's tag from the same [`crate::compile::tags`]
+/// allocation, in one pass, so a tagged trigger line always has its sector.
+fn teleport_edges(tables: &Tables, out: &Compiled) -> Vec<Edge> {
+    let player_teleports = tables.player_teleport_specials();
+    let mut seen: HashSet<(NodeIdx, NodeIdx)> = HashSet::new();
+    let mut edges = Vec::new();
+    for line in &out.data.linedefs {
+        if !player_teleports.contains(&line.special) || line.tag == 0 {
+            continue;
+        }
+        let dest = out
+            .data
+            .sectors
+            .iter()
+            .position(|s| s.tag == line.tag)
+            .expect("the compiler tags every destination");
+        let from = out.data.sidedefs[line.front].sector;
+        if seen.insert((from, dest)) {
+            edges.push(Edge {
+                a: from,
+                b: dest,
+                kind: EdgeKind::Teleport,
+            });
+        }
+    }
+    edges
+}
+
 /// A human-readable name for a node: a room's own id, or a compiler-made
 /// sector described by the nearest rooms around it, found by breadth-first
-/// search over plain adjacency (passability is irrelevant to naming).
+/// search over plain adjacency (passability is irrelevant to naming). The
+/// search treats every edge, including [`EdgeKind::Teleport`], as symmetric —
+/// naming a node needs only some path to a room, not a walkable one.
 #[must_use]
 pub fn node_label(node: NodeIdx, ir: &Ir, graph: &ReachGraph) -> String {
     if node < ir.rooms.len() {
@@ -950,7 +1026,7 @@ mod tests {
             .iter()
             .filter_map(|e| match &e.kind {
                 EdgeKind::Door { lock } => Some(*lock),
-                EdgeKind::Open => None,
+                EdgeKind::Open | EdgeKind::Teleport => None,
             })
             .collect();
         assert_eq!(locks, vec![None, None], "both door faces, neither locked");
@@ -993,7 +1069,7 @@ mod tests {
             .iter()
             .filter_map(|e| match &e.kind {
                 EdgeKind::Door { lock } => Some(*lock),
-                EdgeKind::Open => None,
+                EdgeKind::Open | EdgeKind::Teleport => None,
             })
             .collect();
         assert!(!lock_classes.is_empty(), "the door faces are Door edges");
@@ -1094,6 +1170,100 @@ mod tests {
         assert!(
             graph_from_compiled(&ir, &tables, &out).is_none(),
             "no start: vacuous"
+        );
+    }
+
+    #[test]
+    fn a_teleport_edge_is_one_way_and_ignores_heights() {
+        // 0: start (floor 0); 1: destination on a ledge 200 up; edge 0→1 teleport.
+        let graph = ReachGraph {
+            nodes: vec![
+                Node {
+                    floor: 0,
+                    ceiling: 128,
+                    keys: 0,
+                },
+                Node {
+                    floor: 200,
+                    ceiling: 328,
+                    keys: 0,
+                },
+            ],
+            edges: vec![Edge {
+                a: 0,
+                b: 1,
+                kind: EdgeKind::Teleport,
+            }],
+            start: 0,
+            goals: vec![1],
+        };
+        let f = check(
+            &graph,
+            &Limits {
+                player_height: 56,
+                max_step: 24,
+            },
+        );
+        assert!(
+            !f.unfinishable,
+            "the teleport reaches the ledge despite the 200-unit rise"
+        );
+        assert!(f.unreachable.is_empty());
+        // Reversed, the edge is not traversable: start on the ledge, goal below.
+        let back = ReachGraph {
+            start: 1,
+            goals: vec![0],
+            ..graph
+        };
+        let f = check(
+            &back,
+            &Limits {
+                player_height: 56,
+                max_step: 24,
+            },
+        );
+        assert!(f.unfinishable, "a teleport is directed a → b");
+        assert_eq!(f.unreachable, vec![0]);
+    }
+
+    #[test]
+    fn compiled_teleports_add_player_edges_but_not_monster_edges() {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(
+            r#"{ "seed":1, "grid":64, "theme":"tech_base",
+              "rooms":[
+                { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":128, "light":160,
+                  "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+                  "things":[ { "kind":"player1_start", "at":[192,64], "angle":90 } ] },
+                { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":128, "light":160,
+                  "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+                  "things":[ { "kind":"imp", "at":[384,64], "angle":0 } ] }
+              ],
+              "portals":[],
+              "exits":[{ "room":"b", "trigger":"walkover", "at":[448,256], "width":64 }],
+              "teleports":[
+                { "id":"go", "room":"a", "pad":{"island":[64,128]}, "to":{"room":"b","at":[512,128],"angle":90} },
+                { "id":"pen", "room":"b", "pad":{"island":[384,128]}, "to":{"room":"a","at":[192,192],"angle":0}, "monsters_only":true }
+              ] }"#,
+        )
+        .expect("ir");
+        let out = crate::compile::compile(&ir, &tables).expect("compiles");
+        let built = graph_from_compiled(&ir, &tables, &out).expect("graph");
+        let teleports: Vec<&Edge> = built
+            .graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Teleport)
+            .collect();
+        assert_eq!(
+            teleports.len(),
+            1,
+            "the monsters-only pad adds no player edge"
+        );
+        assert_eq!(
+            (teleports[0].a, teleports[0].b),
+            (0, 1),
+            "from the host room to room b"
         );
     }
 }

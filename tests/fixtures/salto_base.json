@@ -1,0 +1,89 @@
+{
+  "seed": 20260828,
+  "grid": 64,
+  "theme": "tech_base",
+  "rooms": [
+    {
+      "id": "hub",
+      "footprint": [[0, 0], [0, 512], [512, 512], [512, 0]],
+      "floor": 0,
+      "ceiling": 128,
+      "light": 160,
+      "floor_tex": "FLOOR4_8",
+      "ceil_tex": "CEIL3_5",
+      "wall_tex": "STARTAN3",
+      "things": [
+        { "kind": "player1_start", "at": [256, 128], "angle": 90 }
+      ]
+    },
+    {
+      "id": "arena",
+      "footprint": [[0, 576], [0, 1088], [512, 1088], [512, 576]],
+      "floor": 0,
+      "ceiling": 160,
+      "light": 144,
+      "floor_tex": "FLOOR4_8",
+      "ceil_tex": "CEIL3_5",
+      "wall_tex": "STARTAN3",
+      "things": [
+        { "kind": "shotgun", "at": [256, 640], "angle": 90 }
+      ]
+    },
+    {
+      "id": "closet",
+      "footprint": [[704, 576], [704, 832], [960, 832], [960, 576]],
+      "floor": 0,
+      "ceiling": 128,
+      "light": 96,
+      "floor_tex": "FLOOR4_8",
+      "ceil_tex": "CEIL3_5",
+      "wall_tex": "STARTAN3",
+      "things": [
+        { "kind": "imp", "at": [768, 640], "angle": 180, "ambush": true },
+        { "kind": "imp", "at": [896, 640], "angle": 180, "ambush": true },
+        { "kind": "imp", "at": [768, 768], "angle": 180, "ambush": true }
+      ]
+    },
+    {
+      "id": "vault",
+      "footprint": [[704, 0], [704, 256], [960, 256], [960, 0]],
+      "floor": 0,
+      "ceiling": 128,
+      "light": 176,
+      "floor_tex": "FLOOR4_8",
+      "ceil_tex": "CEIL3_5",
+      "wall_tex": "STARTAN3",
+      "things": [
+        { "kind": "stimpack", "at": [832, 64], "angle": 0 }
+      ]
+    },
+    {
+      "id": "exit",
+      "footprint": [[1216, 0], [1216, 256], [1472, 256], [1472, 0]],
+      "floor": 0,
+      "ceiling": 128,
+      "light": 160,
+      "floor_tex": "FLOOR4_8",
+      "ceil_tex": "CEIL3_5",
+      "wall_tex": "STARTAN3"
+    }
+  ],
+  "portals": [
+    { "a": "hub", "b": "arena", "kind": "door", "width": 128, "at": [256, 512],
+      "door_thickness": 32, "alcove_near": 16, "alcove_far": 16 },
+    { "a": "arena", "b": "closet", "kind": "plain", "width": 64, "at": [512, 704] }
+  ],
+  "exits": [
+    { "room": "exit", "trigger": "teleport", "at": [1344, 256], "width": 64 }
+  ],
+  "teleports": [
+    { "id": "hub_to_vault", "room": "hub", "pad": { "island": [64, 384] },
+      "to": { "room": "vault", "at": [864, 288], "angle": 270 } },
+    { "id": "vault_to_hub", "room": "vault", "pad": { "wall": [832, 256] },
+      "to": { "room": "hub", "at": [96, 416], "angle": 0 } },
+    { "id": "ambush", "room": "closet", "pad": { "island": [832, 704] },
+      "to": { "room": "arena", "at": [256, 896], "angle": 270 }, "monsters_only": true },
+    { "id": "hub_to_exit", "room": "hub", "pad": { "wall": [384, 0] },
+      "to": { "room": "exit", "at": [1344, 192], "angle": 90 }, "repeatable": false }
+  ]
+}

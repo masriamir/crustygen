@@ -989,8 +989,9 @@ pub fn check_door_openings(scene: &Scene, tables: &Tables, findings: &mut Vec<Fi
 }
 
 /// The linedef specials this checker recognizes as modeled: `0` (no
-/// special), a manual or locked door ([`door_specials`]), and the four exit
-/// specials (switch/walkover crossed with normal/secret).
+/// special), a manual or locked door ([`door_specials`]), the four exit
+/// specials (switch/walkover crossed with normal/secret), and the four
+/// teleport specials ([`Tables::teleport_specials`]).
 fn recognized_specials(tables: &Tables) -> Vec<i32> {
     let mut specials = door_specials(tables);
     specials.push(0);
@@ -998,6 +999,7 @@ fn recognized_specials(tables: &Tables) -> Vec<i32> {
     specials.push(i32::from(tables.exit_walkover_special()));
     specials.push(i32::from(tables.secret_exit_switch_special()));
     specials.push(i32::from(tables.secret_exit_walkover_special()));
+    specials.extend(tables.teleport_specials().into_iter().map(i32::from));
     specials
 }
 
@@ -1025,15 +1027,15 @@ fn recognized_specials(tables: &Tables) -> Vec<i32> {
 /// Severity stays [`Severity::Warning`]: an unrecognized special is not
 /// proof the map is broken, only proof this checker cannot vouch for it.
 ///
-/// **Lift and teleport specials are deliberately not in the recognized
-/// set.** `Tables::lift_switch_special`, `lift_walkover_special`, and
-/// `teleport_special` all exist in the sourced tables — but this compiler
-/// does not emit lifts or teleporters yet (`KNOWN-GAPS.md`), and neither
-/// this module nor `flood.rs` models their traversal semantics. Recognizing
-/// them here without the flood actually understanding them would be
-/// dishonest: a map that somehow carried one would get a silent pass
-/// instead of the warning that correctly says "this checker does not know
-/// what this line does."
+/// **Lift specials are deliberately not in the recognized set.**
+/// `Tables::lift_switch_special` and `lift_walkover_special` are sourced,
+/// but no pass emits them and the flood does not model a moving floor.
+/// Recognizing them here without the flood actually understanding them
+/// would be dishonest: a map that somehow carried one would get a silent
+/// pass instead of the warning that correctly says "this checker does not
+/// know what this line does." The four teleport specials **are** in the
+/// set, since the flood models them (`flood.rs`, "Edges") and
+/// [`check_teleport_pairing`] (V-P15) checks their pairing.
 ///
 /// Each linedef is visited once (`fronts_this` only): `special` is
 /// linedef-wide, so both mirrors of a two-sided line would otherwise report
@@ -1060,10 +1062,190 @@ pub fn check_recognized_specials(scene: &Scene, tables: &Tables, findings: &mut 
     }
 }
 
+/// V-P15 — teleport pairing, re-derived from the emitted map the way
+/// `EV_Teleport` reads it: every teleport line's tag must resolve
+/// (`flood::resolve_teleport_destination`) to a sector holding exactly one
+/// `teleport_dest`, with the player's headroom and radius clearance at the
+/// marker. A tag-0 teleport line is [`check_tags`]'s (V-P14) finding, not
+/// repeated here.
+///
+/// Each linedef is judged once, from its front mirror: `EV_Teleport` fires
+/// only for a front-side crossing ("`if (side == 1) return 0;`", pinned
+/// `p_telept.c`), so the back mirror of a teleport line triggers nothing to
+/// check.
+///
+/// Clearance is measured against the destination's **non-passable**
+/// boundary segments only, the same rule (and the same reason)
+/// [`check_starts`] applies to a player start: an open doorway cannot crush
+/// the player against it, so only a solid segment can deny the radius.
+///
+/// Headroom and clearance are sized for [`Tables::player`], including on a
+/// monsters-only line. That is a known gap in the *optimistic* direction: a
+/// species wider than the player (a pinky is 30 to the player's 16) can
+/// arrive at a destination this check calls clear and land embedded in the
+/// wall. The engine does not catch it — `P_TeleportMove` (pinned
+/// `p_map.c`) sets `tmbbox` from the arriving thing's radius, takes floor
+/// and ceiling from `R_PointInSubsector (x,y)`, runs
+/// `P_BlockThingsIterator(bx,by,PIT_StompThing)` over *things* only, and
+/// then links the thing and returns true. It consults no line at all, and
+/// its one false return is `PIT_StompThing` refusing a non-player stomp
+/// ("`if ( !tmthing->player && gamemap != 30) return false;`"). What the
+/// arrival hits is not a refusal but a stuck mobj: `PIT_CheckLine` fails
+/// every later `P_TryMove` whose destination box still straddles the wall
+/// ("`if (!ld->backsector) return false; // one sided line`"). Sizing this
+/// properly needs the set of species that can actually reach the trigger
+/// line, which is the acoustic model this checker does not have.
+///
+/// # Panics
+///
+/// If the vocabulary names no `teleport_dest` thing — impossible for the
+/// `data/vocabulary.toml` this crate embeds, which [`Tables::load`] is the
+/// only way to build a [`Tables`] from.
+pub fn check_teleport_pairing(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    let specials: Vec<i32> = tables
+        .teleport_specials()
+        .into_iter()
+        .map(i32::from)
+        .collect();
+    let marker = i32::from(
+        tables
+            .thing_id("teleport_dest")
+            .expect("`teleport_dest` is in the vocabulary"),
+    );
+    let player = tables.player();
+    for sector in &scene.sectors {
+        for b in &sector.boundary {
+            if !b.fronts_this || !specials.contains(&b.special) || b.tag == 0 {
+                continue;
+            }
+            let Some(dest) =
+                crate::check::flood::resolve_teleport_destination(scene, tables, b.tag)
+            else {
+                findings.push(Finding {
+                    check: "V-P15",
+                    severity: Severity::Error,
+                    subject: Subject::Linedef(b.linedef),
+                    message: format!(
+                        "teleport line's tag {} resolves to no sector holding a teleport \
+                         destination",
+                        b.tag
+                    ),
+                });
+                continue;
+            };
+            let markers: Vec<usize> = scene
+                .things
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.type_id == marker && t.sector == Some(dest))
+                .map(|(i, _)| i)
+                .collect();
+            // `resolve_teleport_destination` already found one, so this is
+            // the "more than one" case: `EV_Teleport` takes whichever the
+            // thinker list yields first, which is not a pairing an author
+            // can predict from the TEXTMAP.
+            if markers.len() != 1 {
+                findings.push(Finding {
+                    check: "V-P15",
+                    severity: Severity::Error,
+                    subject: Subject::Sector(dest),
+                    message: format!(
+                        "teleport destination sector holds {} markers, not one",
+                        markers.len()
+                    ),
+                });
+                continue;
+            }
+            let d = &scene.sectors[dest];
+            if d.ceiling - d.floor < player.height {
+                findings.push(Finding {
+                    check: "V-P15",
+                    severity: Severity::Error,
+                    subject: Subject::Sector(dest),
+                    message: format!(
+                        "teleport destination has {} units of headroom; the player needs {}",
+                        d.ceiling - d.floor,
+                        player.height
+                    ),
+                });
+            }
+            let t = &scene.things[markers[0]];
+            let clearance = d
+                .boundary
+                .iter()
+                .filter(|e| !e.passable())
+                .map(|e| dist_to_segment_f64(t.x, t.y, e.a.0, e.a.1, e.b.0, e.b.1))
+                .fold(f64::INFINITY, f64::min);
+            if clearance < f64::from(player.radius) {
+                findings.push(Finding {
+                    check: "V-P15",
+                    severity: Severity::Error,
+                    subject: Subject::Thing(markers[0]),
+                    message: format!(
+                        "teleport destination has {clearance:.1} units of clearance; the \
+                         player needs {}",
+                        player.radius
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// V-P27 — no sealed monster sector: a sector holding a monster has at
+/// least one two-sided boundary, or is a teleport destination. A fully
+/// one-sided monster sector can never be woken by sight or sound and is
+/// never entered, so its monsters are scenery the player never meets.
+///
+/// Two-sided rather than [`crate::check::scene::Boundary::passable`]: sound
+/// and sight both travel through a two-sided line the player cannot walk
+/// across (a window, a fence), so a blocking two-sided boundary is still a
+/// way in for the wake-up this rule is about.
+///
+/// # Panics
+///
+/// If the vocabulary names no `teleport_dest` thing — impossible for the
+/// `data/vocabulary.toml` this crate embeds, which [`Tables::load`] is the
+/// only way to build a [`Tables`] from.
+pub fn check_sealed_monster_rooms(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    let marker = i32::from(
+        tables
+            .thing_id("teleport_dest")
+            .expect("`teleport_dest` is in the vocabulary"),
+    );
+    for (i, sector) in scene.sectors.iter().enumerate() {
+        let holds_monster = scene.things.iter().any(|t| {
+            t.sector == Some(i)
+                && t.name
+                    .as_deref()
+                    .is_some_and(|n| tables.spawnhealth(n).is_some())
+        });
+        if !holds_monster {
+            continue;
+        }
+        let joined = sector.boundary.iter().any(|b| b.two_sided);
+        let destination = scene
+            .things
+            .iter()
+            .any(|t| t.type_id == marker && t.sector == Some(i));
+        if !joined && !destination {
+            findings.push(Finding {
+                check: "V-P27",
+                severity: Severity::Error,
+                subject: Subject::Sector(i),
+                message: "holds monsters but every boundary is one-sided and no teleport lands \
+                          here; nothing can ever wake them"
+                    .to_owned(),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::check;
+    use crate::check::fixtures::{self, TELEPORT_MAP};
     use crate::check::scene::{SceneSector, SceneThing};
     use crustywad::Limits;
     use crustywad::map::udmf::parse_udmf;
@@ -2075,5 +2257,173 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
                 && matches!(f.subject, Subject::Thing(0))),
             "expected a V-P20 error on thing 0 (the stimpack): {findings:?}"
         );
+    }
+
+    // --- Teleport pairing (V-P15), sealed monster sectors (V-P27), and the
+    // four teleport specials joining the recognized set. ---
+
+    /// The alcove threshold of [`TELEPORT_MAP`], verbatim — sector 1's only
+    /// two-sided boundary.
+    const THRESHOLD: &str = "linedef { v1 = 13; v2 = 12; sidefront = 15; sideback = 16; \
+                             twosided = true; special = 52; arg0 = 1; }";
+    /// The same line made one-sided, which seals sector 1. (It leaves the
+    /// alcove, sector 2, unclosed — a `"V-S"` finding `scene_of` discards,
+    /// and irrelevant to a check that reads sector 1.)
+    const SEALED_THRESHOLD: &str =
+        "linedef { v1 = 13; v2 = 12; sidefront = 15; blocking = true; special = 52; arg0 = 1; }";
+
+    /// [`TELEPORT_MAP`]'s teleport destination marker, verbatim, for tests
+    /// that remove it.
+    const MARKER: &str = "thing { x = 320.0; y = 64.0; angle = 0; type = 14; single = true; }\n";
+    /// The same marker shifted east to `x = 372`, 12 units from sector 1's
+    /// two-sided alcove threshold at `x = 384` and 34.2 from the nearest
+    /// solid wall.
+    const MARKER_NEAR_DOORWAY: &str =
+        "thing { x = 372.0; y = 64.0; angle = 0; type = 14; single = true; }\n";
+
+    #[test]
+    fn v_p15_flags_a_dangling_marker_less_tag_and_an_ambiguous_one() {
+        let (scene, tables) = fixtures::scene_of(TELEPORT_MAP);
+        let mut findings = Vec::new();
+        check_teleport_pairing(&scene, &tables, &mut findings);
+        assert!(findings.is_empty(), "{findings:?}");
+        // No marker anywhere on the tag.
+        let (scene, tables) =
+            fixtures::scene_of(&TELEPORT_MAP.replace("type = 14;", "type = 2035;"));
+        let mut findings = Vec::new();
+        check_teleport_pairing(&scene, &tables, &mut findings);
+        assert_eq!(
+            findings.iter().filter(|f| f.check == "V-P15").count(),
+            4,
+            "one per trigger edge"
+        );
+        // Two markers in the resolved sector.
+        let (scene, tables) = fixtures::scene_of(&TELEPORT_MAP.replace(
+            MARKER,
+            "thing { x = 320.0; y = 64.0; angle = 0; type = 14; single = true; }\n\
+             thing { x = 340.0; y = 64.0; angle = 0; type = 14; single = true; }\n",
+        ));
+        let mut findings = Vec::new();
+        check_teleport_pairing(&scene, &tables, &mut findings);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "V-P15" && f.message.contains("2 markers")),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn v_p15_measures_clearance_against_solid_walls_only() {
+        // The marker at (372, 64) is 12 units from the alcove threshold —
+        // a two-sided, open boundary — and 34.2 from the nearest solid
+        // wall. An open doorway cannot crush the player against it, so
+        // only the solid segments count and the player's radius (16) is
+        // clear.
+        let (scene, tables) =
+            fixtures::scene_of(&TELEPORT_MAP.replace(MARKER, MARKER_NEAR_DOORWAY));
+        let mut findings = Vec::new();
+        check_teleport_pairing(&scene, &tables, &mut findings);
+        assert!(
+            findings.is_empty(),
+            "an open boundary is not a wall to squeeze against: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn v_p15_flags_a_destination_the_player_does_not_fit_in() {
+        // Sector 1 is the destination (`id = 5`). Drop its ceiling to 32,
+        // well under the player's height, and the arrival is inside the
+        // ceiling. Every trigger edge of the island pad resolves to the
+        // same sector, so each one reports it.
+        let squashed = TELEPORT_MAP.replace(
+            "sector { heightfloor = 0; heightceiling = 128; texturefloor = \"FLOOR4_8\"; \
+             textureceiling = \"CEIL3_5\"; lightlevel = 160; id = 5; }",
+            "sector { heightfloor = 0; heightceiling = 32; texturefloor = \"FLOOR4_8\"; \
+             textureceiling = \"CEIL3_5\"; lightlevel = 160; id = 5; }",
+        );
+        assert_ne!(squashed, TELEPORT_MAP, "the destination sector was edited");
+        let (scene, tables) = fixtures::scene_of(&squashed);
+        let mut findings = Vec::new();
+        check_teleport_pairing(&scene, &tables, &mut findings);
+        let headroom: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == "V-P15" && f.message.contains("units of headroom"))
+            .collect();
+        assert_eq!(headroom.len(), 4, "one per trigger edge: {findings:?}");
+        assert!(
+            headroom
+                .iter()
+                .all(|f| f.severity == Severity::Error && matches!(f.subject, Subject::Sector(1))),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn v_p15_flags_a_destination_pressed_against_a_solid_wall() {
+        // The companion to `v_p15_measures_clearance_against_solid_walls_only`:
+        // sector 1's west wall is solid and sits at `x = 256`, so a marker
+        // at `x = 260` leaves 4 units where the player's radius needs 16.
+        let (scene, tables) = fixtures::scene_of(&TELEPORT_MAP.replace(
+            MARKER,
+            "thing { x = 260.0; y = 64.0; angle = 0; type = 14; single = true; }\n",
+        ));
+        let mut findings = Vec::new();
+        check_teleport_pairing(&scene, &tables, &mut findings);
+        let clearance: Vec<_> = findings
+            .iter()
+            .filter(|f| f.check == "V-P15" && f.message.contains("units of clearance"))
+            .collect();
+        assert_eq!(clearance.len(), 4, "one per trigger edge: {findings:?}");
+        assert!(
+            clearance
+                .iter()
+                .all(|f| f.severity == Severity::Error && matches!(f.subject, Subject::Thing(_))),
+            "{findings:?}"
+        );
+    }
+
+    #[test]
+    fn v_p27_flags_a_sealed_monster_sector_but_not_a_destination() {
+        // Seal sector 1 — its only two-sided boundary is the alcove
+        // threshold — and stand an imp (3001) in it. Sector 1 still holds
+        // the marker, so a teleport lands there: no finding.
+        let sealed = format!(
+            "{}thing {{ x = 300.0; y = 64.0; angle = 0; type = 3001; single = true; }}\n",
+            TELEPORT_MAP.replace(THRESHOLD, SEALED_THRESHOLD)
+        );
+        let (scene, tables) = fixtures::scene_of(&sealed);
+        assert_eq!(
+            scene.things[2].name.as_deref(),
+            Some("imp"),
+            "the fixture's third thing is the imp"
+        );
+        assert_eq!(scene.things[2].sector, Some(1), "and it stands in sector 1");
+        let mut findings = Vec::new();
+        check_sealed_monster_rooms(&scene, &tables, &mut findings);
+        assert!(
+            findings.iter().all(|f| f.check != "V-P27"),
+            "a teleport destination is never sealed: {findings:?}"
+        );
+
+        // Same sealed sector with the marker removed: nothing reaches the
+        // imp by sight, by sound, or by teleport.
+        let (scene, tables) = fixtures::scene_of(&sealed.replace(MARKER, ""));
+        let mut findings = Vec::new();
+        check_sealed_monster_rooms(&scene, &tables, &mut findings);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P27"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Sector(1))),
+            "expected a V-P27 error on sector 1: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn teleport_specials_are_recognized() {
+        let (scene, tables) = fixtures::scene_of(TELEPORT_MAP);
+        let mut findings = Vec::new();
+        check_recognized_specials(&scene, &tables, &mut findings);
+        assert!(findings.is_empty(), "97 is modeled now: {findings:?}");
     }
 }

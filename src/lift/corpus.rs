@@ -1,5 +1,7 @@
 //! Corpus sweep: every zip/WAD in a directory → per-map census + verdict,
-//! deduplicated by content, with every failure counted in a bucket.
+//! deduplicated by content, with every failure counted in a bucket. Each
+//! surviving map also runs through [`crate::lift::teleport`], whose refusals
+//! gate the verdict's fourth axis and whose counts the report rolls up.
 //! Aggregation and the report live in the second half of this module.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,9 +12,12 @@ use crustywad::map::MapGroup;
 use crustywad::{Limits, ParseOptions, Strictness, Wad};
 use sha2::{Digest, Sha256};
 
+use crate::check::scene::Scene;
 use crate::ingest::{self, IngestError, MapOrigin};
+use crate::lift::teleport::TeleportCounts;
 use crate::lift::vocabulary::{Verdict, Vocabulary};
 use crate::lift::{self, MapTelemetry};
+use crate::tables::Tables;
 
 /// One surveyed, classified map.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -27,8 +32,10 @@ pub struct MapRecord {
     pub hash: String,
     /// The raw census.
     pub telemetry: MapTelemetry,
-    /// The vocabulary verdict.
+    /// The vocabulary verdict, teleport refusals folded in.
     pub verdict: Verdict,
+    /// The teleport recognizer's census for this map.
+    pub teleports: TeleportCounts,
 }
 
 /// Every count a sweep produces. Failure buckets are per candidate (an
@@ -181,7 +188,7 @@ fn archive_options() -> ParseOptions {
 ///
 /// If the sweep collects more than `u64::MAX` unique maps, which no
 /// directory of files can hold.
-pub fn sweep_dir(dir: &Path, vocab: &Vocabulary) -> Result<Sweep, CorpusError> {
+pub fn sweep_dir(dir: &Path, vocab: &Vocabulary, tables: &Tables) -> Result<Sweep, CorpusError> {
     let mut candidates: Vec<(PathBuf, String)> = std::fs::read_dir(dir)
         .map_err(|source| CorpusError::Io {
             path: dir.display().to_string(),
@@ -218,7 +225,9 @@ pub fn sweep_dir(dir: &Path, vocab: &Vocabulary) -> Result<Sweep, CorpusError> {
                     {
                         let source = format!("{label}!{}", member.path());
                         match archive.wad(member) {
-                            Ok(wad) => survey_wad(&wad, &source, vocab, &mut sweep, &mut seen),
+                            Ok(wad) => {
+                                survey_wad(&wad, &source, vocab, tables, &mut sweep, &mut seen);
+                            }
                             Err(err) => {
                                 sweep.buckets.wad_unreadable += 1;
                                 sweep.failures.push(format!("{source}: {err}"));
@@ -233,7 +242,7 @@ pub fn sweep_dir(dir: &Path, vocab: &Vocabulary) -> Result<Sweep, CorpusError> {
             }
         } else {
             match Wad::from_path(path) {
-                Ok(wad) => survey_wad(&wad, label, vocab, &mut sweep, &mut seen),
+                Ok(wad) => survey_wad(&wad, label, vocab, tables, &mut sweep, &mut seen),
                 Err(err) => {
                     sweep.buckets.wad_unreadable += 1;
                     sweep.failures.push(format!("{label}: {err}"));
@@ -249,6 +258,7 @@ fn survey_wad(
     wad: &Wad,
     source: &str,
     vocab: &Vocabulary,
+    tables: &Tables,
     sweep: &mut Sweep,
     seen: &mut BTreeSet<String>,
 ) {
@@ -269,6 +279,29 @@ fn survey_wad(
                 }
                 let telemetry = lift::survey(&group.name, &loaded.map);
                 let verdict = vocab.classify(&telemetry);
+                // The histogram is already computed: a map with none of the
+                // four teleport specials among its linedef specials has no
+                // teleport line for the recognizer to recognize, so skip
+                // building a `Scene` and running it — `verdict` stays
+                // `classify`'s own (`teleports_ok == true`) and the counts
+                // are the all-zero default.
+                let has_teleports = tables
+                    .teleport_specials()
+                    .into_iter()
+                    .any(|s| telemetry.linedef_specials.contains_key(&i32::from(s)));
+                let (verdict, teleports) = if has_teleports {
+                    // `Scene::build`'s findings are discarded on purpose:
+                    // structural findings are the verifier's business, and this
+                    // sweep is not verifying anything. The recognizer reads
+                    // whatever boundaries resolved and refuses what it cannot
+                    // recognize — a map the verifier would fault still yields an
+                    // honest teleport census.
+                    let scene = Scene::build(&loaded.map, tables, &mut Vec::new());
+                    let report = lift::teleport::recognize(&scene, tables);
+                    (verdict.with_teleports(&report), report.counts)
+                } else {
+                    (verdict, TeleportCounts::default())
+                };
                 sweep.maps.push(MapRecord {
                     source: source.to_owned(),
                     map: group.name.clone(),
@@ -279,6 +312,7 @@ fn survey_wad(
                     hash,
                     telemetry,
                     verdict,
+                    teleports,
                 });
             }
             Err(err) => {
@@ -314,7 +348,10 @@ pub struct AxisShare {
     pub sector_specials: f64,
     /// Fraction whose thing types are all in vocabulary.
     pub thing_kinds: f64,
-    /// Fraction expressible on all three.
+    /// Fraction whose teleport lines are all recognized (no refusal). A map
+    /// with no teleport line passes vacuously.
+    pub teleports: f64,
+    /// Fraction expressible on all four axes.
     pub expressible: f64,
 }
 
@@ -350,6 +387,27 @@ pub struct GreedyCurve {
     pub checkpoints: Vec<(usize, f64)>,
 }
 
+/// The teleport recognizer's roll-up over a sweep. Every count except
+/// [`Self::maps_with_teleports`] is scoped to the maps that carry at least
+/// one teleport line, so a corpus of teleport-free maps reports zeros rather
+/// than diluting every ratio.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct TeleportAggregate {
+    /// Maps carrying at least one teleport line.
+    pub maps_with_teleports: u64,
+    /// Maps carrying at least one refused line — the maps the teleport axis
+    /// alone makes inexpressible.
+    pub maps_refused: u64,
+    /// Field-wise sum of every such map's counts.
+    pub lines: TeleportCounts,
+    /// Maps with at least one closet line.
+    pub closet_maps: u64,
+    /// Maps with at least one line delivering beside an exit.
+    pub exit_maps: u64,
+    /// Maps with at least one line on a paired pad.
+    pub paired_maps: u64,
+}
+
 /// The whole-sweep summary.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Aggregate {
@@ -369,10 +427,13 @@ pub struct Aggregate {
     pub thing_blockers: Vec<Blocker>,
     /// Greedy curve with thing kinds and sector specials held expressible.
     pub greedy_line_axis: GreedyCurve,
-    /// Greedy curve over maps already ok on the other two axes. Its shares
+    /// Greedy curve over maps already ok on the other three axes. Its shares
     /// are still over every unique map, so it plateaus below 1.0 whenever
-    /// some map is blocked on a sector special or a thing kind.
+    /// some map is blocked on a sector special, a thing kind, or a refused
+    /// teleport line.
     pub greedy_conjunction: GreedyCurve,
+    /// The teleport recognizer's roll-up.
+    pub teleports: TeleportAggregate,
 }
 
 /// `n / of` as a fraction, with an empty population scoring 0.
@@ -384,6 +445,15 @@ fn share(n: usize, of: usize) -> f64 {
     if of == 0 { 0.0 } else { n as f64 / of as f64 }
 }
 
+/// [`share`] over the `u64` counts the aggregate stores.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "map counts are always far under f64's 52-bit mantissa"
+)]
+fn u64_share(n: u64, of: u64) -> f64 {
+    if of == 0 { 0.0 } else { n as f64 / of as f64 }
+}
+
 fn axis_share(maps: &[&MapRecord]) -> AxisShare {
     let n = maps.len();
     let count = |f: fn(&Verdict) -> bool| share(maps.iter().filter(|m| f(&m.verdict)).count(), n);
@@ -391,6 +461,7 @@ fn axis_share(maps: &[&MapRecord]) -> AxisShare {
         line_specials: count(|v| v.line_specials_ok),
         sector_specials: count(|v| v.sector_specials_ok),
         thing_kinds: count(|v| v.thing_kinds_ok),
+        teleports: count(|v| v.teleports_ok),
         expressible: count(|v| v.expressible),
     }
 }
@@ -493,6 +564,34 @@ fn greedy(population: &[&MapRecord], total: usize) -> GreedyCurve {
     GreedyCurve { steps, checkpoints }
 }
 
+/// Rolls the per-map teleport counts up over the maps that carry a teleport
+/// line. Maps with none are excluded outright rather than summed as zeros:
+/// every "N lines, M maps" pair in the report is then a statement about the
+/// teleporting slice of the corpus.
+///
+/// # Panics
+///
+/// If a map count does not fit a `u64`, which needs more maps than a
+/// directory of files can hold.
+fn teleport_aggregate(maps: &[MapRecord]) -> TeleportAggregate {
+    let with: Vec<&MapRecord> = maps.iter().filter(|m| m.teleports.lines > 0).collect();
+    let mut lines = TeleportCounts::default();
+    for m in &with {
+        lines = lines.add(&m.teleports);
+    }
+    let count = |f: fn(&TeleportCounts) -> bool| {
+        u64::try_from(with.iter().filter(|m| f(&m.teleports)).count()).expect("fits u64")
+    };
+    TeleportAggregate {
+        maps_with_teleports: u64::try_from(with.len()).expect("fits u64"),
+        maps_refused: count(|c| c.refusals() > 0),
+        lines,
+        closet_maps: count(|c| c.closet > 0),
+        exit_maps: count(|c| c.exit > 0),
+        paired_maps: count(|c| c.paired > 0),
+    }
+}
+
 /// Summarizes a sweep's unique maps.
 ///
 /// # Panics
@@ -503,9 +602,15 @@ fn greedy(population: &[&MapRecord], total: usize) -> GreedyCurve {
 pub fn aggregate(maps: &[MapRecord]) -> Aggregate {
     let all: Vec<&MapRecord> = maps.iter().collect();
     let vanilla: Vec<&MapRecord> = maps.iter().filter(|m| m.verdict.vanilla_only).collect();
+    // The teleport axis belongs in this filter, not just in the shares: no
+    // number of added line specials can un-refuse a teleport line, so a
+    // teleport-blocked map that this curve "unblocked" would be counted
+    // expressible when it is not.
     let conjunction_pop: Vec<&MapRecord> = maps
         .iter()
-        .filter(|m| m.verdict.sector_specials_ok && m.verdict.thing_kinds_ok)
+        .filter(|m| {
+            m.verdict.sector_specials_ok && m.verdict.thing_kinds_ok && m.verdict.teleports_ok
+        })
         .collect();
     Aggregate {
         maps_unique: u64::try_from(maps.len()).expect("fits u64"),
@@ -517,6 +622,7 @@ pub fn aggregate(maps: &[MapRecord]) -> Aggregate {
         thing_blockers: blockers(maps, |v| v.unknown_thing_types.as_slice()),
         greedy_line_axis: greedy(&all, maps.len()),
         greedy_conjunction: greedy(&conjunction_pop, maps.len()),
+        teleports: teleport_aggregate(maps),
     }
 }
 
@@ -617,8 +723,8 @@ pub fn render_markdown(provenance: Option<&Provenance>, b: &Buckets, a: &Aggrega
     s.push_str(
         "> **Status of these numbers: measured practice, not engine fact — and an upper bound.** ",
     );
-    s.push_str("A map counts as expressible when every non-zero line special and sector special, and every thing type, it carries is in crustygen's emittable vocabulary. ");
-    s.push_str("Geometry, flags, tags, and texture names are not measured; a geometry-aware lifter can only do worse, never better, than this membership test.\n\n");
+    s.push_str("A map counts as expressible when every non-zero line special and sector special, and every thing type, it carries is in crustygen's emittable vocabulary, and every teleport line it carries is one the recognizer can state (see `Teleports`). ");
+    s.push_str("Beyond those teleport lines, geometry, flags, tags, and texture names are not measured; a geometry-aware lifter can only do worse, never better, than this bound.\n\n");
     if let Some(p) = provenance {
         s.push_str("## Sample\n\n");
         let _ = writeln!(
@@ -659,7 +765,8 @@ pub fn render_markdown(provenance: Option<&Provenance>, b: &Buckets, a: &Aggrega
             a.vanilla.sector_specials,
         ),
         ("thing kinds", a.all.thing_kinds, a.vanilla.thing_kinds),
-        ("**all three**", a.all.expressible, a.vanilla.expressible),
+        ("teleport lines", a.all.teleports, a.vanilla.teleports),
+        ("**all axes**", a.all.expressible, a.vanilla.expressible),
     ] {
         let _ = writeln!(s, "| {name} | {} | {} |", pct(all), pct(van));
     }
@@ -687,8 +794,60 @@ pub fn render_markdown(provenance: Option<&Provenance>, b: &Buckets, a: &Aggrega
             let _ = writeln!(s, "| {} | {} | {} |", bl.value, bl.maps, pct(bl.share));
         }
     }
+    render_teleports(&mut s, a);
     render_curves(&mut s, a);
     s
+}
+
+/// The teleport recognizer's section. Every shape row carries both a line
+/// count and a map count: a line total alone cannot tell one map with forty
+/// closets from forty maps with one each, and the difference is the whole
+/// question when reading which shapes a corpus actually uses. Counts are
+/// over the maps that carry a teleport line, not over every unique map.
+fn render_teleports(s: &mut String, a: &Aggregate) {
+    use std::fmt::Write as _;
+
+    let t = &a.teleports;
+    let c = &t.lines;
+    s.push_str("\n## Teleports\n\n| Measure | Value |\n|---|---|\n");
+    let _ = writeln!(
+        s,
+        "| maps with a teleport line | {} ({} of unique maps) |",
+        t.maps_with_teleports,
+        pct(u64_share(t.maps_with_teleports, a.maps_unique))
+    );
+    let _ = writeln!(
+        s,
+        "| maps with a refused line (not expressible) | {} |",
+        t.maps_refused
+    );
+    let _ = writeln!(
+        s,
+        "| lines: player / monsters-only / one-shot | {} / {} / {} |",
+        c.player, c.monsters_only, c.one_shot
+    );
+    for (label, lines, maps) in [
+        (
+            "lines in closets (front sector holds a monster)",
+            c.closet,
+            t.closet_maps,
+        ),
+        ("lines delivering beside an exit", c.exit, t.exit_maps),
+        ("lines on a paired pad", c.paired, t.paired_maps),
+    ] {
+        let plural = if maps == 1 { "map" } else { "maps" };
+        let _ = writeln!(s, "| {label} | {lines} ({maps} {plural}) |");
+    }
+    let _ = writeln!(
+        s,
+        "| geometry: island / alcove / boundary / other | {} / {} / {} / {} |",
+        c.island, c.alcove, c.boundary, c.other
+    );
+    let _ = writeln!(
+        s,
+        "| ambiguous (several markers) / broken / self-referencing | {} / {} / {} |",
+        c.ambiguous, c.broken, c.self_referencing
+    );
 }
 
 /// The two greedy-curve sections. Both curves are scored against *all* unique
@@ -706,10 +865,10 @@ fn render_curves(s: &mut String, a: &Aggregate) {
             a.all.line_specials,
         ),
         (
-            "Greedy curve — conjunction (maps already ok on sectors and things)",
+            "Greedy curve — conjunction (maps already ok on sectors, things, and teleports)",
             "Share is of **all unique maps**, not of the already-ok population this curve walks, \
-             so it plateaus below 100 % by exactly the maps blocked on a sector special or a \
-             thing kind.",
+             so it plateaus below 100 % by exactly the maps blocked on a sector special, a \
+             thing kind, or a refused teleport line.",
             &a.greedy_conjunction,
             a.all.expressible,
         ),
@@ -800,6 +959,7 @@ mod tests {
             line_specials_ok: unknown_line.is_empty(),
             sector_specials_ok: sector_ok,
             thing_kinds_ok: thing_ok,
+            teleports_ok: true,
             expressible: unknown_line.is_empty() && sector_ok && thing_ok,
             vanilla_only: vanilla,
             unknown_line_specials: unknown_line.to_vec(),
@@ -813,6 +973,7 @@ mod tests {
             hash: "h".into(),
             telemetry,
             verdict,
+            teleports: TeleportCounts::default(),
         }
     }
 
@@ -903,6 +1064,13 @@ mod tests {
             "## Buckets",
             "## Expressibility",
             "## Line-special blockers",
+            "## Teleports",
+            "| teleport lines | 100.0 % | 100.0 % |",
+            // A teleport-free corpus states its zeros rather than hiding the
+            // section: the reader can tell "measured, none found" from
+            // "not measured".
+            "| maps with a teleport line | 0 (0.0 % of unique maps) |",
+            "| lines on a paired pad | 0 (0 maps) |",
             "## Greedy curve",
             "| 97 | 1 | 100.0 % |",
             // The conjunction curve names its denominator, so a plateau
@@ -915,6 +1083,143 @@ mod tests {
         // so in a row rather than leaving a bare table header.
         assert_eq!(md.matches("| (none) | | |").count(), 2, "{md}");
         assert!(!md.contains("## Sample"));
+    }
+
+    /// The teleport golden fixture, compiled and packed as a one-map UDMF
+    /// PWAD — the same route `tests/common/mod.rs::udmf_entrada_wad` takes.
+    fn teleport_wad() -> Vec<u8> {
+        let tables = crate::tables::Tables::load().expect("tables");
+        let ir = crate::ir::Ir::from_json(include_str!("../../tests/golden/teleports.json"))
+            .expect("ir parses");
+        let compiled = crate::compile::compile(&ir, &tables).expect("compiles");
+        crate::pack::pack_udmf(&compiled, "MAP01").expect("packs")
+    }
+
+    /// A fresh temp directory holding `files`.
+    fn temp_dir_with(label: &str, files: &[(&str, Vec<u8>)]) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time moves forward")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "crustygen-sweep-{label}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        for (name, bytes) in files {
+            std::fs::write(dir.join(name), bytes).expect("write fixture");
+        }
+        dir
+    }
+
+    /// The end-to-end teleport path: a swept WAD carries per-map counts, the
+    /// aggregate rolls them up, and the report renders the section.
+    #[test]
+    fn a_swept_map_carries_its_teleport_counts_into_the_aggregate_and_the_report() {
+        let tables = crate::tables::Tables::load().expect("tables");
+        let vocab = Vocabulary::from_tables(&tables);
+        let dir = temp_dir_with("teleports", &[("t.wad", teleport_wad())]);
+        let sweep = sweep_dir(&dir, &vocab, &tables).expect("sweeps");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(sweep.maps.len(), 1);
+        let rec = &sweep.maps[0];
+        assert_eq!(
+            rec.teleports.lines, 9,
+            "five player-crossable edges plus the pen's four monsters-only edges"
+        );
+        assert_eq!(rec.teleports.player, 5);
+        assert_eq!(rec.teleports.monsters_only, 4);
+        assert_eq!(rec.teleports.refusals(), 0, "the fixture is well formed");
+        assert!(rec.verdict.teleports_ok && rec.verdict.expressible);
+        // Shape axes, traced line by line through the fixture: the island
+        // pad's four edges and the pen's four are all free-standing pads;
+        // only the wall pad's single threshold is a recess.
+        assert_eq!(rec.teleports.island, 8);
+        assert_eq!(rec.teleports.alcove, 1, "the wall pad's threshold");
+        assert_eq!(
+            rec.teleports.paired, 4,
+            "the island's four edges back onto the pad, which holds a marker of its own"
+        );
+        assert_eq!(
+            rec.teleports.exit, 4,
+            "the pen's four edges deliver into room a, which hosts the switch exit"
+        );
+
+        let a = aggregate(&sweep.maps);
+        assert_eq!(a.teleports.maps_with_teleports, 1);
+        assert_eq!(a.teleports.maps_refused, 0);
+        assert_eq!(a.teleports.lines.lines, 9);
+        assert_eq!(a.teleports.closet_maps, 1, "the pen holds an ambush imp");
+        let md = render_markdown(None, &sweep.buckets, &a);
+        assert!(md.contains("## Teleports"), "{md}");
+        assert!(md.contains("| maps with a teleport line | 1"), "{md}");
+    }
+
+    /// A map whose only teleport line is refused is not expressible, and the
+    /// aggregate counts it in both the "with" and the "refused" populations.
+    #[test]
+    fn a_refused_line_is_aggregated_and_rendered() {
+        let mut m = record(&[97], &[], true, true, true);
+        m.teleports = TeleportCounts {
+            lines: 2,
+            player: 2,
+            broken: 1,
+            self_referencing: 1,
+            closet: 1,
+            exit: 1,
+            paired: 1,
+            ..TeleportCounts::default()
+        };
+        m.verdict.teleports_ok = false;
+        m.verdict.expressible = false;
+        let a = aggregate(std::slice::from_ref(&m));
+        assert_eq!(a.teleports.maps_with_teleports, 1);
+        assert_eq!(a.teleports.maps_refused, 1);
+        assert_eq!(a.teleports.lines.broken, 1);
+        assert_eq!(a.teleports.closet_maps, 1);
+        assert_eq!(a.teleports.exit_maps, 1);
+        assert_eq!(a.teleports.paired_maps, 1);
+        assert!(a.all.teleports.abs() < 1e-9);
+        let md = render_markdown(None, &Buckets::default(), &a);
+        assert!(
+            md.contains("| maps with a refused line (not expressible) | 1 |"),
+            "{md}"
+        );
+        assert!(
+            md.contains("| lines on a paired pad | 1 (1 map) |"),
+            "a single map is not \"1 maps\": {md}"
+        );
+        assert!(
+            md.contains("| ambiguous (several markers) / broken / self-referencing | 0 / 1 / 1 |"),
+            "{md}"
+        );
+    }
+
+    /// A teleport-refused map is out of the conjunction curve's population:
+    /// no number of added line specials can un-refuse a teleport line, so
+    /// counting the map as unblocked would credit the curve with an
+    /// expressibility it does not buy.
+    #[test]
+    fn the_conjunction_curve_excludes_a_teleport_refused_map() {
+        let mut blocked = record(&[97], &[97], true, true, true);
+        blocked.teleports = TeleportCounts {
+            lines: 1,
+            broken: 1,
+            ..TeleportCounts::default()
+        };
+        blocked.verdict.teleports_ok = false;
+        blocked.verdict.expressible = false;
+        let a = aggregate(&[blocked, record(&[1], &[], true, true, true)]);
+        assert_eq!(
+            a.greedy_line_axis.steps[0].special, 97,
+            "the line axis alone still walks the blocked map"
+        );
+        assert!(
+            a.greedy_conjunction.steps.is_empty(),
+            "the only line-blocked map is teleport-refused, so nothing is left to unblock"
+        );
+        assert!((a.all.expressible - 0.5).abs() < 1e-9);
     }
 
     #[test]

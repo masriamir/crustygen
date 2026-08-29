@@ -2,9 +2,11 @@
 //!
 //! `check_all` implements a deliberately partial rule catalog: **P3** (passage
 //! width), **P4** (door opening clearance), **P7** (no softlock), **P8** (no
-//! missing textures), **P9** (no texture scaling), **P19** (light bounds), and
-//! **P24** (key and lock coherence). **P7** floods `(sector, keys-held)`
-//! states over the emitted geometry — see [`crate::reach`].
+//! missing textures), **P9** (no texture scaling), **P15** (teleport
+//! pairing), **P19** (light bounds), **P24** (key and lock coherence),
+//! **P26** (teleport-only exit rooms), and **P27** (no sealed monster
+//! rooms). **P7** floods `(sector, keys-held)` states over the emitted
+//! geometry — see [`crate::reach`].
 //!
 //! **P1** (step height between connected rooms) has been **retired**: it
 //! capped the floor delta between connected rooms in either direction, but
@@ -23,7 +25,7 @@
 
 use crate::compile::Compiled;
 use crate::compile::heights::{visible_lower_side, visible_upper_side};
-use crate::ir::{Ir, PortalKind};
+use crate::ir::{ExitTrigger, Ir, PortalKind};
 use crate::reach;
 use crate::tables::Tables;
 
@@ -61,6 +63,9 @@ pub fn check_all(ir: &Ir, tables: &Tables, out: &Compiled) -> Vec<RuleViolation>
     check_no_scaling(out, &mut v);
     check_missing_textures(out, &mut v);
     check_key_lock_coherence(ir, &mut v);
+    check_teleport_pairing(tables, out, &mut v);
+    check_teleport_exit_rooms(ir, out, &mut v);
+    check_sealed_monster_rooms(ir, tables, out, &mut v);
     check_reachability(ir, tables, out, &mut v);
     v
 }
@@ -310,11 +315,133 @@ fn check_key_lock_coherence(ir: &Ir, v: &mut Vec<RuleViolation>) {
     }
 }
 
+/// P15: every teleport line's tag resolves to exactly one emitted sector,
+/// and exactly one marker stands in it. Headroom and clearance for the
+/// arriving thing are enforced at placement (`CompileError::TeleportMarker*`),
+/// so a compiled map can only fail here if a later pass disturbed the pairing.
+fn check_teleport_pairing(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>) {
+    let specials = tables.teleport_specials();
+    for (i, line) in out.data.linedefs.iter().enumerate() {
+        if !specials.contains(&line.special) {
+            continue;
+        }
+        let sectors = out
+            .data
+            .sectors
+            .iter()
+            .filter(|s| s.tag == line.tag && line.tag != 0)
+            .count();
+        if sectors != 1 {
+            v.push(RuleViolation {
+                rule: "P15",
+                subject: format!("linedef {i}"),
+                detail: format!("tag {} resolves to {sectors} sectors, not one", line.tag),
+            });
+            continue;
+        }
+        let sector = out
+            .data
+            .sectors
+            .iter()
+            .position(|s| s.tag == line.tag)
+            .expect("counted above");
+        let markers = out.markers.iter().filter(|m| m.sector == sector).count();
+        if markers != 1 {
+            v.push(RuleViolation {
+                rule: "P15",
+                subject: format!("linedef {i}"),
+                detail: format!("destination sector {sector} holds {markers} markers, not one"),
+            });
+        }
+    }
+}
+
+/// Whether some teleport marker delivers into `room_idx` — either directly
+/// (the marker's sector *is* the room's own sector) or onto an island pad
+/// hosted inside it (`SectorOut::host == Some(room_idx)`). Shared by P26 and
+/// P27, both of which treat a hosted-pad destination the same as a direct
+/// one: the pad is still physically inside the room, so anything arriving on
+/// it is inside the room too.
+fn is_teleport_destination(out: &Compiled, room_idx: usize) -> bool {
+    out.markers
+        .iter()
+        .any(|m| m.sector == room_idx || out.data.sectors[m.sector].host == Some(room_idx))
+}
+
+/// P26: an exit with `trigger: teleport` sits in a room with no portal and at
+/// least one destination marker — the player arrives by teleport and steps
+/// across the exit line (TNT MAP23's shape).
+fn check_teleport_exit_rooms(ir: &Ir, out: &Compiled, v: &mut Vec<RuleViolation>) {
+    for exit in ir
+        .exits
+        .iter()
+        .filter(|e| e.trigger == ExitTrigger::Teleport)
+    {
+        let room_idx = ir
+            .rooms
+            .iter()
+            .position(|r| r.id == exit.room)
+            .expect("validated");
+        if ir
+            .portals
+            .iter()
+            .any(|p| p.a == exit.room || p.b == exit.room)
+        {
+            v.push(RuleViolation {
+                rule: "P26",
+                subject: exit.room.clone(),
+                detail: "a teleport exit's room must have no portal; the player arrives by \
+                          teleport only"
+                    .to_owned(),
+            });
+        }
+        if !is_teleport_destination(out, room_idx) {
+            v.push(RuleViolation {
+                rule: "P26",
+                subject: exit.room.clone(),
+                detail: "a teleport exit's room holds no teleport destination".to_owned(),
+            });
+        }
+    }
+}
+
+/// P27: no sealed monster room — a room holding a monster has a portal or is
+/// a teleport destination, so sight or sound can ever reach it. A sealed pen
+/// with no remote release strip has no release at all; retail seals a pen
+/// only where a monsters-only teleport or a tier-3 strip special empties it,
+/// and the strip specials are out of this vocabulary.
+fn check_sealed_monster_rooms(
+    ir: &Ir,
+    tables: &Tables,
+    out: &Compiled,
+    v: &mut Vec<RuleViolation>,
+) {
+    for (i, room) in ir.rooms.iter().enumerate() {
+        if !room
+            .things
+            .iter()
+            .any(|t| tables.species(&t.kind).is_some())
+        {
+            continue;
+        }
+        let has_portal = ir.portals.iter().any(|p| p.a == room.id || p.b == room.id);
+        if !has_portal && !is_teleport_destination(out, i) {
+            v.push(RuleViolation {
+                rule: "P27",
+                subject: room.id.clone(),
+                detail: "holds monsters but has no portal and is no teleport destination; \
+                          nothing can ever wake them"
+                    .to_owned(),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::compile::{CompileError, compile, compile_reporting};
     use crate::ir::Ir;
-    use crate::rules::{RuleViolation, check_all};
+    use crate::rules::{RuleViolation, check_all, check_teleport_pairing};
     use crate::tables::Tables;
 
     /// Two rooms joined by a plain portal, with tunable floors, width, and
@@ -1089,6 +1216,220 @@ mod tests {
         assert_eq!(v.len(), 1, "{v:?}");
         assert!(v[0].subject.contains("island"));
         assert!(v[0].detail.contains("never be visited"));
+    }
+
+    /// Like the `violations` helper above, but returns the full
+    /// `RuleViolation` list rather than just the rule ids — the P26/P27/P15
+    /// tests below need `subject` too. Named differently to avoid colliding
+    /// with the pre-existing `violations` (`Vec<String>`) helper used
+    /// throughout the rest of this module.
+    fn all_violations(json: &str) -> Vec<RuleViolation> {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(json).expect("ir");
+        let (_, v) = crate::compile::compile_reporting(&ir, &tables).expect("geometry compiles");
+        v
+    }
+
+    const TWO_ROOMS_HEAD: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[192,64], "angle":90 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3", "things":[ THINGS_B ] }
+      ],"#;
+
+    #[test]
+    fn p26_a_teleport_exit_room_must_be_portal_less_with_a_marker() {
+        let ok = format!(
+            r#"{} "portals":[],
+               "exits":[{{ "room":"b", "trigger":"teleport", "at":[448,256], "width":64 }}],
+               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,128]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
+            TWO_ROOMS_HEAD.replace("THINGS_B", "")
+        );
+        let clean = all_violations(&ok);
+        assert!(clean.iter().all(|v| v.rule != "P26"), "{clean:?}");
+        let with_portal = ok.replace(
+            r#""portals":[]"#,
+            r#""portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }]"#,
+        );
+        let v = all_violations(&with_portal);
+        assert!(
+            v.iter().any(|v| v.rule == "P26" && v.subject == "b"),
+            "{v:?}"
+        );
+        // The rule's other half: `b` stays portal-less, but nothing
+        // teleports into it, so the exit is unreachable by any means.
+        let no_destination = ok.replace(
+            r#""to":{"room":"b","at":[448,128],"angle":90}"#,
+            r#""to":{"room":"a","at":[192,192],"angle":90}"#,
+        );
+        let v = all_violations(&no_destination);
+        assert!(
+            v.iter().any(|v| v.rule == "P26"
+                && v.subject == "b"
+                && v.detail.contains("holds no teleport destination")),
+            "{v:?}"
+        );
+    }
+
+    /// The hosted-pad disjunct of P26's destination check
+    /// (`SectorOut::host == Some(room_idx)`): the exit's room `b` has no
+    /// portal, and its only marker lands not on `b`'s own room sector but on
+    /// an island pad hosted inside it — `t1` (triggered from `a`) delivers
+    /// straight onto `t2`'s pad center in `b`, exactly the two-way-pair
+    /// shape `compile::teleports::a_two_way_pair_tags_the_other_pad` already
+    /// pins at the compiler level. No prior fixture exercised this branch of
+    /// the rule; every other destination in this file lands directly in the
+    /// room's own sector.
+    #[test]
+    fn p26_a_hosted_pad_destination_satisfies_the_exit_room() {
+        let json = format!(
+            r#"{} "portals":[],
+               "exits":[{{ "room":"b", "trigger":"teleport", "at":[448,256], "width":64 }}],
+               "teleports":[
+                 {{ "id":"t1", "room":"a", "pad":{{"island":[64,128]}},
+                    "to":{{"room":"b","at":[480,160],"angle":90}} }},
+                 {{ "id":"t2", "room":"b", "pad":{{"island":[448,128]}},
+                    "to":{{"room":"a","at":[200,200],"angle":0}} }}
+               ] }}"#,
+            TWO_ROOMS_HEAD.replace("THINGS_B", "")
+        );
+        let v = all_violations(&json);
+        assert!(v.iter().all(|v| v.rule != "P26"), "{v:?}");
+    }
+
+    #[test]
+    fn p27_a_sealed_room_with_monsters_is_rejected_unless_it_is_a_destination() {
+        let sealed = format!(
+            r#"{} "portals":[],
+               "exits":[{{ "room":"a", "trigger":"switch", "at":[128,0], "width":64 }}],
+               "teleports":[] }}"#,
+            TWO_ROOMS_HEAD.replace("THINGS_B", r#"{ "kind":"imp", "at":[448,128], "angle":0 }"#)
+        );
+        let v = all_violations(&sealed);
+        assert!(
+            v.iter().any(|v| v.rule == "P27" && v.subject == "b"),
+            "{v:?}"
+        );
+        let destination = sealed.replace(
+            r#""teleports":[]"#,
+            r#""teleports":[{ "id":"t", "room":"a", "pad":{"island":[64,128]}, "to":{"room":"b","at":[384,64],"angle":90} }]"#,
+        );
+        assert!(all_violations(&destination).iter().all(|v| v.rule != "P27"));
+    }
+
+    /// The hosted-pad disjunct of P27's destination check, mirroring
+    /// `p26_a_hosted_pad_destination_satisfies_the_exit_room` above: room
+    /// `b` is sealed (no portal) and holds an imp, but is a destination only
+    /// because another teleport (`t1`, triggered from `a`) delivers onto
+    /// `b`'s own island pad (`t2`'s), not into `b`'s room sector directly.
+    /// The imp sits well clear of the pad's grown square.
+    #[test]
+    fn p27_a_hosted_pad_destination_satisfies_the_sealed_room() {
+        let json = format!(
+            r#"{} "portals":[],
+               "exits":[{{ "room":"a", "trigger":"switch", "at":[128,0], "width":64 }}],
+               "teleports":[
+                 {{ "id":"t1", "room":"a", "pad":{{"island":[64,128]}},
+                    "to":{{"room":"b","at":[480,160],"angle":90}} }},
+                 {{ "id":"t2", "room":"b", "pad":{{"island":[448,128]}},
+                    "to":{{"room":"a","at":[200,200],"angle":0}} }}
+               ] }}"#,
+            TWO_ROOMS_HEAD.replace("THINGS_B", r#"{ "kind":"imp", "at":[384,64], "angle":0 }"#)
+        );
+        let v = all_violations(&json);
+        assert!(v.iter().all(|v| v.rule != "P27"), "{v:?}");
+    }
+
+    #[test]
+    fn p15_holds_for_every_compiled_teleport() {
+        // The compiler constructs pairing; P15 re-checks it on the emitted
+        // data. A clean fixture yields no P15 violation.
+        let json = format!(
+            r#"{} "portals":[{{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }}],
+               "exits":[{{ "room":"a", "trigger":"switch", "at":[128,0], "width":64 }}],
+               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,128]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
+            TWO_ROOMS_HEAD.replace("THINGS_B", "")
+        );
+        assert!(all_violations(&json).iter().all(|v| v.rule != "P15"));
+    }
+
+    #[test]
+    fn p15_a_second_sector_sharing_the_trigger_tag_is_flagged() {
+        // Mutate the emitted `Compiled` directly: give some other sector the
+        // same tag as the teleport's trigger lines, so the tag no longer
+        // resolves to exactly one sector. `check_teleport_pairing` walks
+        // every trigger *linedef*, not every teleport, so an island pad's
+        // four trigger edges (all sharing the one tag) each report their own
+        // violation — one per trigger edge affected, not one per teleport.
+        let json = format!(
+            r#"{} "portals":[{{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }}],
+               "exits":[{{ "room":"a", "trigger":"switch", "at":[128,0], "width":64 }}],
+               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,128]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
+            TWO_ROOMS_HEAD.replace("THINGS_B", "")
+        );
+        let ir = Ir::from_json(&json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (mut out, found) = crate::compile::compile_reporting(&ir, &tables).expect("compiles");
+        assert!(!found.iter().any(|v| v.rule == "P15"), "{found:?}");
+
+        let trigger_edges = out
+            .data
+            .linedefs
+            .iter()
+            .filter(|l| tables.teleport_specials().contains(&l.special))
+            .count();
+        let trigger_tag = out
+            .data
+            .linedefs
+            .iter()
+            .find(|l| tables.teleport_specials().contains(&l.special))
+            .expect("a teleport trigger line")
+            .tag;
+        // Room `a` (sector 0) is not the destination sector; give it the
+        // same tag so the trigger's tag now resolves to two sectors.
+        out.data.sectors[0].tag = trigger_tag;
+
+        let mut v = Vec::new();
+        check_teleport_pairing(&tables, &out, &mut v);
+        assert_eq!(
+            v.len(),
+            trigger_edges,
+            "one P15 violation per trigger edge affected: {v:?}"
+        );
+        assert!(v.iter().all(|x| x.rule == "P15"));
+    }
+
+    #[test]
+    fn p15_a_missing_marker_is_flagged() {
+        let json = format!(
+            r#"{} "portals":[{{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }}],
+               "exits":[{{ "room":"a", "trigger":"switch", "at":[128,0], "width":64 }}],
+               "teleports":[{{ "id":"t", "room":"a", "pad":{{"island":[64,128]}}, "to":{{"room":"b","at":[448,128],"angle":90}} }}] }}"#,
+            TWO_ROOMS_HEAD.replace("THINGS_B", "")
+        );
+        let ir = Ir::from_json(&json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (mut out, found) = crate::compile::compile_reporting(&ir, &tables).expect("compiles");
+        assert!(!found.iter().any(|v| v.rule == "P15"), "{found:?}");
+
+        let trigger_edges = out
+            .data
+            .linedefs
+            .iter()
+            .filter(|l| tables.teleport_specials().contains(&l.special))
+            .count();
+        out.markers.clear();
+
+        let mut v = Vec::new();
+        check_teleport_pairing(&tables, &out, &mut v);
+        assert_eq!(
+            v.len(),
+            trigger_edges,
+            "one P15 violation per trigger edge affected: {v:?}"
+        );
+        assert!(v.iter().all(|x| x.rule == "P15"));
     }
 
     /// A door across a >24 floor delta is one-way *through the door*: the

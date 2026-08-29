@@ -1,5 +1,6 @@
 //! Places things with real clearance, not merely inside their room.
 
+use crate::compile::teleports::Marker;
 use crate::compile::{CompileError, MapData};
 use crate::geom::{Pt, contains, dist_to_segment};
 use crate::ir::{Ir, ThingSkills};
@@ -18,10 +19,12 @@ pub struct ThingOut {
     pub kind: u16,
     /// Which skill levels this thing appears on.
     pub skills: ThingSkills,
+    /// `MTF_AMBUSH`: wakes on sight only.
+    pub ambush: bool,
 }
 
-/// The minimum distance from `p` to any emitted linedef bordering the sector
-/// for room `room_idx`, in map units.
+/// The minimum distance from `p` to any emitted linedef bordering `sector`,
+/// in map units.
 ///
 /// [`crate::compile::sectors::emit_sectors`] pushes exactly one sector per
 /// room, in `ir.rooms` order, so a room's index doubles as its sector index
@@ -38,14 +41,18 @@ pub struct ThingOut {
 /// unbounded room cannot be measured, and folding to `f64::INFINITY` instead
 /// would have silently *passed* every clearance check — the failure mode
 /// where a broken room looks safest.
-fn emitted_clearance(data: &MapData, room_idx: usize, p: Pt) -> Option<f64> {
+///
+/// `pub(crate)` and taking a sector rather than a room, because a teleport
+/// destination marker can land in a compiler-generated sector — the other
+/// pad of a two-way pair — which is no room and so has no room index.
+pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<f64> {
     data.linedefs
         .iter()
         .filter(|line| {
-            data.sidedefs[line.front].sector == room_idx
+            data.sidedefs[line.front].sector == sector
                 || line
                     .back
-                    .is_some_and(|back| data.sidedefs[back].sector == room_idx)
+                    .is_some_and(|back| data.sidedefs[back].sector == sector)
         })
         .map(|line| dist_to_segment(p, data.vertices[line.v1], data.vertices[line.v2]))
         .reduce(f64::min)
@@ -65,6 +72,14 @@ fn emitted_clearance(data: &MapData, room_idx: usize, p: Pt) -> Option<f64> {
 /// authored apart, and why measuring the emitted geometry is still the
 /// principled choice rather than an incidental one.
 ///
+/// After every authored thing, each of `markers` —
+/// [`crate::compile::teleports::emit_teleports`]'s destination markers — is
+/// emitted as a `teleport_dest` thing, held to the clearance and headroom
+/// its *arriving* thing needs rather than the marker's own (the marker is in
+/// no blockmap and obstructs nothing). That is rule P15, and it is checked
+/// here rather than in the teleport pass because this is where clearance is
+/// measured against the finished geometry.
+///
 /// # Errors
 /// Returns [`CompileError::UnknownThing`] for an unresolvable name,
 /// [`CompileError::ThingOutsideRoom`] for a point outside its room,
@@ -72,12 +87,22 @@ fn emitted_clearance(data: &MapData, room_idx: usize, p: Pt) -> Option<f64> {
 /// [`CompileError::NoHeadroom`] when the room is too short — for the
 /// tallest placed thing, or for the player if the room is empty or shorter
 /// than the player alone — [`CompileError::UnboundedRoom`] when a room's
-/// sector has no emitted linedef to measure against, and
-/// [`CompileError::OverlappingStarts`] for coincident player starts.
+/// sector has no emitted linedef to measure against,
+/// [`CompileError::OverlappingStarts`] for coincident player starts,
+/// [`CompileError::TeleportMarkerTooClose`] when a destination is closer to
+/// its sector's walls than the arriving thing's radius, and
+/// [`CompileError::TeleportMarkerNoHeadroom`] when that sector is too short
+/// for it.
+///
+/// # Panics
+/// Panics if `teleport_dest` is absent from the vocabulary table, which
+/// `tables`'s own `exit_lift_teleport_and_sector_specials_resolve` test
+/// pins present.
 pub fn place_things(
     ir: &Ir,
     tables: &Tables,
     data: &MapData,
+    markers: &[Marker],
 ) -> Result<Vec<ThingOut>, CompileError> {
     let mut out = Vec::new();
     let mut starts: Vec<(i32, i32)> = Vec::new();
@@ -166,8 +191,83 @@ pub fn place_things(
                 angle: thing.angle,
                 kind: id,
                 skills: thing.skills,
+                ambush: thing.ambush,
             });
         }
+    }
+
+    out.extend(place_markers(tables, data, markers)?);
+    Ok(out)
+}
+
+/// Emits one `teleport_dest` thing per destination marker, proving each
+/// destination clears the thing that will arrive on it (rule P15).
+///
+/// The marker itself is `MF_NOBLOCKMAP|MF_NOSECTOR` and obstructs nothing,
+/// so its own nominal dimensions are irrelevant; what must fit is
+/// [`Marker::need`], the largest thing any teleport delivering here can
+/// send. Clearance is measured against the marker's *sector*, which for the
+/// far half of a two-way pair is another pad rather than a room.
+///
+/// [`emitted_clearance`] counts **every** linedef bordering that sector, an
+/// open threshold included, while the verifier's V-P15
+/// (`check::invariants::check_teleport_pairing`) measures only the
+/// destination's non-passable segments — a doorway cannot crush an arrival,
+/// so it does not deny the radius. The compile side is therefore strictly
+/// stricter, which is the safe direction for the pass that decides what gets
+/// written: nothing this accepts can fail V-P15 for clearance.
+///
+/// # Errors
+/// Returns [`CompileError::TeleportMarkerTooClose`] when the marker stands
+/// closer to its sector's walls than the arriving thing's radius, and
+/// [`CompileError::TeleportMarkerNoHeadroom`] when the sector is too short
+/// for it.
+///
+/// # Panics
+/// Panics if `teleport_dest` is absent from the vocabulary table, or if a
+/// marker's sector has no bordering linedef at all — impossible, since every
+/// destination sector is one `compile::sectors` or `compile::teleports`
+/// emitted as a closed polygon, and neither can emit a sector without
+/// pushing its own boundary linedefs.
+fn place_markers(
+    tables: &Tables,
+    data: &MapData,
+    markers: &[Marker],
+) -> Result<Vec<ThingOut>, CompileError> {
+    let marker_kind = tables
+        .thing_id("teleport_dest")
+        .expect("`teleport_dest` is in the vocabulary");
+    let mut out = Vec::with_capacity(markers.len());
+    for m in markers {
+        let id = m.teleports.join(", ");
+        let have = emitted_clearance(data, m.sector, m.at)
+            .expect("every emitted sector is closed, so it has bordering linedefs");
+        if have < f64::from(m.need.radius) {
+            return Err(CompileError::TeleportMarkerTooClose {
+                id,
+                x: m.at.x,
+                y: m.at.y,
+                have,
+                need: m.need.radius,
+            });
+        }
+        let sector = &data.sectors[m.sector];
+        let headroom = sector.ceiling - sector.floor;
+        if headroom < m.need.height {
+            return Err(CompileError::TeleportMarkerNoHeadroom {
+                id,
+                have: headroom,
+                need: m.need.height,
+            });
+        }
+        out.push(ThingOut {
+            x: m.at.x,
+            y: m.at.y,
+            angle: m.angle,
+            kind: marker_kind,
+            skills: ThingSkills::default(),
+            ambush: false,
+        });
     }
     Ok(out)
 }
@@ -176,6 +276,7 @@ pub fn place_things(
 mod tests {
     use crate::compile::CompileError;
     use crate::compile::MapData;
+    use crate::compile::compile_reporting;
     use crate::compile::doors::emit_doors;
     use crate::compile::portals::cut_portals;
     use crate::compile::sectors::emit_sectors;
@@ -213,7 +314,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[]).expect("placed");
         assert_eq!(things.len(), 1);
         assert_eq!(things[0].kind, 1, "player 1 start");
         assert_eq!(things[0].x, 128);
@@ -225,7 +326,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data),
+            place_things(&ir, &tables, &data, &[]),
             Err(CompileError::ThingOutsideRoom { .. })
         ));
     }
@@ -238,14 +339,14 @@ mod tests {
         let ok = Ir::from_json(&ir_with_thing("player1_start", (r, 128), 128)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
             "at the radius it fits"
         );
         // One unit closer: it does not.
         let bad = Ir::from_json(&ir_with_thing("player1_start", (r - 1, 128), 128)).expect("ir");
         let data_bad = compiled_data(&bad, &tables);
         assert!(matches!(
-            place_things(&bad, &tables, &data_bad),
+            place_things(&bad, &tables, &data_bad, &[]),
             Err(CompileError::ThingTooClose { .. })
         ));
     }
@@ -289,7 +390,7 @@ mod tests {
         let data = compiled_data(&ir, &tables);
         assert!(
             matches!(
-                place_things(&ir, &tables, &data),
+                place_things(&ir, &tables, &data, &[]),
                 Err(CompileError::ThingTooClose { .. })
             ),
             "a point 8*sqrt(2) ~ 11.3 units from the diagonal chamfer must be rejected \
@@ -310,7 +411,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing_near_octagon_chamfer(12)).expect("ir");
         let data = compiled_data(&ir, &tables);
         assert!(
-            place_things(&ir, &tables, &data).is_ok(),
+            place_things(&ir, &tables, &data, &[]).is_ok(),
             "a point 12*sqrt(2) ~ 17.0 units from the diagonal chamfer must fit against a \
              16-unit radius"
         );
@@ -323,13 +424,13 @@ mod tests {
         let ok = Ir::from_json(&ir_with_thing("player1_start", (128, 128), h)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
             "at exactly its height it fits"
         );
         let bad = Ir::from_json(&ir_with_thing("player1_start", (128, 128), h - 1)).expect("ir");
         let data_bad = compiled_data(&bad, &tables);
         assert!(matches!(
-            place_things(&bad, &tables, &data_bad),
+            place_things(&bad, &tables, &data_bad, &[]),
             Err(CompileError::NoHeadroom { .. })
         ));
     }
@@ -340,7 +441,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data),
+            place_things(&ir, &tables, &data, &[]),
             Err(CompileError::UnknownThing { .. })
         ));
     }
@@ -360,7 +461,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data),
+            place_things(&ir, &tables, &data, &[]),
             Err(CompileError::OverlappingStarts { .. })
         ));
     }
@@ -376,7 +477,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         assert!(matches!(
-            place_things(&ir, &tables, &MapData::default()),
+            place_things(&ir, &tables, &MapData::default(), &[]),
             Err(CompileError::UnboundedRoom { .. })
         ));
     }
@@ -415,7 +516,7 @@ mod tests {
         let ok = Ir::from_json(&ir_json(wall + r)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
             "exactly the radius from room b's own wall fits"
         );
 
@@ -423,7 +524,7 @@ mod tests {
         let data_bad = compiled_data(&bad, &tables);
         assert!(
             matches!(
-                place_things(&bad, &tables, &data_bad),
+                place_things(&bad, &tables, &data_bad, &[]),
                 Err(CompileError::ThingTooClose { .. })
             ),
             "one unit closer than the radius does not fit"
@@ -475,7 +576,7 @@ mod tests {
         let ok = Ir::from_json(&empty_corridor_json(h)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
             "at exactly the player's height, an empty room is fine"
         );
 
@@ -483,10 +584,141 @@ mod tests {
         let data_bad = compiled_data(&bad, &tables);
         assert!(
             matches!(
-                place_things(&bad, &tables, &data_bad),
+                place_things(&bad, &tables, &data_bad, &[]),
                 Err(CompileError::NoHeadroom { .. })
             ),
             "an empty room one unit too short must still be rejected"
+        );
+    }
+
+    /// Two rooms, an island teleport pad in `a` delivering into `b`, and an
+    /// authored ambush imp in `b` — the smallest fixture that exercises both
+    /// halves of this pass's new work at once (a synthesized marker and an
+    /// authored `MTF_AMBUSH` flag). Run through `compile_reporting`, which is
+    /// the only way to get the teleport pass's markers into `place_things`.
+    const TELEPORT_MAP: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[{ "kind":"player1_start", "at":[192,64], "angle":90 }] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+          "floor":16, "ceiling":144, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[{ "kind":"imp", "at":[384,64], "angle":0, "ambush":true }] }
+      ],
+      "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }],
+      "teleports":[{ "id":"t", "room":"a", "pad":{"island":[64,128]},
+                     "to":{"room":"b","at":[448,128],"angle":90} }] }"#;
+
+    #[test]
+    fn a_marker_is_placed_with_the_arriving_things_clearance_and_no_ambush() {
+        let ir = Ir::from_json(TELEPORT_MAP).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let marker_kind = tables.thing_id("teleport_dest").expect("teleport_dest");
+        let (out, _) = compile_reporting(&ir, &tables).expect("compiles");
+
+        let marker = out
+            .things
+            .iter()
+            .find(|t| t.kind == marker_kind)
+            .expect("the destination marker is emitted");
+        assert_eq!(
+            (marker.x, marker.y, marker.angle),
+            (448, 128, 90),
+            "the marker sits at the destination, facing its angle"
+        );
+        assert!(!marker.ambush, "a marker is never an ambush thing");
+
+        let imp_kind = tables.thing_id("imp").expect("imp");
+        let imp = out
+            .things
+            .iter()
+            .find(|t| t.kind == imp_kind)
+            .expect("the authored imp is emitted");
+        assert!(
+            imp.ambush,
+            "the authored `ambush` flag survives into ThingOut"
+        );
+        let start_kind = tables.thing_id("player1_start").expect("player1_start");
+        assert!(
+            out.things.iter().all(|t| t.kind != start_kind || !t.ambush),
+            "the player start, which authored no flag, stays unambushed"
+        );
+    }
+
+    /// A destination 14 units from room `b`'s own west wall — inside the
+    /// player's 16-unit radius. Destinations are points, deliberately not
+    /// grid-snapped by `Ir::from_json`, so a fixture can sit at any offset.
+    const MARKER_TOO_CLOSE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[{ "kind":"player1_start", "at":[192,64], "angle":90 }] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+          "floor":16, "ceiling":144, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }],
+      "teleports":[{ "id":"t", "room":"a", "pad":{"island":[64,128]},
+                     "to":{"room":"b","at":[334,128],"angle":90} }] }"#;
+
+    #[test]
+    fn a_destination_inside_the_arriving_things_radius_is_rejected() {
+        let ir = Ir::from_json(MARKER_TOO_CLOSE).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let err = compile_reporting(&ir, &tables).expect_err("14 < the player's 16-unit radius");
+        assert!(
+            matches!(
+                &err,
+                CompileError::TeleportMarkerTooClose { id, x, y, have, need }
+                    if (id.as_str(), *x, *y, *need) == ("t", 334, 128, 16)
+                        && (have - 14.0).abs() < f64::EPSILON
+            ),
+            "expected TeleportMarkerTooClose at (334, 128) with have = 14, got {err}"
+        );
+    }
+
+    /// A two-way pair whose far half lands on room `b`'s own pad. Room `b` is
+    /// exactly the player's height (56), which it may be — but the pad's
+    /// floor sits `PAD_FLOOR_STEP` above it, leaving the pad 48 units of
+    /// headroom, which the arriving player does not fit in.
+    const MARKER_NO_HEADROOM: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+          "floor":0, "ceiling":128, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[{ "kind":"player1_start", "at":[192,64], "angle":90 }] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+          "floor":0, "ceiling":56, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }],
+      "teleports":[
+        { "id":"t1", "room":"a", "pad":{"island":[64,128]},
+          "to":{"room":"b","at":[480,160],"angle":90} },
+        { "id":"t2", "room":"b", "pad":{"island":[448,128]},
+          "to":{"room":"a","at":[192,192],"angle":0} }] }"#;
+
+    #[test]
+    fn a_destination_pad_too_short_for_the_arriving_thing_is_rejected() {
+        let tables = Tables::load().expect("tables");
+        assert_eq!(
+            (tables.player().height, crate::ir::Ir::PAD_FLOOR_STEP),
+            (56, 8),
+            "the fixture's 56-unit room and its 48-unit pad assume these"
+        );
+        let ir = Ir::from_json(MARKER_NO_HEADROOM).expect("ir");
+        let err = compile_reporting(&ir, &tables).expect_err("48 < the player's 56-unit height");
+        assert!(
+            matches!(
+                &err,
+                CompileError::TeleportMarkerNoHeadroom { id, have, need }
+                    if (id.as_str(), *have, *need) == ("t1", 48, 56)
+            ),
+            "expected TeleportMarkerNoHeadroom naming the teleport delivering onto b's pad, \
+             got {err}"
         );
     }
 
@@ -495,7 +727,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[]).expect("placed");
         let skills = things[0].skills;
         assert!(
             skills.skill1 && skills.skill2 && skills.skill3 && skills.skill4 && skills.skill5,
@@ -512,7 +744,7 @@ mod tests {
         let ir = Ir::from_json(&json).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[]).expect("placed");
         let skills = things[0].skills;
         assert!(!skills.skill1 && !skills.skill2, "explicitly excluded");
         assert!(
