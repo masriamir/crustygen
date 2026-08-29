@@ -1117,6 +1117,19 @@ mod tests {
         assert_eq!(rec.teleports.monsters_only, 4);
         assert_eq!(rec.teleports.refusals(), 0, "the fixture is well formed");
         assert!(rec.verdict.teleports_ok && rec.verdict.expressible);
+        // Shape axes, traced line by line through the fixture: the island
+        // pad's four edges and the pen's four are all free-standing pads;
+        // only the wall pad's single threshold is a recess.
+        assert_eq!(rec.teleports.island, 8);
+        assert_eq!(rec.teleports.alcove, 1, "the wall pad's threshold");
+        assert_eq!(
+            rec.teleports.paired, 4,
+            "the island's four edges back onto the pad, which holds a marker of its own"
+        );
+        assert_eq!(
+            rec.teleports.exit, 4,
+            "the pen's four edges deliver into room a, which hosts the switch exit"
+        );
 
         let a = aggregate(&sweep.maps);
         assert_eq!(a.teleports.maps_with_teleports, 1);
