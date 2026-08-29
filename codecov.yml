@@ -13,3 +13,9 @@ coverage:
 comment:
   layout: "reach, diff, files"
   require_changes: true
+# `examples/` holds measurement probes (`liftprobe`): reproducible tools that
+# are compiled and linted by CI's `--all-targets` jobs but never executed under
+# `cargo test`, so they carry no coverage by construction. Excluding them keeps
+# the patch check about the crate, not the probes.
+ignore:
+  - "examples/**"

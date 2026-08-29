@@ -135,3 +135,7 @@ failure.
    [`docs/measurements/teleports-2026-08-28.md`](measurements/teleports-2026-08-28.md),
    which records the before/after for the teleport construct and says so at
    both its curve table and its caveats.
+   The lift shape probe ([`docs/measurements/lift-shapes-2026-08-29.md`](measurements/lift-shapes-2026-08-29.md))
+   is the same kind of before-design measurement, and its tool is committed as
+   `examples/liftprobe` (`cargo run --release --example liftprobe -- census <label> <dir>...`)
+   so the numbers can be re-derived when the sample or the loader changes.
