@@ -370,18 +370,27 @@ pub(crate) fn resolve_teleport_destination(
 /// [`EdgeKind::Open`].
 ///
 /// Plus, when `teleports` is set, one directed [`EdgeKind::Teleport`] edge
-/// per `fronts_this` **passable** boundary carrying a player teleport
-/// special, from that boundary's own sector to whatever
-/// [`resolve_teleport_destination`] resolves its tag to — built ahead of
-/// the `neighbor` filter above, since a teleport's destination is its
-/// tag's, not its own back sector's, but behind the same crossability gate
-/// every other edge answers to. Passing
+/// per distinct (front, destination) pair among the `fronts_this`
+/// **passable** boundaries carrying a player teleport special — several
+/// boundaries of the same pad can share a trigger special and tag, and this
+/// dedupes them exactly as `reach::teleport_edges` already does, rather than
+/// pushing one identical edge per triggering boundary. Each edge runs from
+/// its shared front sector to whatever [`resolve_teleport_destination`]
+/// resolves the tag to — built ahead of the `neighbor` filter above, since a
+/// teleport's destination is its tag's, not its own back sector's, but
+/// behind the same crossability gate every other edge answers to. Passing
 /// `false` builds the same graph with those edges left out, which is how
 /// [`teleport_only_sectors`] measures what a teleport is load-bearing for.
 fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool) -> Vec<Edge> {
     let plain_door = tables.door_special();
     let player_teleports = tables.player_teleport_specials();
     let mut edges = Vec::new();
+    // Dedupes teleport edges by (front sector, destination sector), mirroring
+    // `reach::teleport_edges`'s own `HashSet<(NodeIdx, NodeIdx)>`: several
+    // boundaries of the same pad (e.g. all four sides of an island) share one
+    // trigger special and one tag, so without this, one identical edge would
+    // be pushed per triggering boundary rather than once per distinct pair.
+    let mut teleport_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (i, sector) in scene.sectors.iter().enumerate() {
         for b in &sector.boundary {
             if !b.fronts_this {
@@ -395,6 +404,7 @@ fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool
                 && b.passable()
                 && u16::try_from(b.special).is_ok_and(|s| player_teleports.contains(&s))
                 && let Some(dest) = resolve_teleport_destination(scene, tables, b.tag)
+                && teleport_pairs.insert((i, dest))
             {
                 edges.push(Edge {
                     a: i,
@@ -1626,6 +1636,24 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             edges.is_empty(),
             "a blocking twosided boundary is a wall to the flood: {edges:?}"
         );
+    }
+
+    #[test]
+    fn build_edges_dedupes_teleport_edges_by_destination() {
+        let (scene, tables) = fixtures::scene_of(TELEPORT_MAP);
+        let (specials, _class_names) = intern_lock_classes(&tables).expect("small vocabulary");
+        let edges = build_edges(&scene, &tables, &specials, true);
+        let teleports: Vec<&Edge> = edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Teleport)
+            .collect();
+        assert_eq!(
+            teleports.len(),
+            1,
+            "the island pad's four boundaries share one (front, destination) pair: {edges:?}"
+        );
+        assert_eq!(teleports[0].a, 0, "the pad's front sector is sector 0");
+        assert_eq!(teleports[0].b, 1, "the tag resolves to the marker sector");
     }
 
     // --- Teleport edges: the directed edge a trigger line adds, and the
