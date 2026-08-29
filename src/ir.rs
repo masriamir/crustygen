@@ -619,14 +619,23 @@ pub enum IrError {
     },
     /// A pad's square does not sit on the 64-unit flat grid.
     #[error(
-        "teleport `{id}`: pad corner ({x}, {y}) is not on the 64-unit flat grid; vanilla wraps a \
-         flat every 64 units in world space, so a 64x64 pad reads as one tile only when its \
-         corners are multiples of 64"
+        "teleport `{id}`: the pad placed at ({at_x}, {at_y}) has its square's low corner at \
+         ({x}, {y}), which is not on the 64-unit flat grid; vanilla wraps a flat every 64 units \
+         in world space, so a 64x64 pad reads as one tile only when its corners are multiples \
+         of 64"
     )]
     TeleportPadOffFlatGrid {
         /// The teleport's identifier.
         id: String,
-        /// The X coordinate of the pad square's low corner.
+        /// The X coordinate of the authored point: an island pad's corner,
+        /// or a wall pad's span start.
+        at_x: i32,
+        /// The Y coordinate of the authored point.
+        at_y: i32,
+        /// The X coordinate of the pad square's low corner. Reported
+        /// alongside the authored point because the two differ for a pad
+        /// recessed toward -x or -y, where the square's low corner is the
+        /// recess's *far* corner and never appears in the IR at all.
         x: i32,
         /// The Y coordinate of the pad square's low corner.
         y: i32,
@@ -1221,6 +1230,8 @@ impl Ir {
         if lo.x % Self::FLAT_TILE != 0 || lo.y % Self::FLAT_TILE != 0 {
             return Err(IrError::TeleportPadOffFlatGrid {
                 id: t.id.clone(),
+                at_x: point.x,
+                at_y: point.y,
                 x: lo.x,
                 y: lo.y,
             });
@@ -2171,8 +2182,17 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, IrError::TeleportPadOffFlatGrid { x: 96, y: 160, .. }),
-            "{err}"
+            matches!(
+                err,
+                IrError::TeleportPadOffFlatGrid {
+                    at_x: 96,
+                    at_y: 160,
+                    x: 96,
+                    y: 160,
+                    ..
+                }
+            ),
+            "an island pad's authored point is its square's low corner: {err}"
         );
     }
 
@@ -2186,7 +2206,42 @@ mod tests {
         )
         .unwrap_err();
         assert!(
-            matches!(err, IrError::TeleportPadOffFlatGrid { x: 96, y: 256, .. }),
+            matches!(
+                err,
+                IrError::TeleportPadOffFlatGrid {
+                    at_x: 96,
+                    at_y: 256,
+                    x: 96,
+                    y: 256,
+                    ..
+                }
+            ),
+            "a pad recessed toward +y keeps the authored point as its low corner: {err}"
+        );
+    }
+
+    /// The other half of the reported pair: this pad is recessed toward -x,
+    /// so its square's low corner (-64, 96) is the recess's *far* corner and
+    /// appears nowhere in the IR. The error names the authored point (0, 96)
+    /// as well, so the message points at something the author wrote.
+    #[test]
+    fn a_wall_pad_recessed_backward_reports_both_its_point_and_its_corner() {
+        let err = with_teleports(
+            r#"{ "id":"w", "room":"a", "pad":{"wall":[0,96]},
+                 "to":{"room":"b","at":[448,128],"angle":90} }"#,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                IrError::TeleportPadOffFlatGrid {
+                    at_x: 0,
+                    at_y: 96,
+                    x: -64,
+                    y: 96,
+                    ..
+                }
+            ),
             "{err}"
         );
     }
@@ -2213,7 +2268,16 @@ mod tests {
           ] }"#;
         let err = Ir::from_json(json).unwrap_err();
         assert!(
-            matches!(err, IrError::TeleportPadOffFlatGrid { x: 64, y: 264, .. }),
+            matches!(
+                err,
+                IrError::TeleportPadOffFlatGrid {
+                    at_x: 64,
+                    at_y: 264,
+                    x: 64,
+                    y: 264,
+                    ..
+                }
+            ),
             "{err}"
         );
     }
