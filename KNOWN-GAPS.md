@@ -587,11 +587,20 @@ crossable pad edges.
 **V-P15 sizes the destination for the player, even on a monsters-only line.**
 Headroom and radius clearance at the marker are measured against
 `Tables::player`, so a species wider than the player (a pinky is 30 to the
-player's 16) can arrive at a destination this check calls clear yet
-`P_TeleportMove` would refuse. Sizing it properly needs the set of species
-that can actually reach the trigger line, which is the acoustic model this
-project deliberately does not have. Optimistic in one direction only, and
-recorded in `check_teleport_pairing`'s own doc comment.
+player's 16) can arrive at a destination this check calls clear and land
+embedded in the wall. The engine does not refuse that arrival:
+`P_TeleportMove` (pinned `p_map.c`) sets `tmbbox` from the arriving thing's
+radius, takes floor and ceiling from `R_PointInSubsector (x,y)`, runs
+`P_BlockThingsIterator(bx,by,PIT_StompThing)` over *things* only, then links
+the thing and returns true — it consults no line, and its one false return is
+`PIT_StompThing` refusing a non-player stomp (`if ( !tmthing->player &&
+gamemap != 30) return false;`). The consequence is a stuck mobj rather than a
+rejected teleport: `PIT_CheckLine` fails every later `P_TryMove` whose
+destination box still straddles the wall (`if (!ld->backsector) return false;
+// one sided line`). Sizing this properly needs the set of species that can
+actually reach the trigger line, which is the acoustic model this project
+deliberately does not have. Optimistic in one direction only, and recorded in
+`check_teleport_pairing`'s own doc comment.
 
 **Odd portal widths are rejected rather than rounded**, per the spec's
 reject-don't-degrade posture. The same posture governs

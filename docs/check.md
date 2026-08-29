@@ -457,9 +457,16 @@ positive.
   rule (`docs/measurements/teleports-2026-08-28.md`). And V-P15 sizes
   headroom and clearance for the **player** even on a monsters-only line,
   which is optimistic in one direction: a species wider than the player can
-  arrive where this check calls the destination clear yet `P_TeleportMove`
-  would refuse. Sizing it properly needs the set of species that can reach
-  the trigger line — the acoustic model this checker does not have.
+  arrive where this check calls the destination clear and land embedded in
+  the wall. The engine does not refuse that arrival — `P_TeleportMove`
+  (pinned `p_map.c`) sets `tmbbox`, takes floor and ceiling from
+  `R_PointInSubsector`, runs `PIT_StompThing` over *things* only, links the
+  thing and returns true, consulting no line; its one false return is
+  `PIT_StompThing` refusing a non-player stomp. The mobj is simply stuck
+  afterwards, because `PIT_CheckLine` fails every later `P_TryMove` whose
+  box still straddles the one-sided line. Sizing it properly needs the set
+  of species that can reach the trigger line — the acoustic model this
+  checker does not have.
 - **Sector specials, liquids included — and these *do* pass silently.** The
   warning above is a *linedef*-special check: `check_recognized_specials`
   reads `Boundary::special`, and a damaging floor is a **sector** special

@@ -1082,10 +1082,19 @@ pub fn check_recognized_specials(scene: &Scene, tables: &Tables, findings: &mut 
 /// Headroom and clearance are sized for [`Tables::player`], including on a
 /// monsters-only line. That is a known gap in the *optimistic* direction: a
 /// species wider than the player (a pinky is 30 to the player's 16) can
-/// arrive at a destination this check calls clear yet `P_TeleportMove`
-/// would refuse. Sizing it properly needs the set of species that can
-/// actually reach the trigger line, which is the acoustic model this
-/// checker does not have.
+/// arrive at a destination this check calls clear and land embedded in the
+/// wall. The engine does not catch it — `P_TeleportMove` (pinned
+/// `p_map.c`) sets `tmbbox` from the arriving thing's radius, takes floor
+/// and ceiling from `R_PointInSubsector (x,y)`, runs
+/// `P_BlockThingsIterator(bx,by,PIT_StompThing)` over *things* only, and
+/// then links the thing and returns true. It consults no line at all, and
+/// its one false return is `PIT_StompThing` refusing a non-player stomp
+/// ("`if ( !tmthing->player && gamemap != 30) return false;`"). What the
+/// arrival hits is not a refusal but a stuck mobj: `PIT_CheckLine` fails
+/// every later `P_TryMove` whose destination box still straddles the wall
+/// ("`if (!ld->backsector) return false; // one sided line`"). Sizing this
+/// properly needs the set of species that can actually reach the trigger
+/// line, which is the acoustic model this checker does not have.
 ///
 /// # Panics
 ///
