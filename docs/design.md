@@ -434,16 +434,18 @@ crossing. **A pad is addressed by its low corner**, never its center: an `island
 square's minimum-x/minimum-y corner (the square is `[x, x+64] x [y, y+64]`), and a `wall` point is
 where the pad's 64-unit span *starts* along that wall. `to` is a point with a facing, not a pad:
 the compiler synthesizes a destination marker there and tags the sector that holds it — a two-way
-pair therefore names the other pad's center itself, since nothing centers an arrival for you. `monsters_only` selects the 126/125 pair over 97/39, and
-`repeatable` (default true) the retriggerable form over the one-shot one. A two-way pair is two
-independent one-way teleports whose destinations land on each other's pads. `exits[].trigger`
-gains `teleport` alongside `switch` and `walkover`: an exit the player can only arrive at by
-teleport.
+pair therefore names the other pad's center itself, since nothing centers an arrival for you.
+`monsters_only` selects the 126/125 pair over 97/39, and `repeatable` (default true) the
+retriggerable form over the one-shot one. A two-way pair is two independent one-way teleports
+whose destinations land on each other's pads. `exits[].trigger` gains `teleport` alongside
+`switch` and `walkover`: an exit the player can only arrive at by teleport.
 
-Corners, because the flat grid is the *renderer's* and it is not centered on anything. `R_MapPlane`
-(`linuxdoom-1.10/r_plane.c`, pinned `a77dfb96`) gives a flat span the world coordinates themselves —
-`ds_xfrac = viewx + FixedMul(finecosine[angle], length);` / `ds_yfrac = -viewy - FixedMul(finesine[angle], length);`
-— and `R_DrawSpan` (`r_draw.c`) indexes the 64x64 flat with the low six bits of each:
+The address is the corner rather than the center because the grid a flat wraps on is the
+*renderer's*, anchored to the world origin and not to the sector. `R_MapPlane`
+(`linuxdoom-1.10/r_plane.c`, pinned `a77dfb96`) gives a flat span the world coordinates
+themselves — `ds_xfrac = viewx + FixedMul(finecosine[angle], length);` and
+`ds_yfrac = -viewy - FixedMul(finesine[angle], length);` — and `R_DrawSpan` (`r_draw.c`)
+indexes the 64x64 flat with the low six bits of each:
 `spot = ((yfrac>>(16-6))&(63*64)) + ((xfrac>>16)&63);`. A flat therefore wraps every 64 units of
 world space, and a 64x64 `GATE` pad reads as exactly one tile only when its corners are multiples
 of 64. Both the island corner and the wall pad's span start — and the wall's own fixed coordinate,

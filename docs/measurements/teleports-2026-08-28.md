@@ -304,7 +304,9 @@ one: `R_MapPlane` gives a flat span the world coordinates themselves and `R_Draw
 bits per axis, so a 64x64 pad reads as exactly one `GATE` tile only when its corners are multiples
 of 64. The corpus rows above are the evidence that id built to that fact. Acting on it, the IR now
 addresses a pad by its low corner (`Ir::FLAT_TILE`, `IrError::TeleportPadOffFlatGrid`); center
-addressing had put every pad the compiler emitted half a tile off on both axes.
+addressing had put every pad the compiler emitted off by half a tile on at least one axis — on both
+axes for an island pad, and on the along axis alone for a wall pad, whose across coordinate is the
+wall's own and so stayed aligned.
 
 Alcove pads: 94 in DOOM+DOOM2, of which opening width 64 on 89, depth 64 on 81 (32 on 8), bbox
 ≤ 64 on 91, floor +8 on 38 and flush on 30. idgames: 1,088 alcoves, opening width 33–64 on 74.7 %,

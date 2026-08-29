@@ -59,10 +59,10 @@ const TELEPORT_ISLAND: &str = r#"{ "id":"i", "room":"a", "pad":{"island":[64,128
 const TELEPORT_WALL_ONE_SHOT: &str = r#"{ "id":"w", "room":"a", "pad":{"wall":[64,256]},
   "to":{"room":"b","at":[448,128],"angle":90}, "repeatable":false }"#;
 /// A monsters-only pad in room `b` delivering into room `a`: the `126`
-/// special. The destination is `[64,64]` and not room `a`'s center, where
-/// the player start stands: nothing in the compiler polices an arrival
-/// point that lands on another thing, so the fixture keeps the two apart by
-/// hand rather than leaning on a check that is not there. Pair with
+/// special. The destination is `[64,64]`, 128 units west of the player start
+/// at (192, 64): nothing in the compiler polices an arrival point that lands
+/// on another thing, so the fixture keeps the two apart by hand rather than
+/// leaning on a check that is not there. Pair with
 /// [`IMP_B`], whose species sets the clearance the destination must offer
 /// (`teleports::arriving_dims` takes the largest species in the pad's own
 /// room).
