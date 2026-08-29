@@ -593,12 +593,18 @@ fn exit_kind_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conformanc
 /// teleport-only for the map to read `teleport`; one that can also be walked
 /// to reads `walkover`.
 ///
-/// The "crossable" qualifier makes that set non-empty whenever a walkover
-/// special is present at all, so the `all` below is never vacuously true on
-/// a map worth grading: `P_CrossSpecialLine` fires on neither a one-sided
-/// line nor a blocking one, so [`crate::compile::exits`] builds every
-/// walkover threshold two-sided and non-blocking, and a hand-authored map
-/// that did otherwise has an exit the engine would never fire.
+/// The set is required to be non-empty rather than left to `all`, which
+/// answers `true` over nothing. That emptiness clause is belt and braces
+/// today — when no walkover line is crossable, `resolve_goals` finds no goal
+/// (it applies the identical
+/// [`Boundary::passable`](crate::check::scene::Boundary::passable) test) and
+/// [`crate::check::flood::teleport_only_sectors`] returns `None`, which
+/// already sinks the row to `walkover`. Stating it here keeps the row's own
+/// meaning — *every crossable walkover goal sector is teleport-only, and
+/// there is at least one* — from resting on that coupling in another module.
+/// A map whose only walkover exit is one-sided or blocking has an exit
+/// `P_CrossSpecialLine` would never fire, and grades `walkover`, which fails
+/// against a `teleport` target instead of passing by accident.
 fn exit_trigger_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> ConformanceRow {
     let target = exit_trigger_name(fm.progression.exit.trigger).to_owned();
     let switches = [
@@ -625,9 +631,9 @@ fn exit_trigger_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conform
         .collect();
     let is_teleport_exit = has_walkover
         && !has_switch
-        && teleport_only
-            .as_ref()
-            .is_some_and(|only| walkover_goal_sectors.iter().all(|&s| only[s]));
+        && teleport_only.as_ref().is_some_and(|only| {
+            !walkover_goal_sectors.is_empty() && walkover_goal_sectors.iter().all(|&s| only[s])
+        });
     let actual_trigger = match (has_switch, has_walkover, is_teleport_exit) {
         (true, false, _) => Some(ExitTrigger::Switch),
         (false, true, true) => Some(ExitTrigger::Teleport),
@@ -1861,6 +1867,39 @@ thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
             &scene,
             &tables,
         );
+        assert_eq!(row.verdict, Verdict::Fail, "{row:?}");
+    }
+
+    #[test]
+    fn an_uncrossable_walkover_exit_does_not_grade_as_a_teleport_exit() {
+        // The one walkover exit line made blocking: `P_CrossSpecialLine`
+        // never fires on it, so no sector holds a *crossable* walkover exit
+        // and the teleport-only test would otherwise run `all` over an empty
+        // set, which answers `true`. Two independent things stop that from
+        // reading `teleport` — `resolve_goals` finds no goal at all and
+        // `teleport_only_sectors` returns `None`, and the emptiness clause
+        // in the row itself. This pins the outcome so neither can be removed
+        // silently.
+        let blocked = crate::check::fixtures::TELEPORT_MAP.replace(
+            "twosided = true; special = 52; arg0 = 1;",
+            "twosided = true; blocking = true; special = 52; arg0 = 1;",
+        );
+        assert_ne!(
+            blocked,
+            crate::check::fixtures::TELEPORT_MAP,
+            "the patch changed nothing"
+        );
+        let (scene, tables) = crate::check::fixtures::scene_of(&blocked);
+        assert!(
+            crate::check::flood::teleport_only_sectors(&scene, &tables).is_none(),
+            "a blocking exit threshold leaves the flood no goal to run toward"
+        );
+        let row = exit_trigger_row(
+            &frontmatter_with_exit_trigger(ExitTrigger::Teleport),
+            &scene,
+            &tables,
+        );
+        assert_eq!(row.actual, "walkover", "{row:?}");
         assert_eq!(row.verdict, Verdict::Fail, "{row:?}");
     }
 
