@@ -24,8 +24,8 @@
 //! and is refused here, so this module's shape buckets are subsets of the
 //! measurement's, not the same counts. The probe names refusal reasons only
 //! as a corpus histogram (its `why Other` row); this module attaches one to
-//! each platform and adds [`Refusal::Dead`] and [`Refusal::SharedTag`] to
-//! that vocabulary.
+//! each platform and adds [`Refusal::Dead`], [`Refusal::SharedTag`] and
+//! [`Refusal::OneWayBarrier`] to that vocabulary.
 //!
 //! **Refusal precedence.** A platform is judged against the eight
 //! [`Refusal`]s in one fixed order and the first that applies wins, so a
