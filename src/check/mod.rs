@@ -150,7 +150,8 @@ impl std::fmt::Display for Finding {
 /// This builds the [`scene::Scene`] (which contributes reference-validity
 /// findings), runs the texture ([`invariants::check_textures`], V-P8),
 /// scaling ([`invariants::check_scaling`], V-P9), door-pegging
-/// ([`invariants::check_door_pegging`], V-P11), tag
+/// ([`invariants::check_door_pegging`], V-P11), lift-pegging
+/// ([`invariants::check_lift_pegging`], the lift half of V-P11), tag
 /// ([`invariants::check_tags`], V-P13/P14), thing-headroom
 /// ([`invariants::check_thing_headroom`], V-P2), light-bounds
 /// ([`invariants::check_light_bounds`], V-P19), start-clearance
@@ -159,7 +160,8 @@ impl std::fmt::Display for Finding {
 /// passage-width ([`invariants::check_passage_width`], V-P3), door-opening
 /// ([`invariants::check_door_openings`], V-P4), and recognized-special
 /// ([`invariants::check_recognized_specials`], the flood's soundness
-/// precondition), teleport-pairing
+/// precondition), lift-return ([`invariants::check_lift_return`], V-P5),
+/// teleport-pairing
 /// ([`invariants::check_teleport_pairing`], V-P15) and sealed-monster-sector
 /// ([`invariants::check_sealed_monster_rooms`], V-P27) invariants, runs the
 /// key-aware reachability flood
@@ -197,6 +199,7 @@ pub fn run(map: &UdmfMap, map_name: &str, tables: &Tables, spec: Option<&Spec>) 
     invariants::check_textures(map, &scene, &mut findings);
     invariants::check_scaling(map, &mut findings);
     invariants::check_door_pegging(&scene, tables, &mut findings);
+    invariants::check_lift_pegging(&scene, tables, &mut findings);
     let tag_manifest = invariants::check_tags(map, tables, &mut findings);
     invariants::check_thing_headroom(&scene, tables, &mut findings);
     invariants::check_light_bounds(&scene, tables, &mut findings);
@@ -205,6 +208,7 @@ pub fn run(map: &UdmfMap, map_name: &str, tables: &Tables, spec: Option<&Spec>) 
     invariants::check_passage_width(&scene, tables, &mut findings);
     invariants::check_door_openings(&scene, tables, &mut findings);
     invariants::check_recognized_specials(&scene, tables, &mut findings);
+    invariants::check_lift_return(&scene, tables, &mut findings);
     invariants::check_teleport_pairing(&scene, tables, &mut findings);
     invariants::check_sealed_monster_rooms(&scene, tables, &mut findings);
     if let Some(reached) = flood::run_flood(&scene, tables, &mut findings) {

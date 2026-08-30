@@ -636,4 +636,16 @@ fn the_lift_golden_is_modeled_not_warned_about() {
         "{:?}",
         report.findings
     );
+    assert_eq!(
+        count(&report.findings, "V-P5"),
+        0,
+        "every platform travels and is callable from its low floor: {:?}",
+        report.findings
+    );
+    assert_eq!(
+        count(&report.findings, "V-P11"),
+        0,
+        "no riser carries dontpegbottom and no door face carries a flag: {:?}",
+        report.findings
+    );
 }

@@ -9,6 +9,7 @@
 //! `heights::visible_lower_side`/`visible_upper_side` being the single,
 //! un-cross-checked place that comparison is made compile-side).
 
+use crate::check::plats::resolve_plats;
 use crate::check::scene::Scene;
 use crate::check::{Finding, Severity, Subject, TagEntry};
 use crate::tables::Tables;
@@ -258,6 +259,28 @@ pub fn check_door_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Fin
                          lower-unpegged; faces carry neither flag",
                         b.special, b.upper_unpegged, b.lower_unpegged
                     ),
+                });
+            }
+        }
+    }
+}
+
+/// V-P11 for lifts — a riser (a plat boundary whose neighbor's floor is
+/// below the plat's) carrying `dontpegbottom`, which anchors the lower to
+/// the ceiling so it stays put while the platform moves out from under it
+/// (`r_segs.c`). Rendering only, hence a Warning.
+pub fn check_lift_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    for plat in resolve_plats(scene, tables) {
+        let floor = scene.sectors[plat.sector].floor;
+        for b in &scene.sectors[plat.sector].boundary {
+            let Some(n) = b.neighbor else { continue };
+            if scene.sectors[n].floor < floor && b.lower_unpegged {
+                findings.push(Finding {
+                    check: "V-P11",
+                    severity: Severity::Warning,
+                    subject: Subject::Linedef(b.linedef),
+                    message: "lift riser carries dontpegbottom; flag-clear rides with the platform"
+                        .to_owned(),
                 });
             }
         }
@@ -1061,6 +1084,38 @@ pub fn check_recognized_specials(scene: &Scene, tables: &Tables, findings: &mut 
     }
 }
 
+/// V-P5 — lift travel and return, re-derived from the map the way
+/// `EV_DoPlat` reads it ([`crate::check::plats`]). Warnings, not errors: a
+/// dead lift is a no-op, and whether a top-only lift traps anyone is V-P7's
+/// verdict.
+pub fn check_lift_return(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    for plat in resolve_plats(scene, tables) {
+        if plat.travel == 0 {
+            findings.push(Finding {
+                check: "V-P5",
+                severity: Severity::Warning,
+                subject: Subject::Sector(plat.sector),
+                message: format!(
+                    "lift never moves: its floor {} is already the lowest around it",
+                    scene.sectors[plat.sector].floor
+                ),
+            });
+            continue;
+        }
+        if !plat.callable_low() {
+            findings.push(Finding {
+                check: "V-P5",
+                severity: Severity::Warning,
+                subject: Subject::Sector(plat.sector),
+                message: format!(
+                    "lift is callable only from above: no trigger fires from its low floor {}",
+                    plat.low
+                ),
+            });
+        }
+    }
+}
+
 /// V-P15 — teleport pairing, re-derived from the emitted map the way
 /// `EV_Teleport` reads it: every teleport line's tag must resolve
 /// (`flood::resolve_teleport_destination`) to a sector holding exactly one
@@ -1244,7 +1299,7 @@ pub fn check_sealed_monster_rooms(scene: &Scene, tables: &Tables, findings: &mut
 mod tests {
     use super::*;
     use crate::check;
-    use crate::check::fixtures::{self, TELEPORT_MAP};
+    use crate::check::fixtures::{self, TELEPORT_MAP, chain};
     use crate::check::scene::{SceneSector, SceneThing};
     use crustywad::Limits;
     use crustywad::map::udmf::parse_udmf;
@@ -2424,5 +2479,79 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         let mut findings = Vec::new();
         check_recognized_specials(&scene, &tables, &mut findings);
         assert!(findings.is_empty(), "97 is modeled now: {findings:?}");
+    }
+
+    /// Parses `text`, builds its [`Scene`] and runs one check over it.
+    fn findings_of_check(
+        text: &str,
+        check: fn(&Scene, &Tables, &mut Vec<Finding>),
+    ) -> Vec<Finding> {
+        let tables = Tables::load().expect("tables");
+        let map = parse_udmf(text, Limits::default()).expect("fixture parses");
+        let scene = Scene::build(&map, &tables, &mut Vec::new());
+        let mut findings = Vec::new();
+        check(&scene, &tables, &mut findings);
+        findings
+    }
+
+    #[test]
+    fn v_p5_names_a_dead_lift_and_a_top_only_lift_and_passes_a_real_one() {
+        let dead = findings_of_check(
+            &chain(&[0, 0, 0], &[0, 7, 0], &[(62, 7, false), (0, 0, false)], ""),
+            check_lift_return,
+        );
+        assert_eq!(dead.len(), 1);
+        assert!(
+            dead[0].check == "V-P5"
+                && dead[0].severity == Severity::Warning
+                && dead[0].message.contains("never moves")
+        );
+        assert_eq!(dead[0].subject, Subject::Sector(1));
+
+        let top_only = findings_of_check(
+            &chain(
+                &[0, 128, 128],
+                &[0, 7, 0],
+                &[(0, 0, false), (62, 7, true)],
+                "",
+            ),
+            check_lift_return,
+        );
+        assert_eq!(top_only.len(), 1);
+        assert!(
+            top_only[0].message.contains("only from above"),
+            "{top_only:?}"
+        );
+
+        let fine = findings_of_check(
+            &chain(
+                &[0, 128, 128],
+                &[0, 7, 0],
+                &[(62, 7, false), (0, 0, false)],
+                "",
+            ),
+            check_lift_return,
+        );
+        assert!(fine.is_empty(), "{fine:?}");
+    }
+
+    #[test]
+    fn v_p11_warns_on_an_unpegged_riser_only() {
+        let text = chain(
+            &[0, 128, 128],
+            &[0, 7, 0],
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        );
+        assert!(findings_of_check(&text, check_lift_pegging).is_empty());
+        let unpegged = text.replacen("special = 62;", "special = 62; dontpegbottom = true;", 1);
+        let f = findings_of_check(&unpegged, check_lift_pegging);
+        assert_eq!(f.len(), 1);
+        assert!(
+            f[0].check == "V-P11"
+                && f[0].subject == Subject::Linedef(0)
+                && f[0].message.contains("dontpegbottom"),
+            "{f:?}"
+        );
     }
 }
