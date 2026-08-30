@@ -46,8 +46,8 @@ they sit in — how many are lifts, pedestals or barriers, how many are callable
 from below, carry a top trigger, hold things, or run at `blazeDWUS` speed —
 plus the eight refusal classes that gate the verdict (`dead`, shared tag,
 one-shot, mixed speed, unsupported rest, top-only, one-way barrier,
-conflicting action) and the broken lines, those whose tag names no sector at
-all. One row is neither a platform tally nor a refusal: *shared-tag groups
+conflicting action) and the broken lines, those naming no platform at all (tag 0, or a tag no
+sector answers to). One row is neither a platform tally nor a refusal: *shared-tag groups
 that are one platform split* counts tag groups whose sectors all sit at one
 floor and are mutually adjacent — the sub-case of a shared tag a
 geometry-aware lifter could still read as a single lift — so it is reported

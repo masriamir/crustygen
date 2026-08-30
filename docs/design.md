@@ -558,7 +558,8 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
   travels to the lowest floor among its two-sided neighbors (`P_FindLowestFloorSurrounding`), so
   the floor it lowers to is not an authored choice — it is whatever its lowest neighbor stands
   at. That travel must exceed the engine's step height, since under it the player simply walks
-  up, and must not exceed `progression.lifts.max_travel`. Every sector that calls the platform
+  up, and must not exceed `progression.lifts.max_travel` — a bound only the verifier's
+  conformance row grades, since the compiler never sees a spec. Every sector that calls the platform
   must itself stand at that lowest floor, or the platform will not stop where the caller is. And
   some trigger must fire from that floor: a use special from its front sector (`P_UseSpecialLine`
   is front-side only), or a walkover from whichever side can cross the line at rest. A trigger on

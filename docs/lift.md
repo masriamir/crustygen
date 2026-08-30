@@ -37,7 +37,7 @@ engine's pick is deterministic.
 
 `lift::plat` is the second, over platforms. It reads the same engine-side
 resolution the verifier does — `check::plats`, shared by the flood, the
-rules, the conformance rows and this recognizer, so the four cannot drift on
+V-P5/V-P11 invariants, the conformance rows and this recognizer, so the four cannot drift on
 what a platform travels to or who can fire its triggers. Every sector a lift
 line names by tag is resolved the way `EV_DoPlat` reads it (the floor it
 travels to is `P_FindLowestFloorSurrounding`'s; a use line fires from its
@@ -53,7 +53,7 @@ the tag, where one IR lift is one platform), `one_shot`, `mixed_speed`,
 `unsupported_rest`, `top_only` (no trigger fires from below — the lift a
 player underneath cannot call), `one_way_barrier` (it lowers for one side
 only) and `conflicting_action` (a non-lift special names the tag too). A lift
-line whose tag names no sector at all is not a refused platform but a broken
+line that names no platform — tag 0, or a tag no sector answers to — is not a refused platform but a broken
 line, counted alongside the refusals. `shared_tag` and `one_way_barrier` are
 gates the shape probe behind `docs/measurements/lift-shapes-2026-08-29.md`
 never applied, so these shape counts are subsets of that measurement's rather
