@@ -115,6 +115,38 @@
 //! with and without these edges, to name the sectors a teleport is
 //! load-bearing for.
 //!
+//! **Lift edges**, likewise on top of the boundary edges and independent of
+//! the `teleports` flag. Every platform [`plats::resolve_plats`] resolves —
+//! each sector some lift line names by a nonzero tag — contributes one
+//! [`reach::EdgeKind::Lift`] edge per distinct caller, written caller →
+//! platform (the edge is undirected all the same: [`reach::check`] walks a
+//! `Lift` both ways). `reach.rs` owns what that edge *means* — bidirectional
+//! and exempt from both geometric rules, because `EV_DoPlat`'s
+//! `downWaitUpStay` (`p_plats.c`) brings the floor down to the caller and
+//! carries them up; this module's job is only naming the callers, which it
+//! does in two cases:
+//!
+//! - **A trigger the caller can reach on foot.** When some trigger fires
+//!   from a sector that is both a neighbor of the platform and more than a
+//!   step below it ([`plats::ScenePlat::low_activator_neighbors`]), those
+//!   neighbors are the callers, and nothing else is: a player standing
+//!   there presses or crosses the line and rides.
+//! - **A remote trigger only.** When every `Low` activator is some sector
+//!   the platform does not border, the callers are instead every neighbor
+//!   standing at the platform's `low` floor (within a step of it, and more
+//!   than a step below the platform's rest floor) — the sectors the
+//!   lowered platform is level with. This is deliberately optimistic: the
+//!   flood cannot model the walk from a remote switch back to the platform,
+//!   nor the wait before it rises again, so it credits the ride rather than
+//!   inventing a softlock. A platform no trigger fires from below
+//!   ([`plats::ScenePlat::callable_low`] false) gets no edge at all — that
+//!   is the top-only lift a player below cannot call, and the flood should
+//!   see the wall it really is.
+//!
+//! Pairs are deduped, as the teleport edges are: a pedestal's four island
+//! edges all name the same (host, platform) pair, and a barrier is called
+//! from both of the rooms it stands between.
+//!
 //! # Key classes
 //!
 //! Interned the same way [`reach::graph_from_compiled`] does: by the locked
@@ -134,6 +166,7 @@
 //! elsewhere: a `TEXTMAP` with neither is a hard `V-P7` finding here (see
 //! the design doc's verifier catalog), not a silent pass.
 
+use crate::check::plats;
 use crate::check::scene::Scene;
 use crate::check::{Finding, Severity, Subject};
 use crate::reach::{self, Edge, EdgeKind, KeyClass, KeyMask, Limits, Node, ReachGraph};
@@ -381,6 +414,13 @@ pub(crate) fn resolve_teleport_destination(
 /// behind the same crossability gate every other edge answers to. Passing
 /// `false` builds the same graph with those edges left out, which is how
 /// [`teleport_only_sectors`] measures what a teleport is load-bearing for.
+///
+/// And, unconditionally, one [`EdgeKind::Lift`] edge per distinct (caller,
+/// platform) pair [`plats::resolve_plats`] resolves — see "Lift edges" in
+/// the module doc for which sectors count as callers. Unconditional because
+/// a platform is geometry, not a teleport's optional modeling: the
+/// `teleports` flag exists to measure what a *teleport* is load-bearing for,
+/// and taking the lifts out alongside it would confound that measurement.
 fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool) -> Vec<Edge> {
     let plain_door = tables.door_special();
     let player_teleports = tables.player_teleport_specials();
@@ -391,6 +431,10 @@ fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool
     // trigger special and one tag, so without this, one identical edge would
     // be pushed per triggering boundary rather than once per distinct pair.
     let mut teleport_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+    // The same dedupe for lift edges: every edge of an island pedestal
+    // carries the platform's tag, and a barrier is called from both of its
+    // neighbors, so one (caller, platform) pair can be named several times.
+    let mut lift_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (i, sector) in scene.sectors.iter().enumerate() {
         for b in &sector.boundary {
             if !b.fronts_this {
@@ -434,6 +478,42 @@ fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool
                 b: neighbor,
                 kind,
             });
+        }
+    }
+    let step = tables.step_height();
+    for plat in plats::resolve_plats(scene, tables) {
+        let neighbors_at_low: Vec<usize> = plat
+            .neighbors
+            .iter()
+            .copied()
+            .filter(|&n| {
+                scene.sectors[n].floor >= plat.low - step
+                    && scene.sectors[n].floor < scene.sectors[plat.sector].floor - step
+            })
+            .collect();
+        let adjacent_callers = plat.low_activator_neighbors();
+        // Remote-only activators: every low neighbor gets the edge, ungated
+        // — the flood cannot model the wait or the walk from a switch that
+        // is nowhere near the platform, so it stays optimistic rather than
+        // pessimistic, the same trade `KNOWN-GAPS.md` already records for
+        // the teleport edge that ignores its pad's step height.
+        let callers: Vec<usize> = if adjacent_callers.is_empty() {
+            if plat.callable_low() {
+                neighbors_at_low
+            } else {
+                Vec::new()
+            }
+        } else {
+            adjacent_callers.into_iter().collect()
+        };
+        for c in callers {
+            if lift_pairs.insert((c, plat.sector)) {
+                edges.push(Edge {
+                    a: c,
+                    b: plat.sector,
+                    kind: EdgeKind::Lift,
+                });
+            }
         }
     }
     edges
@@ -1729,5 +1809,59 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             1,
         ));
         assert_eq!(resolve_teleport_destination(&scene, &tables, 5), Some(1));
+    }
+
+    #[test]
+    fn a_lift_called_from_below_makes_the_climb_finishable_and_a_top_only_one_strands_the_start() {
+        let tables = Tables::load().expect("tables");
+        let exit = tables.exit_switch_special();
+        // `room_chain_ex` writes every sector as `sector { texturefloor ...`
+        // and declares no `id`: tag the *second* one (the platform) by
+        // splicing an `id` into the first two and undoing the first.
+        let tagged = |text: String| {
+            text.replacen("sector { texturefloor", "sector { id = 7; texturefloor", 2)
+                .replacen("sector { id = 7; texturefloor", "sector { texturefloor", 1)
+        };
+        let text = tagged(room_chain(
+            &[(0, 128, 160), (128, 256, 160), (128, 256, 160)],
+            &[(62, 7, false), (0, 0, false)],
+            Some((2, exit, 0)),
+            &thing_at(64.0, 64.0, 1),
+        ));
+        let (scene, mut findings) = scene_of(&text, &tables);
+        let reached = run_flood(&scene, &tables, &mut findings).expect("flood ran");
+        assert!(
+            reached.iter().all(|&r| r),
+            "every sector reachable via the lift: {findings:?}"
+        );
+        assert!(!findings.iter().any(|f| f.check == "V-P7"), "{findings:?}");
+
+        // Flip the switch line so its front is the level room: no way up
+        // from the start. `write_link` fronts each link on its *west* room,
+        // so moving the special from the first link (rooms 0 | 1) to the
+        // second (rooms 1 | 2) makes the platform itself the only side that
+        // can fire it.
+        let flipped = text.replacen("special = 62;", "special = 0;", 1).replacen(
+            "twosided = true; }",
+            "twosided = true; special = 62; arg0 = 7; }",
+            1,
+        );
+        let (scene, mut findings) = scene_of(&flipped, &tables);
+        // Pin what the splice produced, so a stranded start proves the
+        // *top-only* lift rather than a fixture that lost its lift line.
+        let plats = plats::resolve_plats(&scene, &tables);
+        assert_eq!(plats.len(), 1, "the platform is still named by tag 7");
+        assert!(
+            !plats[0].callable_low() && plats[0].callable_top(),
+            "the moved switch fires only from the platform's own side: {:?}",
+            plats[0].triggers
+        );
+        // The flood's own return is irrelevant here; the finding it pushes
+        // is the assertion (`run_flood` is `#[must_use]`).
+        let _ = run_flood(&scene, &tables, &mut findings);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"),
+            "the start is stranded below a top-only lift: {findings:?}"
+        );
     }
 }

@@ -19,6 +19,7 @@ use crustywad::map::udmf::{UdmfMap, parse_udmf};
 
 const ENTRADA: &str = include_str!("fixtures/entrada_base.json");
 const TELEPORTS: &str = include_str!("golden/teleports.json");
+const LIFTS: &str = include_str!("golden/lifts.json");
 
 /// Compiles entrada, emits its TEXTMAP, and parses it back — the same
 /// compile -> emit -> parse round trip `tests/check_conformance.rs` uses, so
@@ -41,6 +42,21 @@ fn entrada_udmf() -> (UdmfMap, Tables) {
 fn teleports_udmf() -> (UdmfMap, Tables) {
     let tables = Tables::load().expect("tables");
     let ir = Ir::from_json(TELEPORTS).expect("ir");
+    let compiled = compile(&ir, &tables).expect("compiles");
+    let text = emit_textmap(&compiled.data, &compiled.things);
+    (
+        parse_udmf(&text, Limits::default()).expect("parses"),
+        tables,
+    )
+}
+
+/// Compiles the lift golden fixture (switch lift, fast barrier, walkover
+/// lift with its alcove, and a pedestal — see `tests/golden/lifts.json`),
+/// emits its TEXTMAP, and parses it back, the same round trip
+/// `entrada_udmf` uses.
+fn lifts_udmf() -> (UdmfMap, Tables) {
+    let tables = Tables::load().expect("tables");
+    let ir = Ir::from_json(LIFTS).expect("ir");
     let compiled = compile(&ir, &tables).expect("compiles");
     let text = emit_textmap(&compiled.data, &compiled.things);
     (
@@ -599,5 +615,25 @@ fn sealing_the_pen_is_caught_as_v_p27() {
     assert!(
         p27[0].message.contains("nothing can ever wake them"),
         "expected the sealed-room message: {p27:?}"
+    );
+}
+
+/// The lift golden is the verifier's own cross-examination of Task 5's
+/// emission: every lift special is one the checker models, and the flood
+/// rides each platform rather than calling the map softlocked.
+#[test]
+fn the_lift_golden_is_modeled_not_warned_about() {
+    let (map, tables) = lifts_udmf();
+    let report = run(&map, "MAP01", &tables, None);
+    let unmodeled: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.check == "V-S" && f.message.contains("does not model"))
+        .collect();
+    assert!(unmodeled.is_empty(), "{unmodeled:?}");
+    assert!(
+        !report.findings.iter().any(|f| f.check == "V-P7"),
+        "{:?}",
+        report.findings
     );
 }

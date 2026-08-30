@@ -990,8 +990,9 @@ pub fn check_door_openings(scene: &Scene, tables: &Tables, findings: &mut Vec<Fi
 
 /// The linedef specials this checker recognizes as modeled: `0` (no
 /// special), a manual or locked door ([`door_specials`]), the four exit
-/// specials (switch/walkover crossed with normal/secret), and the four
-/// teleport specials ([`Tables::teleport_specials`]).
+/// specials (switch/walkover crossed with normal/secret), the four teleport
+/// specials ([`Tables::teleport_specials`]), and the eight lift specials
+/// ([`Tables::lift_specials`]).
 fn recognized_specials(tables: &Tables) -> Vec<i32> {
     let mut specials = door_specials(tables);
     specials.push(0);
@@ -1000,6 +1001,7 @@ fn recognized_specials(tables: &Tables) -> Vec<i32> {
     specials.push(i32::from(tables.secret_exit_switch_special()));
     specials.push(i32::from(tables.secret_exit_walkover_special()));
     specials.extend(tables.teleport_specials().into_iter().map(i32::from));
+    specials.extend(tables.lift_specials().into_iter().map(i32::from));
     specials
 }
 
@@ -1027,15 +1029,12 @@ fn recognized_specials(tables: &Tables) -> Vec<i32> {
 /// Severity stays [`Severity::Warning`]: an unrecognized special is not
 /// proof the map is broken, only proof this checker cannot vouch for it.
 ///
-/// **Lift specials are deliberately not in the recognized set.**
-/// `Tables::lift_switch_special` and `lift_walkover_special` are sourced,
-/// but no pass emits them and the flood does not model a moving floor.
-/// Recognizing them here without the flood actually understanding them
-/// would be dishonest: a map that somehow carried one would get a silent
-/// pass instead of the warning that correctly says "this checker does not
-/// know what this line does." The four teleport specials **are** in the
-/// set, since the flood models them (`flood.rs`, "Edges") and
-/// [`check_teleport_pairing`] (V-P15) checks their pairing.
+/// **The eight lift specials are in the set because the flood now models
+/// them** (`flood.rs`, "Lift edges", via [`crate::check::plats`]): a lift
+/// line names a platform by tag, and the flood rides it as an
+/// [`crate::reach::EdgeKind::Lift`] edge from every sector that can call it.
+/// The four teleport specials are in the set for the same reason (`flood.rs`,
+/// "Edges"), with [`check_teleport_pairing`] (V-P15) checking their pairing.
 ///
 /// Each linedef is visited once (`fronts_this` only): `special` is
 /// linedef-wide, so both mirrors of a two-sided line would otherwise report

@@ -18,6 +18,7 @@ use crustywad::map::udmf::UdmfMap;
 pub mod conform;
 pub mod flood;
 pub mod invariants;
+pub mod plats;
 pub mod scene;
 
 /// How bad a [`Finding`] is.
@@ -367,6 +368,95 @@ thing { x = 320.0; y = 64.0; angle = 0; type = 14; single = true; }
         let map = parse_udmf(text, crustywad::Limits::default()).expect("fixture parses");
         let scene = Scene::build(&map, &tables, &mut Vec::new());
         (scene, tables)
+    }
+
+    /// A row of 128×128 boxes, room `i` spanning `x ∈ [i·128, (i+1)·128]`,
+    /// `y ∈ [0, 128]`, ceilings at 256. `floors[i]` and `tags[i]` are room
+    /// `i`'s floor and sector tag. `links[i]` describes the two-sided line
+    /// between rooms `i` and `i+1` as `(special, arg0, front_is_east)`: with
+    /// `front_is_east` false the line runs top-to-bottom so its front (right)
+    /// side is the west room, the natural clockwise orientation; `true` flips
+    /// it so the east room is the front. Every link sidedef carries
+    /// `SUPPORT3` as its lower; every one-sided wall is `STARTAN2`. `extra` is
+    /// appended verbatim.
+    ///
+    /// Ported from `examples/liftprobe/common.rs`'s own test module (the lift
+    /// shape probe, `docs/measurements/lift-shapes-2026-08-29.md`) so the
+    /// probe's measured cases and this crate's re-derivation of them read the
+    /// same geometry; `examples/` is not a library, so the probe keeps its
+    /// copy.
+    pub(crate) fn chain(
+        floors: &[i32],
+        tags: &[i32],
+        links: &[(i32, i32, bool)],
+        extra: &str,
+    ) -> String {
+        use std::fmt::Write as _;
+
+        let n = floors.len();
+        assert_eq!(tags.len(), n);
+        assert_eq!(links.len(), n - 1);
+        let mut text = String::from("namespace = \"doom\";\n");
+        for i in 0..=n {
+            let x = i * 128;
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = 0.000; }}");
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = 128.000; }}");
+        }
+        let mut sidedefs = String::new();
+        let mut next = 0usize;
+        let mut side = |sidedefs: &mut String, sector: usize, lower: bool| {
+            let tex = if lower {
+                "texturemiddle = \"-\"; texturebottom = \"SUPPORT3\";"
+            } else {
+                "texturemiddle = \"STARTAN2\";"
+            };
+            let _ = writeln!(sidedefs, "sidedef {{ sector = {sector}; {tex} }}");
+            next += 1;
+            next - 1
+        };
+        for (i, &(special, tag, east_front)) in links.iter().enumerate() {
+            let (top, bottom) = (2 * i + 3, 2 * i + 2);
+            let (v1, v2, front, back) = if east_front {
+                (bottom, top, i + 1, i)
+            } else {
+                (top, bottom, i, i + 1)
+            };
+            let sf = side(&mut sidedefs, front, true);
+            let sb = side(&mut sidedefs, back, true);
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {sf}; sideback = {sb}; \
+                 twosided = true; special = {special}; arg0 = {tag}; }}"
+            );
+        }
+        for i in 0..n {
+            let (bl, tl, br, tr) = (2 * i, 2 * i + 1, 2 * i + 2, 2 * i + 3);
+            let mut wall = |text: &mut String, v1: usize, v2: usize| {
+                let s = side(&mut sidedefs, i, false);
+                let _ = writeln!(
+                    text,
+                    "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {s}; blocking = true; }}"
+                );
+            };
+            if i == 0 {
+                wall(&mut text, bl, tl);
+            }
+            wall(&mut text, tl, tr);
+            if i == n - 1 {
+                wall(&mut text, tr, br);
+            }
+            wall(&mut text, br, bl);
+        }
+        text.push_str(&sidedefs);
+        for (floor, tag) in floors.iter().zip(tags) {
+            let _ = writeln!(
+                text,
+                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; \
+                 heightfloor = {floor}; heightceiling = 256; lightlevel = 160; id = {tag}; }}"
+            );
+        }
+        text.push_str(extra);
+        text
     }
 }
 
