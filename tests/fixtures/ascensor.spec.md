@@ -270,7 +270,7 @@ measured value where the row grades a range.
 for `switch` while the map uses each trigger once, so the row reports
 `switch ×1, walkover ×1, both_ends ×1` and fails. That is the point of the
 fixture: the row takes one word, a map may mix, and a spec that asks for a
-mix has no word to ask it with. `ascensor_switch.spec.md` is this same
+mix has no word to ask it with. `ascensor_both_ends.spec.md` is this same
 document asking `both_ends` instead, which fails the same row with the same
 `actual` — only the target moves.
 

@@ -24,7 +24,7 @@ const SALTO: &str = include_str!("fixtures/salto_base.json");
 const SALTO_SPEC: &str = include_str!("fixtures/salto.spec.md");
 const ASCENSOR: &str = include_str!("fixtures/ascensor_base.json");
 const ASCENSOR_SPEC: &str = include_str!("fixtures/ascensor.spec.md");
-const ASCENSOR_SWITCH_SPEC: &str = include_str!("fixtures/ascensor_switch.spec.md");
+const ASCENSOR_BOTH_ENDS_SPEC: &str = include_str!("fixtures/ascensor_both_ends.spec.md");
 
 /// Compiles `ir_json`, emits its TEXTMAP, parses it back, and runs
 /// [`crustygen::check::run`] against `spec_text` parsed through
@@ -327,7 +327,7 @@ fn ascensor_conforms_to_its_paired_spec_except_the_lift_trigger_row() {
     }
 }
 
-/// The same map against `tests/fixtures/ascensor_switch.spec.md` — the
+/// The same map against `tests/fixtures/ascensor_both_ends.spec.md` — the
 /// identical document asking for `both_ends` instead — showing the trigger
 /// row's *other* failure text: the actual is the map's own trigger mix
 /// either way, and only the target moves. (The row's Pass case is a unit
@@ -335,7 +335,7 @@ fn ascensor_conforms_to_its_paired_spec_except_the_lift_trigger_row() {
 #[test]
 fn the_lift_trigger_row_names_the_same_mix_whichever_trigger_the_spec_asks_for() {
     let asked_switch = conformance_rows_for(ASCENSOR, ASCENSOR_SPEC);
-    let asked_both_ends = conformance_rows_for(ASCENSOR, ASCENSOR_SWITCH_SPEC);
+    let asked_both_ends = conformance_rows_for(ASCENSOR, ASCENSOR_BOTH_ENDS_SPEC);
     assert_eq!(
         asked_switch.len(),
         asked_both_ends.len(),
