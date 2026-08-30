@@ -1,18 +1,46 @@
-# Thresholds are advisory gates on the checks; the working review gate is the
-# codecov PR comment's missing-lines table, which reports uncovered changed
-# lines even when the thresholded checks pass.
+# Coverage gates come from the account-wide policy in masriamir/.github, synced
+# into the marked blocks below. The codecov PR comment's missing-lines table
+# remains the working review gate: it reports uncovered changed lines even when
+# the thresholded checks pass, and the shared comment policy guarantees that
+# comment is posted on every PR.
 coverage:
   status:
     project:
-      default:
-        target: auto
-        threshold: 1%
-    patch:
+      # >>> meta:codecov-project-status
+      # One source shared by the project and patch statuses, so they cannot drift apart.
       default:
         target: 90%
+        if_not_found: failure  # a missing report is a broken upload, not a pass
+        if_ci_failed: error    # a red CI run cannot yield a green coverage status
+        informational: false   # this status blocks; it does not merely report
+      # <<< meta:codecov-project-status
+    patch:
+      # >>> meta:codecov-patch-status
+      # One source shared by the project and patch statuses, so they cannot drift apart.
+      default:
+        target: 90%
+        if_not_found: failure  # a missing report is a broken upload, not a pass
+        if_ci_failed: error    # a red CI run cannot yield a green coverage status
+        informational: false   # this status blocks; it does not merely report
+      # <<< meta:codecov-patch-status
+
 comment:
-  layout: "reach, diff, files"
-  require_changes: true
+  # >>> meta:codecov-comment
+  # Every key here is explicit because the shared review gate depends on it, not
+  # because it differs from Codecov's current default. The gate in
+  # copilot-review-loop.md reads "the codecov comment" on every PR, so the comment
+  # has to exist, stay singular, and show coverage on the changed lines.
+  require_changes: false  # post even when a change moves coverage by nothing
+  require_base: false     # post on a PR with no base report (a repo's first PRs)
+  behavior: default       # update the one comment rather than adding another
+  # layout and hide_project_coverage are one decision, not two: condensed_* plus
+  # hide_project_coverage reduces the comment to the git diff. This policy keeps
+  # project coverage, so both codecov/project and codecov/patch are explained when
+  # either goes red.
+  layout: "header, diff, files, footer"
+  hide_project_coverage: false
+  # <<< meta:codecov-comment
+
 # `examples/` holds measurement probes (`liftprobe`): reproducible tools that
 # are compiled and linted by CI's `--all-targets` jobs but never executed under
 # `cargo test`, so they carry no coverage by construction. Excluding them keeps
