@@ -2,7 +2,9 @@
 //! `Tables::named_sector_specials`: the curated sets must equal what the
 //! compiler really writes. Fixtures below cover every IR construct that
 //! emits a special — plain, door and locked portals (one per key color), the
-//! four exit kinds, the four teleport specials, and a secret room.
+//! four exit kinds, the four teleport specials, a secret room, and
+//! `tests/golden/lifts.json`'s switch lift, fast walkover lift and fast
+//! barrier — between them, every repeatable lift special.
 //!
 //! These tests still do not detect a new emitting pass on their own: no
 //! fixture can author a construct the IR cannot yet express. The teleport
@@ -11,8 +13,8 @@
 //! landing its fixtures and growing the curated set in the same change, by
 //! rule rather than by detection. What the tests enforce is the other
 //! direction — adding a special to the curated set without a fixture that
-//! emits it breaks the equality assertion, and adding 62 or 88, the two lift
-//! specials the tables source but no pass writes, breaks
+//! emits it breaks the equality assertion, and adding 21, 10, 122 or 121 —
+//! the one-shot lift forms the tables source but no pass ever writes — breaks
 //! `sourced_but_unemitted_specials_stay_out_of_the_emittable_set`.
 
 use std::collections::BTreeSet;
@@ -41,6 +43,16 @@ const BASE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
   "portals":[{PORTAL}],
   "exits":[{EXITS}],
   "teleports":[{TELEPORTS}] }"#;
+
+/// The Task 5 lift golden: a switch lift (`both_ends`), a fast walkover
+/// lift, and a fast barrier, plus a pedestal — every repeatable lift
+/// special (62, 88, 123, 120) in one fixture. Unlike every fixture above, it
+/// is a whole map on its own rather than a `{PORTAL}`/`{EXITS}`/... fill-in
+/// for [`BASE`] — [`specials_of`]'s template has no room to author a lift
+/// portal, so this fixture is compiled directly in
+/// [`every_construct_the_compiler_emits_is_in_the_curated_sets`] instead of
+/// going through it.
+const LIFTS: &str = include_str!("golden/lifts.json");
 
 const PLAIN: &str = r#"{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }"#;
 const DOOR: &str = r#"{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128],
@@ -214,6 +226,28 @@ fn every_construct_the_compiler_emits_is_in_the_curated_sets() {
         lines.extend(l);
         sectors.extend(s);
     }
+    // The lift golden, compiled directly since it does not fit `BASE`'s
+    // template: a switch lift (62/88, `both_ends`), a fast barrier (123 on
+    // both faces) and a fast walkover lift (120 on the alcove's outer
+    // threshold) — every repeatable lift special in one fixture.
+    let lift_ir = Ir::from_json(LIFTS).expect("lifts fixture parses");
+    let lift_out = compile(&lift_ir, &tables).expect("lifts fixture compiles");
+    lines.extend(
+        lift_out
+            .data
+            .linedefs
+            .iter()
+            .map(|l| l.special)
+            .filter(|&s| s != 0),
+    );
+    sectors.extend(
+        lift_out
+            .data
+            .sectors
+            .iter()
+            .map(|s| s.special)
+            .filter(|&s| s != 0),
+    );
     assert_eq!(
         lines,
         tables.emittable_line_specials(),
@@ -231,7 +265,9 @@ fn the_curated_sets_hold_their_expected_values_today() {
     let tables = Tables::load().expect("tables");
     assert_eq!(
         tables.emittable_line_specials(),
-        BTreeSet::from([1, 26, 27, 28, 11, 51, 52, 124, 39, 97, 125, 126])
+        BTreeSet::from([
+            1, 26, 27, 28, 11, 51, 52, 124, 39, 97, 125, 126, 62, 88, 123, 120
+        ])
     );
     assert_eq!(
         tables.named_sector_specials(),
@@ -243,8 +279,20 @@ fn the_curated_sets_hold_their_expected_values_today() {
 fn sourced_but_unemitted_specials_stay_out_of_the_emittable_set() {
     let tables = Tables::load().expect("tables");
     let set = tables.emittable_line_specials();
-    for s in [tables.lift_switch_special(), tables.lift_walkover_special()] {
-        assert!(!set.contains(&s), "special {s} has no compiler pass yet");
+    let repeatable = tables.lift_repeatable_specials();
+    for s in repeatable {
+        assert!(
+            set.contains(&s),
+            "repeatable lift special {s} should be emittable"
+        );
+    }
+    for s in tables.lift_specials() {
+        if !repeatable.contains(&s) {
+            assert!(
+                !set.contains(&s),
+                "one-shot lift special {s} has no compiler pass — it is never emitted"
+            );
+        }
     }
 }
 

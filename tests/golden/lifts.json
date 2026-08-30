@@ -14,7 +14,7 @@
   "portals": [
     { "a": "low", "b": "ledge", "kind": "lift", "width": 64, "at": [256, 128], "trigger": "both_ends" },
     { "a": "ledge", "b": "far", "kind": "lift", "width": 64, "at": [576, 128], "rise": 64, "speed": "fast" },
-    { "a": "low", "b": "north", "kind": "lift", "width": 64, "at": [128, 256], "trigger": "walkover", "alcove_near": 16 }
+    { "a": "low", "b": "north", "kind": "lift", "width": 64, "at": [128, 256], "trigger": "walkover", "alcove_near": 16, "speed": "fast" }
   ],
   "exits": [ { "room": "far", "trigger": "switch", "at": [896, 128], "width": 64 } ],
   "pedestals": [

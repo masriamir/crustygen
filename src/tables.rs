@@ -821,16 +821,20 @@ impl Tables {
     }
 
     /// Every linedef special a compiler pass writes today: the manual door,
-    /// the keyed doors, the four exits, and the four teleport specials
-    /// ([`crate::compile::teleports`]). Curated rather than "every
-    /// accessor" — the lift specials are sourced in the table but no pass
-    /// emits them. `tests/vocabulary_arbiter.rs` compiles a fixture per
+    /// the keyed doors, the four exits, the four teleport specials
+    /// ([`crate::compile::teleports`]), and the four repeatable lift
+    /// specials ([`Self::lift_repeatable_specials`],
+    /// [`crate::compile::lifts`]) — never the one-shot forms
+    /// ([`Self::lift_specials`] minus the repeatable ones), which the table
+    /// sources but no pass ever writes. Curated rather than "every
+    /// accessor". `tests/vocabulary_arbiter.rs` compiles a fixture per
     /// construct and asserts this set equals what came out. That does not
     /// detect a new pass on its own: no fixture can author a construct the
     /// IR cannot yet express, so a pass that lands before its IR construct
     /// leaves the fixtures' union unchanged. What it does enforce is that
     /// growing this list without a fixture that emits the new special breaks
-    /// the equality — and that adding 62 or 88 breaks
+    /// the equality — and that adding a one-shot lift form (21, 10, 122 or
+    /// 121) breaks
     /// `sourced_but_unemitted_specials_stay_out_of_the_emittable_set` too.
     /// A new pass therefore lands its fixture and updates both tests by
     /// rule.
@@ -845,6 +849,7 @@ impl Tables {
         ]);
         set.extend(self.locked_door_kinds().into_iter().map(|(_, s)| s));
         set.extend(self.teleport_specials());
+        set.extend(self.lift_repeatable_specials());
         set
     }
 

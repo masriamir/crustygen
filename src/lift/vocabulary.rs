@@ -185,13 +185,13 @@ mod tests {
 
     #[test]
     fn each_axis_flips_independently() {
-        let v = vocab().classify(&telemetry(&[62], 0, &[1]));
+        let v = vocab().classify(&telemetry(&[21], 0, &[1]));
         assert!(!v.line_specials_ok && v.sector_specials_ok && v.thing_kinds_ok);
         assert!(!v.expressible);
-        assert_eq!(v.unknown_line_specials, vec![62]);
+        assert_eq!(v.unknown_line_specials, vec![21]);
         assert!(
             v.vanilla_only,
-            "62 is a vanilla special even though it is not emittable"
+            "21 is a vanilla special even though it is not emittable"
         );
 
         let v = vocab().classify(&telemetry(&[], 4, &[1]));
@@ -252,7 +252,7 @@ mod tests {
     #[test]
     fn a_clean_report_leaves_the_membership_verdict_alone() {
         let v = vocab()
-            .classify(&telemetry(&[62], 0, &[1]))
+            .classify(&telemetry(&[21], 0, &[1]))
             .with_teleports(&TeleportReport {
                 lines: vec![],
                 counts: TeleportCounts::default(),
@@ -263,9 +263,9 @@ mod tests {
 
     #[test]
     fn verdict_serializes_with_the_documented_field_names() {
-        let json = serde_json::to_value(vocab().classify(&telemetry(&[62], 0, &[1]))).unwrap();
+        let json = serde_json::to_value(vocab().classify(&telemetry(&[21], 0, &[1]))).unwrap();
         assert_eq!(json["expressible"], false);
-        assert_eq!(json["unknown_line_specials"], serde_json::json!([62]));
+        assert_eq!(json["unknown_line_specials"], serde_json::json!([21]));
         assert_eq!(json["vanilla_only"], true);
     }
 }
