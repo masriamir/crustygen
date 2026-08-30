@@ -276,6 +276,44 @@ fn a_non_utf8_textmap_is_bucketed_as_unparseable() {
     assert_eq!(report["buckets"]["wads"], 1);
 }
 
+/// The lift golden, compiled and packed as a one-map UDMF PWAD.
+fn lifts_wad() -> Vec<u8> {
+    let tables = crustygen::tables::Tables::load().expect("tables");
+    let ir = crustygen::ir::Ir::from_json(include_str!("golden/lifts.json")).expect("ir parses");
+    let compiled = crustygen::compile::compile(&ir, &tables).expect("compiles");
+    crustygen::pack::pack_udmf(&compiled, "MAP01").expect("packs")
+}
+
+/// The plat recognizer reaches the sweep: a swept lift map is classified on
+/// the fifth axis, its counts land in the JSON record, and the report grows
+/// a `## Lifts` section carrying the shape census.
+#[test]
+fn a_lift_map_is_recognized_reported_and_carried_into_the_json_record() {
+    let dir = corpus_dir("lifts", &[("l.wad", lifts_wad())]);
+    let json_path = dir.join("out.json");
+    let report_out = bin().arg(&dir).output().unwrap();
+    let out = bin()
+        .args([dir.to_str().unwrap(), "--json", json_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    let md = String::from_utf8_lossy(&report_out.stdout);
+    assert!(md.contains("## Lifts"), "{md}");
+    assert!(md.contains("| plats | 4 |"), "{md}");
+    assert!(
+        md.contains("| lifts / pedestals / barriers | 2 / 1 / 1 |"),
+        "{md}"
+    );
+    assert_eq!(report["maps"][0]["lifts"]["plats"], 4);
+    assert_eq!(report["maps"][0]["verdict"]["lifts_ok"], true);
+    assert_eq!(report["aggregate"]["lifts"]["maps_with_lifts"], 1);
+}
+
 /// A Hexen map that assembles cleanly reaches the ingest path's Doom-format
 /// gate and is refused there — the `unsupported_format` bucket, distinct
 /// from the `assembly_refused` one.

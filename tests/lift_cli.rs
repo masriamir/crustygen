@@ -307,6 +307,109 @@ thing { x = 32; y = 32; type = 1; }
     assert_eq!(value[0]["teleports"]["broken"], 1);
 }
 
+/// The lift golden, compiled and packed as a one-map UDMF PWAD: three lift
+/// portals and one pedestal, none of them refused.
+fn lifts_wad() -> Vec<u8> {
+    let tables = crustygen::tables::Tables::load().expect("tables");
+    let ir = crustygen::ir::Ir::from_json(include_str!("golden/lifts.json")).expect("ir parses");
+    let compiled = crustygen::compile::compile(&ir, &tables).expect("compiles");
+    crustygen::pack::pack_udmf(&compiled, "MAP01").expect("packs")
+}
+
+/// A map whose every platform the recognizer accepts passes the fifth axis:
+/// the JSON verdict says so, the `lifts` object carries the shape census,
+/// and the human line stays silent about lifts.
+#[test]
+fn a_recognized_lift_map_passes_the_lift_axis() {
+    let path = write_temp(&lifts_wad(), "lifts-ok");
+    let human = bin()
+        .args([path.to_str().unwrap(), "--vocabulary"])
+        .output()
+        .expect("runs");
+    let json = bin()
+        .args([path.to_str().unwrap(), "--vocabulary", "--json"])
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("; expressible: yes"), "{stdout}");
+    assert!(!stdout.contains("lifts refused"), "{stdout}");
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json");
+    assert_eq!(value[0]["verdict"]["lifts_ok"], true);
+    assert_eq!(value[0]["lifts"]["plats"], 4);
+    assert_eq!(value[0]["lifts"]["lifts"], 2);
+    assert_eq!(value[0]["lifts"]["pedestals"], 1);
+    assert_eq!(value[0]["lifts"]["barriers"], 1);
+}
+
+/// A lift line whose platform cannot move refuses the map on the fifth
+/// axis: membership alone would pass (62 is emittable), but the recognizer's
+/// `Refusal::Dead` flips `expressible` off. Three rooms all at floor 0, the
+/// middle one tagged 7 and named by an SR lift line — `EV_DoPlat` would send
+/// it to its own floor, so there is no movement to state.
+const DEAD_LIFT_TEXTMAP: &str = r#"namespace = "doom";
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 0.000; y = 128.000; }
+vertex { x = 128.000; y = 0.000; }
+vertex { x = 128.000; y = 128.000; }
+vertex { x = 256.000; y = 0.000; }
+vertex { x = 256.000; y = 128.000; }
+vertex { x = 384.000; y = 0.000; }
+vertex { x = 384.000; y = 128.000; }
+linedef { v1 = 3; v2 = 2; sidefront = 0; sideback = 1; twosided = true; special = 62; arg0 = 7; }
+linedef { v1 = 5; v2 = 4; sidefront = 2; sideback = 3; twosided = true; }
+linedef { v1 = 0; v2 = 1; sidefront = 4; blocking = true; }
+linedef { v1 = 1; v2 = 3; sidefront = 5; blocking = true; }
+linedef { v1 = 2; v2 = 0; sidefront = 6; blocking = true; }
+linedef { v1 = 3; v2 = 5; sidefront = 7; blocking = true; }
+linedef { v1 = 4; v2 = 2; sidefront = 8; blocking = true; }
+linedef { v1 = 5; v2 = 7; sidefront = 9; blocking = true; }
+linedef { v1 = 7; v2 = 6; sidefront = 10; blocking = true; }
+linedef { v1 = 6; v2 = 4; sidefront = 11; blocking = true; }
+sidedef { sector = 0; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 2; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; id = 0; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; id = 7; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; id = 0; }
+thing { x = 64.0; y = 64.0; angle = 90; type = 1; single = true; }
+"#;
+
+#[test]
+fn a_dead_lift_refuses_the_map_on_the_lift_axis() {
+    let path = write_temp(&common::wad_with_textmap(DEAD_LIFT_TEXTMAP), "lift-dead");
+    let human = bin()
+        .args([path.to_str().unwrap(), "--vocabulary"])
+        .output()
+        .expect("runs");
+    let json = bin()
+        .args([path.to_str().unwrap(), "--vocabulary", "--json"])
+        .output()
+        .expect("runs");
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("; expressible: no"), "{stdout}");
+    assert!(stdout.contains("(lifts refused: 1)"), "{stdout}");
+    assert!(
+        stdout.contains("(line specials ok)"),
+        "membership is untouched: {stdout}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json");
+    assert_eq!(value[0]["verdict"]["lifts_ok"], false);
+    assert_eq!(value[0]["verdict"]["line_specials_ok"], true);
+    assert_eq!(value[0]["lifts"]["plats"], 1);
+    assert_eq!(value[0]["lifts"]["dead"], 1);
+}
+
 /// Without a refusal, the human line carries no teleport note at all.
 #[test]
 fn a_teleport_free_map_gets_no_teleport_note() {

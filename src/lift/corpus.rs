@@ -1,7 +1,8 @@
 //! Corpus sweep: every zip/WAD in a directory → per-map census + verdict,
 //! deduplicated by content, with every failure counted in a bucket. Each
-//! surviving map also runs through [`crate::lift::teleport`], whose refusals
-//! gate the verdict's fourth axis and whose counts the report rolls up.
+//! surviving map also runs through [`crate::lift::teleport`] and
+//! [`crate::lift::plat`], whose refusals gate the verdict's fourth and fifth
+//! axes and whose counts the report rolls up.
 //! Aggregation and the report live in the second half of this module.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -14,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 use crate::check::scene::Scene;
 use crate::ingest::{self, IngestError, MapOrigin};
+use crate::lift::plat::PlatCounts;
 use crate::lift::teleport::TeleportCounts;
 use crate::lift::vocabulary::{Verdict, Vocabulary};
 use crate::lift::{self, MapTelemetry};
@@ -32,10 +34,12 @@ pub struct MapRecord {
     pub hash: String,
     /// The raw census.
     pub telemetry: MapTelemetry,
-    /// The vocabulary verdict, teleport refusals folded in.
+    /// The vocabulary verdict, teleport and plat refusals folded in.
     pub verdict: Verdict,
     /// The teleport recognizer's census for this map.
     pub teleports: TeleportCounts,
+    /// The plat recognizer's census for this map.
+    pub lifts: PlatCounts,
 }
 
 /// Every count a sweep produces. Failure buckets are per candidate (an
@@ -278,30 +282,45 @@ fn survey_wad(
                     continue;
                 }
                 let telemetry = lift::survey(&group.name, &loaded.map);
-                let verdict = vocab.classify(&telemetry);
-                // The histogram is already computed: a map with none of the
-                // four teleport specials among its linedef specials has no
-                // teleport line for the recognizer to recognize, so skip
-                // building a `Scene` and running it — `verdict` stays
-                // `classify`'s own (`teleports_ok == true`) and the counts
-                // are the all-zero default.
+                let mut verdict = vocab.classify(&telemetry);
+                // The histogram is already computed: a map carrying none of
+                // the four teleport specials among its linedef specials has
+                // no teleport line for the recognizer to recognize, and one
+                // carrying none of the eight lift specials has no platform,
+                // so each recognizer is skipped when its specials are
+                // absent — `verdict` then stays `classify`'s own
+                // (`teleports_ok` / `lifts_ok == true`) and the counts are
+                // the all-zero default. The `Scene` is built once and shared:
+                // a map with both kinds of line pays for it once.
                 let has_teleports = tables
                     .teleport_specials()
                     .into_iter()
                     .any(|s| telemetry.linedef_specials.contains_key(&i32::from(s)));
-                let (verdict, teleports) = if has_teleports {
+                let has_lifts = tables
+                    .lift_specials()
+                    .into_iter()
+                    .any(|s| telemetry.linedef_specials.contains_key(&i32::from(s)));
+                let mut teleports = TeleportCounts::default();
+                let mut lifts = PlatCounts::default();
+                if has_teleports || has_lifts {
                     // `Scene::build`'s findings are discarded on purpose:
                     // structural findings are the verifier's business, and this
-                    // sweep is not verifying anything. The recognizer reads
-                    // whatever boundaries resolved and refuses what it cannot
+                    // sweep is not verifying anything. The recognizers read
+                    // whatever boundaries resolved and refuse what they cannot
                     // recognize — a map the verifier would fault still yields an
-                    // honest teleport census.
+                    // honest census.
                     let scene = Scene::build(&loaded.map, tables, &mut Vec::new());
-                    let report = lift::teleport::recognize(&scene, tables);
-                    (verdict.with_teleports(&report), report.counts)
-                } else {
-                    (verdict, TeleportCounts::default())
-                };
+                    if has_teleports {
+                        let report = lift::teleport::recognize(&scene, tables);
+                        verdict = verdict.with_teleports(&report);
+                        teleports = report.counts;
+                    }
+                    if has_lifts {
+                        let report = lift::plat::recognize(&scene, tables);
+                        verdict = verdict.with_lifts(&report);
+                        lifts = report.counts;
+                    }
+                }
                 sweep.maps.push(MapRecord {
                     source: source.to_owned(),
                     map: group.name.clone(),
@@ -313,6 +332,7 @@ fn survey_wad(
                     telemetry,
                     verdict,
                     teleports,
+                    lifts,
                 });
             }
             Err(err) => {
@@ -351,7 +371,10 @@ pub struct AxisShare {
     /// Fraction whose teleport lines are all recognized (no refusal). A map
     /// with no teleport line passes vacuously.
     pub teleports: f64,
-    /// Fraction expressible on all four axes.
+    /// Fraction whose platforms are all recognized and whose every lift line
+    /// names one (no refusal). A map with no lift line passes vacuously.
+    pub lifts: f64,
+    /// Fraction expressible on all five axes.
     pub expressible: f64,
 }
 
@@ -408,6 +431,28 @@ pub struct TeleportAggregate {
     pub paired_maps: u64,
 }
 
+/// The plat recognizer's roll-up over a sweep. Every count except
+/// [`Self::maps_with_lifts`] is scoped to the maps that carry at least one
+/// lift line, for the reason [`TeleportAggregate`] gives: a corpus of
+/// lift-free maps reports zeros rather than diluting every ratio.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+pub struct LiftAggregate {
+    /// Maps carrying at least one lift line — one that resolved to a
+    /// platform, or one that named none and is counted broken.
+    pub maps_with_lifts: u64,
+    /// Maps carrying at least one refused platform or broken lift line —
+    /// the maps the lift axis alone makes inexpressible.
+    pub maps_refused: u64,
+    /// Field-wise sum of every such map's counts.
+    pub plats: PlatCounts,
+    /// Maps with at least one platform accepted as a lift.
+    pub lift_maps: u64,
+    /// Maps with at least one platform accepted as a pedestal.
+    pub pedestal_maps: u64,
+    /// Maps with at least one platform accepted as a barrier.
+    pub barrier_maps: u64,
+}
+
 /// The whole-sweep summary.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Aggregate {
@@ -434,6 +479,8 @@ pub struct Aggregate {
     pub greedy_conjunction: GreedyCurve,
     /// The teleport recognizer's roll-up.
     pub teleports: TeleportAggregate,
+    /// The plat recognizer's roll-up.
+    pub lifts: LiftAggregate,
 }
 
 /// `n / of` as a fraction, with an empty population scoring 0.
@@ -462,6 +509,7 @@ fn axis_share(maps: &[&MapRecord]) -> AxisShare {
         sector_specials: count(|v| v.sector_specials_ok),
         thing_kinds: count(|v| v.thing_kinds_ok),
         teleports: count(|v| v.teleports_ok),
+        lifts: count(|v| v.lifts_ok),
         expressible: count(|v| v.expressible),
     }
 }
@@ -592,6 +640,40 @@ fn teleport_aggregate(maps: &[MapRecord]) -> TeleportAggregate {
     }
 }
 
+/// Rolls the per-map plat counts up over the maps that carry a lift line.
+/// Maps with none are excluded outright rather than summed as zeros, for the
+/// reason [`teleport_aggregate`] gives.
+///
+/// "Carries a lift line" is `plats + broken_lines > 0`: every lift line
+/// either names at least one platform or is counted broken, so the pair
+/// covers the whole population the recognizer ran on.
+///
+/// # Panics
+///
+/// If a map count does not fit a `u64`, which needs more maps than a
+/// directory of files can hold.
+fn lift_aggregate(maps: &[MapRecord]) -> LiftAggregate {
+    let with: Vec<&MapRecord> = maps
+        .iter()
+        .filter(|m| m.lifts.plats > 0 || m.lifts.broken_lines > 0)
+        .collect();
+    let mut plats = PlatCounts::default();
+    for m in &with {
+        plats = plats.add(&m.lifts);
+    }
+    let count = |f: fn(&PlatCounts) -> bool| {
+        u64::try_from(with.iter().filter(|m| f(&m.lifts)).count()).expect("fits u64")
+    };
+    LiftAggregate {
+        maps_with_lifts: u64::try_from(with.len()).expect("fits u64"),
+        maps_refused: count(|c| c.refusals() > 0),
+        plats,
+        lift_maps: count(|c| c.lifts > 0),
+        pedestal_maps: count(|c| c.pedestals > 0),
+        barrier_maps: count(|c| c.barriers > 0),
+    }
+}
+
 /// Summarizes a sweep's unique maps.
 ///
 /// # Panics
@@ -602,14 +684,17 @@ fn teleport_aggregate(maps: &[MapRecord]) -> TeleportAggregate {
 pub fn aggregate(maps: &[MapRecord]) -> Aggregate {
     let all: Vec<&MapRecord> = maps.iter().collect();
     let vanilla: Vec<&MapRecord> = maps.iter().filter(|m| m.verdict.vanilla_only).collect();
-    // The teleport axis belongs in this filter, not just in the shares: no
-    // number of added line specials can un-refuse a teleport line, so a
-    // teleport-blocked map that this curve "unblocked" would be counted
-    // expressible when it is not.
+    // The two recognizer axes belong in this filter, not just in the shares:
+    // no number of added line specials can un-refuse a teleport line or a
+    // platform, so a map blocked on either that this curve "unblocked" would
+    // be counted expressible when it is not.
     let conjunction_pop: Vec<&MapRecord> = maps
         .iter()
         .filter(|m| {
-            m.verdict.sector_specials_ok && m.verdict.thing_kinds_ok && m.verdict.teleports_ok
+            m.verdict.sector_specials_ok
+                && m.verdict.thing_kinds_ok
+                && m.verdict.teleports_ok
+                && m.verdict.lifts_ok
         })
         .collect();
     Aggregate {
@@ -623,6 +708,7 @@ pub fn aggregate(maps: &[MapRecord]) -> Aggregate {
         greedy_line_axis: greedy(&all, maps.len()),
         greedy_conjunction: greedy(&conjunction_pop, maps.len()),
         teleports: teleport_aggregate(maps),
+        lifts: lift_aggregate(maps),
     }
 }
 
@@ -723,8 +809,8 @@ pub fn render_markdown(provenance: Option<&Provenance>, b: &Buckets, a: &Aggrega
     s.push_str(
         "> **Status of these numbers: measured practice, not engine fact — and an upper bound.** ",
     );
-    s.push_str("A map counts as expressible when every non-zero line special and sector special, and every thing type, it carries is in crustygen's emittable vocabulary, and every teleport line it carries is one the recognizer can state (see `Teleports`). ");
-    s.push_str("Beyond those teleport lines, geometry, flags, tags, and texture names are not measured; a geometry-aware lifter can only do worse, never better, than this bound.\n\n");
+    s.push_str("A map counts as expressible when every non-zero line special and sector special, and every thing type, it carries is in crustygen's emittable vocabulary, every teleport line it carries is one the recognizer can state (see `Teleports`), and every platform its lift lines name is one of the three shapes the IR can state (see `Lifts`). ");
+    s.push_str("Beyond those teleport lines and platforms, geometry, flags, tags, and texture names are not measured; a geometry-aware lifter can only do worse, never better, than this bound.\n\n");
     if let Some(p) = provenance {
         s.push_str("## Sample\n\n");
         let _ = writeln!(
@@ -766,6 +852,7 @@ pub fn render_markdown(provenance: Option<&Provenance>, b: &Buckets, a: &Aggrega
         ),
         ("thing kinds", a.all.thing_kinds, a.vanilla.thing_kinds),
         ("teleport lines", a.all.teleports, a.vanilla.teleports),
+        ("lift platforms", a.all.lifts, a.vanilla.lifts),
         ("**all axes**", a.all.expressible, a.vanilla.expressible),
     ] {
         let _ = writeln!(s, "| {name} | {} | {} |", pct(all), pct(van));
@@ -795,6 +882,7 @@ pub fn render_markdown(provenance: Option<&Provenance>, b: &Buckets, a: &Aggrega
         }
     }
     render_teleports(&mut s, a);
+    render_lifts(&mut s, a);
     render_curves(&mut s, a);
     s
 }
@@ -850,6 +938,74 @@ fn render_teleports(s: &mut String, a: &Aggregate) {
     );
 }
 
+/// The plat recognizer's section. Counts are over the maps that carry a lift
+/// line, not over every unique map, the way [`render_teleports`]'s are.
+///
+/// The shape row counts *platforms* and the row under it counts the maps
+/// they sit in, because a corpus total alone cannot tell one map with a
+/// dozen lifts from a dozen maps with one each. The shared-tag row is the
+/// one count that is neither: it tallies tag *groups* that are one platform
+/// split by trim, a sub-count of the shared-tag refusal's groups rather than
+/// of its platforms, so it gets a row of its own instead of a slot in the
+/// refusal list.
+fn render_lifts(s: &mut String, a: &Aggregate) {
+    use std::fmt::Write as _;
+
+    let l = &a.lifts;
+    let c = &l.plats;
+    s.push_str("\n## Lifts\n\n| Measure | Value |\n|---|---|\n");
+    let _ = writeln!(
+        s,
+        "| maps with a lift line | {} ({} of unique maps) |",
+        l.maps_with_lifts,
+        pct(u64_share(l.maps_with_lifts, a.maps_unique))
+    );
+    let _ = writeln!(
+        s,
+        "| maps with a refused plat or line (not expressible) | {} |",
+        l.maps_refused
+    );
+    let _ = writeln!(s, "| plats | {} |", c.plats);
+    let _ = writeln!(
+        s,
+        "| lifts / pedestals / barriers | {} / {} / {} |",
+        c.lifts, c.pedestals, c.barriers
+    );
+    let _ = writeln!(
+        s,
+        "| maps with a lift / pedestal / barrier | {} / {} / {} |",
+        l.lift_maps, l.pedestal_maps, l.barrier_maps
+    );
+    let _ = writeln!(
+        s,
+        "| refused: dead / shared tag / one-shot / mixed speed / unsupported rest / top-only / \
+         one-way barrier / conflicting action | {} / {} / {} / {} / {} / {} / {} / {} |",
+        c.dead,
+        c.shared_tag,
+        c.one_shot,
+        c.mixed_speed,
+        c.unsupported_rest,
+        c.top_only,
+        c.one_way_barrier,
+        c.conflicting
+    );
+    let _ = writeln!(
+        s,
+        "| shared-tag groups that are one platform split | {} |",
+        c.shared_split
+    );
+    let _ = writeln!(s, "| broken lines | {} |", c.broken_lines);
+    let _ = writeln!(
+        s,
+        "| callable from below | {} ({} of plats) |",
+        c.callable_low,
+        pct(u64_share(c.callable_low, c.plats))
+    );
+    let _ = writeln!(s, "| with a top trigger | {} |", c.with_top_trigger);
+    let _ = writeln!(s, "| holding things | {} |", c.with_things);
+    let _ = writeln!(s, "| fast | {} |", c.fast);
+}
+
 /// The two greedy-curve sections. Both curves are scored against *all* unique
 /// maps, never against the population they walk — spelled out in each table's
 /// header and note, so the conjunction curve's plateau below 100 % reads as
@@ -865,10 +1021,10 @@ fn render_curves(s: &mut String, a: &Aggregate) {
             a.all.line_specials,
         ),
         (
-            "Greedy curve — conjunction (maps already ok on sectors, things, and teleports)",
+            "Greedy curve — conjunction (maps already ok on sectors, things, teleports, and lifts)",
             "Share is of **all unique maps**, not of the already-ok population this curve walks, \
              so it plateaus below 100 % by exactly the maps blocked on a sector special, a \
-             thing kind, or a refused teleport line.",
+             thing kind, a refused teleport line, or a refused platform.",
             &a.greedy_conjunction,
             a.all.expressible,
         ),
@@ -960,6 +1116,7 @@ mod tests {
             sector_specials_ok: sector_ok,
             thing_kinds_ok: thing_ok,
             teleports_ok: true,
+            lifts_ok: true,
             expressible: unknown_line.is_empty() && sector_ok && thing_ok,
             vanilla_only: vanilla,
             unknown_line_specials: unknown_line.to_vec(),
@@ -974,6 +1131,7 @@ mod tests {
             telemetry,
             verdict,
             teleports: TeleportCounts::default(),
+            lifts: PlatCounts::default(),
         }
     }
 
@@ -1071,6 +1229,11 @@ mod tests {
             // "not measured".
             "| maps with a teleport line | 0 (0.0 % of unique maps) |",
             "| lines on a paired pad | 0 (0 maps) |",
+            "## Lifts",
+            "| lift platforms | 100.0 % | 100.0 % |",
+            // A lift-free corpus states its zeros too, for the same reason.
+            "| maps with a lift line | 0 (0.0 % of unique maps) |",
+            "| lifts / pedestals / barriers | 0 / 0 / 0 |",
             "## Greedy curve",
             "| 97 | 1 | 100.0 % |",
             // The conjunction curve names its denominator, so a plateau
@@ -1218,6 +1381,155 @@ mod tests {
         assert!(
             a.greedy_conjunction.steps.is_empty(),
             "the only line-blocked map is teleport-refused, so nothing is left to unblock"
+        );
+        assert!((a.all.expressible - 0.5).abs() < 1e-9);
+    }
+
+    /// The lift golden fixture, compiled and packed as a one-map UDMF PWAD —
+    /// the same route [`teleport_wad`] takes.
+    fn lifts_wad() -> Vec<u8> {
+        let tables = crate::tables::Tables::load().expect("tables");
+        let ir = crate::ir::Ir::from_json(include_str!("../../tests/golden/lifts.json"))
+            .expect("ir parses");
+        let compiled = crate::compile::compile(&ir, &tables).expect("compiles");
+        crate::pack::pack_udmf(&compiled, "MAP01").expect("packs")
+    }
+
+    /// The end-to-end plat path: a swept WAD carries per-map counts, the
+    /// aggregate rolls them up, and the report renders the section.
+    #[test]
+    fn a_swept_map_carries_its_lift_counts_into_the_aggregate_and_the_report() {
+        let tables = crate::tables::Tables::load().expect("tables");
+        let vocab = Vocabulary::from_tables(&tables);
+        let dir = temp_dir_with("lifts", &[("l.wad", lifts_wad())]);
+        let sweep = sweep_dir(&dir, &vocab, &tables).expect("sweeps");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(sweep.maps.len(), 1);
+        let rec = &sweep.maps[0];
+        assert_eq!(
+            rec.lifts.plats, 4,
+            "the golden's three lift portals plus its one pedestal"
+        );
+        assert_eq!(
+            (rec.lifts.lifts, rec.lifts.pedestals, rec.lifts.barriers),
+            (2, 1, 1)
+        );
+        assert_eq!(rec.lifts.refusals(), 0, "the fixture is well formed");
+        assert!(rec.verdict.lifts_ok && rec.verdict.expressible);
+
+        let a = aggregate(&sweep.maps);
+        assert_eq!(a.lifts.maps_with_lifts, 1);
+        assert_eq!(a.lifts.maps_refused, 0);
+        assert_eq!(a.lifts.plats.plats, 4);
+        assert_eq!(
+            (
+                a.lifts.lift_maps,
+                a.lifts.pedestal_maps,
+                a.lifts.barrier_maps
+            ),
+            (1, 1, 1)
+        );
+        let md = render_markdown(None, &sweep.buckets, &a);
+        assert!(md.contains("## Lifts"), "{md}");
+        assert!(md.contains("| plats | 4 |"), "{md}");
+        assert!(
+            md.contains("| lifts / pedestals / barriers | 2 / 1 / 1 |"),
+            "{md}"
+        );
+    }
+
+    /// A map whose only platform is refused is not expressible, and the
+    /// aggregate counts it in both the "with" and the "refused" populations.
+    #[test]
+    fn a_refused_plat_is_aggregated_and_rendered() {
+        let mut m = record(&[62], &[], true, true, true);
+        m.lifts = PlatCounts {
+            plats: 2,
+            lifts: 1,
+            refused: 1,
+            dead: 1,
+            broken_lines: 1,
+            callable_low: 2,
+            with_top_trigger: 1,
+            with_things: 1,
+            fast: 1,
+            ..PlatCounts::default()
+        };
+        m.verdict.lifts_ok = false;
+        m.verdict.expressible = false;
+        let a = aggregate(std::slice::from_ref(&m));
+        assert_eq!(a.lifts.maps_with_lifts, 1);
+        assert_eq!(a.lifts.maps_refused, 1);
+        assert_eq!(a.lifts.plats.dead, 1);
+        assert_eq!(a.lifts.lift_maps, 1);
+        assert_eq!((a.lifts.pedestal_maps, a.lifts.barrier_maps), (0, 0));
+        assert!(a.all.lifts.abs() < 1e-9);
+        let md = render_markdown(None, &Buckets::default(), &a);
+        assert!(
+            md.contains("| maps with a refused plat or line (not expressible) | 1 |"),
+            "{md}"
+        );
+        assert!(
+            md.contains(
+                "| refused: dead / shared tag / one-shot / mixed speed / unsupported \
+                         rest / top-only / one-way barrier / conflicting action | 1 / 0 / 0 / 0 \
+                         / 0 / 0 / 0 / 0 |"
+            ),
+            "{md}"
+        );
+        assert!(md.contains("| broken lines | 1 |"), "{md}");
+        assert!(
+            md.contains("| callable from below | 2 (100.0 % of plats) |"),
+            "{md}"
+        );
+    }
+
+    /// A map with a lift line that names no platform at all still counts as
+    /// carrying lifts: the broken line is the whole refusal.
+    #[test]
+    fn a_map_whose_only_lift_line_is_broken_is_counted_as_carrying_lifts() {
+        let mut m = record(&[62], &[], true, true, true);
+        m.lifts = PlatCounts {
+            broken_lines: 1,
+            ..PlatCounts::default()
+        };
+        m.verdict.lifts_ok = false;
+        m.verdict.expressible = false;
+        let a = aggregate(std::slice::from_ref(&m));
+        assert_eq!(a.lifts.maps_with_lifts, 1, "no plat, but a lift line");
+        assert_eq!(a.lifts.maps_refused, 1);
+        let md = render_markdown(None, &Buckets::default(), &a);
+        assert!(md.contains("| plats | 0 |"), "{md}");
+        // No plat: the share row states a zero denominator as 0.0 %, not NaN.
+        assert!(
+            md.contains("| callable from below | 0 (0.0 % of plats) |"),
+            "{md}"
+        );
+    }
+
+    /// A lift-refused map is out of the conjunction curve's population, for
+    /// the reason a teleport-refused one is: no number of added line
+    /// specials can un-refuse a platform.
+    #[test]
+    fn the_conjunction_curve_excludes_a_lift_refused_map() {
+        let mut blocked = record(&[97], &[97], true, true, true);
+        blocked.lifts = PlatCounts {
+            plats: 1,
+            refused: 1,
+            dead: 1,
+            ..PlatCounts::default()
+        };
+        blocked.verdict.lifts_ok = false;
+        blocked.verdict.expressible = false;
+        let a = aggregate(&[blocked, record(&[1], &[], true, true, true)]);
+        assert_eq!(
+            a.greedy_line_axis.steps[0].special, 97,
+            "the line axis alone still walks the blocked map"
+        );
+        assert!(
+            a.greedy_conjunction.steps.is_empty(),
+            "the only line-blocked map is lift-refused, so nothing is left to unblock"
         );
         assert!((a.all.expressible - 0.5).abs() < 1e-9);
     }

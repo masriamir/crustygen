@@ -19,6 +19,7 @@ compiler reads; the fourth reads geometry:
 | sector specials | `Tables::named_sector_specials()` — secret, the three damage tiers, the four light effects |
 | thing kinds | `Tables::thing_kinds()` |
 | teleports | no set — `lift::teleport::recognize` resolves every teleport line the way `EV_Teleport` does and refuses the shapes the IR cannot state; the axis passes when the map has no refusal |
+| lifts | no set — `lift::plat::recognize` resolves every platform a lift line names the way `EV_DoPlat` does, classifies it as a lift, a pedestal or a barrier, and refuses the ones the IR cannot state; the axis passes when the map has no refused platform and no lift line that names none |
 
 `tests/vocabulary_arbiter.rs` compiles a fixture per construct and asserts
 the curated line set equals what came out. Adding a special to the curated

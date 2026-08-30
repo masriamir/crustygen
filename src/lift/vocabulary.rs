@@ -11,12 +11,14 @@
 //! [`Verdict::with_teleports`] is where a recognizer narrows that bound: it
 //! folds [`crate::lift::teleport`]'s refusals in as a fourth axis, so a map
 //! whose every value is nameable can still be refused for a teleport line
-//! the IR could not state. Membership can only ever say "yes"; a recognizer
-//! is what turns a "yes" into a "no".
+//! the IR could not state. [`Verdict::with_lifts`] is the same move for
+//! [`crate::lift::plat`]'s refusals, the fifth axis. Membership can only
+//! ever say "yes"; a recognizer is what turns a "yes" into a "no".
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::lift::MapTelemetry;
+use crate::lift::plat::PlatReport;
 use crate::lift::teleport::TeleportReport;
 use crate::tables::Tables;
 
@@ -34,8 +36,8 @@ pub struct Vocabulary {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "these six booleans are independent per-axis verdicts (three membership checks \
-              plus the teleport recognizer's) and two derived roll-ups (the four-axis \
+    reason = "these seven booleans are independent per-axis verdicts (three membership checks \
+              plus the teleport and plat recognizers') and two derived roll-ups (the five-axis \
               conjunction and the stricter vanilla-only check) over the same census, not \
               state-machine flags — and their names are the documented, load-bearing JSON \
               field names later tasks and reports key off of"
@@ -51,7 +53,12 @@ pub struct Verdict {
     /// self-referencing ([`crate::lift::teleport`]); `true` until
     /// [`Verdict::with_teleports`] is applied.
     pub teleports_ok: bool,
-    /// The conjunction of the four axes.
+    /// Every platform a lift line names is one of the three shapes the IR
+    /// can state, and every lift line names a platform
+    /// ([`crate::lift::plat`]); `true` until [`Verdict::with_lifts`] is
+    /// applied.
+    pub lifts_ok: bool,
+    /// The conjunction of the five axes.
     pub expressible: bool,
     /// Every non-zero linedef special is one the pinned vanilla engine
     /// dispatches.
@@ -99,14 +106,16 @@ impl Vocabulary {
         let line_specials_ok = unknown_line_specials.is_empty();
         let sector_specials_ok = unknown_sector_specials.is_empty();
         let thing_kinds_ok = unknown_thing_types.is_empty();
-        Verdict {
+        let mut verdict = Verdict {
             line_specials_ok,
             sector_specials_ok,
             thing_kinds_ok,
-            // Membership knows nothing about geometry: the teleport axis
-            // starts clean and only `with_teleports` can refuse it.
+            // Membership knows nothing about geometry: the teleport and
+            // lift axes start clean and only `with_teleports` /
+            // `with_lifts` can refuse them.
             teleports_ok: true,
-            expressible: line_specials_ok && sector_specials_ok && thing_kinds_ok,
+            lifts_ok: true,
+            expressible: false,
             vanilla_only: t
                 .linedef_specials
                 .keys()
@@ -114,20 +123,39 @@ impl Vocabulary {
             unknown_line_specials,
             unknown_sector_specials,
             unknown_thing_types,
-        }
+        };
+        verdict.expressible = verdict.conjunction();
+        verdict
     }
 }
 
 impl Verdict {
-    /// Folds a recognizer report in: `teleports_ok` is "no refused line",
-    /// and `expressible` is the conjunction of all four axes.
+    /// The conjunction of every axis — the one definition of `expressible`,
+    /// so that no site can compute it from fewer axes than the struct
+    /// carries and no later axis can be forgotten at one of them.
+    fn conjunction(&self) -> bool {
+        self.line_specials_ok
+            && self.sector_specials_ok
+            && self.thing_kinds_ok
+            && self.teleports_ok
+            && self.lifts_ok
+    }
+
+    /// Folds the teleport recognizer in: `teleports_ok` is "no refused
+    /// line", the fourth axis.
     #[must_use]
     pub fn with_teleports(mut self, report: &TeleportReport) -> Self {
         self.teleports_ok = report.counts.refusals() == 0;
-        self.expressible = self.line_specials_ok
-            && self.sector_specials_ok
-            && self.thing_kinds_ok
-            && self.teleports_ok;
+        self.expressible = self.conjunction();
+        self
+    }
+
+    /// Folds the plat recognizer in: `lifts_ok` is "no refused plat and no
+    /// broken lift line", the fifth axis.
+    #[must_use]
+    pub fn with_lifts(mut self, report: &PlatReport) -> Self {
+        self.lifts_ok = report.counts.refusals() == 0;
+        self.expressible = self.conjunction();
         self
     }
 }
@@ -137,6 +165,9 @@ mod tests {
     use std::fmt::Write as _;
 
     use super::*;
+    use crate::check::fixtures::chain;
+    use crate::check::scene::Scene;
+    use crate::lift::plat;
     use crate::lift::survey;
     use crate::lift::teleport::TeleportCounts;
     use crustywad::Limits;
@@ -262,10 +293,67 @@ mod tests {
     }
 
     #[test]
+    fn with_lifts_is_the_fifth_axis() {
+        let tables = Tables::load().expect("tables");
+        let vocab = Vocabulary::from_tables(&tables);
+        let clean_text = chain(
+            &[0, 128, 128],
+            &[0, 7, 0],
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        );
+        let map = parse_udmf(&clean_text, Limits::default()).expect("parses");
+        let telemetry = survey("MAP01", &map);
+        let verdict = vocab.classify(&telemetry);
+        assert!(
+            verdict.lifts_ok && verdict.line_specials_ok,
+            "62 is emittable and no plat is refused yet: {verdict:?}"
+        );
+        let scene = Scene::build(&map, &tables, &mut Vec::new());
+        let ok = verdict
+            .clone()
+            .with_lifts(&plat::recognize(&scene, &tables));
+        assert!(ok.lifts_ok && ok.expressible);
+        let dead_text = chain(&[0, 0, 0], &[0, 7, 0], &[(62, 7, false), (0, 0, false)], "");
+        let map = parse_udmf(&dead_text, Limits::default()).expect("parses");
+        let scene = Scene::build(&map, &tables, &mut Vec::new());
+        let refused = vocab
+            .classify(&survey("MAP01", &map))
+            .with_lifts(&plat::recognize(&scene, &tables));
+        assert!(
+            !refused.lifts_ok && !refused.expressible,
+            "a dead lift is a refusal: {refused:?}"
+        );
+    }
+
+    /// A clean plat report leaves a membership refusal standing, the way
+    /// `with_teleports` does: neither recognizer may resurrect an
+    /// `expressible` an out-of-set value already earned.
+    #[test]
+    fn a_clean_plat_report_leaves_the_membership_verdict_alone() {
+        let tables = Tables::load().expect("tables");
+        let text = chain(
+            &[0, 128, 128],
+            &[0, 7, 0],
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        );
+        let map = parse_udmf(&text, Limits::default()).expect("parses");
+        let scene = Scene::build(&map, &tables, &mut Vec::new());
+        let report = plat::recognize(&scene, &tables);
+        let v = vocab()
+            .classify(&telemetry(&[21], 0, &[1]))
+            .with_lifts(&report);
+        assert!(v.lifts_ok);
+        assert!(!v.expressible && !v.line_specials_ok);
+    }
+
+    #[test]
     fn verdict_serializes_with_the_documented_field_names() {
         let json = serde_json::to_value(vocab().classify(&telemetry(&[21], 0, &[1]))).unwrap();
         assert_eq!(json["expressible"], false);
         assert_eq!(json["unknown_line_specials"], serde_json::json!([21]));
         assert_eq!(json["vanilla_only"], true);
+        assert_eq!(json["lifts_ok"], true);
     }
 }
