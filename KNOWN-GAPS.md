@@ -246,15 +246,50 @@ least one thing (§L). The recognizer reports the count (`holding things` in
 the corpus report) and refuses nothing for it; the thing simply has no IR
 field to land in.
 
-**Jamb pegging on a lift shaft is unverified, not verified-correct.** A
-platform's two long sides are one-sided walls emitted by
+**Jamb pegging on a lift shaft is now measured, and the compiler agrees with
+it.** A platform's two long sides are one-sided walls emitted by
 `portals::emit_segment` through `emit_jambs`, which — like every other side
-wall in the compiler — writes them with both pegging flags clear. The riser
-convention *is* measured (96 % of risers carry neither flag,
-`docs/measurements/lift-shapes-2026-08-29.md` §G); jamb pegging on lift shafts
-is on that measurement's own "not measured" list, alongside middle-texture
-behavior as the plat descends and sidedef offsets on risers. Nothing here is
-known to be wrong. It is simply unmeasured, which is a different claim.
+wall in the compiler — writes them with both pegging flags clear. That is what
+the corpus does: 2–6 % of lift jambs carry either flag, on every population
+and every shape but two (`docs/measurements/lift-shapes-2026-08-29.md` §G2
+item B, added 2026-08-30). `ML_DONTPEGTOP` on a one-sided line is inert
+anyway — `r_segs.c`'s single-sided branch reads only `ML_DONTPEGBOTTOM` — so
+the only live flag here is one the corpus sets 0–10 % of the time and the
+compiler never sets. What remains unmeasured on that list is middle-texture
+behavior as the plat descends and sidedef offsets on risers.
+
+**A walkover lift shipped with an alcove the player could not enter, twice,
+and every layer said the map was fine.** A playtest of `maps/ascensor_doom.wad`
+found the hall's walkover lift dead: the alcove behind its trigger line was 16
+units deep, the player's own radius, so `P_TryMove` never let their center
+across the line (the box would have had to straddle the platform's face, which
+raises `tmfloorz` more than a step and fails the move before the `spechit`
+walk that fires walkovers ever runs). `tests/golden/lifts.json` carried the
+same 16-unit alcove. Nothing caught it: the compiler checked the *platform*
+against the player's diameter but not the alcove; `reach`'s flood and the
+verifier's V-P5 both credited the trigger, because no layer modeled the
+player's radius against a dead end at all. Now `compile::lifts` refuses a
+walkover alcove no deeper than the radius
+(`CompileError::LiftAlcoveTooShallow`, and `Ir::LIFT_ALCOVE_DIMENSIONS` adds
+64 so a real approach strip is expressible), and `check::plats` drops the
+activator on a walkover with a dead-end pocket that shallow on either side, so
+V-P5 reports the lift as callable only from above and the flood gives it no
+edge.
+
+**What that pair of guards still does not cover.** The verifier's rule is the
+*dead-end* case only: a pocket every other boundary of which the player cannot
+pass. Geometry the box may legitimately overhang — a thin strip open at one
+end, the far sector continuing past a passable boundary — is credited, and
+must be: §G3 of the shapes measurement finds 3 / 30 / 64 low-side walkovers
+whose far sector reaches no further than 16 units, of which only 0 / 3 / 6 are
+genuinely impossible crossings, the rest being ordinary trigger strips cut
+across a corridor. Between the two estimates §G3 reports (farthest vertex,
+nearest blocking boundary) the truth is bracketed but not pinned; a general
+"can the player's box actually get there" test would need real collision
+simulation, which nothing here does. On the compiler side the rule is narrower
+still: it judges the alcove the IR declares, so a walkover trigger placed
+anywhere other than a lift alcove — which the IR cannot express today — would
+not be judged at all.
 
 **The map-spec's `progression.lifts.trigger` takes one word, and a map may
 mix.** `spec::frontmatter::LiftTrigger` is `walkover | switch | both_ends`,

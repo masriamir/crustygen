@@ -416,8 +416,8 @@ gap sector with a raised floor and 62 on both faces. Neither needs new geometry 
 
 - Things standing on pedestals (what a pedestal *holds*) and whether barrier plats carry
   `ML_BLOCKING` fences on top — needed before the pedestal/barrier IR is written.
-- Jamb (one-sided side wall) pegging on lift shafts, and middle-texture behavior as the plat
-  descends; sidedef `x_offset`/`y_offset` on risers.
+- Middle-texture behavior as the plat descends; sidedef `x_offset`/`y_offset` on risers.
+  (Jamb pegging and jamb *textures* were measured on 2026-08-30 — see §G2 item B.)
 - Sound: which plats have `ML_SOUNDBLOCK` neighbors; whether lifts wake monsters (`sfx_pstart`
   through `S_StartSound` at the sector's `soundorg` is unconditional — P_NoiseAlert is a separate
   mechanism and was not examined).
@@ -500,3 +500,386 @@ rare; the common case is genuinely one trigger driving several sectors.**
 - Shared tags are common enough (17–40 % of plats by shape) that refusing them all costs yield;
   accepting only the split-platform case (3–9 % of groups) recovers little. A later construct may
   let one trigger name several lifts.
+
+---
+
+## G2. Rendering-facing, extended (2026-08-30)
+
+**Date:** 2026-08-30 · Same three populations, same load rules, same tool (`examples/liftprobe
+census`, extended with a `report_faces` pass). Added after a playtest of `maps/ascensor.wad`
+raised four conventions the playtester believed vanilla lifts follow. The arbiter reproduced §C,
+§G and §K exactly — 68 / 64 / 1,282 unique maps, 53 / 59 / 795 with a lift line, 278 / 395 /
+3,632 moving plats, 809 / 1,118 / 10,937 riser boundaries, Core / Pedestal / Barrier / Other
+147·50·18·63, 194·44·40·117, 1808·498·322·1004, and "plat flat == level neighbor's / == low
+neighbor's" 41.8 / 18.7 %, 60.7 / 34.7 %, 44.8 / 27.5 %.
+
+| playtester's claim | verdict |
+|---|---|
+| riser is `SUPPORT2`, not `SUPPORT3` | **refuted as stated.** `SUPPORT3` leads on Core risers in 5 of the 6 (boundary, map) measures; `SUPPORT2` is a genuine second and *does* overtake it by boundaries in Final Doom (47 vs 39) |
+| side walls are `DOORTRAK` | **refuted for id's maps, partly true for idgames.** ≤ 2.7 % of DOOM+DOOM2 jambs, 4.2 % of Final Doom's, 6.4 % of idgames' (where it is the #2 texture) |
+| platform flat is `STEP1`/`STEP2` | **supported.** `STEP1` and `STEP2` are top-3 Core flats in all three populations (27.9 / 16.0 / 18.8 % combined) — though "copy the level neighbor's flat" is commoner still (40–62 %) |
+| alcove upper is `ML_DONTPEGTOP` | **refuted as a convention.** 51.4 / 6.0 / 21.5 % of top faces; 28.5 / 19.5 / 23.7 % of all drawn uppers. A minority in every population, and wildly inconsistent between them |
+
+### One deliberate difference from §G: case folding
+
+The corpus carries lowercase texture names (`support2`, `doortrak`). The engine does not care —
+`r_data.c`, `R_CheckTextureNumForName`: `for (i=0 ; i<numtextures ; i++) if (!strncasecmp
+(textures[i]->name, name, 8) ) return i;` — so §G2 folds names to upper case before counting,
+while **§G is left exactly as it printed before**: its numbers are the arbiter and must not move.
+The effect is small but real: on DOOM+DOOM2 Core risers, folding moves `SUPPORT2` from 10 to
+**18** and `SUPPORT3` from 155 to **159**, because eight risers spell it `support2` and four
+`support3`. Every §G2 number below is the folded one.
+
+### What `ML_DONTPEGTOP` does to an upper
+
+From `linuxdoom-1.10/r_segs.c`, `R_StoreWallRange`, line 450 and lines 565-587:
+
+```c
+    worldtop = frontsector->ceilingheight - viewz;
+...
+	if (worldhigh < worldtop)
+	{
+	    // top texture
+	    toptexture = texturetranslation[sidedef->toptexture];
+	    if (linedef->flags & ML_DONTPEGTOP)
+	    {
+		// top of texture at top
+		rw_toptexturemid = worldtop;
+	    }
+	    else
+	    {
+		vtop =
+		    backsector->ceilingheight
+		    + textureheight[sidedef->toptexture];
+
+		// bottom of texture
+		rw_toptexturemid = vtop - viewz;
+	    }
+	}
+```
+
+With `ML_DONTPEGTOP` set, the upper's top row is anchored at `worldtop` — the **front** sector's
+own ceiling, the side being drawn — so the texture is held still while the back sector's ceiling
+moves. Unset (the default), it anchors from `vtop = backsector->ceilingheight +
+textureheight[...]`, i.e. the texture's *bottom* row sits on the **back** sector's ceiling and
+slides with it. This is the exact mirror of `ML_DONTPEGBOTTOM` on a lower, the flag §G measured
+on risers and found set only ~4 % of the time.
+
+Two consequences for lifts. The guard `if (worldhigh < worldtop)` proves **which sidedef the
+upper is drawn on**: the side whose sector has the *higher* ceiling — for a plat in a shaft under
+a taller landing, the **landing's**, which is the side the "top faces" measure below reads, not
+the plat's. And a plat's ceiling does not move, so on a lift the pegging of that upper is
+**purely cosmetic**, unlike the riser's `ML_DONTPEGBOTTOM`, which decides whether the riser rides
+with the platform.
+
+**`ML_DONTPEGTOP` is also inert on a one-sided wall.** The same file's single-sided branch (lines
+456-475) reads only the *other* flag:
+
+```c
+    if (!backsector)
+    {
+	// single sided line
+	midtexture = texturetranslation[sidedef->midtexture];
+	// a single sided line is terminal, so it must mark ends
+	markfloor = markceiling = true;
+	if (linedef->flags & ML_DONTPEGBOTTOM)
+	{
+	    vtop = frontsector->floorheight +
+		textureheight[sidedef->midtexture];
+	    // bottom of texture at bottom
+	    rw_midtexturemid = vtop - viewz;
+	}
+	else
+	{
+	    // top of texture at top
+	    rw_midtexturemid = worldtop;
+	}
+```
+
+So the 2–6 % `ML_DONTPEGTOP` rate measured on one-sided jambs below has **no rendering effect at
+all** — leftover editor state, and a generator that omits it loses nothing. `ML_DONTPEGBOTTOM`
+*is* live on a jamb, and it too is set only 0–10 % of the time.
+
+### Definitions the new measures use
+
+- **Jamb** — a **one-sided** linedef whose (only) front sector is the plat. The engine draws only
+  its middle slot and reads only `ML_DONTPEGBOTTOM` on it, so the histogram is of `texturemiddle`.
+  `ML_DONTPEGTOP` = `0x0008`, `ML_DONTPEGBOTTOM` = `0x0010`, verified in `data/engine.toml`
+  (`upper_unpegged = 8`, `lower_unpegged = 16`, sourced to `doomdata.h`).
+- **Two-sided side wall** — a two-sided boundary of the plat to a neighbor at **exactly** the
+  plat's own floor whose **ceiling differs**. When that neighbor's ceiling is *higher*, the same
+  edge is also a top face, so the measure reports the total and the split.
+- **Top face** — a boundary to a **level landing** (a neighbor within one step, 24, of the plat's
+  floor) whose ceiling is **above** the plat's: the plat is a shaft or alcove and the drawn upper
+  is the landing's.
+- **Every drawn upper** — any two-sided boundary of the plat whose two ceilings differ and whose
+  higher-ceiling side carries a non-blank upper.
+- **Low walkover** — a linedef with special 88/120/10/121 naming the plat's tag whose activator
+  class includes `Low`, classified by placement: on the plat's own boundary versus elsewhere.
+
+### A. Riser texture on Core lifts — `SUPPORT2` vs `SUPPORT3`
+
+By **boundary** (Core lifts only; §G's 809 / 1,118 / 10,937 all-moving risers become 326 / 465 /
+3,691 Core risers):
+
+| Core risers | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| riser boundaries | 326 | 465 | 3,691 |
+| **`SUPPORT2`** | **18 (5.5 %)** | **47 (10.1 %)** | **326 (8.8 %)** |
+| **`SUPPORT3`** | **159 (48.8 %)** | **39 (8.4 %)** | **498 (13.5 %)** |
+| top 8 | SUPPORT3 159, PLAT1 24, SUPPORT2 18, TANROCK5 14, METAL 9, SILVER1 9, BROWN96 6, MARBLE1 6 | SILVER1 67, METAL 50, SUPPORT2 47, SUPPORT3 39, PLAT1 30, BRICK2 20, ASHWALL4 16, METAL6 14 | SUPPORT3 498, SUPPORT2 326, PLAT1 298, METAL 155, SHAWN2 141, METAL2 98, BROWN96 67, METAL1 59 |
+
+By **map** (a texture counted once per map, over the maps carrying a Core plat):
+
+| Core risers, by map | DOOM+DOOM2 (40 maps) | Final Doom (50 maps) | idgames (585 maps) |
+|---|---|---|---|
+| **`SUPPORT2`** | **8** | **11** | **107** |
+| **`SUPPORT3`** | **17** | **18** | **142** |
+| top 8 | SUPPORT3 17, PLAT1 11, SUPPORT2 8, METAL 4, STONE4 3, BROWN1 2, BROWN96 2, MARBFACE 2 | SUPPORT3 18, METAL 12, SUPPORT2 11, PLAT1 8, SHAWN2 6, ASHWALL3 2, BSTONE2 2, METAL5 2 | SUPPORT3 142, PLAT1 121, SUPPORT2 107, METAL 62, SHAWN2 39, METAL2 22, BROWN96 12, BROWNGRN 12 |
+
+**Read.** `SUPPORT3` is ahead in five of the six cells; the single exception is Final Doom by
+boundary count, where `SUPPORT2` (47) edges it (39) — and even there `SUPPORT3` reaches more maps
+(18 vs 11). The playtester's "typically `SUPPORT2`" is not what the corpus says, but the claim is
+not baseless either: `SUPPORT2` is the #2 or #3 riser texture everywhere, a *co-convention*
+rather than an error. `PLAT1` — the texture named for the mechanism — is #2 by maps in DOOM+DOOM2
+(11) and idgames (121), better than its fifth place by boundary count in §G suggested. **The
+`lift_riser` default stays `SUPPORT3`.**
+
+### B. Side walls (jambs)
+
+One-sided jambs, all moving plats:
+
+| one-sided jambs | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| jambs | 437 | 569 | 5,703 |
+| **`ML_DONTPEGTOP`** | **5.3 %** | **3.0 %** | **5.8 %** |
+| **`ML_DONTPEGBOTTOM`** | **1.8 %** | **2.5 %** | **5.4 %** |
+| middle texture, top 8 | METAL2 45, ROCK2 30, SUPPORT3 27, METAL 17, ROCK5 15, BROWNHUG 14, GSTONE1 14, BROWN96 12 | METAL 69, SUPPORT3 44, METAL2 43, SUPPORT2 26, BSTONE2 25, **DOORTRAK 24**, GSTONE1 17, WOOD9 17 | SUPPORT3 528, **DOORTRAK 364**, METAL 217, METAL2 177, SHAWN2 163, SUPPORT2 155, GSTONE1 153, DOORSTOP 91 |
+
+Restricted to Core lifts:
+
+| Core one-sided jambs | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| jambs | 246 | 266 | 3,045 |
+| `ML_DONTPEGTOP` | 4.1 % | 2.3 % | 4.9 % |
+| `ML_DONTPEGBOTTOM` | 0.0 % | 4.5 % | 4.9 % |
+| middle texture, top 8 | SUPPORT3 20, ROCK2 16, METAL2 14, BROWN96 12, GSTONE1 12, METAL 11, SUPPORT2 10, BIGBRIK2 8 | METAL 30, SUPPORT3 21, GSTONE1 17, A-BRICK3 16, METAL2 16, SUPPORT2 16, WOOD12 9, ASHWALL4 8 | SUPPORT3 358, METAL 143, GSTONE1 103, METAL2 98, SUPPORT2 97, SHAWN2 91, **DOORTRAK 74**, STONE2 64 |
+
+Per shape (Pedestal / Barrier / Other), one-sided jambs:
+
+| | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| Pedestal | 32 · PEGTOP 12.5 % · PEGBOT 0.0 % · ROCK2 12, MARBGRAY 4, GRAY4 3 | 34 · 0.0 % · 0.0 % · METAL2 7, A-BROWN3 6, WOOD9 6 | 406 · 1.7 % · 9.9 % · SUPPORT2 36, METAL2 24, BROWN1 21 |
+| Barrier | 32 · 6.2 % · 6.2 % · **DOORTRAK 8**, SUPPORT3 3, ASHWALL2 2 | 116 · 3.4 % · 0.0 % · METAL 32, **DOORTRAK 16**, MARBGRAY 10 | 624 · 11.2 % · 5.8 % · **DOORTRAK 144**, SUPPORT3 50, DOORSTOP 40 |
+| Other | 127 · 5.5 % · 4.7 % · METAL2 31, ROCK5 13, BROWNHUG 12 | 153 · 4.6 % · 1.3 % · BSTONE2 14, SUPPORT3 13, BRICK10 12 | 1,628 · 6.6 % · 4.9 % · **DOORTRAK 138**, SUPPORT3 105, METAL2 49 |
+
+Two-sided side walls (a neighbor at the plat's own floor with a different ceiling):
+
+| two-sided side walls | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| all moving | 83 (27 with the neighbor's ceiling above — also top faces; 56 below) | 65 (24 above, 41 below) | 624 (275 above, 349 below) |
+| Core | 67 (20 above, 47 below) | 56 (22 above, 34 below) | 449 (202 above, 247 below) |
+| Pedestal / Barrier | 0 / 0 | 0 / 0 | 0 / 0 |
+| Other | 16 (7 above, 9 below) | 9 (2 above, 7 below) | 175 (73 above, 102 below) |
+| plat-side middle texture | BRNSMAL2 1 (all others blank) | *all blank* | ADEL_R97 2, FIREWALA 1, MIDGRATE 1 (all others blank) |
+
+**Read.** Lift jambs are **not** `DOORTRAK` in id's maps. `DOORTRAK` does not appear in
+DOOM+DOOM2's top 8 at all, which bounds it at **≤ 12 of 437 (≤ 2.7 %)** — and the 12 the shape
+split does show sit on Barriers and Others, **none on a Core or Pedestal lift**. In Final Doom it
+is 24 of 569 (4.2 %) and in idgames 364 of 5,703 (6.4 %), where it is the #2 jamb texture overall
+but only #7 on Core lifts (74 of 3,045, 2.4 %). Where `DOORTRAK` concentrates is the **Barrier**
+shape (8 / 16 / 144, the #1 or #2 texture in all three), which makes sense: a barrier plat *is* a
+door-shaped gap sector. For the Core lift the jamb takes the same wall texture as the riser —
+`SUPPORT3` is #1 or #2 on Core jambs in DOOM+DOOM2 and idgames, exactly as on the risers, which
+is what `compile::portals::emit_jambs` already writes through the theme's `trim` role. Both
+pegging flags are **rare on jambs** (2–6 % either way, on every population and shape but two:
+idgames Pedestal `DONTPEGBOTTOM` 9.9 %, idgames Barrier `DONTPEGTOP` 11.2 %) — a jamb is a plain,
+pegged wall, which is what the compiler emits. Two-sided side walls are a small population
+(65–624) and almost always carry no middle texture at all: ordinary open boundaries, not
+"tracks".
+
+### C. Top face — the upper over the plat
+
+| top faces | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| top faces (level landing, its ceiling above the plat's) | 37 | 117 | 428 |
+| **`ML_DONTPEGTOP` on that linedef** | **51.4 %** | **6.0 %** | **21.5 %** |
+| upper texture on the landing's sidedef, top 8 | WOOD12 4, WOOD5 4, TEKWALL1 3, BRONZE1 2, BSTONE1 2, MARBLE1 2, STONE 2, BIGBRIK1 1 | STARG1 40, ASHWALL4 24, SILVER1 19, BIGBRIK1 9, METAL 6, GSTONE1 5, EGREDI 2, METAL7 2 | METAL 16, MARBGRAY 15, BRICK5 12, BROWNHUG 12, SUPPORT3 12, METAL2 11, BIGBRIK1 10, BIGBRIK2 9 |
+| **every two-sided boundary that draws an upper** | **347 · `ML_DONTPEGTOP` 28.5 % (99)** | **688 · 19.5 % (134)** | **4,930 · 23.7 % (1,167)** |
+
+Per shape:
+
+| top faces | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| Core | 26 · PEGTOP 46.2 % · WOOD12 4, TEKWALL1 3, BSTONE1 2 | 51 · 11.8 % · SILVER1 19, BIGBRIK1 9, METAL 6 | 281 · 23.8 % · METAL 13, METAL2 11, MARBGRAY 9 |
+| Pedestal | 0 | 0 | 0 |
+| Barrier | 0 | 0 | 0 |
+| Other | 11 · 63.6 % · WOOD5 4, BRONZE1 2, BIGBRIK1 1 | 66 · 1.5 % · STARG1 40, ASHWALL4 24, ASHWALL3 1 | 147 · 17.0 % · BRICK5 12, BROWNHUG 9, BIGBRIK1 8 |
+| all drawn uppers, Core | 200 · 27.0 % | 394 · 19.5 % | 2,370 · 24.8 % |
+
+**Read.** There is no top-face texture convention: the modal upper is whatever the surrounding
+wall is (`WOOD12` in DOOM/DOOM2, `STARG1`/`ASHWALL4` in Final Doom — and those two are 64 of
+Final Doom's 66 `Other` top faces, i.e. one or two maps repeating themselves; `METAL`/`MARBGRAY`
+in idgames, 16 and 15 out of 428). And the `ML_DONTPEGTOP` rate is **not a convention either**:
+51 % in DOOM+DOOM2, 6 % in Final Doom, 22 % in idgames — a swing far too wide to be a rule, and
+consistent with the engine finding that the flag is cosmetic here because the plat's ceiling never
+moves. Across *all* drawn uppers on plat boundaries the rate settles at a steady **20–29 %**: the
+background rate for uppers in Doom maps, not a lift-specific habit. Pedestals and Barriers have
+**zero** top faces by construction — both rest `AboveAll`, so they have no level landing at all.
+
+Because the corpus states no rule, `compile::lifts` decides the flag on the rendering argument
+instead: it sets `ML_DONTPEGTOP` on any platform boundary whose neighbor's ceiling is the taller
+one, so the landing's upper starts at the landing's own ceiling, where the one-sided walls beside
+it also start. V-P11 judges only the *lower* flag on a plat, and deliberately says nothing about
+this one.
+
+### D. Platform floor flat
+
+| Core lifts | DOOM+DOOM2 (147) | Final Doom (194) | idgames (1,808) |
+|---|---|---|---|
+| flat, top 8 | **STEP1 22, STEP2 19**, FLOOR5_1 17, FLOOR5_4 14, FLAT23 12, FLAT1 7, FLAT5_1 5, FLOOR4_8 4 | FLAT23 22, **STEP1 20, STEP2 11**, DEM1_5 9, RROCK17 8, FLAT4 7, FLOOR5_3 7, TLITE6_6 7 | CEIL5_2 198, **STEP1 186, STEP2 154**, FLOOR7_1 70, FLOOR4_8 60, FLAT23 53, CEIL5_1 47, FLAT5_4 45 |
+| `STEP1` + `STEP2` | **41 (27.9 %)** | **31 (16.0 %)** | **340 (18.8 %)** |
+| == level neighbor's flat | 59 of 147 (40.1 %) | 120 of 194 (61.9 %) | 791 of 1,808 (43.8 %) |
+| == low neighbor's flat | 21 of 147 (14.3 %) | 58 of 194 (29.9 %) | 372 of 1,808 (20.6 %) |
+
+All moving plats, for comparison with §G's row:
+
+| all moving | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| flat, top 8 | STEP1 24, STEP2 22, FLAT23 19, FLOOR5_1 19, FLOOR7_1 19, CEIL5_1 18, FLOOR5_4 15, FLAT1 11 | RROCK17 32, STEP1 29, FLAT23 27, STEP2 17, CEIL5_2 16, FLAT20 13, FLOOR7_1 13, FLAT4 11 | CEIL5_2 331, STEP1 250, STEP2 198, FLOOR7_1 118, FLOOR4_8 112, FLOOR0_3 96, FLAT23 94, CEIL5_1 93 |
+| == level nb / == low nb | 41.8 % / 18.7 % | 60.7 % / 34.7 % | 44.8 % / 27.5 % (**§G reproduced**) |
+
+Pedestal and Barrier flats (no level neighbor exists, so "== level" is `n/a` for both):
+
+| | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| Pedestal, top 3 · == low nb | FLOOR7_1 14, CEIL5_1 11, CRATOP1 3 · 14.0 % | CEIL5_2 9, FLAT5_4 6, SLIME15 4 · 18.2 % | CEIL5_2 42, FLOOR0_3 23, FLOOR6_1 21 · 32.7 % |
+| Barrier, top 3 · == low nb | CEIL5_1 2, FLAT10 2, FLAT23 2 · 22.2 % | FLOOR4_1 5, CEIL5_1 3, CEIL5_2 3 · 50.0 % | CEIL5_2 36, STEP1 18, FLAT20 15 · 43.8 % |
+
+**Read.** This claim holds, as a minority. `STEP1` and `STEP2` are the #1 and #2 Core-lift flats
+in DOOM+DOOM2, #2 and #3 in Final Doom and idgames — together 16–28 % of Core platforms, and no
+other pair comes close in all three. But the stronger rule remains §G's: **40–62 % of Core lifts
+simply take the level room's flat**, and only 14–30 % take the low room's. A generator that copies
+the landing's flat is right more often than one that always writes `STEP1`, which is exactly what
+`compile::lifts` does (the platform borrows the level room's flat and light). `STEP1`/`STEP2`
+belongs in a theme, as an override, not in the construction.
+
+### E. Low-side walkover placement
+
+| walkover lift lines (88/120/10/121) with a `Low` activator | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| **on the plat's own boundary** | **0** | **0** | **0** |
+| **elsewhere** | **125** | **335** | **1,259** |
+| — adjacent (a line in a neighbor) | 86 | 278 | 637 |
+| — remote | 39 | 57 | 622 |
+| Core: on-plat / elsewhere | 0 / 65 (adj 50, rem 15) | 0 / 271 (adj 256, rem 15) | 0 / 619 (adj 396, rem 223) |
+| Pedestal | 0 / 22 | 0 / 10 | 0 / 308 |
+| Barrier | 0 / 9 | 0 / 17 | 0 / 79 |
+| Other | 0 / 29 | 0 / 37 | 0 / 253 |
+
+**The zero is a tautology and is reported as one.** `activator_sides` admits a walkover's side as
+an activator only when the crossing *from* that side is possible at rest under `P_TryMove`'s step
+rule, and `Activator::Low` means a floor more than a step below the plat. A side of the plat's own
+boundary cannot satisfy both at once, so the count is 0 by construction, not by corpus evidence.
+The complement is the evidence:
+
+| walkover lift lines ON the plat's own boundary | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| all moving | 90 — Level 88, Plat 90 | 105 — Level 104, Plat 105 | 997 — Level 914, Plat 966, Above 25, None 6 |
+| Core | 81 — Level 80, Plat 81 | 89 — Level 89, Plat 89 | 809 — Level 784, Plat 803, None 6 |
+| Pedestal / Barrier | 0 / 0 | 0 / 0 | 2 (Plat) / 1 (Plat) |
+| Other | 9 — Level 8, Plat 9 | 16 — Level 15, Plat 16 | 185 — Level 130, Plat 160, Above 25 |
+
+**Read.** A walkover on the plat's own boundary is common (90 / 105 / 997 lines) and is **always
+the top edge**: it fires from `Level` and from `Plat`, i.e. from the landing the player steps off
+and from the platform itself. It is never the riser edge — no map in any of the three populations
+puts a walkover on the plat's low face expecting it to be crossed from below, which is what the
+engine's step rule refuses. The six idgames lines classed `None` are walkovers crossable from
+neither side at rest: dead triggers. So the low-side trigger is **always** either a use-line on
+the riser (§F's dominant 4,381-line form) or a walkover placed *off* the plat — in the approach
+(86 / 278 / 637) or further away (39 / 57 / 622), which is `LiftTrigger::Walkover`'s alcove and
+`switches.remote_allowed`'s not-yet-expressible remote form respectively.
+
+## G3. Depth behind a low-side walkover (2026-08-30)
+
+**Date:** 2026-08-30 · Same populations, same commands, same tool run. Population: §G2 item E's
+"elsewhere" set — walkover lift lines naming a moving plat, carrying a `Low` activator, placed
+anywhere but the plat's own boundary. For each, `S` is the activator sector the player stands in
+and `T` the sector on the line's other side. Two estimates of the room beyond the line, both
+measured perpendicular to it, positive on `T`'s side (the line's own endpoints are 0):
+
+- **farthest vertex** — the greatest perpendicular distance over every vertex of every boundary
+  of `T`. An upper bound on the room available.
+- **nearest blocking** — the least perpendicular distance to a *blocking* boundary of `T`
+  (one-sided, or a step of more than 24 up out of `T`) whose projection onto the line overlaps
+  the line's own extent **in positive length**. A closer estimate of what actually stops the
+  player. The positive-length rule is load-bearing: a boundary perpendicular to the line projects
+  to a single point, and `T`'s side walls meet the line at its own endpoints, so admitting them
+  would report 0 for every room in the corpus. Two-sided boundaries flagged `ML_BLOCKING` are
+  **not** counted as blocking here, so this figure is an upper bound on how far the player really
+  gets.
+
+### Farthest-vertex depth of `T`
+
+| depth | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| ≤ 16 | 3 (1.9 %) | 30 (4.7 %) | 64 (3.7 %) |
+| 17–32 | 8 (5.0 %) | 6 (0.9 %) | 125 (7.3 %) |
+| 33–64 | 17 (10.6 %) | 284 (44.6 %) | 311 (18.0 %) |
+| 65–128 | 46 (28.6 %) | 143 (22.4 %) | 243 (14.1 %) |
+| > 128 | 87 (54.0 %) | 174 (27.3 %) | 980 (56.9 %) |
+| **crossings measured** | **161 over 92 lines** | **637 over 323 lines** | **1,723 over 945 lines** |
+
+### Nearest-blocking depth of `T`
+
+| depth | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| ≤ 16 | 38 (23.6 %) | 248 (38.9 %) | 385 (22.3 %) |
+| 17–32 | 4 (2.5 %) | 5 (0.8 %) | 62 (3.6 %) |
+| 33–64 | 9 (5.6 %) | 30 (4.7 %) | 109 (6.3 %) |
+| 65–128 | 23 (14.3 %) | 19 (3.0 %) | 134 (7.8 %) |
+| > 128 | 36 (22.4 %) | 15 (2.4 %) | 330 (19.2 %) |
+| none in front of the line | 51 (31.7 %) | 320 (50.2 %) | 703 (40.8 %) |
+
+### The ≤ 16 count, and why it does *not* mean "never crossable"
+
+| | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| **farthest vertex ≤ 16** | **3 (1.9 %)** | **30 (4.7 %)** | **64 (3.7 %)** |
+| — of those, also blocked within a radius (a true dead end) | **0** | **3 (0.5 %)** | **6 (0.3 %)** |
+
+All three DOOM+DOOM2 cases, every one with `nearest blocking = none`:
+
+```
+E1M3  · plat sector 168 · linedef 179 · farthest vertex 16.0 · nearest blocking none
+MAP04 · plat sector 38  · linedef 408 · farthest vertex 16.0 · nearest blocking none
+MAP04 · plat sector 38  · linedef 409 · farthest vertex 16.0 · nearest blocking none
+```
+
+**Read.** A far sector shallower than the player's radius does *not* by itself pin the center out:
+`P_TryMove` tests the box against *blocking* lines only, so the box may legitimately overhang into
+whatever lies past `T` through a passable boundary. All three DOOM+DOOM2 cases are exactly that —
+a 16-deep sector with **no blocking boundary in front of the line at all**: the classic thin
+*trigger strip*, a sliver sector cut across a corridor purely to carry a walkover line, open at
+both ends, and perfectly crossable. Requiring *both* estimates to be ≤ 16 gives the honest count
+of impossible crossings: **0 / 3 / 6** — three in a thousand, at most. Walkover far sectors are
+open space, not pockets; "no blocking boundary in front of the line" is the single largest bucket
+in two of the three populations (31.7 / 50.2 / 40.8 %).
+
+So §G2 item E's conclusion strengthens: **no low-side walkover in any of the three populations is
+placed where a player standing in `S` could not cross it.** Zero on the plat's own riser edge (a
+tautology of the activator model) and effectively zero blocked by the far sector's geometry (a
+real measurement that could have come out otherwise).
+
+**Two facts the run turned up on its own.** Self-referencing trigger lines are common: 66 / 24 /
+628 `Low` activator sides were skipped for having no far sector at all, every one a line whose two
+sidedefs name the **same** sector — a trigger drawn *inside* one room, where crossing changes
+nothing and the far-sector question is vacuous. (In DOOM+DOOM2 these were 33 distinct (plat, line)
+pairs each contributing two sides, several of them lines shared by six plats at once; 92 measured
++ 33 self-referencing = item E's 125.) And the two estimates diverge in both directions:
+farthest-vertex overestimates whenever `T` extends sideways or onward past the line (54 / 27 /
+57 % of crossings read > 128 that way) while nearest-blocking *under*estimates whenever a blocking
+edge clips the line's extent off to one side of the player's path (its ≤ 16 bucket is 24 / 39 /
+22 %). Neither is the walkable depth; the truth is bracketed between them, which is why the
+dead-end count above requires both — and why `check::plats`' `dead_end_pocket` requires both
+halves too.

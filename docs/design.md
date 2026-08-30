@@ -488,6 +488,27 @@ alcove, which that room must therefore declare; `both_ends` is the switch plus a
 platform's top face. A barrier has no low room and so offers only `switch`. A lift names no
 `door_thickness` — its own platform sector is what fills the gap.
 
+**A walkover lift's alcove must be deeper than the player's radius.** `P_TryMove` fires a
+walkover from its `spechit` walk, which asks whether `P_PointOnLineSide (thing->x, thing->y, ld)`
+changed — the thing's *center* crosses, not its box — but it refuses the move first, at
+`tmfloorz - thing->z > 24*FRACUNIT`, and `PIT_CheckLine` has by then raised `tmfloorz` for every
+line the *box* straddles, `P_BoxOnLineSide` counting a box edge that merely touches a line as
+straddling it. So the center never comes within the player's radius (16) of the platform's face,
+and a 16-unit alcove behind a walkover is a slot no center enters: the trigger can never fire.
+`Ir::LIFT_ALCOVE_DIMENSIONS` therefore offers 8/16/32/64 where a door's alcove offers 8/16/32,
+the compiler refuses a shallower walkover alcove (`CompileError::LiftAlcoveTooShallow`), and the
+verifier refuses to credit the same shape in a map it is only reading (`check::plats`). A
+playtest of `maps/ascensor.wad` found this the hard way; `KNOWN-GAPS.md` records what still is
+not guarded.
+
+Two conventions the platform takes from measurement rather than from the engine
+(`docs/measurements/lift-shapes-2026-08-29.md` §G2): it borrows the **level room's flat** and
+light, which is what 40–62 % of the corpus's Core lifts do — `STEP1`/`STEP2`, the
+"lift-looking" flats, are a 16–28 % minority that belongs in a theme, not in the construction —
+and its **jambs take the theme's `trim` texture**, not `DOORTRAK`, which id never puts on a Core
+or Pedestal lift (≤ 2.7 % of DOOM+DOOM2 lift jambs overall, and concentrated on the Barrier
+shape).
+
 **A pedestal is that same platform with no portal under it**: a raised island cut inside one room,
 carried in its own `pedestals` list as `{ id, room, at, size, rise, speed, things }`. `at` is the
 rectangle's low corner (minimum x, minimum y) and `size` its width and height, each a positive
@@ -586,7 +607,13 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
   open; a lift riser keeps the unpegged flag **clear**, which anchors the lower texture to the
   back sector's floor — on the platform's low face that back sector is the platform itself, so
   the riser rides with it. Clear is also the corpus's convention: 96 % of risers carry neither
-  flag (`docs/measurements/lift-shapes-2026-08-29.md` §G).
+  flag (`docs/measurements/lift-shapes-2026-08-29.md` §G). The *upper* on a platform boundary
+  goes the other way: the engine draws it on whichever side has the taller ceiling — the
+  landing's — and the compiler sets `ML_DONTPEGTOP` there so it starts at the landing's own
+  ceiling, where the one-sided walls beside it start, instead of at the platform's. That one is
+  cosmetic (a plat's ceiling never moves) and the verifier does not judge it, because the corpus
+  states no convention to judge against: the flag is set on 51 % / 6 % / 22 % of lift top faces
+  in the three populations (§G2).
 - **P12 — Sky coherence.** Sky ceilings use the sky flat. Two adjacent sky sectors at differing
   heights are permitted; a sky sector adjacent to a non-sky sector still obeys P8.
 

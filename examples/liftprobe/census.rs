@@ -11,7 +11,7 @@ use crustywad::map::udmf::UdmfMap;
 
 use crate::common::{
     self, Activator, BLAZE, DWUS, Hist, LOWER, PERPETUAL, Placement, PlatFacts, RAISE_CHANGE,
-    RAISE_NEAREST, REPEATABLE_LIFT, Rest, Shape, USE_LIFT, is_lift, pct, percentiles,
+    RAISE_NEAREST, REPEATABLE_LIFT, Rest, Shape, USE_LIFT, WALK_LIFT, is_lift, pct, percentiles,
 };
 
 #[derive(Default)]
@@ -27,6 +27,14 @@ struct Agg {
     switch_slot: Hist,
     switch_sw_prefix: u64,
     switch_lines: u64,
+    /// Maps carrying ≥1 moving `Core` plat — the denominator of
+    /// [`Agg::core_riser_tex_maps`].
+    maps_with_core_plat: u64,
+    /// Riser textures of moving `Core` plats, counted **once per map**.
+    core_riser_tex_maps: Hist,
+    /// Low-side walkover crossings whose far sector is too shallow to admit
+    /// the player's center, named `map · plat sector · linedef · depth`.
+    shallow_far_sectors: Vec<String>,
     sectors_raise_only: u64,
     sectors_lower_only: u64,
     sectors_raise_and_lower: u64,
@@ -118,11 +126,45 @@ fn survey_map(
 
     let lift_refused = survey_lift_lines(map, &index, agg);
     let mut shapes = Vec::new();
+    // The riser textures this map's Core lifts use, deduplicated so a texture
+    // counts once per map however many boundaries carry it.
+    let mut core_riser_tex: BTreeSet<String> = BTreeSet::new();
     for plat in index.plat_sectors(map) {
         if let Some(facts) = common::analyze_plat(map, &scene, &index, plat, step) {
             shapes.push(facts.shape);
+            for t in &facts.triggers {
+                if on_the_plat(t.placement) {
+                    continue;
+                }
+                for c in &t.low_crossings {
+                    if c.max_vertex <= PLAYER_RADIUS {
+                        agg.shallow_far_sectors.push(format!(
+                            "{name} · plat sector {plat} · linedef {} · farthest vertex {:.1} · nearest blocking {}",
+                            c.linedef,
+                            c.max_vertex,
+                            c.nearest_blocking
+                                .map_or_else(|| "none".to_owned(), |d| format!("{d:.1}"))
+                        ));
+                    }
+                }
+            }
+            if facts.moving() && facts.shape == Shape::Core {
+                core_riser_tex.extend(
+                    facts
+                        .risers
+                        .iter()
+                        .map(|r| r.texture.to_ascii_uppercase())
+                        .filter(|t| t != "-"),
+                );
+            }
             agg.plats.push(facts);
         }
+    }
+    if shapes.contains(&Shape::Core) {
+        agg.maps_with_core_plat += 1;
+    }
+    for tex in core_riser_tex {
+        agg.core_riser_tex_maps.add(tex);
     }
 
     // Shape-gated arbiter: every plat accepted and no refused line.
@@ -293,6 +335,8 @@ fn report(label: &str, agg: &Agg, step: i32) {
     report_size(&moving, nmv);
     report_triggers(agg, &moving, nmv);
     report_rendering(&moving, nmv);
+    report_faces(agg, &moving);
+    report_low_walk_depth(agg, &moving);
     report_conflicts(&moving, nmv);
     report_floor_pairing(agg);
     report_arbiter(agg, &moving, nmv);
@@ -775,6 +819,300 @@ fn report_rendering(moving: &[&PlatFacts], nmv: u64) {
     );
 }
 
+/// A texture name as the engine matches it. `r_data.c`,
+/// `R_CheckTextureNumForName`: `if (!strncasecmp (textures[i]->name, name, 8))`
+/// — the lookup is case-insensitive, and the corpus does carry lowercase names
+/// (`support2`, `doortrak`), so §G2 folds them together. §G above does not:
+/// its histogram is left exactly as the measurement of record printed it.
+fn tex(name: &str) -> String {
+    name.to_ascii_uppercase()
+}
+
+/// The player's collision radius (`p_local.h`'s `MAXRADIUS` and the player
+/// `mobjinfo` radius, 16). `P_BoxOnLineSide` counts a box that merely touches
+/// a line as straddling it, so a crossable far sector must be strictly deeper
+/// than this.
+const PLAYER_RADIUS: f64 = 16.0;
+
+/// Whether a trigger sits on the plat's own boundary. Its complement is §G2's
+/// and §G3's "elsewhere" population.
+fn on_the_plat(placement: Placement) -> bool {
+    matches!(placement, Placement::OnPlatFront | Placement::OnPlatBack)
+}
+
+/// The buckets §G2 splits by: the whole moving population, then each shape.
+const SHAPE_BUCKETS: [(&str, Option<Shape>); 5] = [
+    ("all moving", None),
+    ("Core", Some(Shape::Core)),
+    ("Pedestal", Some(Shape::Pedestal)),
+    ("Barrier", Some(Shape::Barrier)),
+    ("Other", Some(Shape::Other)),
+];
+
+/// The riser line: what the low face of the plat is textured with, and how
+/// often that is `SUPPORT2` rather than `SUPPORT3`.
+fn line_risers(group: &[&PlatFacts]) {
+    let mut textures = Hist::default();
+    let (mut risers, mut support2, mut support3) = (0u64, 0u64, 0u64);
+    for p in group {
+        for r in &p.risers {
+            risers += 1;
+            let name = tex(&r.texture);
+            if name != "-" {
+                textures.add(name.clone());
+            }
+            support2 += u64::from(name == "SUPPORT2");
+            support3 += u64::from(name == "SUPPORT3");
+        }
+    }
+    println!(
+        "  - risers: {risers} · SUPPORT2 {support2} ({}) · SUPPORT3 {support3} ({}) · lower top 8: {}",
+        pct(support2, risers),
+        pct(support3, risers),
+        textures.top(8)
+    );
+}
+
+/// The jamb lines: the plat's one-sided side walls, then the two-sided ones.
+fn line_jambs(group: &[&PlatFacts]) {
+    let mut textures = Hist::default();
+    let (mut jambs, mut pegtop, mut pegbottom) = (0u64, 0u64, 0u64);
+    for p in group {
+        for j in &p.jambs {
+            jambs += 1;
+            let name = tex(&j.texture);
+            if name != "-" {
+                textures.add(name);
+            }
+            pegtop += u64::from(j.dontpegtop);
+            pegbottom += u64::from(j.dontpegbottom);
+        }
+    }
+    println!(
+        "  - one-sided jambs: {jambs} · DONTPEGTOP {} · DONTPEGBOTTOM {} · middle top 8: {}",
+        pct(pegtop, jambs),
+        pct(pegbottom, jambs),
+        textures.top(8)
+    );
+    let mut two_sided = Hist::default();
+    let (mut n, mut above) = (0u64, 0u64);
+    for p in group {
+        for w in &p.two_sided_jambs {
+            n += 1;
+            above += u64::from(w.nb_ceiling_above);
+            let name = tex(&w.texture);
+            if name != "-" {
+                two_sided.add(name);
+            }
+        }
+    }
+    println!(
+        "  - two-sided side walls (neighbor at the plat's own floor, different ceiling): {n} — neighbor ceiling above the plat's {above} (these are also top faces), below {} · plat-side middle top 8: {}",
+        n - above,
+        two_sided.top(8)
+    );
+}
+
+/// The top-face lines: the upper drawn on a level landing above a shaft, and
+/// the pegging of every upper the plat's boundary draws.
+fn line_top_faces(group: &[&PlatFacts]) {
+    let mut textures = Hist::default();
+    let (mut faces, mut pegtop) = (0u64, 0u64);
+    for p in group {
+        for f in &p.top_faces {
+            faces += 1;
+            let name = tex(&f.texture);
+            if name != "-" {
+                textures.add(name);
+            }
+            pegtop += u64::from(f.dontpegtop);
+        }
+    }
+    println!(
+        "  - top faces (level landing whose ceiling is above the plat's): {faces} · DONTPEGTOP {} · upper top 8: {}",
+        pct(pegtop, faces),
+        textures.top(8)
+    );
+    let drawn: u64 = group.iter().map(|p| count_len(p.uppers_drawn)).sum();
+    let drawn_pegtop: u64 = group.iter().map(|p| count_len(p.uppers_drawn_pegtop)).sum();
+    println!(
+        "  - every two-sided boundary that draws an upper: {drawn} · DONTPEGTOP {} ({drawn_pegtop})",
+        pct(drawn_pegtop, drawn)
+    );
+}
+
+/// The flat line: what the platform's own floor is, and whose flat it copies.
+fn line_flats(group: &[&PlatFacts]) {
+    let mut flats = Hist::default();
+    for p in group {
+        let name = tex(&p.floor_flat);
+        if name != "-" {
+            flats.add(name);
+        }
+    }
+    let same = |f: fn(&PlatFacts) -> Option<bool>| {
+        let yes = count_len(group.iter().filter(|p| f(p) == Some(true)).count());
+        let of = count_len(group.iter().filter(|p| f(p).is_some()).count());
+        format!("{yes} of {of} ({})", pct(yes, of))
+    };
+    println!(
+        "  - floor flat top 8: {} · == level neighbor's: {} · == low neighbor's: {}",
+        flats.top(8),
+        same(|p| p.flat_same_as_level_nb),
+        same(|p| p.flat_same_as_low_nb)
+    );
+}
+
+/// The walkover lines: whether a walkover a player fires from below sits on
+/// the plat's own edge or off it, and — the informative complement — what the
+/// walkovers that *do* sit on the plat's edge fire from.
+///
+/// The first count is zero **by construction**, not by corpus accident:
+/// `activator_sides` admits a walkover side only when the crossing from it is
+/// possible under `P_TryMove`'s step rule, and `Activator::Low` means a floor
+/// more than a step below the plat's. A side of the plat's own boundary
+/// therefore cannot be both. The measure is printed because it is the
+/// question a reader asks, and the second histogram is what answers it.
+fn line_low_walkovers(group: &[&PlatFacts]) {
+    let (mut on_plat, mut adjacent, mut remote) = (0u64, 0u64, 0u64);
+    let (mut on_plat_lines, mut on_plat_from) = (0u64, Hist::default());
+    for p in group {
+        for t in &p.triggers {
+            if !WALK_LIFT.contains(&t.special) {
+                continue;
+            }
+            if on_the_plat(t.placement) {
+                on_plat_lines += 1;
+                for a in &t.activators {
+                    on_plat_from.add(format!("{a:?}"));
+                }
+            }
+            if !t.activators.contains(&Activator::Low) {
+                continue;
+            }
+            match t.placement {
+                Placement::OnPlatFront | Placement::OnPlatBack => on_plat += 1,
+                Placement::Adjacent => adjacent += 1,
+                Placement::Remote => remote += 1,
+            }
+        }
+    }
+    println!(
+        "  - walkover lift lines with a Low activator: on the plat's own boundary {on_plat} · elsewhere {} (adjacent {adjacent}, remote {remote})",
+        adjacent + remote
+    );
+    println!(
+        "  - walkover lift lines that DO sit on the plat's own boundary: {on_plat_lines} · what they fire from: {}",
+        on_plat_from.all()
+    );
+}
+
+fn report_faces(agg: &Agg, moving: &[&PlatFacts]) {
+    println!(
+        "\n### G2. Risers, jambs, top faces, flats and low walkovers (moving plats, by shape)\n"
+    );
+    println!(
+        "Core riser textures counted once per MAP ({} maps carry a Core plat): {}\n",
+        agg.maps_with_core_plat,
+        agg.core_riser_tex_maps.top(8)
+    );
+    for (name, shape) in SHAPE_BUCKETS {
+        let group: Vec<&PlatFacts> = moving
+            .iter()
+            .copied()
+            .filter(|p| shape.is_none_or(|s| p.shape == s))
+            .collect();
+        println!("- **{name}** — {} plats", group.len());
+        line_risers(&group);
+        line_jambs(&group);
+        line_top_faces(&group);
+        line_flats(&group);
+        line_low_walkovers(&group);
+    }
+}
+
+/// The depth bucket a distance falls in. Keys are numbered so the histogram's
+/// key order is the bucket order.
+fn depth_bucket(d: f64) -> &'static str {
+    if d <= 16.0 {
+        "1 <=16"
+    } else if d <= 32.0 {
+        "2 17-32"
+    } else if d <= 64.0 {
+        "3 33-64"
+    } else if d <= 128.0 {
+        "4 65-128"
+    } else {
+        "5 >128"
+    }
+}
+
+/// §G3 — how much room the far sector has beyond a low-side walkover.
+fn report_low_walk_depth(agg: &Agg, moving: &[&PlatFacts]) {
+    println!("\n### G3. Far-sector depth beyond a low-side walkover (moving plats)\n");
+    let (mut by_vertex, mut by_blocking) = (Hist::default(), Hist::default());
+    let (mut crossings, mut lines, mut shallow, mut dead_end) = (0u64, 0u64, 0u64, 0u64);
+    let mut unmeasured = 0u64;
+    for p in moving {
+        for t in &p.triggers {
+            if on_the_plat(t.placement) {
+                continue;
+            }
+            unmeasured += count_len(t.low_unmeasured);
+            if t.low_crossings.is_empty() {
+                continue;
+            }
+            lines += 1;
+            for c in &t.low_crossings {
+                crossings += 1;
+                by_vertex.add(depth_bucket(c.max_vertex));
+                match c.nearest_blocking {
+                    Some(d) => by_blocking.add(depth_bucket(d)),
+                    None => by_blocking.add("6 none in front of the line"),
+                }
+                shallow += u64::from(c.max_vertex <= PLAYER_RADIUS);
+                dead_end += u64::from(
+                    c.max_vertex <= PLAYER_RADIUS
+                        && c.nearest_blocking.is_some_and(|d| d <= PLAYER_RADIUS),
+                );
+            }
+        }
+    }
+    println!(
+        "- crossings measured (one per `Low` activator side, on lines placed elsewhere than the plat's own boundary): {crossings} over {lines} lines · sides skipped for having no far sector (both sides name one sector — a trigger line inside a single room): {unmeasured}"
+    );
+    println!(
+        "- T depth by farthest vertex: {}",
+        by_vertex.shares(crossings)
+    );
+    println!(
+        "- T depth to the nearest blocking boundary in front of the line: {}",
+        by_blocking.shares(crossings)
+    );
+    println!(
+        "- **crossings whose far sector is shallower than the player's radius (farthest vertex <= {PLAYER_RADIUS:.0}): {shallow} ({})**",
+        pct(shallow, crossings)
+    );
+    // A shallow sector alone does not forbid the crossing: the player's box may
+    // legitimately overhang into whatever lies beyond, so long as nothing
+    // *blocking* is within a radius. Only a shallow sector that is also a dead
+    // end pins the center out.
+    println!(
+        "- of those, also blocked within a radius (a dead end — the crossing is genuinely impossible): {dead_end} ({})",
+        pct(dead_end, crossings)
+    );
+    if agg.shallow_far_sectors.is_empty() {
+        println!("- none to name");
+    } else {
+        for name in agg.shallow_far_sectors.iter().take(20) {
+            println!("  - {name}");
+        }
+        if agg.shallow_far_sectors.len() > 20 {
+            println!("  - ... and {} more", agg.shallow_far_sectors.len() - 20);
+        }
+    }
+}
+
 fn report_conflicts(moving: &[&PlatFacts], nmv: u64) {
     println!("\n## H. Conflicts\n");
     let conflicts = count_len(
@@ -904,6 +1242,8 @@ mod tests {
             low_sides: Vec::new(),
             one_sided: false,
             switch_slots: Vec::new(),
+            low_crossings: Vec::new(),
+            low_unmeasured: 0,
         }
     }
 
