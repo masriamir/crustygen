@@ -739,9 +739,8 @@ pub struct Compiled {
 ///    `downWaitUpStay` platform sector — again optionally flanked by
 ///    alcoves — and cuts every pedestal as a hosted island inside its room,
 ///    tagging each from the same [`TagAllocator`]. Runs after `cut_portals`
-///    left that gap empty (step 3), after `emit_teleports` (step 6) so a
-///    pedestal's island edges are emitted against the same finished pad
-///    geometry, and before the overlap check since it emits sectors. Its
+///    left that gap empty (step 3) and before the overlap check since it
+///    emits sectors. Its
 ///    risers must be written before step 9: `heights` fills only empty
 ///    texture slots, and the platform's own top-face riser is invisible at
 ///    load-time heights, so `heights` would never write it.

@@ -966,6 +966,24 @@ pub enum IrError {
         /// The second island's identifier (a pedestal or a teleport).
         second: String,
     },
+    /// A teleport's destination point lies inside, or on the boundary of, a
+    /// pedestal's rectangle in the destination's own room.
+    ///
+    /// Not [`IrError::PedestalsOverlap`]: a destination is a point, not a
+    /// square, so the island rule between two rectangles never sees it. The
+    /// pedestal's rectangle is its own sector, so the engine would land the
+    /// traveler on the raised platform rather than on the floor the author
+    /// aimed at — and on the boundary too, where the arrival's own radius
+    /// straddles the edge.
+    #[error(
+        "teleport `{teleport}` delivers onto pedestal `{pedestal}`: a destination inside a pedestal rectangle would arrive on the raised platform"
+    )]
+    TeleportDestinationOnPedestal {
+        /// The teleport whose destination lands on the pedestal.
+        teleport: String,
+        /// The pedestal it lands on.
+        pedestal: String,
+    },
 }
 
 /// The inclusive coordinate and height range every Doom map format stores in
@@ -1149,9 +1167,11 @@ impl Ir {
     /// has a side that is not a positive multiple of 8,
     /// [`IrError::PedestalOutsideRoom`] for a pedestal whose rectangle does
     /// not lie strictly inside its room, [`IrError::PedestalThingOutside`]
-    /// for a thing placed on a pedestal but outside its rectangle, and
+    /// for a thing placed on a pedestal but outside its rectangle,
     /// [`IrError::PedestalsOverlap`] for two pedestals, or a pedestal and a
-    /// teleport pad, in one room that overlap or touch.
+    /// teleport pad, in one room that overlap or touch, and
+    /// [`IrError::TeleportDestinationOnPedestal`] for a teleport whose
+    /// destination point lies inside or on a pedestal's rectangle.
     pub fn from_json(s: &str) -> Result<Self, IrError> {
         let ir: Self = serde_json::from_str(s)?;
 
@@ -1853,6 +1873,28 @@ impl Ir {
                     return Err(IrError::PedestalsOverlap {
                         first: a.id.clone(),
                         second: t.id.clone(),
+                    });
+                }
+            }
+        }
+        Self::validate_destinations_off_pedestals(ir)
+    }
+
+    /// Rejects a teleport whose destination point lands on a pedestal.
+    ///
+    /// The last of [`Self::validate_pedestals`]' checks, split out only
+    /// because the whole of it no longer fits one function: a destination is
+    /// a *point*, so the island rule between two rectangles there never sees
+    /// it. Closed on both axes — a point on the rectangle's own edge is one
+    /// the arrival's radius straddles.
+    fn validate_destinations_off_pedestals(ir: &Self) -> Result<(), IrError> {
+        for p in &ir.pedestals {
+            let (lo, hi) = p.rect();
+            for t in ir.teleports.iter().filter(|t| t.to.room == p.room) {
+                if square_contains(lo, hi, t.to.at) {
+                    return Err(IrError::TeleportDestinationOnPedestal {
+                        teleport: t.id.clone(),
+                        pedestal: p.id.clone(),
                     });
                 }
             }
@@ -3351,6 +3393,30 @@ mod tests {
             Ir::from_json(&huge_size),
             Err(IrError::CoordinateOutOfRange { .. })
         ));
+    }
+
+    /// The pad rule's companion for the *destination*: a point, which
+    /// [`IrError::PedestalsOverlap`]'s rectangle-against-rectangle test
+    /// cannot see. The pad itself sits at (320, 320), well clear of the
+    /// pedestal's (128, 128)..(192, 192), so only the destination is at
+    /// issue in either case.
+    #[test]
+    fn a_teleport_may_not_deliver_onto_a_pedestal() {
+        let with_destination = |at: &str| {
+            PEDESTAL_BASE.replacen(
+                r#""portals":[],"#,
+                &format!(
+                    r#""portals":[], "teleports":[ {{ "id":"t", "room":"a", "pad":{{"island":[320,320]}}, "to":{{"room":"a","at":{at},"angle":0}} }} ],"#
+                ),
+                1,
+            )
+        };
+        assert!(matches!(
+            Ir::from_json(&with_destination("[160,160]")),
+            Err(IrError::TeleportDestinationOnPedestal { .. })
+        ));
+        Ir::from_json(&with_destination("[400,400]"))
+            .expect("a destination clear of the pedestal parses");
     }
 
     #[test]

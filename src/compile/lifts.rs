@@ -1072,6 +1072,39 @@ mod tests {
         );
     }
 
+    /// The other half of the speed-to-special mapping. The test above pins
+    /// only `lift_special(true, true)`, whose two arguments are both `true`
+    /// and which a transposed argument order would therefore satisfy just as
+    /// well; a pedestal that names no speed rides at the normal one, so its
+    /// edges must carry `lift_special(true, false)` — a value the transposed
+    /// call could not produce.
+    #[test]
+    fn a_pedestal_that_names_no_speed_carries_the_normal_use_special() {
+        let json = PEDESTAL.replacen(r#" "speed":"fast","#, "", 1);
+        let Built {
+            tables,
+            data,
+            lifts,
+            ..
+        } = compile_data(&json);
+        let plat = lifts[0].sector;
+        let edges: Vec<usize> = data
+            .linedefs
+            .iter()
+            .enumerate()
+            .filter(|(_, ld)| ld.back.is_some_and(|b| data.sidedefs[b].sector == plat))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(edges.len(), 4, "one edge per side of the island");
+        for i in edges {
+            assert_eq!(
+                data.linedefs[i].special,
+                tables.lift_special(true, false),
+                "linedef {i}: the normal use special"
+            );
+        }
+    }
+
     #[test]
     fn pedestal_rejections() {
         let tables = Tables::load().expect("tables");
