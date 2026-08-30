@@ -1572,6 +1572,41 @@ mod tests {
     }
 
     #[test]
+    fn p5_reads_a_plat_boundary_from_whichever_side_carries_the_platform() {
+        let (tables, mut out) = lifts_compiled();
+        // Every plat boundary the compiler emits puts the platform on the
+        // line's back side, so the neighbor scan's other arm never runs on
+        // emitted geometry. The walkover lift's low face — platform to
+        // alcove — carries no special, so which side it is drawn from is
+        // nothing the engine reads: redraw it the other way round and P5
+        // must reach the same verdict.
+        let plats: Vec<usize> = out.lifts.iter().map(|l| l.sector).collect();
+        let low_face = out
+            .data
+            .linedefs
+            .iter()
+            .position(|line| {
+                let Some(back) = line.back else { return false };
+                let (f, b) = (
+                    out.data.sidedefs[line.front].sector,
+                    out.data.sidedefs[back].sector,
+                );
+                line.special == 0
+                    && plats.contains(&b)
+                    && out.data.sectors[f].floor < out.data.sectors[b].floor
+            })
+            .expect("a special-free plat boundary down to the platform's lowest neighbor");
+        let line = &mut out.data.linedefs[low_face];
+        let back = line.back.expect("two-sided");
+        line.back = Some(line.front);
+        line.front = back;
+
+        let mut v = Vec::new();
+        check_lift_return(&tables, &out, &mut v);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
     fn p5_catches_a_platform_that_travels_no_more_than_a_step() {
         let (tables, mut out) = lifts_compiled();
         let plat = out.lifts[0].sector;

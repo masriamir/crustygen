@@ -663,6 +663,91 @@ mod tests {
         assert_eq!((r.counts.shared_tag, r.counts.shared_split), (2, 0));
     }
 
+    /// Three tagged platforms at one floor, each adjacent to the other two:
+    /// `A` fills the southwest quarter, `B` the southeast, and `C` spans the
+    /// whole north half above them both, so `A|B`, `A|C` and `B|C` are all
+    /// shared edges. `L` (west, below `A` and `C`) and `L2` (east, below `B`)
+    /// are the low rooms that give each member somewhere to travel to, and
+    /// `L`'s edge with `A` carries the riser switch naming tag 7.
+    ///
+    /// `chain` cannot build this: its rooms sit in a row, so a member only
+    /// ever touches the next one along. Mutual adjacency is what makes the
+    /// group's walk reach a member twice — the second time from the third
+    /// member rather than the seed.
+    const TRIANGLE: &str = r#"namespace = "doom";
+vertex { x = -128.000; y = 0.000; }
+vertex { x = -128.000; y = 256.000; }
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 0.000; y = 128.000; }
+vertex { x = 0.000; y = 256.000; }
+vertex { x = 128.000; y = 0.000; }
+vertex { x = 128.000; y = 128.000; }
+vertex { x = 256.000; y = 0.000; }
+vertex { x = 256.000; y = 128.000; }
+vertex { x = 256.000; y = 256.000; }
+vertex { x = 384.000; y = 0.000; }
+vertex { x = 384.000; y = 128.000; }
+
+linedef { v1 = 3; v2 = 2; sidefront = 0; sideback = 1; twosided = true; special = 62; arg0 = 7; }
+linedef { v1 = 3; v2 = 4; sidefront = 2; sideback = 3; twosided = true; }
+linedef { v1 = 5; v2 = 6; sidefront = 4; sideback = 5; twosided = true; }
+linedef { v1 = 3; v2 = 6; sidefront = 6; sideback = 7; twosided = true; }
+linedef { v1 = 6; v2 = 8; sidefront = 8; sideback = 9; twosided = true; }
+linedef { v1 = 7; v2 = 8; sidefront = 10; sideback = 11; twosided = true; }
+linedef { v1 = 2; v2 = 0; sidefront = 12; blocking = true; }
+linedef { v1 = 0; v2 = 1; sidefront = 13; blocking = true; }
+linedef { v1 = 1; v2 = 4; sidefront = 14; blocking = true; }
+linedef { v1 = 5; v2 = 2; sidefront = 15; blocking = true; }
+linedef { v1 = 7; v2 = 5; sidefront = 16; blocking = true; }
+linedef { v1 = 9; v2 = 8; sidefront = 17; blocking = true; }
+linedef { v1 = 4; v2 = 9; sidefront = 18; blocking = true; }
+linedef { v1 = 10; v2 = 7; sidefront = 19; blocking = true; }
+linedef { v1 = 11; v2 = 10; sidefront = 20; blocking = true; }
+linedef { v1 = 8; v2 = 11; sidefront = 21; blocking = true; }
+
+sidedef { sector = 0; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 3; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 0; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 2; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 3; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 2; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 3; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 4; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 2; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sidedef { sector = 3; texturemiddle = "STARTAN2"; }
+sidedef { sector = 3; texturemiddle = "STARTAN2"; }
+sidedef { sector = 4; texturemiddle = "STARTAN2"; }
+sidedef { sector = 4; texturemiddle = "STARTAN2"; }
+sidedef { sector = 4; texturemiddle = "STARTAN2"; }
+
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; id = 0; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 128; heightceiling = 256; lightlevel = 160; id = 7; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 128; heightceiling = 256; lightlevel = 160; id = 7; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 128; heightceiling = 256; lightlevel = 160; id = 7; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; id = 0; }
+"#;
+
+    #[test]
+    fn a_three_member_split_group_is_walked_once_per_member() {
+        // The walk reaches `B` from both `A` and `C`, so it is stacked twice
+        // and popped twice; the second pop must be dropped rather than
+        // walked again. All three members still count as one split group,
+        // and none is `Dead` — each has a low room under it.
+        let r = report_of(TRIANGLE);
+        assert_eq!(r.plats.len(), 3);
+        assert_eq!((r.counts.shared_tag, r.counts.shared_split), (3, 1));
+        let refusals: Vec<Option<Refusal>> = r.plats.iter().map(|p| p.refusal).collect();
+        assert_eq!(refusals, vec![Some(Refusal::SharedTag); 3]);
+    }
+
     #[test]
     fn callable_classes_and_the_top_trigger_are_reported() {
         // A walkover on the low face fires from the platform alone.

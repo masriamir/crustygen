@@ -455,6 +455,73 @@ mod tests {
     }
 
     #[test]
+    fn a_walkovers_two_sides_are_gated_one_at_a_time() {
+        // `a_walkover_on_the_low_face_fires_only_from_the_plat`'s two
+        // sectors with the line drawn the other way round, so the platform
+        // is its front and the low room its back. `P_TryMove`'s rule is
+        // read once per side: the platform steps down into the low room, so
+        // the front fires; the low room cannot climb the 128 back onto the
+        // platform, so the back does not. The same lone activator, reached
+        // through the other of the two guards.
+        let (_, _, plats) = plats_of(&chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(88, 7, true), (0, 0, false)],
+            "",
+        ));
+        let t = &plats[0].triggers[0];
+        assert_eq!(
+            (t.front, t.back),
+            (1, Some(0)),
+            "the flipped link puts the platform on the line's front"
+        );
+        assert_eq!(t.activators, vec![(1, Activator::Plat)]);
+
+        // A walkover between two rooms level with each other and well below
+        // the platform they name: each can cross into the other, so both
+        // fire it, and the back one is a low room rather than the platform.
+        let (_, _, plats) = plats_of(&chain(
+            &[0, 0, 128],
+            &[0, 0, 7],
+            &[(88, 7, false), (0, 0, false)],
+            "",
+        ));
+        assert_eq!(
+            plats[0].triggers[0].activators,
+            vec![(0, Activator::Low), (1, Activator::Low)]
+        );
+    }
+
+    #[test]
+    fn a_walkover_nobody_can_cross_fires_from_neither_side() {
+        // `ML_BLOCKING` is legal on a two-sided line — a fence the player
+        // sees and shoots across but cannot walk through.
+        // `P_CrossSpecialLine` runs off `P_TryMove`, so a walkover on one is
+        // crossed from neither side and has no activator at all, even though
+        // the line is still the platform's trigger.
+        let text = chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(88, 7, false), (0, 0, false)],
+            "",
+        )
+        .replacen(
+            "special = 88; arg0 = 7; }",
+            "special = 88; arg0 = 7; blocking = true; }",
+            1,
+        );
+        let (_, _, plats) = plats_of(&text);
+        let t = &plats[0].triggers[0];
+        assert_eq!((t.linedef, t.special), (0, 88));
+        assert!(
+            t.activators.is_empty(),
+            "an uncrossable walkover fires from nowhere: {:?}",
+            t.activators
+        );
+        assert!(!plats[0].callable_low() && !plats[0].callable_top());
+    }
+
+    #[test]
     fn rests_and_shared_tags() {
         let (_, _, p) = plats_of(&chain(&[0, 128], &[0, 7], &[(62, 7, false)], ""));
         assert_eq!(

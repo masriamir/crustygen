@@ -640,6 +640,34 @@ mod tests {
     }
 
     #[test]
+    fn emit_lifts_refuses_a_theme_the_texture_table_does_not_name() {
+        // `compile` never reaches this pass with an unresolvable theme —
+        // `emit_sectors` refuses it first — so the riser and trim lookups
+        // are reachable only by driving the pass directly, as `compile_data`
+        // already does. Every earlier pass gets the real theme; only
+        // `emit_lifts` sees the bad one.
+        let mut ir = Ir::from_json(LIFT).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = sectors::emit_sectors(&ir).expect("sectors");
+        sectors::resolve_secret_specials(&ir, &tables, &mut data);
+        portals::cut_portals(&ir, &tables, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        doors::emit_doors(&ir, &tables, &mut data, &mut tags).expect("doors");
+        exits::emit_exits(&ir, &tables, &mut data, &mut tags).expect("exits");
+        teleports::emit_teleports(&ir, &tables, &mut data, &mut tags).expect("teleports");
+
+        ir.theme = "no_such_theme".to_owned();
+        let err = emit_lifts(&ir, &tables, &mut data, &mut tags).expect_err(
+            "the theme resolves to no \
+                 texture set",
+        );
+        assert!(
+            matches!(&err, CompileError::UnknownTheme { theme } if theme == "no_such_theme"),
+            "expected UnknownTheme naming the theme asked for, got {err}"
+        );
+    }
+
+    #[test]
     fn a_lift_portal_emits_one_platform_at_the_high_floor_with_the_switch_on_its_low_face() {
         let Built {
             tables,

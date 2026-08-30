@@ -928,6 +928,27 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn an_unknown_vocabulary_name_on_a_pedestal_is_rejected() {
+        // The room's own things resolve through `place_things`; a pedestal's
+        // resolve in `place_pedestal_things`, which has to raise the same
+        // refusal itself. `Ir::from_json` carries an unresolvable `kind`
+        // through untouched — `an_unknown_vocabulary_name_is_rejected` shows
+        // that for a room thing — so this pass is where it is caught.
+        let tables = Tables::load().expect("tables");
+        let unknown = PEDESTAL.replacen(r#""kind":"soulsphere""#, r#""kind":"no_such_thing""#, 1);
+        let err = compile(&Ir::from_json(&unknown).expect("ir"), &tables)
+            .expect_err("an unresolvable pedestal thing is refused");
+        assert!(
+            matches!(
+                &err,
+                CompileError::UnknownThing { room, kind }
+                    if room == "a" && kind == "no_such_thing"
+            ),
+            "expected UnknownThing naming the pedestal's host room and the bad kind, got {err}"
+        );
+    }
+
     /// `PEDESTAL`'s room and pedestal, with the pedestal carrying nothing
     /// and a soulsphere authored in the *room* at `at` instead — the mistake
     /// `ThingOnPedestal` exists to catch.
