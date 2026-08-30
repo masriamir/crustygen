@@ -1,0 +1,24 @@
+{
+  "seed": 20260829, "grid": 64, "theme": "tech_base",
+  "rooms": [
+    { "id": "low", "footprint": [[0,0],[0,256],[256,256],[256,0]], "floor": 0, "ceiling": 192, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
+      "things": [ { "kind": "player1_start", "at": [64, 64], "angle": 90 } ] },
+    { "id": "ledge", "footprint": [[320,0],[320,256],[576,256],[576,0]], "floor": 128, "ceiling": 256, "light": 144,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3" },
+    { "id": "far", "footprint": [[640,0],[640,256],[896,256],[896,0]], "floor": 128, "ceiling": 256, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3" },
+    { "id": "north", "footprint": [[0,320],[0,576],[256,576],[256,320]], "floor": 128, "ceiling": 256, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3" }
+  ],
+  "portals": [
+    { "a": "low", "b": "ledge", "kind": "lift", "width": 64, "at": [256, 128], "trigger": "both_ends" },
+    { "a": "ledge", "b": "far", "kind": "lift", "width": 64, "at": [576, 128], "rise": 64, "speed": "fast" },
+    { "a": "low", "b": "north", "kind": "lift", "width": 64, "at": [128, 256], "trigger": "walkover", "alcove_near": 16 }
+  ],
+  "exits": [ { "room": "far", "trigger": "switch", "at": [896, 128], "width": 64 } ],
+  "pedestals": [
+    { "id": "perch", "room": "low", "at": [128, 128], "rise": 96,
+      "things": [ { "kind": "medikit", "at": [160, 160], "angle": 0 } ] }
+  ]
+}
