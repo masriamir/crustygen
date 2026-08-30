@@ -1,5 +1,6 @@
 //! Places things with real clearance, not merely inside their room.
 
+use crate::compile::lifts::LiftOut;
 use crate::compile::teleports::Marker;
 use crate::compile::{CompileError, MapData};
 use crate::geom::{Pt, contains, dist_to_segment};
@@ -94,6 +95,9 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// [`CompileError::TeleportMarkerNoHeadroom`] when that sector is too short
 /// for it.
 ///
+/// `lifts` carries the emitted platforms; it is accepted now so the pass
+/// order is settled, and is not yet read.
+///
 /// # Panics
 /// Panics if `teleport_dest` is absent from the vocabulary table, which
 /// `tables`'s own `exit_lift_teleport_and_sector_specials_resolve` test
@@ -103,6 +107,7 @@ pub fn place_things(
     tables: &Tables,
     data: &MapData,
     markers: &[Marker],
+    _lifts: &[LiftOut],
 ) -> Result<Vec<ThingOut>, CompileError> {
     let mut out = Vec::new();
     let mut starts: Vec<(i32, i32)> = Vec::new();
@@ -314,7 +319,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data, &[]).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[], &[]).expect("placed");
         assert_eq!(things.len(), 1);
         assert_eq!(things[0].kind, 1, "player 1 start");
         assert_eq!(things[0].x, 128);
@@ -326,7 +331,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data, &[]),
+            place_things(&ir, &tables, &data, &[], &[]),
             Err(CompileError::ThingOutsideRoom { .. })
         ));
     }
@@ -339,14 +344,14 @@ mod tests {
         let ok = Ir::from_json(&ir_with_thing("player1_start", (r, 128), 128)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
             "at the radius it fits"
         );
         // One unit closer: it does not.
         let bad = Ir::from_json(&ir_with_thing("player1_start", (r - 1, 128), 128)).expect("ir");
         let data_bad = compiled_data(&bad, &tables);
         assert!(matches!(
-            place_things(&bad, &tables, &data_bad, &[]),
+            place_things(&bad, &tables, &data_bad, &[], &[]),
             Err(CompileError::ThingTooClose { .. })
         ));
     }
@@ -390,7 +395,7 @@ mod tests {
         let data = compiled_data(&ir, &tables);
         assert!(
             matches!(
-                place_things(&ir, &tables, &data, &[]),
+                place_things(&ir, &tables, &data, &[], &[]),
                 Err(CompileError::ThingTooClose { .. })
             ),
             "a point 8*sqrt(2) ~ 11.3 units from the diagonal chamfer must be rejected \
@@ -411,7 +416,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing_near_octagon_chamfer(12)).expect("ir");
         let data = compiled_data(&ir, &tables);
         assert!(
-            place_things(&ir, &tables, &data, &[]).is_ok(),
+            place_things(&ir, &tables, &data, &[], &[]).is_ok(),
             "a point 12*sqrt(2) ~ 17.0 units from the diagonal chamfer must fit against a \
              16-unit radius"
         );
@@ -424,13 +429,13 @@ mod tests {
         let ok = Ir::from_json(&ir_with_thing("player1_start", (128, 128), h)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
             "at exactly its height it fits"
         );
         let bad = Ir::from_json(&ir_with_thing("player1_start", (128, 128), h - 1)).expect("ir");
         let data_bad = compiled_data(&bad, &tables);
         assert!(matches!(
-            place_things(&bad, &tables, &data_bad, &[]),
+            place_things(&bad, &tables, &data_bad, &[], &[]),
             Err(CompileError::NoHeadroom { .. })
         ));
     }
@@ -441,7 +446,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data, &[]),
+            place_things(&ir, &tables, &data, &[], &[]),
             Err(CompileError::UnknownThing { .. })
         ));
     }
@@ -461,7 +466,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data, &[]),
+            place_things(&ir, &tables, &data, &[], &[]),
             Err(CompileError::OverlappingStarts { .. })
         ));
     }
@@ -477,7 +482,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         assert!(matches!(
-            place_things(&ir, &tables, &MapData::default(), &[]),
+            place_things(&ir, &tables, &MapData::default(), &[], &[]),
             Err(CompileError::UnboundedRoom { .. })
         ));
     }
@@ -516,7 +521,7 @@ mod tests {
         let ok = Ir::from_json(&ir_json(wall + r)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
             "exactly the radius from room b's own wall fits"
         );
 
@@ -524,7 +529,7 @@ mod tests {
         let data_bad = compiled_data(&bad, &tables);
         assert!(
             matches!(
-                place_things(&bad, &tables, &data_bad, &[]),
+                place_things(&bad, &tables, &data_bad, &[], &[]),
                 Err(CompileError::ThingTooClose { .. })
             ),
             "one unit closer than the radius does not fit"
@@ -576,7 +581,7 @@ mod tests {
         let ok = Ir::from_json(&empty_corridor_json(h)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
             "at exactly the player's height, an empty room is fine"
         );
 
@@ -584,7 +589,7 @@ mod tests {
         let data_bad = compiled_data(&bad, &tables);
         assert!(
             matches!(
-                place_things(&bad, &tables, &data_bad, &[]),
+                place_things(&bad, &tables, &data_bad, &[], &[]),
                 Err(CompileError::NoHeadroom { .. })
             ),
             "an empty room one unit too short must still be rejected"
@@ -727,7 +732,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data, &[]).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[], &[]).expect("placed");
         let skills = things[0].skills;
         assert!(
             skills.skill1 && skills.skill2 && skills.skill3 && skills.skill4 && skills.skill5,
@@ -744,7 +749,7 @@ mod tests {
         let ir = Ir::from_json(&json).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data, &[]).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[], &[]).expect("placed");
         let skills = things[0].skills;
         assert!(!skills.skill1 && !skills.skill2, "explicitly excluded");
         assert!(
