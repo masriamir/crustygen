@@ -154,3 +154,12 @@ failure.
    is the same kind of before-design measurement, and its tool is committed as
    `examples/liftprobe` (`cargo run --release --example liftprobe -- census <label> <dir>...`)
    so the numbers can be re-derived when the sample or the loader changes.
+
+**The measurement of record is the newest dated document under `docs/measurements/`.** Today
+that is [`docs/measurements/lifts-2026-08-30.md`](measurements/lifts-2026-08-30.md): the
+before/after for the lift construct (all axes 7.5 % → 8.9 %, line axis 9.0 % → 13.5 %, the new
+lift axis at 61.1 %), the reconciliation of `lift::plat::recognize` against the shape probe on
+both the sample and DOOM+DOOM2, and the full sweep report for that run — which is why there is
+no separate `expressibility-2026-08-30.md`. A run whose report is merged into a narrative
+document this way is the norm for a construct release; a bare `expressibility-<date>.md` is what
+a re-measurement with nothing to narrate leaves behind.

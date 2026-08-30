@@ -14,6 +14,14 @@ as Dead plats with no geometry. That moves only the `Other` shape's size lines i
 **Engine source:** `linuxdoom-1.10` at the pinned commit `a77dfb96`, fetched for this probe
 (`p_spec.h`, `p_plats.c`, `p_switch.c`, `p_spec.c`, `p_floor.c`, `p_map.c`, `r_segs.c`).
 
+**Reproduced by:** [`lifts-2026-08-30.md`](lifts-2026-08-30.md), the after-measurement for the
+shipped construct. It re-ran `examples/liftprobe` over both populations on the branch tree and
+reproduced §A–§C and §K exactly (795 lift maps, 3,876 plats, 244 dead, 304 broken lines; Core /
+Pedestal / Barrier 1,808 / 498 / 322 on the sample and 147 / 50 / 18 on DOOM+DOOM2), then
+reconciled those shape counts against the recognizer's — which refuses shared-tag and one-way
+platforms this document's `clean` test never tested for. §K's predicted yield of 9.4 % came in
+at 8.9 %; the six-map difference is decomposed there.
+
 Sub-project 3 of Project G. The question: what *is* a lift in the maps we have, so that the IR,
 the compiler, rule P5 and the recognizer state the same thing.
 
