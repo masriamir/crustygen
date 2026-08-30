@@ -174,7 +174,7 @@ struct TextureSet {
     /// face) — the SUPPORT family.
     lift_riser: String,
     /// Width in pixels of the `switch` texture's canvas, so an exit line
-    /// narrower than it can centre the texture rather than showing its
+    /// narrower than it can center the texture rather than showing its
     /// left edge.
     switch_width: i32,
 }
@@ -1085,9 +1085,9 @@ impl Tables {
     /// The width in pixels of `theme`'s switch texture, or `None` when the
     /// theme is unknown.
     ///
-    /// `compile::exits` centres the switch texture on an exit line narrower
+    /// `compile::exits` centers the switch texture on an exit line narrower
     /// than the texture; without this an exit shows the texture's left edge
-    /// and the switch graphic reads as off-centre.
+    /// and the switch graphic reads as off-center.
     #[must_use]
     pub fn switch_width(&self, theme: &str) -> Option<i32> {
         Some(self.vocabulary.textures.get(theme)?.switch_width)
