@@ -16,7 +16,7 @@
       "things": [ { "kind": "stimpack", "at": [1408, 960], "angle": 0 } ] },
     { "id": "hall", "footprint": [[1152,0],[1152,512],[1664,512],[1664,0]], "floor": 0, "ceiling": 256, "light": 160,
       "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3" },
-    { "id": "exit", "footprint": [[1728,0],[1728,512],[2240,512],[2240,0]], "floor": 128, "ceiling": 256, "light": 160,
+    { "id": "exit", "footprint": [[1792,0],[1792,512],[2304,512],[2304,0]], "floor": 128, "ceiling": 256, "light": 160,
       "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3" }
   ],
   "portals": [
@@ -24,9 +24,9 @@
     { "a": "ledge", "b": "yard", "kind": "lift", "width": 128, "at": [512, 832], "trigger": "both_ends", "speed": "fast" },
     { "a": "yard", "b": "yard2", "kind": "lift", "width": 64, "at": [1088, 832], "rise": 96, "speed": "fast" },
     { "a": "yard2", "b": "hall", "kind": "plain", "width": 128, "at": [1408, 576] },
-    { "a": "hall", "b": "exit", "kind": "lift", "width": 128, "at": [1664, 256], "trigger": "walkover", "alcove_near": 16 }
+    { "a": "hall", "b": "exit", "kind": "lift", "width": 128, "at": [1664, 256], "trigger": "walkover", "alcove_near": 64 }
   ],
-  "exits": [ { "room": "exit", "trigger": "switch", "at": [2240, 256], "width": 64 } ],
+  "exits": [ { "room": "exit", "trigger": "switch", "at": [2304, 256], "width": 64 } ],
   "pedestals": [
     { "id": "prize", "room": "hall", "at": [1344, 192], "rise": 128,
       "things": [ { "kind": "soulsphere", "at": [1376, 224], "angle": 0 } ] }

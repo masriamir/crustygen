@@ -235,7 +235,7 @@ yard is a `both_ends` call, fast. The yard's east gap is a barrier: a
 platform risen 96 above two rooms that share a floor, lowered from either
 side. A plain passage runs south out of yard2 into the hall, where a pedestal
 holds a soulsphere the player must call down. The hall's lift east into the
-exit room is a walkover, recessed into a near alcove.
+exit room is a walkover, recessed into a 64-deep near alcove.
 
 ## Sequence of events
 
@@ -252,9 +252,11 @@ exit room is a walkover, recessed into a near alcove.
    yard2, holding a stimpack.
 5. A plain passage runs south out of yard2 into the hall. The pedestal there
    rests 128 up with a soulsphere on it; any of its four faces calls it down.
-6. The hall's east wall carries the last lift, a walkover in a near alcove,
-   up into the exit room — 128 above the hall — whose east wall carries the
-   switch that ends the level.
+6. The hall's east wall carries the last lift, a walkover in a 64-deep
+   near alcove, up into the exit room — 128 above the hall — whose east wall
+   carries the switch that ends the level. The alcove is deeper than the
+   player's own radius on purpose: the walkover fires only when their center
+   crosses its outer threshold, which a shallower alcove would never admit.
 
 ## Notes
 
@@ -277,7 +279,7 @@ document asking `both_ends` instead, which fails the same row with the same
 This spec was derived from `salto.spec.md`; the keys that differ, and why:
 
 - `scale.size` reset to 2400x1200 (salto: 1500x1200) — wider, same height budget.
-  Ascensor's emitted bounding box is 2240x1088: the six rooms run west to
+  Ascensor's emitted bounding box is 2304x1088: the six rooms run west to
   east as one chain, and salto's 1500-unit width budget fails on it.
 - `scale.sectors` left at salto's 12..20. Ascensor emits 13: 6 rooms + 3
   lift platforms + 1 barrier + 1 plain passage + 1 lift alcove + 1 pedestal.

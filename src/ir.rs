@@ -251,8 +251,11 @@ pub struct Portal {
     /// An optional buffer sector between room `a` and the door or platform,
     /// in map units.
     ///
-    /// When present, must be one of [`Ir::DOOR_DIMENSIONS`]
-    /// ([`IrError::InvalidDoorDimension`] otherwise). Meaningless (and
+    /// When present, must be one of [`Ir::DOOR_DIMENSIONS`] on a
+    /// [`PortalKind::Door`]/[`PortalKind::Locked`] portal
+    /// ([`IrError::InvalidDoorDimension`] otherwise) and one of the wider
+    /// [`Ir::LIFT_ALCOVE_DIMENSIONS`] on a [`PortalKind::Lift`]
+    /// ([`IrError::InvalidLiftAlcoveDimension`] otherwise). Meaningless (and
     /// rejected) on a [`PortalKind::Plain`] portal. On a [`PortalKind::Lift`]
     /// this is a buffer, or, when the low room is `a` and [`Self::trigger`]
     /// is [`LiftTrigger::Walkover`], the strip that carries the walkover
@@ -651,8 +654,12 @@ pub enum IrError {
         /// The second room.
         b: String,
     },
-    /// A [`Portal::door_thickness`], [`Portal::alcove_near`], or
-    /// [`Portal::alcove_far`] value is not one of [`Ir::DOOR_DIMENSIONS`].
+    /// A [`Portal::door_thickness`], or a
+    /// [`Portal::alcove_near`]/[`Portal::alcove_far`] on a
+    /// [`PortalKind::Door`]/[`PortalKind::Locked`] portal, is not one of
+    /// [`Ir::DOOR_DIMENSIONS`]. A lift's alcove is judged against the wider
+    /// [`Ir::LIFT_ALCOVE_DIMENSIONS`] and reports
+    /// [`Self::InvalidLiftAlcoveDimension`] instead.
     #[error("portal `{a}` <-> `{b}` has {field} {value}, which must be 8, 16, or 32 map units")]
     InvalidDoorDimension {
         /// The first room.
@@ -661,6 +668,27 @@ pub enum IrError {
         b: String,
         /// Which field was rejected: `"door_thickness"`, `"alcove_near"`, or
         /// `"alcove_far"`.
+        field: &'static str,
+        /// The rejected value.
+        value: i32,
+    },
+    /// A [`PortalKind::Lift`] portal's [`Portal::alcove_near`] or
+    /// [`Portal::alcove_far`] value is not one of
+    /// [`Ir::LIFT_ALCOVE_DIMENSIONS`].
+    ///
+    /// Its own variant rather than a widened [`Self::InvalidDoorDimension`]
+    /// because the two sets differ — a lift alcove may also be 64 — and one
+    /// message naming both would have to lie about whichever kind the caller
+    /// actually wrote.
+    #[error(
+        "portal `{a}` <-> `{b}` is a lift with {field} {value}, which must be 8, 16, 32, or 64 map units"
+    )]
+    InvalidLiftAlcoveDimension {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// Which field was rejected: `"alcove_near"` or `"alcove_far"`.
         field: &'static str,
         /// The rejected value.
         value: i32,
@@ -1007,8 +1035,9 @@ impl Ir {
     /// jambs are commonly built on.
     pub const MIN_PORTAL_GAP: i32 = 8;
 
-    /// The legal values for [`Portal::door_thickness`], [`Portal::alcove_near`],
-    /// and [`Portal::alcove_far`], in map units.
+    /// The legal values for [`Portal::door_thickness`], and for
+    /// [`Portal::alcove_near`]/[`Portal::alcove_far`] on a
+    /// [`PortalKind::Door`]/[`PortalKind::Locked`] portal, in map units.
     ///
     /// A compiler-construction constant, like [`Self::MIN_PORTAL_GAP`], not
     /// an engine-sourced one — nothing in the Doom engine constrains door or
@@ -1017,7 +1046,24 @@ impl Ir {
     /// playtester's request itself specified, matching real mapping
     /// practice: a door is built at one of a few conventional depths, not an
     /// arbitrary one.
+    ///
+    /// A [`PortalKind::Lift`]'s alcoves take the wider
+    /// [`Self::LIFT_ALCOVE_DIMENSIONS`] instead.
     pub const DOOR_DIMENSIONS: [i32; 3] = [8, 16, 32];
+
+    /// The legal values for [`Portal::alcove_near`] and [`Portal::alcove_far`]
+    /// on a [`PortalKind::Lift`], in map units.
+    ///
+    /// [`Self::DOOR_DIMENSIONS`] plus 64, because a lift alcove is not only a
+    /// buffer the way a door's is. On a [`LiftTrigger::Walkover`] lift it is
+    /// the strip the player must stand *inside* for the trigger to fire, so
+    /// it has to be deeper than the player's own radius (16) — which leaves
+    /// 32 as the only workable door dimension and nothing above it for an
+    /// approach strip the player walks along rather than merely steps into.
+    /// 64 is the next size up on the same 8-unit ladder, and the module the
+    /// rest of the compiler's own rectangles are built on
+    /// ([`Self::PAD_SIZE`], [`Self::PEDESTAL_DEFAULT_SIZE`]).
+    pub const LIFT_ALCOVE_DIMENSIONS: [i32; 4] = [8, 16, 32, 64];
 
     /// The side of every teleport pad, in map units.
     ///
@@ -1126,8 +1172,10 @@ impl Ir {
     /// [`IrError::InvalidExitWidth`]/[`IrError::OddExitWidth`] for a
     /// non-positive or odd exit width, [`IrError::MissingDoorThickness`] for
     /// a door/locked portal that names no `door_thickness`,
-    /// [`IrError::InvalidDoorDimension`] for a `door_thickness`,
+    /// [`IrError::InvalidDoorDimension`] for a door's `door_thickness`,
     /// `alcove_near`, or `alcove_far` that is not 8, 16, or 32,
+    /// [`IrError::InvalidLiftAlcoveDimension`] for a lift's `alcove_near` or
+    /// `alcove_far` that is not 8, 16, 32, or 64,
     /// [`IrError::DoorFieldsOnPlainPortal`] for a plain portal that sets any
     /// of those three fields, [`IrError::DoorGapMismatch`] for a door/locked
     /// portal whose facing-wall gap does not exactly equal `door_thickness +
@@ -1335,7 +1383,8 @@ impl Ir {
     /// [`PortalKind::Door`]/[`PortalKind::Locked`], absent for
     /// [`PortalKind::Plain`]/[`PortalKind::Lift`]; the alcoves, when
     /// present, one of [`Self::DOOR_DIMENSIONS`] for
-    /// [`PortalKind::Door`]/[`PortalKind::Locked`]/[`PortalKind::Lift`], and
+    /// [`PortalKind::Door`]/[`PortalKind::Locked`] and one of
+    /// [`Self::LIFT_ALCOVE_DIMENSIONS`] for [`PortalKind::Lift`], and
     /// absent for [`PortalKind::Plain`].
     ///
     /// Runs unconditionally over every portal — unlike [`Self::validate_door_gap`],
@@ -1393,9 +1442,9 @@ impl Ir {
                         ("alcove_far", portal.alcove_far),
                     ] {
                         if let Some(value) = value
-                            && !Self::DOOR_DIMENSIONS.contains(&value)
+                            && !Self::LIFT_ALCOVE_DIMENSIONS.contains(&value)
                         {
-                            return Err(IrError::InvalidDoorDimension {
+                            return Err(IrError::InvalidLiftAlcoveDimension {
                                 a: portal.a.clone(),
                                 b: portal.b.clone(),
                                 field,
@@ -3157,15 +3206,20 @@ mod tests {
             Ir::from_json(&json),
             Err(IrError::DoorThicknessOnLift { .. })
         ));
-        let json = with(
-            LIFT_BASE,
-            r#""at":[256,128] }"#,
-            r#""at":[256,128], "alcove_near":16 }"#,
-        );
-        assert!(
-            Ir::from_json(&json).is_ok(),
-            "an alcove on a lift is a buffer or a walkover strip"
-        );
+        for depth in Ir::LIFT_ALCOVE_DIMENSIONS {
+            let json = with(
+                LIFT_BASE,
+                r#""at":[256,128] }"#,
+                &format!(r#""at":[256,128], "alcove_near":{depth} }}"#),
+            );
+            assert!(
+                Ir::from_json(&json).is_ok(),
+                "an alcove on a lift is a buffer or a walkover strip, and {depth} is a legal depth"
+            );
+        }
+        // 64 is the one depth a lift admits and a door does not, so the two
+        // sets are genuinely different rather than one widened in place.
+        assert!(!Ir::DOOR_DIMENSIONS.contains(&64) && Ir::LIFT_ALCOVE_DIMENSIONS.contains(&64));
         let json = with(
             LIFT_BASE,
             r#""at":[256,128] }"#,
@@ -3173,8 +3227,9 @@ mod tests {
         );
         assert!(matches!(
             Ir::from_json(&json),
-            Err(IrError::InvalidDoorDimension {
+            Err(IrError::InvalidLiftAlcoveDimension {
                 field: "alcove_near",
+                value: 12,
                 ..
             })
         ));

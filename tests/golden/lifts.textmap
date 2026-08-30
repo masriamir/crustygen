@@ -30,8 +30,8 @@ vertex { x = 160.0; y = 320.0; }
 vertex { x = 96.0; y = 320.0; }
 vertex { x = 896.0; y = 160.0; }
 vertex { x = 896.0; y = 96.0; }
-vertex { x = 96.0; y = 272.0; }
-vertex { x = 160.0; y = 272.0; }
+vertex { x = 96.0; y = 288.0; }
+vertex { x = 160.0; y = 288.0; }
 vertex { x = 128.0; y = 128.0; }
 vertex { x = 192.0; y = 128.0; }
 vertex { x = 192.0; y = 192.0; }
