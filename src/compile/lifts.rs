@@ -899,6 +899,143 @@ mod tests {
         }
     }
 
+    /// The same construction with the two rooms swapped *in space*: room
+    /// `a` lies EAST of room `b`, so the facing pair is room `a`'s own west
+    /// wall against room `b`'s own east wall.
+    ///
+    /// Every other lift fixture on the branch puts room `a` west of room
+    /// `b`, which pins two of `emit_portal_lift`'s geometric inputs to a
+    /// single value each: [`crate::geom::FacingSpan`]'s `near` is always
+    /// below its `far`, so `dir` is always `+1` and `pos1`/`pos2` always
+    /// walk up from room `a`'s wall; and `geom::facing_spans` always reports
+    /// `a_forward == false`, so the far alcove's outer threshold is always
+    /// cut with `!a_forward == true`. Facing the other way inverts both at
+    /// once — `dir == -1`, `a_forward == true` — which is what makes the
+    /// signed depth a subtraction in the other direction and swaps which
+    /// winding `emit_opening` gives each threshold. Room `b` is the low one
+    /// here too, so the `!a_is_low` arm and the far-alcove block run against
+    /// the inverted geometry rather than the familiar one.
+    ///
+    /// Worked example: room `a`'s own wall sits at x=256 and room `b`'s at
+    /// x=192, a 64-unit gap; portal width 64 at (256,128) opens y in
+    /// [96,160]; `alcove_far` 16 puts the alcove at x in [192,208] and the
+    /// platform at x in [208,256] — a signed depth of
+    /// `(208 - 256) * -1 == 48`, which the same expression read with the
+    /// sign the other way round would make -48 and refuse.
+    #[test]
+    fn a_lift_whose_room_a_lies_east_of_room_b_builds_the_same_platform_mirrored() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[256,0],[256,256],[512,256],[512,0]], "floor":128, "ceiling":256, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[ { "kind":"player1_start", "at":[384,128], "angle":0 } ] },
+            { "id":"b", "footprint":[[-64,0],[-64,256],[192,256],[192,0]], "floor":0, "ceiling":192, "light":144,
+              "floor_tex":"FLAT1", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[ { "a":"a", "b":"b", "kind":"lift", "width":64, "at":[256,128],
+                        "trigger":"walkover", "alcove_far":16 } ]
+        }"#;
+        let Built {
+            tables,
+            data,
+            lifts,
+            ..
+        } = compile_data(json);
+        let riser = tables
+            .texture("lift_riser", "tech_base")
+            .expect("the theme names a lift riser");
+        assert_eq!(lifts.len(), 1);
+        let l = &lifts[0];
+        assert_eq!((l.shape, l.travel), (LiftShape::Lift, 128));
+
+        // Sectors: a, b, the far alcove (the only one), the platform.
+        assert_eq!(data.sectors.len(), 4);
+        let alcove = 2;
+        assert_eq!(
+            (data.sectors[alcove].floor, data.sectors[alcove].light),
+            (0, 144),
+            "the alcove sits at room b's floor, the low one, and borrows its light"
+        );
+        assert_eq!(
+            l.callable_from,
+            vec![alcove],
+            "called from the far alcove, since room b is the low room"
+        );
+        let plat = &data.sectors[l.sector];
+        assert_eq!(
+            (plat.floor, plat.ceiling),
+            (128, 192),
+            "rests at room a's floor, under the lower of the two ceilings"
+        );
+        assert_eq!(plat.wall_tex, riser);
+
+        // The whole point of the fixture: the platform is built *westward*
+        // from room a's wall, so the alcove is the 16 units nearest room b
+        // and the platform is the 48 the depth check measured.
+        let x_of = |line: usize| {
+            let ld = &data.linedefs[line];
+            let (a, b) = (data.vertices[ld.v1], data.vertices[ld.v2]);
+            assert_eq!(a.x, b.x, "linedef {line} is a vertical cut");
+            a.x
+        };
+        let low = l.low_line.expect("a portal lift has a low face");
+        let top = l.top_line.expect("and a top face");
+        assert_eq!(
+            (x_of(top), x_of(low)),
+            (256, 208),
+            "the top face is room a's own wall; the low face stops 16 short of room b's"
+        );
+        // Front/back: `emit_opening` binds the neighbor to the front and the
+        // platform to the back on both faces, whichever way the wall winds.
+        assert_eq!(
+            (sides(&data, low), sides(&data, top)),
+            ((alcove, Some(l.sector)), (0, Some(l.sector))),
+            "the alcove fronts the low face, room a the top one"
+        );
+
+        let outer = data
+            .linedefs
+            .iter()
+            .position(|ld| {
+                let (f, b) = (
+                    data.sidedefs[ld.front].sector,
+                    ld.back.map(|b| data.sidedefs[b].sector),
+                );
+                f == 1 && b == Some(alcove)
+            })
+            .expect("the alcove's outer threshold fronts room b");
+        assert_eq!(x_of(outer), 192, "cut at room b's own wall");
+        assert_eq!(
+            data.linedefs[outer].special,
+            tables.lift_special(false, false),
+            "the walkover special rides the outer threshold, not the riser"
+        );
+        assert_eq!(data.linedefs[outer].tag, l.tag);
+        assert_eq!(
+            data.linedefs[low].special, 0,
+            "nothing on the riser for a walkover lift"
+        );
+
+        // Both risers, each on the one sidedef `r_segs.c` draws it from: the
+        // alcove's on the low face, the platform's own on the top face.
+        let lower = |side: usize| data.sidedefs[side].lower.as_str();
+        assert_eq!(
+            (
+                lower(data.linedefs[low].front),
+                lower(data.linedefs[top].back.expect("two-sided")),
+                lower(data.linedefs[top].front),
+            ),
+            (riser, riser, ""),
+            "room a, the level room, is the one side that shows nothing"
+        );
+        for i in [low, top] {
+            assert!(
+                !data.linedefs[i].lower_unpegged && !data.linedefs[i].upper_unpegged,
+                "linedef {i}: both pegging flags clear"
+            );
+        }
+    }
+
     #[test]
     fn a_barrier_rests_rise_above_both_rooms_with_the_switch_on_both_faces() {
         let json = LIFT
@@ -919,7 +1056,14 @@ mod tests {
             .expect("the theme names a lift riser");
         let l = &lifts[0];
         assert_eq!(l.shape, LiftShape::Barrier);
-        assert_eq!(data.sectors[l.sector].floor, 96);
+        let plat = &data.sectors[l.sector];
+        assert_eq!(plat.floor, 96);
+        // A barrier rests flush with neither room, so it has no "level
+        // room" to borrow from and falls back to room `a` — the fixture
+        // gives `b` a different light (144) and flat (`FLAT1`), so these
+        // would not hold if the fallback picked the other room.
+        assert_eq!(plat.light, 160, "room a's light");
+        assert_eq!(plat.floor_tex, "FLOOR4_8", "room a's flat");
         assert_eq!(l.travel, 96);
         assert_eq!(l.callable_from, vec![0, 1]);
         for line in [l.low_line.unwrap(), l.top_line.unwrap()] {
@@ -1131,6 +1275,53 @@ mod tests {
                 "linedef {i}: the normal use special"
             );
         }
+    }
+
+    /// The accept path for an explicit [`crate::ir::Pedestal::size`]. Every
+    /// other pedestal fixture either takes the 64x64 default or names a size
+    /// only to be refused (`pedestal_rejections`'s 24-wide one), so nothing
+    /// yet showed a *legal* explicit size reaching the emitted geometry: a
+    /// `size` the compiler deserialized and then ignored would satisfy all
+    /// of them.
+    ///
+    /// `Pedestal::rect` anchors the rectangle at `at` and adds the size, so
+    /// a 96x64 pedestal at (128,128) spans (128,128)-(224,192) — deliberately
+    /// non-square, since a square would not tell a transposed `[w, h]` apart.
+    #[test]
+    fn an_explicit_pedestal_size_becomes_the_emitted_rectangle() {
+        let json = PEDESTAL.replacen(r#""rise":128,"#, r#""rise":128, "size":[96,64],"#, 1);
+        assert_ne!(json, PEDESTAL, "the splice changed nothing");
+        let Built { data, lifts, .. } = compile_data(&json);
+        let l = &lifts[0];
+        let corners: Vec<(i32, i32)> = data
+            .linedefs
+            .iter()
+            .filter(|ld| ld.back.is_some_and(|b| data.sidedefs[b].sector == l.sector))
+            .flat_map(|ld| {
+                let (v1, v2) = (data.vertices[ld.v1], data.vertices[ld.v2]);
+                [(v1.x, v1.y), (v2.x, v2.y)]
+            })
+            .collect();
+        assert_eq!(corners.len(), 8, "four island edges, two vertices each");
+        let (xs, ys): (Vec<i32>, Vec<i32>) = corners.into_iter().unzip();
+        let span = |v: &[i32]| {
+            (
+                *v.iter().min().expect("the island has edges"),
+                *v.iter().max().expect("the island has edges"),
+            )
+        };
+        let (lo_x, hi_x) = span(&xs);
+        let (lo_y, hi_y) = span(&ys);
+        assert_eq!(
+            ((lo_x, lo_y), (hi_x, hi_y)),
+            ((128, 128), (224, 192)),
+            "the rectangle `Pedestal::rect` names, anchored at `at`"
+        );
+        assert_eq!(
+            (hi_x - lo_x, hi_y - lo_y),
+            (96, 64),
+            "96 wide and 64 deep, not the 64x64 default and not transposed"
+        );
     }
 
     #[test]

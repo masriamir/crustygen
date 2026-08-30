@@ -834,8 +834,8 @@ impl Tables {
     /// leaves the fixtures' union unchanged. What it does enforce is that
     /// growing this list without a fixture that emits the new special breaks
     /// the equality — and that adding a one-shot lift form (21, 10, 122 or
-    /// 121) breaks
-    /// `sourced_but_unemitted_specials_stay_out_of_the_emittable_set` too.
+    /// 121) also breaks
+    /// `sourced_but_unemitted_specials_stay_out_of_the_emittable_set`.
     /// A new pass therefore lands its fixture and updates both tests by
     /// rule.
     #[must_use]

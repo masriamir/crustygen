@@ -20,6 +20,7 @@ use crustywad::map::udmf::{UdmfMap, parse_udmf};
 const ENTRADA: &str = include_str!("fixtures/entrada_base.json");
 const TELEPORTS: &str = include_str!("golden/teleports.json");
 const LIFTS: &str = include_str!("golden/lifts.json");
+const ASCENSOR: &str = include_str!("fixtures/ascensor_base.json");
 
 /// Compiles entrada, emits its TEXTMAP, and parses it back — the same
 /// compile -> emit -> parse round trip `tests/check_conformance.rs` uses, so
@@ -57,6 +58,20 @@ fn teleports_udmf() -> (UdmfMap, Tables) {
 fn lifts_udmf() -> (UdmfMap, Tables) {
     let tables = Tables::load().expect("tables");
     let ir = Ir::from_json(LIFTS).expect("ir");
+    let compiled = compile(&ir, &tables).expect("compiles");
+    let text = emit_textmap(&compiled.data, &compiled.things);
+    (
+        parse_udmf(&text, Limits::default()).expect("parses"),
+        tables,
+    )
+}
+
+/// Compiles ascensor — the lift playtest map paired with the committed
+/// `maps/ascensor.wad` — emits its TEXTMAP, and parses it back, the same
+/// round trip `entrada_udmf` uses.
+fn ascensor_udmf() -> (UdmfMap, Tables) {
+    let tables = Tables::load().expect("tables");
+    let ir = Ir::from_json(ASCENSOR).expect("ir");
     let compiled = compile(&ir, &tables).expect("compiles");
     let text = emit_textmap(&compiled.data, &compiled.things);
     (
@@ -646,6 +661,53 @@ fn the_lift_golden_is_modeled_not_warned_about() {
         count(&report.findings, "V-P11"),
         0,
         "no riser carries dontpegbottom and no door face carries a flag: {:?}",
+        report.findings
+    );
+}
+
+/// The same cross-examination on ascensor, the lift playtest map that
+/// `maps/ascensor.wad` is built from. Spec section 8.3 asks for it as
+/// reach/check parity: `tests/check_conformance.rs` judges ascensor's spec
+/// *rows*, and a row cannot say whether the flood got across the map.
+///
+/// Not a restatement of the golden above. The golden's only horizontal-wall
+/// lift is a walkover one, so `entry` -> `ledge` here (cut at y=512) is the
+/// only y-axis lift in the suite whose trigger is a switch on the platform's
+/// low face. And where the golden fans three platforms out from one room,
+/// ascensor puts four portal platforms *in series* on the single path from
+/// the player start to the exit switch — a switch lift, a fast both-ends
+/// lift, a barrier, then a walkover lift — with a plain portal between the
+/// last two and a pedestal off to the side. Its P7 flood is a ride through
+/// all four rather than a single hop.
+#[test]
+fn the_ascensor_playtest_map_is_modeled_not_warned_about() {
+    let (map, tables) = ascensor_udmf();
+    let report = run(&map, "MAP01", &tables, None);
+    let unmodeled: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.check == "V-S" && f.message.contains("does not model"))
+        .collect();
+    assert!(
+        unmodeled.is_empty(),
+        "every special ascensor emits is one the checker models: {unmodeled:?}"
+    );
+    assert_eq!(
+        count(&report.findings, "V-P7"),
+        0,
+        "the flood rides all four platforms to the exit: {:?}",
+        report.findings
+    );
+    assert_eq!(
+        count(&report.findings, "V-P5"),
+        0,
+        "every platform travels and is callable from its low floor: {:?}",
+        report.findings
+    );
+    assert_eq!(
+        count(&report.findings, "V-P11"),
+        0,
+        "no riser carries dontpegbottom: {:?}",
         report.findings
     );
 }

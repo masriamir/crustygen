@@ -740,10 +740,9 @@ pub struct Compiled {
 ///    alcoves — and cuts every pedestal as a hosted island inside its room,
 ///    tagging each from the same [`TagAllocator`]. Runs after `cut_portals`
 ///    left that gap empty (step 3) and before the overlap check since it
-///    emits sectors. Its
-///    risers must be written before step 9: `heights` fills only empty
-///    texture slots, and the platform's own top-face riser is invisible at
-///    load-time heights, so `heights` would never write it.
+///    emits sectors. Its risers must be written before step 9: `heights`
+///    fills only empty texture slots, and the platform's own top-face riser
+///    is invisible at load-time heights, so `heights` would never write it.
 /// 8. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
 ///    that overlap in 2-D — a gap sector driven through a third room, or two
 ///    gap sectors from unrelated portals crossing each other. Must run after

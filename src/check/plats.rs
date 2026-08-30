@@ -24,10 +24,12 @@
 //! **One deliberate divergence from the probe.** A walkover trigger is
 //! credited here only across a boundary the player can actually cross
 //! ([`Boundary::passable`]): `P_CrossSpecialLine` runs from `P_TryMove`'s
-//! `spechit` bookkeeping, and `PIT_CheckLine` (pinned `p_map.c:214-217`)
-//! rejects a one-sided or `ML_BLOCKING` line for any non-missile *before*
-//! that list is ever populated, so a walkover lift line the player cannot
-//! walk through fires nothing — the same gate `flood.rs` applies to walkover
+//! `spechit` bookkeeping, and `PIT_CheckLine` (pinned `p_map.c:211-217`)
+//! returns *before* that list is ever populated (`p_map.c:240-244`) — for a
+//! one-sided line unconditionally (`p_map.c:211-212`), and for an
+//! `ML_BLOCKING` line whenever the moving thing is not a missile
+//! (`p_map.c:214-217`). So a walkover lift line the player cannot walk
+//! through fires nothing — the same gate `flood.rs` applies to walkover
 //! exits and teleports. The probe's `activator_sides` omits it because it is
 //! measuring what map authors *drew*, where crediting the side is the
 //! conservative reading; a checker that must not call a map finishable it

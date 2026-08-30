@@ -56,6 +56,21 @@
 //! P15 over the marker (`compile::things`, `check::invariants`). These edges
 //! are also the graph's only directed ones (see [`Edge`]).
 //!
+//! [`EdgeKind::Lift`] edges skip both rules too, for a different reason: the
+//! platform *moves*. `lift_edges` adds one undirected edge per
+//! `(caller, platform)` pair the compiler recorded on
+//! [`crate::compile::lifts::LiftOut::callable_from`] — a lift's low room (or
+//! its alcove), both neighbors of a barrier, a pedestal's host — because
+//! `downWaitUpStay` (`p_plats.c`) brings the platform down to that caller's
+//! floor and carries them back up. The step rule would refuse that crossing
+//! on the platform's *rest* heights, which is the one position the player
+//! never has to climb from; the crossing window is guaranteed instead by the
+//! compiler's headroom check on the platform at rest, its tightest position.
+//! Only the call is special-cased: the platform node keeps its rest floor, so
+//! every other boundary it has stays an ordinary [`EdgeKind::Open`] edge
+//! under both rules — level room ↔ platform at equal floors, and the drop
+//! back down to the low room as a free descent.
+//!
 //! # The vacuous-pass gate
 //!
 //! P7 runs only when the map has a player 1 start and at least one exit;

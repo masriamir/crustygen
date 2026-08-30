@@ -175,11 +175,13 @@ pub fn place_things(
             // island's edges, and `ThingTooClose` would name the symptom
             // rather than the cause. Closed on both axes: a point on the
             // rectangle's edge already sits on the platform's boundary line.
-            if let Some(pedestal) = ir
-                .pedestals
-                .iter()
-                .find(|p| p.room == room.id && square_contains(p.rect().0, p.rect().1, thing.at))
-            {
+            if let Some(pedestal) = ir.pedestals.iter().find(|p| {
+                if p.room != room.id {
+                    return false;
+                }
+                let (lo, hi) = p.rect();
+                square_contains(lo, hi, thing.at)
+            }) {
                 return Err(CompileError::ThingOnPedestal {
                     pedestal: pedestal.id.clone(),
                     kind: thing.kind.clone(),
