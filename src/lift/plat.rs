@@ -18,8 +18,14 @@
 //! [`Shape::Barrier`] when there are two or more. Those are the lift shape
 //! probe's rules (`examples/liftprobe/common.rs`,
 //! `docs/measurements/lift-shapes-2026-08-29.md`), which measured them across
-//! the idgames corpus; the probe folds every other platform into one `Other`
-//! bucket, where this module names the reason instead.
+//! the idgames corpus — with two gates the probe's `clean` test never had:
+//! [`Refusal::SharedTag`] and [`Refusal::OneWayBarrier`]. A shared-tag
+//! platform or a barrier callable from one side scores a shape in the probe
+//! and is refused here, so this module's shape buckets are subsets of the
+//! measurement's, not the same counts. The probe names refusal reasons only
+//! as a corpus histogram (its `why Other` row); this module attaches one to
+//! each platform and adds [`Refusal::Dead`] and [`Refusal::SharedTag`] to
+//! that vocabulary.
 //!
 //! **Refusal precedence.** A platform is judged against the eight
 //! [`Refusal`]s in one fixed order and the first that applies wins, so a
@@ -197,8 +203,10 @@ pub struct PlatCounts {
     /// Platforms refused [`Refusal::SharedTag`].
     pub shared_tag: u64,
     /// Shared-tag groups that are one platform split by trim: every member at
-    /// one floor and all of them mutually adjacent. A sub-count of
-    /// [`Self::shared_tag`]'s groups, not of its platforms — the shape a
+    /// one floor and all of them mutually adjacent. A count of groups the
+    /// resolver found sharing a tag, not of platforms — and not strictly a
+    /// sub-count of [`Self::shared_tag`], whose members report
+    /// [`Refusal::Dead`] instead when they cannot move. The shape a
     /// geometry-aware lifter could still recognize as a single lift.
     pub shared_split: u64,
     /// Platforms refused [`Refusal::OneShot`].
