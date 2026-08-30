@@ -207,13 +207,25 @@ fn emit_pads(
     Ok((pad_sector, pad_edges))
 }
 
-/// Emits an island pad's four two-sided edges, returning their indices.
+/// Emits an island's four two-sided edges, returning their indices.
 ///
 /// The corners walk counter-clockwise (east along the south edge first), so
 /// the host lies on the right of every directed edge and binds each line's
 /// front sidedef — the winding a hole in a Doom sector needs, opposite the
 /// clockwise winding of a room's own footprint.
-fn emit_island_edges(data: &mut MapData, lo: Pt, hi: Pt, host: usize, sector: usize) -> Vec<usize> {
+///
+/// `pub(crate)` because a pedestal is the same construction with a raised
+/// floor: [`crate::compile::lifts::emit_lifts`] cuts one this way and then
+/// writes its own special, tag and riser onto the four lines it returns. The
+/// front-side binding is what makes that work — `P_UseSpecialLine` fires
+/// from a line's front, which here is the host the player stands in.
+pub(crate) fn emit_island_edges(
+    data: &mut MapData,
+    lo: Pt,
+    hi: Pt,
+    host: usize,
+    sector: usize,
+) -> Vec<usize> {
     let corners = [lo, Pt { x: hi.x, y: lo.y }, hi, Pt { x: lo.x, y: hi.y }];
     (0..corners.len())
         .map(|k| {
@@ -397,8 +409,8 @@ fn larger(a: ThingDims, b: ThingDims) -> ThingDims {
 /// Emits a two-sided, non-blocking linedef from `p1` to `p2`, front bound to
 /// `front` and back to `back`. Returns its index.
 ///
-/// The pad's edges use it with the host on the front, so the caller supplies
-/// the points in the direction whose right-hand side is the host.
+/// An island's edges use it with the host on the front, so the caller
+/// supplies the points in the direction whose right-hand side is the host.
 fn push_two_sided(data: &mut MapData, p1: Pt, p2: Pt, front: usize, back: usize) -> usize {
     let v1 = vertex_index(&mut data.vertices, p1);
     let v2 = vertex_index(&mut data.vertices, p2);

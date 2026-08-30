@@ -170,8 +170,11 @@ struct TextureSet {
     trim: String,
     /// The floor flat of a teleport pad — the GATE family.
     pad: String,
+    /// The lower texture on a lift's riser (the moving platform's low
+    /// face) — the SUPPORT family.
+    lift_riser: String,
     /// Width in pixels of the `switch` texture's canvas, so an exit line
-    /// narrower than it can centre the texture rather than showing its
+    /// narrower than it can center the texture rather than showing its
     /// left edge.
     switch_width: i32,
 }
@@ -340,6 +343,7 @@ struct Engine {
     movement: Movement,
     door: Door,
     flat: Flat,
+    plat: PlatConstants,
     light: LightRange,
     player: ThingDims,
     species: HashMap<String, SpeciesEntry>,
@@ -366,11 +370,32 @@ struct ExitSpecials {
     secret_walkover: u16,
 }
 
-/// The linedef specials for a lift, keyed by `progression.lifts.trigger`.
+/// The eight linedef specials that dispatch to a `downWaitUpStay` or
+/// `blazeDWUS` plat, keyed by trigger kind, speed and repeatability. Only
+/// the four repeatable forms are ever emitted.
 #[derive(Debug, Deserialize)]
 struct LiftSpecials {
     switch: u16,
     walkover: u16,
+    switch_fast: u16,
+    walkover_fast: u16,
+    switch_one_shot: u16,
+    walkover_one_shot: u16,
+    switch_fast_one_shot: u16,
+    walkover_fast_one_shot: u16,
+}
+
+/// `p_spec.h`/`p_plats.c` plat constants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct PlatConstants {
+    /// `PLATSPEED * 4`, map units per tic.
+    pub speed_normal: i32,
+    /// `PLATSPEED * 8`, map units per tic.
+    pub speed_fast: i32,
+    /// `35 * PLATWAIT`, tics the platform waits at the bottom.
+    pub wait_tics: i32,
+    /// `MAXPLATS`, the most plats that can be active at once.
+    pub max_active: usize,
 }
 
 /// The four teleporter line specials, keyed by who may cross and whether
@@ -657,6 +682,86 @@ impl Tables {
         self.vocabulary.specials.lift.walkover
     }
 
+    /// The repeatable lift special for a trigger kind and speed: 62/88
+    /// (`downWaitUpStay`, SR/WR) or 123/120 (`blazeDWUS`).
+    #[must_use]
+    pub fn lift_special(&self, use_line: bool, fast: bool) -> u16 {
+        let l = &self.vocabulary.specials.lift;
+        match (use_line, fast) {
+            (true, false) => l.switch,
+            (false, false) => l.walkover,
+            (true, true) => l.switch_fast,
+            (false, true) => l.walkover_fast,
+        }
+    }
+
+    /// Every special the engine dispatches to a `downWaitUpStay`/`blazeDWUS`
+    /// plat, one-shot forms included — for the verifier and recognizer, which
+    /// must name what a map carries, not only what the compiler writes.
+    #[must_use]
+    pub fn lift_specials(&self) -> [u16; 8] {
+        let l = &self.vocabulary.specials.lift;
+        [
+            l.switch,
+            l.switch_one_shot,
+            l.walkover,
+            l.walkover_one_shot,
+            l.switch_fast,
+            l.switch_fast_one_shot,
+            l.walkover_fast,
+            l.walkover_fast_one_shot,
+        ]
+    }
+
+    /// The use-activated lift specials (`P_UseSpecialLine`, front side only).
+    #[must_use]
+    pub fn lift_use_specials(&self) -> [u16; 4] {
+        let l = &self.vocabulary.specials.lift;
+        [
+            l.switch,
+            l.switch_one_shot,
+            l.switch_fast,
+            l.switch_fast_one_shot,
+        ]
+    }
+
+    /// The walkover lift specials (`P_CrossSpecialLine`, no side gate).
+    #[must_use]
+    pub fn lift_walkover_specials(&self) -> [u16; 4] {
+        let l = &self.vocabulary.specials.lift;
+        [
+            l.walkover,
+            l.walkover_one_shot,
+            l.walkover_fast,
+            l.walkover_fast_one_shot,
+        ]
+    }
+
+    /// The four repeatable forms — the only ones the compiler emits.
+    #[must_use]
+    pub fn lift_repeatable_specials(&self) -> [u16; 4] {
+        let l = &self.vocabulary.specials.lift;
+        [l.switch, l.walkover, l.switch_fast, l.walkover_fast]
+    }
+
+    /// The four `blazeDWUS` forms.
+    #[must_use]
+    pub fn lift_fast_specials(&self) -> [u16; 4] {
+        let l = &self.vocabulary.specials.lift;
+        [
+            l.switch_fast,
+            l.switch_fast_one_shot,
+            l.walkover_fast,
+            l.walkover_fast_one_shot,
+        ]
+    }
+
+    /// The pinned plat constants.
+    #[must_use]
+    pub fn plat(&self) -> PlatConstants {
+        self.engine.plat
+    }
+
     /// The linedef special for a teleporter line. `monsters_only` selects the
     /// `!thing->player`-guarded pair (126/125); `repeatable` selects the
     /// RETRIGGERS form, which keeps its special after firing.
@@ -716,17 +821,21 @@ impl Tables {
     }
 
     /// Every linedef special a compiler pass writes today: the manual door,
-    /// the keyed doors, the four exits, and the four teleport specials
-    /// ([`crate::compile::teleports`]). Curated rather than "every
-    /// accessor" — the lift specials are sourced in the table but no pass
-    /// emits them. `tests/vocabulary_arbiter.rs` compiles a fixture per
+    /// the keyed doors, the four exits, the four teleport specials
+    /// ([`crate::compile::teleports`]), and the four repeatable lift
+    /// specials ([`Self::lift_repeatable_specials`],
+    /// [`crate::compile::lifts`]) — never the one-shot forms
+    /// ([`Self::lift_specials`] minus the repeatable ones), which the table
+    /// sources but no pass ever writes. Curated rather than "every
+    /// accessor". `tests/vocabulary_arbiter.rs` compiles a fixture per
     /// construct and asserts this set equals what came out. That does not
     /// detect a new pass on its own: no fixture can author a construct the
     /// IR cannot yet express, so a pass that lands before its IR construct
     /// leaves the fixtures' union unchanged. What it does enforce is that
     /// growing this list without a fixture that emits the new special breaks
-    /// the equality — and that adding 62 or 88 breaks
-    /// `sourced_but_unemitted_specials_stay_out_of_the_emittable_set` too.
+    /// the equality — and that adding a one-shot lift form (21, 10, 122 or
+    /// 121) also breaks
+    /// `sourced_but_unemitted_specials_stay_out_of_the_emittable_set`.
     /// A new pass therefore lands its fixture and updates both tests by
     /// rule.
     #[must_use]
@@ -740,6 +849,7 @@ impl Tables {
         ]);
         set.extend(self.locked_door_kinds().into_iter().map(|(_, s)| s));
         set.extend(self.teleport_specials());
+        set.extend(self.lift_repeatable_specials());
         set
     }
 
@@ -953,8 +1063,8 @@ impl Tables {
     }
 
     /// The texture for a role (`wall`, `floor`, `ceiling`, `door`,
-    /// `door_track`, `switch`, `trim`, `pad`) under a theme, if both
-    /// resolve.
+    /// `door_track`, `switch`, `trim`, `pad`, `lift_riser`) under a theme, if
+    /// both resolve.
     #[must_use]
     pub fn texture(&self, role: &str, theme: &str) -> Option<&str> {
         let set = self.vocabulary.textures.get(theme)?;
@@ -967,6 +1077,7 @@ impl Tables {
             "switch" => Some(&set.switch),
             "trim" => Some(&set.trim),
             "pad" => Some(&set.pad),
+            "lift_riser" => Some(&set.lift_riser),
             _ => None,
         }
     }
@@ -974,9 +1085,9 @@ impl Tables {
     /// The width in pixels of `theme`'s switch texture, or `None` when the
     /// theme is unknown.
     ///
-    /// `compile::exits` centres the switch texture on an exit line narrower
+    /// `compile::exits` centers the switch texture on an exit line narrower
     /// than the texture; without this an exit shows the texture's left edge
-    /// and the switch graphic reads as off-centre.
+    /// and the switch graphic reads as off-center.
     #[must_use]
     pub fn switch_width(&self, theme: &str) -> Option<i32> {
         Some(self.vocabulary.textures.get(theme)?.switch_width)
@@ -1153,16 +1264,12 @@ mod tests {
 
         // `progression.lifts.trigger` (walkover | switch | both_ends): the
         // repeatable form for each of the two trigger kinds.
-        assert_ne!(t.lift_switch_special(), 0, "a lift switch special exists");
-        assert_ne!(
-            t.lift_walkover_special(),
-            0,
-            "a lift walkover special exists"
-        );
-        assert_ne!(
-            t.lift_switch_special(),
-            t.lift_walkover_special(),
-            "the switch and walkover lift specials are distinct"
+        assert_eq!(
+            t.lift_specials()
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            8
         );
 
         // `progression.teleports`: the line special and the destination
@@ -2110,5 +2217,43 @@ mod tests {
         let t = Tables::load().expect("tables load");
         assert_eq!(t.thing_flag("ambush"), Some(8));
         assert_eq!(t.thing_flag("deaf"), None, "only the sourced name resolves");
+    }
+
+    #[test]
+    fn the_eight_lift_specials_are_distinct_and_partitioned() {
+        let t = Tables::load().expect("tables");
+        let all = t.lift_specials();
+        let set: std::collections::BTreeSet<u16> = all.into_iter().collect();
+        assert_eq!(set.len(), 8, "eight distinct lift specials: {all:?}");
+        assert_eq!(t.lift_special(true, false), t.lift_switch_special());
+        assert_eq!(t.lift_special(false, false), t.lift_walkover_special());
+        assert_eq!(t.lift_special(true, true), 123);
+        assert_eq!(t.lift_special(false, true), 120);
+        for s in t.lift_use_specials() {
+            assert!(
+                !t.lift_walkover_specials().contains(&s),
+                "{s} is use or walkover, never both"
+            );
+        }
+        for s in t.lift_repeatable_specials() {
+            assert!(all.contains(&s));
+        }
+        assert_eq!(t.lift_fast_specials(), [123, 122, 120, 121]);
+    }
+
+    #[test]
+    fn plat_constants_are_the_pinned_engines() {
+        let p = Tables::load().expect("tables").plat();
+        assert_eq!(p.speed_normal, 4, "PLATSPEED * 4 with PLATSPEED = FRACUNIT");
+        assert_eq!(p.speed_fast, 8, "PLATSPEED * 8");
+        assert_eq!(p.wait_tics, 105, "35 * PLATWAIT, PLATWAIT = 3");
+        assert_eq!(p.max_active, 30, "MAXPLATS");
+    }
+
+    #[test]
+    fn every_theme_names_a_lift_riser_texture() {
+        let t = Tables::load().expect("tables");
+        assert_eq!(t.texture("lift_riser", "tech_base"), Some("SUPPORT3"));
+        assert!(t.texture("lift_riser", "no_such_theme").is_none());
     }
 }

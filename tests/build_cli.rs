@@ -1,6 +1,6 @@
 //! CLI tests for `crustygen-build`: exit codes per pipeline stage, the
-//! stdout summary, and byte-identity with the committed `maps/entrada.wad`
-//! and `maps/salto.wad`.
+//! stdout summary, and byte-identity with the committed `maps/entrada.wad`,
+//! `maps/salto.wad` and `maps/ascensor.wad`.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -9,7 +9,7 @@ use crustywad::Wad;
 
 mod common;
 
-use common::{ENTRADA, SALTO};
+use common::{ASCENSOR, ENTRADA, SALTO};
 
 fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_crustygen-build"))
@@ -159,6 +159,27 @@ fn the_salto_fixture_builds_byte_identical_to_the_committed_wad() {
         "got: {stdout}"
     );
     assert!(stdout.contains("14 sectors"), "got: {stdout}");
+    assert!(out.stderr.is_empty(), "stderr: {}", stderr(&out));
+}
+
+/// Ascensor, the lift playtest map: the same drift guard entrada and salto
+/// carry, over the fixture that exercises every platform shape the compiler
+/// emits. 13 sectors = 6 rooms + 3 lift platforms + 1 barrier + 1 plain
+/// passage + 1 lift alcove + 1 pedestal.
+#[test]
+fn the_ascensor_fixture_builds_byte_identical_to_the_committed_wad() {
+    let (out, wad) = build(ASCENSOR, "ascensor", &[]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let committed =
+        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("maps/ascensor.wad"))
+            .expect("read maps/ascensor.wad");
+    assert_eq!(wad.expect("a WAD was written"), committed);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with("MAP01: 6 rooms, 5 portals"),
+        "got: {stdout}"
+    );
+    assert!(stdout.contains("13 sectors"), "got: {stdout}");
     assert!(out.stderr.is_empty(), "stderr: {}", stderr(&out));
 }
 

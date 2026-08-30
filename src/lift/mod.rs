@@ -11,14 +11,17 @@
 //! directory of zips and WADs, surveying and classifying every map it finds.
 //! [`teleport`] is the first recognizer proper: it reads geometry through
 //! the verifier's `Scene` and classifies every teleport line by engine
-//! semantics; the remaining recognizers (rooms, doors, keys, exits) arrive
-//! with Project B.
+//! semantics. [`plat`] is the second: over the same `Scene` it classifies
+//! every platform a lift line names as a lift, a pedestal or a barrier, or
+//! names the reason it cannot. The remaining recognizers (rooms, doors,
+//! keys, exits) arrive with Project B.
 
 use std::collections::BTreeMap;
 
 use crustywad::map::udmf::UdmfMap;
 
 pub mod corpus;
+pub mod plat;
 pub mod teleport;
 pub mod vocabulary;
 

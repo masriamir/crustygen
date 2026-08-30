@@ -5,46 +5,49 @@ reassembles through crustywad, plus the layer-4 verifier that re-checks the
 emitted map (`src/check`, `crustygen-check` — see `docs/check.md`), plus the
 shared `crustygen::ingest` path and the `crustygen-lift` telemetry skeleton
 (`src/lift`, `src/ingest.rs` — see `docs/lift.md`), plus `lift::vocabulary`'s
-membership verdict, `lift::teleport`'s shape recognizer and the
-`crustygen-corpus` corpus sweep (see `docs/corpus.md`), plus the
-`crustygen-build` CLI over the compiler
+membership verdict, `lift::teleport`'s shape recognizer, `lift::plat`'s
+platform recognizer and the `crustygen-corpus` corpus sweep (see
+`docs/corpus.md`), plus the `crustygen-build` CLI over the compiler
 (`src/bin/crustygen-build.rs` — see `docs/build.md`).
-623 tests (524 lib + 3 crustygen-build unit + 16 build_cli + 10 check_adversarial + 16 check_cli +
-5 check_conformance + 9 corpus_cli + 1 first_map + 8 golden_textmap + 15 lift_cli + 3
-spec_documents + 1 teleport_recognizer + 4 vanilla_wad + 4 vocabulary_arbiter + 3
-vocabulary_tables + 1 walking_skeleton), plus two separately-run `#[ignore]`d
-golden-regeneration generators not included in that count. This file records
-what is deliberately absent, what is known-fragile, and the decisions a future
-contributor would otherwise have to re-derive.
+756 tests (620 lib + 3 crustygen-build unit + 17 build_cli + 12 check_adversarial + 16 check_cli +
+7 check_conformance + 10 corpus_cli + 1 first_map + 10 golden_textmap + 17 lift_cli + 1
+plat_recognizer + 3 spec_documents + 1 teleport_recognizer + 5 vanilla_wad + 4
+vocabulary_arbiter + 3 vocabulary_tables + 1 walking_skeleton + 25 in the `liftprobe` example),
+plus three separately-run `#[ignore]`d golden-regeneration generators not included in that
+count. This file records what is deliberately absent, what is known-fragile, and the decisions a
+future contributor would otherwise have to re-derive.
 
 ## Not implemented, by design
 
 The compiler covers structural invariants S1–S6 and playability rules P2,
-P3, P4, P7, P8, P9, P11, P13, P14, P15, P19, P24, P25, P26, P27. **P1** is
+P3, P4, P5, P7, P8, P9, P11, P13, P14, P15, P19, P24, P25, P26, P27. **P1** is
 retired — see `rules.rs`'s module doc and `CompileError::PortalNoHeadroom`,
 and the gap entry below. The layer-4 verifier (`src/check`, `docs/check.md`)
-independently re-derives fourteen of those fifteen from the *emitted* map, as
+independently re-derives fifteen of those sixteen from the *emitted* map, as
 `V-P2`…`V-P27`, and adds `V-P20`. The one it does not is **P26**: a teleport
 exit emits exactly a plain walkover exit's specials, so nothing on the line
 tells them apart, and the verifier grades P26's shape as the
 `progression.exit.trigger` conformance row instead of as a finding.
 
-Deliberately absent, deferred to the next stage: **P5** (lifts), **P6**
-(monster mobility), **P10** (clean vertical tiling), **P12** (sky
-coherence), **P16**/**P17** (liquids and damage survivability), **P18**
+Deliberately absent, deferred to the next stage: **P6** (monster mobility),
+**P10** (clean vertical tiling), **P12** (sky coherence),
+**P16**/**P17** (liquids and damage survivability), **P18**
 (secret accounting), **P20** (pickup accessibility — compiler-side only; the
 verifier covers it, below), **P21** (light sources), **P22** (hanging
 decorations), **P23** (barrel safety).
 
 **Expressibility is mostly membership, and now partly geometry.**
-`lift::vocabulary` and `crustygen-corpus` decide expressibility on **four**
+`lift::vocabulary` and `crustygen-corpus` decide expressibility on **five**
 axes. Three are set membership — line specials, sector specials, thing
 kinds — and read no geometry at all. The fourth is the teleport recognizer
 (`lift::teleport`), which resolves every teleport line the way `EV_Teleport`
 does and refuses the shapes the IR cannot state; it reads the map's tags,
 sector adjacency and destination-marker placement, so on that one axis the
-verdict is geometric rather than table-driven. Everything else about a map —
-room shape, linedef flags, tags outside the teleport resolution, texture
+verdict is geometric rather than table-driven. The fifth is the plat
+recognizer (`lift::plat`), which does the same for platforms: it resolves
+every sector a lift line names the way `EV_DoPlat` does, classifies it as a
+lift, a pedestal or a barrier, and refuses the rest. Everything else about a
+map — room shape, linedef flags, tags outside those two resolutions, texture
 names — is still unmeasured, so the number remains an upper bound on lift
 yield and every report says so. The remaining recognizers are the lifter's
 next stage.
@@ -107,15 +110,18 @@ WAD. (The verifier itself — `docs/design.md` §8 layer 4 — shipped with issu
 #2 and is no longer absent, as did the packer, `pack::pack_udmf` and
 `pack::pack_udmf_with_nodes`, and an authored map,
 `tests/fixtures/entrada_base.json`, built into `maps/entrada.wad`.)
-Specials for lifts and liquid sector effects, monster `spawnhealth`,
-health/armor pickup amounts and caps, the gore prop set, and the
-`ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef flags are all **sourced and
-accessible** but nothing emits any of them yet. Doors, exits
-(`compile::exits`), the secret sector special, and the four teleport specials
+Specials for liquid sector effects, monster `spawnhealth`, health/armor
+pickup amounts and caps, the gore prop set, the four one-shot lift forms
+(21/10/122/121), and the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef flags are
+all **sourced and accessible** but nothing emits any of them yet. Doors, exits
+(`compile::exits`), the secret sector special, the four teleport specials
 (`compile::teleports`, with `lift::teleport` recognizing them on the way back
-in) are wired end to end. Lifts are the largest remaining unemitted group and
-the next construct the corpus blocker table names — see
-`docs/measurements/teleports-2026-08-28.md`.
+in) and the four repeatable lift specials (`compile::lifts`, with
+`lift::plat` recognizing the platforms they name) are wired end to end. Lifts
+were the largest remaining unemitted group and the construct the corpus
+blocker table named next (`docs/measurements/teleports-2026-08-28.md`); what
+the next blocker table names is a question for the run that follows the lift
+release.
 
 **The sealed monster pen with a remote release strip is deferred, and P27 is
 why it has to be.** Retail's genuinely sealed pens — 8 of the 97 closet
@@ -193,14 +199,118 @@ it and the check is deliberately unwritten rather than guessed at — in both
 `check::invariants::check_textures` (V-P8), for the same reason. Required
 before sky is added.
 
+**A barrier lowers for both sides; a one-way barrier is not expressible.** The
+IR's barrier is a platform standing between two rooms at one floor, and
+`compile::lifts` gives each of its two faces the same use line, so either room
+can call it down. Real maps often build the other thing: of the barrier-shaped
+plats the shape probe classified, 4 of 18 in DOOM+DOOM2, 10 of 40 in Final
+Doom and 78 of 322 in the idgames sample have a trigger reachable from only
+one of their two sides (`docs/measurements/lift-shapes-2026-08-29.md` §L).
+`lift::plat` refuses those (`Refusal::OneWayBarrier`) rather than reading them
+as symmetric barriers — a one-way barrier is a gate, and lifting it as a
+barrier would state a progression the map does not have. Expressing one needs
+an IR field naming which side may call it, which nothing yet asks for.
+
+**A lift is called from its own face; a remote switch is not expressible.**
+`LiftTrigger::Switch` puts the use special on the platform's low face and
+`LiftTrigger::Walkover` on the outer threshold of the low room's alcove. There
+is nowhere in the IR to say "the switch in *that* room lowers *this* lift".
+The corpus does it often: 134 / 132 / 2,280 lift use-lines are remote, and the
+`S@remote/Low` trigger set — a wall switch elsewhere in the low area — is
+2.5 % / 3.3 % / 10.2 % of plats (`docs/measurements/lift-shapes-2026-08-29.md`
+§F). The map-spec template names the concept
+in `progression.switches.remote_allowed`, and nothing downstream reads it for
+lifts. The recognizer does **not** refuse such a platform, since a `Low`
+activator is a `Low` activator wherever it stands — so the gap is on the
+writing side: the IR would have to move that switch onto the riser.
+
+**One trigger driving several platforms is not expressible.** One IR lift is
+one tagged platform, so `lift::plat` refuses a tag more than one sector
+answers to (`Refusal::SharedTag`). Only a minority of those groups are the
+benign case: of the multi-sector lift tag groups the probe found (29 / 47 /
+328 across the three populations), 3.4 % / 8.5 % / 7.6 % are one platform
+split by trim — every member at
+one floor and mutually adjacent, which a geometry-aware lifter could still
+read as a single lift, and which the corpus report counts on its own row. The
+rest are genuinely several sectors on one trigger: 55.2 % / 40.4 % / 48.2 % at
+one floor and disconnected, the remainder spread over several floors (§L).
+
+**A lift or barrier platform carries no things; only a pedestal does.**
+`Pedestal::things` places things on the raised island at its own floor, and a
+room thing standing on that rectangle is refused rather than placed
+(`CompileError::ThingOnPedestal`). A portal platform has no such list: its
+sector fills the void between two rooms, which no room's footprint covers, so
+there is nowhere for an author to put the imp that rides the lift up. Real
+maps do it — 40.8 % / 30.4 % / 31.2 % of the probe's lift-shaped plats hold at
+least one thing (§L). The recognizer reports the count (`holding things` in
+the corpus report) and refuses nothing for it; the thing simply has no IR
+field to land in.
+
+**Jamb pegging on a lift shaft is now measured, and the compiler agrees with
+it.** A platform's two long sides are one-sided walls emitted by
+`portals::emit_segment` through `emit_jambs`, which — like every other side
+wall in the compiler — writes them with both pegging flags clear. That is what
+the corpus does: 2–6 % of lift jambs carry either flag, on every population
+and every shape but two (`docs/measurements/lift-shapes-2026-08-29.md` §G2
+item B, added 2026-08-30). `ML_DONTPEGTOP` on a one-sided line is inert
+anyway — `r_segs.c`'s single-sided branch reads only `ML_DONTPEGBOTTOM` — so
+the only live flag here is one the corpus sets 0–10 % of the time and the
+compiler never sets. What remains unmeasured on that list is middle-texture
+behavior as the plat descends and sidedef offsets on risers.
+
+**A walkover lift shipped with an alcove the player could not enter, twice,
+and every layer said the map was fine.** A playtest of `maps/ascensor_doom.wad`
+found the hall's walkover lift dead: the alcove behind its trigger line was 16
+units deep, the player's own radius, so `P_TryMove` never let their center
+across the line (the box would have had to straddle the platform's face, which
+raises `tmfloorz` more than a step and fails the move before the `spechit`
+walk that fires walkovers ever runs). `tests/golden/lifts.json` carried the
+same 16-unit alcove. Nothing caught it: the compiler checked the *platform*
+against the player's diameter but not the alcove; `reach`'s flood and the
+verifier's V-P5 both credited the trigger, because no layer modeled the
+player's radius against a dead end at all. Now `compile::lifts` refuses a
+walkover alcove no deeper than the radius
+(`CompileError::LiftAlcoveTooShallow`, and `Ir::LIFT_ALCOVE_DIMENSIONS` adds
+64 so a real approach strip is expressible), and `check::plats` drops the
+activator on a walkover with a dead-end pocket that shallow on either side, so
+V-P5 reports the lift as callable only from above and the flood gives it no
+edge.
+
+**What that pair of guards still does not cover.** The verifier's rule is the
+*dead-end* case only: a pocket every other boundary of which the player cannot
+pass. Geometry the box may legitimately overhang — a thin strip open at one
+end, the far sector continuing past a passable boundary — is credited, and
+must be: §G3 of the shapes measurement finds 3 / 30 / 64 low-side walkovers
+whose far sector reaches no further than 16 units, of which only 0 / 3 / 6 are
+genuinely impossible crossings, the rest being ordinary trigger strips cut
+across a corridor. Between the two estimates §G3 reports (farthest vertex,
+nearest blocking boundary) the truth is bracketed but not pinned; a general
+"can the player's box actually get there" test would need real collision
+simulation, which nothing here does. On the compiler side the rule is narrower
+still: it judges the alcove the IR declares, so a walkover trigger placed
+anywhere other than a lift alcove — which the IR cannot express today — would
+not be judged at all.
+
+**The map-spec's `progression.lifts.trigger` takes one word, and a map may
+mix.** `spec::frontmatter::LiftTrigger` is `walkover | switch | both_ends`,
+and `check::conform`'s row passes only when *every* top-resting platform takes
+the form the spec named — so a map that deliberately uses more than one
+trigger cannot be described by any word the template offers. There is no
+`any`. `tests/fixtures/ascensor.spec.md` leaves that row failing on purpose
+and says so in its own notes, and `ascensor_both_ends.spec.md` is the same
+document asking the other plausible word and failing identically. Adding an
+`any` (or `mixed`) word is the obvious fix and is deliberately not taken here:
+it widens the template's vocabulary, which is a spec decision rather than a
+checker one.
+
 ## Decisions that look wrong without their reason
 
 **P24 is stricter than the engine about key kinds, and P7 is not.**
-`EV_VerticalDoor` (pinned `p_doors.c:371-403`) opens a colour's lock for either
+`EV_VerticalDoor` (pinned `p_doors.c:371-403`) opens a color's lock for either
 the card or the skull — `!p->cards[it_bluecard] && !p->cards[it_blueskull]`
 rejects the move only if *neither* is held. `reach.rs` interns lock classes by
-colour to match: `graph_from_compiled`'s keyed-special lookup is deliberately
-many-to-one, so either key thing of a colour satisfies a `Door` edge's lock.
+color to match: `graph_from_compiled`'s keyed-special lookup is deliberately
+many-to-one, so either key thing of a color satisfies a `Door` edge's lock.
 `rules::check_key_lock_coherence` (P24) does not — it compares the authored
 lock string (`Portal::lock`, e.g. `"blue_card"`) against placed thing kinds by
 exact string equality. A map that locks a portal `"blue_card"` while placing
@@ -209,15 +319,15 @@ the door in the engine, and P7 passes it — while P24 still fails it, because
 the string `"blue_card"` names a thing that never appears. This is deliberate,
 not a bug in either rule: P24 polices *authored intent* (you named a card,
 place a card), and P7 polices the *engine's actual behavior* (either key of the
-colour works). Recorded here so a future "fix" does not make one rule agree
+color works). Recorded here so a future "fix" does not make one rule agree
 with the other at the cost of disagreeing with the engine or with the author's
 stated intent.
 
 The verifier's own V-P24 (`check::flood::check_key_lock_coherence`) sits on the
 engine side of that split, and had no choice: a linedef's emitted `special` is
-`26`, which names the *colour class*, not which key kind the author wrote. It
+`26`, which names the *color class*, not which key kind the author wrote. It
 therefore checks class-level coherence — every lock class present has a key of
-that colour placed, every placed key opens some door — and the authored-intent
+that color placed, every placed key opens some door — and the authored-intent
 form stays the compile-side rule's job, since the intent is only legible in the
 IR. The two are not redundant and are not in conflict; they check different
 statements at different layers.
@@ -313,9 +423,9 @@ player faces walking *up* to the door; the door's track stays the theme's
 `door_track` (DOORTRAK) unconditionally, so a custom texture WAD can override
 it as the one intended knob. Card versus skull is a measured convention, not
 a guess: across the four id/Final Doom IWADs, restricted to maps holding
-exactly one key of a colour, the plain name accompanies a keycard 117 times
+exactly one key of a color, the plain name accompanies a keycard 117 times
 to 18, and the `2` variant a skull key 92 to 26, in the same direction for
-all three colours. Full tally and method in `vocabulary.toml`'s `[key_trim]`.
+all three colors. Full tally and method in `vocabulary.toml`'s `[key_trim]`.
 
 **A locked portal that declares no alcoves gets no key trim at all.** The trim
 has nowhere to live — the door's own track is deliberately excluded (above),
@@ -328,7 +438,7 @@ exists for "a locked door is visually identifiable".
 
 **Only the exit switch is texture-aligned; nothing else is.**
 `compile::exits` sets the switch sidedef's `offsetx` so the texture is
-centred on the exit line — `(switch_width - width) / 2`, from
+centered on the exit line — `(switch_width - width) / 2`, from
 `vocabulary.toml`'s measured `switch_width`. Every other sidedef in the map
 is emitted with `offsetx` unset, i.e. 0. That is fine for a texture whose
 width divides the wall it sits on and wrong in general: Doom derives a
@@ -552,16 +662,34 @@ square walls (the common real case) already works today, both proved by
 `portals::tests::a_portal_works_on_the_axis_aligned_wall_of_a_diagonally_shaped_room`
 and the equivalent exit/door fixtures.
 
-**Teleports default to repeatable; lifts will be repeatable-only.** A design
+**Teleports default to repeatable; lifts are repeatable-only.** A design
 choice, not a source fact. For a teleport it is only a *default*:
 `Teleport::repeatable` is `true` when absent, and setting it to `false` emits
 the one-shot ("W1") form — 39 for a player pad, 125 for a monsters-only one —
 which the engine clears after its first crossing. That is a recorded IR
 choice about which special to write, not a claim about what the corpus does.
-For lifts the constraint is harder and still stands: P5 requires a lift be
-operable from both ends, and a one-shot lift can strand a player, so the lift
-construct will not offer the one-shot form at all. Recorded in the citations;
-disagree there if you prefer.
+For lifts the constraint is harder, and the shipped construct enforces it: a
+one-shot lift can strand whichever side rode it first, so `PortalKind::Lift`
+offers no one-shot form at all — `Portal::speed` chooses between 62/88 and
+123/120, and nothing selects 21/10/122/121, which the tables carry only so the
+verifier and the recognizer can name every form the engine dispatches
+(`Tables::lift_specials`). The corpus agrees rather than merely permitting it:
+every trigger is a repeatable form on 99.3 % / 97.5 % / 95.0 % of moving plats
+(`docs/measurements/lift-shapes-2026-08-29.md` §A), and the plat recognizer
+refuses a one-shot platform on the way back in (`Refusal::OneShot`). Recorded
+in the citations; disagree there if you prefer.
+
+**A barrier offers only `switch`, and that is geometry rather than policy.**
+`Ir::from_json` refuses `walkover` and `both_ends` on a lift portal whose two
+rooms sit at one floor (`IrError::BarrierTrigger`). A walkover trigger goes on
+the outer threshold of the **low room's** alcove, and a barrier has no low
+room — its two rooms are level by definition, so there is no side to put the
+line in front of that the other side would not claim just as well.
+`both_ends` needs that same line plus one on the platform's top face, which a
+barrier at rest has no walkable access to: its rise must clear the player's
+step height (`CompileError::LiftRiseTooLow`), which is exactly what makes the
+top unreachable on foot. So a use line on each of the barrier's two faces is
+the whole trigger vocabulary the shape can carry.
 
 **P7 treats a one-shot teleport as an ordinary edge.** The flood's directed
 teleport edge is the same whether the line is 97 or 39: a walk uses an edge
@@ -583,6 +711,33 @@ onto a pad the player cannot reach. The same optimism sits in `src/reach.rs`,
 whose compiled-side `teleport_edges` carries no `passable()` guard at all;
 there it is moot for a stronger reason, since the compiler only ever emits
 crossable pad edges.
+
+**The flood credits a remote lift switch it cannot prove the player reaches.**
+`check::flood`'s lift edges name the callers of each platform. When every
+`Low` activator is a sector the platform does not border — a switch elsewhere
+in the low area, which the corpus puts at 2.5 % / 3.3 % / 10.2 % of plats
+(`docs/measurements/lift-shapes-2026-08-29.md` §F) — the callers become every
+neighbor more than a step below the platform instead. That is deliberately
+optimistic: the flood cannot model the walk from a remote switch back to the
+platform, nor the wait before the platform rises again, so it credits the ride
+rather than inventing a softlock. A map whose only lift switch sits behind a
+door the player cannot open yet is therefore called finishable when it is not.
+The same posture the teleport edge above takes, and optimistic in one
+direction only: a platform *no* trigger fires from below gets no edge at all,
+so the top-only trap stays the wall it really is.
+
+**A one-shot lift line (S1/W1: 21, 10, 122, 121) earns the same flood edge as
+a repeatable one.** The flood is a reachability set, and one call carries the
+caller up once, which is all reachability needs — the way down is a drop, not a
+trigger. The edge is wrong only when the single use is spent before the
+player gets it: `P_CrossSpecialLine` (pinned `p_spec.c:503-535`) lets
+non-player things fire specials 10 and 88, so a monster crossing a W1 plat
+line consumes the map's one call, and the player who arrives later finds a
+wall the flood called a ride. That is a monster-timing question the flood has
+no monsters to pose; the recognizer, which judges expressibility rather than
+reachability, refuses every one-shot (`Refusal::OneShot`) because no IR lift
+states one. The idgames sample carries 179 one-shot lift lines against 8,135 repeatable
+ones (2.2 %), 30 of them W1 (`docs/measurements/lift-shapes-2026-08-29.md` §A).
 
 **V-P15 sizes the destination for the player, even on a monsters-only line.**
 Headroom and radius clearance at the marker are measured against

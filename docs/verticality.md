@@ -60,10 +60,19 @@ door-chain machinery (`compile::doors::emit_doors` builds one to three segments 
 `portals::emit_segment`) with different per-segment properties. Corpus-measured
 defaults: 16 units (34.3%), 8 (27.9%), 24 (12.9%) — together 75.1% of all steps.
 
-**Phase 3 — lifts.** A gap sector becomes a tagged plat carrying special **62** (SR
-switch) or **88** (WR walkover), both already sourced in `data/vocabulary.toml`
-`[specials.lift]`, with trigger lines on both sides to satisfy P5's "operable from both
-ends". The corpus supports the repeatable forms 856 to 2.
+**Phase 3 — lifts. Shipped.** A `downWaitUpStay` platform fills the portal gap, tagged and
+carrying **62** (SR switch) or **88** (WR walkover), or their `blazeDWUS` twins **123**/**120** —
+all four sourced in `data/vocabulary.toml` `[specials.lift]`. The construction is what this
+sketch predicted; the trigger rule is not. `EV_DoPlat` sends a platform to the lowest floor
+among its two-sided neighbors and brings it back, so what a lift needs is a trigger on the *low*
+side, and a second one on top is optional because the descent is free. `PortalKind::Lift`
+therefore carries a `trigger` of `switch`, `walkover` or `both_ends` instead of always emitting
+both sides, and the same platform serves two further shapes: a **barrier** (two rooms at one
+floor with the platform risen between them) and a **pedestal** (a raised island inside one room,
+in the IR's own `pedestals` list). P5 is re-derived from the emitted geometry in
+`rules::check_lift_return`, and again at layer 4 as `V-P5`. Shapes, triggers, rest positions and
+riser rendering were measured over DOOM/DOOM2, Final Doom and an idgames sample before any of it
+was designed: `docs/measurements/lift-shapes-2026-08-29.md`.
 
 **What phases 2 and 3 inherit from phase 1**, and therefore what phase 1 must get right:
 

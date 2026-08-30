@@ -11,6 +11,7 @@
 //! an unreadable archive, WAD or map group is named on stderr and skipped, and
 //! an unlistable directory is fatal (exit 2).
 
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -28,6 +29,9 @@ pub(crate) const DWUS: [i32; 4] = [62, 21, 88, 10];
 pub(crate) const BLAZE: [i32; 4] = [123, 122, 120, 121];
 /// The use-activated lift specials (`P_UseSpecialLine`, front side only).
 pub(crate) const USE_LIFT: [i32; 4] = [62, 21, 123, 122];
+/// The walkover lift specials (`P_CrossSpecialLine`, either side) — the
+/// complement of [`USE_LIFT`] within [`DWUS`] ∪ [`BLAZE`].
+pub(crate) const WALK_LIFT: [i32; 4] = [88, 10, 120, 121];
 /// The repeatable forms (`useAgain=1` / the RETRIGGERS block).
 pub(crate) const REPEATABLE_LIFT: [i32; 4] = [62, 88, 123, 120];
 /// `perpetualRaise`: `p_spec.c` 53 (W1), 87 (WR); `EV_StopPlat`: 54 (W1), 89 (WR).
@@ -294,6 +298,18 @@ pub(crate) struct Trigger {
     pub(crate) one_sided: bool,
     /// The `SW1*`/`SW2*` textures on the front sidedef, by slot (`top`/`mid`/`bot`).
     pub(crate) switch_slots: Vec<(&'static str, String)>,
+    /// For a walkover: one entry per `Low` activator side, measuring the far
+    /// sector the crossing would land in. Empty for a use-line, and for a
+    /// walkover no `Low` activator can fire.
+    pub(crate) low_crossings: Vec<LowWalkCross>,
+    /// `Low` activator sides of a walkover with no far sector to measure.
+    /// Measured over the corpus, every one of these is a line whose two sides
+    /// name the **same** sector — a trigger line drawn inside a single room,
+    /// where crossing changes nothing about where the player stands. (The
+    /// same arm also catches a degenerate or dangling line, of which the
+    /// corpus has none here.) Counted so §G3's denominator reconciles with
+    /// §G2's line count rather than being silently short.
+    pub(crate) low_unmeasured: usize,
 }
 
 /// A riser boundary: a two-sided edge whose neighbor's floor is below the plat's.
@@ -303,6 +319,66 @@ pub(crate) struct Riser {
     pub(crate) unpegged: bool,
     /// Whether the plat's own sidedef also carries a lower.
     pub(crate) plat_side_nonblank: bool,
+}
+
+/// A jamb: a one-sided edge of the plat — the shaft's side wall. The engine
+/// draws only the middle slot of a one-sided sidedef (`r_segs.c`,
+/// `R_StoreWallRange`: `midtexture = texturetranslation[sidedef->midtexture]`
+/// in the `if (!backsector)` branch).
+pub(crate) struct Jamb {
+    /// The middle texture on the plat's own (only) sidedef.
+    pub(crate) texture: String,
+    /// `ML_DONTPEGTOP` (`0x0008`) on the linedef.
+    pub(crate) dontpegtop: bool,
+    /// `ML_DONTPEGBOTTOM` (`0x0010`) on the linedef.
+    pub(crate) dontpegbottom: bool,
+}
+
+/// One low-side walkover crossing: a player standing in the activator sector
+/// `S` (more than a step below the plat) about to cross a walkover lift line
+/// into the far sector `T` on its other side. Both depths are measured
+/// perpendicular to the line, positive on `T`'s side, so the line's own
+/// endpoints sit at 0.
+pub(crate) struct LowWalkCross {
+    /// Declaration index of the trigger linedef.
+    pub(crate) linedef: usize,
+    /// `T`'s greatest perpendicular distance beyond the line, over every
+    /// vertex of every boundary of `T`. A crossing whose value is ≤ 16 can
+    /// never happen: the player's center would have to sit strictly more than
+    /// its 16-unit radius clear of a blocking edge (`P_BoxOnLineSide` counts a
+    /// touching box as straddling), and `T` has no room for it.
+    pub(crate) max_vertex: f64,
+    /// The least perpendicular distance to a *blocking* boundary of `T` — one
+    /// -sided, or a step of more than `step` up out of `T` — whose projection
+    /// onto the line overlaps the line's own extent. `None` when `T` has no
+    /// such boundary in front of the line.
+    pub(crate) nearest_blocking: Option<f64>,
+}
+
+/// A two-sided side wall: a boundary to a neighbor at *exactly* the plat's
+/// floor whose ceiling differs — neither a riser (a neighbor below) nor a
+/// landing sharing the plat's ceiling.
+pub(crate) struct SideWall {
+    /// The middle texture on the plat's own sidedef.
+    pub(crate) texture: String,
+    /// Whether the neighbor's ceiling is *above* the plat's — in which case
+    /// this edge is also one of [`PlatFacts::top_faces`]. The two definitions
+    /// overlap by construction, so the report states both counts and the
+    /// split.
+    pub(crate) nb_ceiling_above: bool,
+}
+
+/// A top face: a boundary to a level landing (a neighbor within a step of the
+/// plat's floor) whose ceiling is *above* the plat's — so the plat sits in a
+/// shaft or alcove under a lower ceiling and the engine draws an upper on the
+/// landing's sidedef (`r_segs.c`: the top-texture branch runs when
+/// `worldhigh < worldtop`, i.e. when the *back* sector's ceiling is the lower
+/// one, so the drawn side is the landing's).
+pub(crate) struct TopFace {
+    /// The upper texture on the landing's sidedef — the side the engine draws.
+    pub(crate) texture: String,
+    /// `ML_DONTPEGTOP` on the linedef.
+    pub(crate) dontpegtop: bool,
 }
 
 /// Everything the passes read about one plat.
@@ -331,6 +407,19 @@ pub(crate) struct PlatFacts {
     pub(crate) shape: Shape,
     pub(crate) triggers: Vec<Trigger>,
     pub(crate) risers: Vec<Riser>,
+    /// The plat's one-sided edges — its side walls.
+    pub(crate) jambs: Vec<Jamb>,
+    /// The plat's two-sided side walls (see [`SideWall`]).
+    pub(crate) two_sided_jambs: Vec<SideWall>,
+    /// The plat's top faces (see [`TopFace`]).
+    pub(crate) top_faces: Vec<TopFace>,
+    /// Two-sided boundaries of the plat where the higher-ceiling side carries
+    /// a non-blank upper, so the engine draws one.
+    pub(crate) uppers_drawn: usize,
+    /// How many of [`PlatFacts::uppers_drawn`] carry `ML_DONTPEGTOP`.
+    pub(crate) uppers_drawn_pegtop: usize,
+    /// The plat's own floor flat.
+    pub(crate) floor_flat: String,
     pub(crate) flat_same_as_level_nb: Option<bool>,
     pub(crate) flat_same_as_low_nb: Option<bool>,
     pub(crate) light_eq_all: bool,
@@ -493,6 +582,83 @@ fn activators(sides: &[(usize, Activator)]) -> Vec<Activator> {
     out
 }
 
+/// The perpendicular depth of sector `t` beyond linedef `line_idx`, measured
+/// on `t`'s side, as `(farthest vertex, nearest blocking boundary)` — see
+/// [`LowWalkCross`] for what each estimates. `None` when the line is
+/// degenerate or its vertex references dangle.
+///
+/// A two-sided boundary flagged `ML_BLOCKING` (a fence the player cannot walk
+/// through) is deliberately **not** treated as blocking here: the definition
+/// this measures is the brief's, "one-sided, or floor step > 24 relative to
+/// `T`", so the nearest-blocking estimate is an upper bound on how far the
+/// player really gets.
+fn far_depth(
+    map: &UdmfMap,
+    scene: &Scene,
+    line_idx: usize,
+    t: usize,
+    step: i32,
+) -> Option<(f64, Option<f64>)> {
+    let l = &map.linedefs[line_idx];
+    let vertex = |v: i32| {
+        usize::try_from(v)
+            .ok()
+            .filter(|&i| i < map.vertices.len())
+            .map(|i| (map.vertices[i].x, map.vertices[i].y))
+    };
+    let (p1, p2) = (vertex(l.v1)?, vertex(l.v2)?);
+    let (dx, dy) = (p2.0 - p1.0, p2.1 - p1.1);
+    let len = dx.hypot(dy);
+    if len == 0.0 {
+        return None;
+    }
+    // Doom's front (right) side of a linedef lies along the normal
+    // `(dy, -dx)`; flip it when `t` is the *back* sector, so the normal always
+    // points into `t` and every distance below is positive on `t`'s side.
+    let sign = if side_sector(map, l.sidefront) == Some(t) {
+        1.0
+    } else {
+        -1.0
+    };
+    let nrm = (sign * dy / len, sign * -dx / len);
+    let unit = (dx / len, dy / len);
+    let perp = |p: (f64, f64)| (p.0 - p1.0) * nrm.0 + (p.1 - p1.1) * nrm.1;
+    let along = |p: (f64, f64)| (p.0 - p1.0) * unit.0 + (p.1 - p1.1) * unit.1;
+
+    let mut max_vertex = 0.0_f64;
+    let mut nearest_blocking: Option<f64> = None;
+    let t_floor = scene.sectors[t].floor;
+    for b in &scene.sectors[t].boundary {
+        max_vertex = max_vertex.max(perp(b.a)).max(perp(b.b));
+        // The trigger line itself is at distance 0 and would win every
+        // minimum; it is the edge being crossed, not an obstruction.
+        if b.linedef == line_idx {
+            continue;
+        }
+        let blocks = !b.two_sided
+            || b.neighbor
+                .is_some_and(|nb| scene.sectors[nb].floor - t_floor > step);
+        if !blocks {
+            continue;
+        }
+        // Only what stands across the line's own extent can stop a crossing of
+        // it, so the projections must overlap in positive length. That is not
+        // pedantry: a boundary perpendicular to the line projects to a single
+        // point, and the far sector's side walls meet the line at its own
+        // endpoints — admitting those would report distance 0 for every room
+        // in the corpus. It is also the rule the brief's own worked example
+        // needs: a 16-deep dead-end alcove must measure 16, which is its back
+        // wall, not 0, which is where its side walls start.
+        let (sa, sb) = (along(b.a), along(b.b));
+        if sa.max(sb).min(len) - sa.min(sb).max(0.0) <= 0.0 {
+            continue;
+        }
+        let d = perp(b.a).min(perp(b.b)).max(0.0);
+        nearest_blocking = Some(nearest_blocking.map_or(d, |m: f64| m.min(d)));
+    }
+    Some((max_vertex, nearest_blocking))
+}
+
 fn triggers_of(
     map: &UdmfMap,
     scene: &Scene,
@@ -537,6 +703,30 @@ fn triggers_of(
             }
         }
         let sides = activator_sides(map, scene, plat, plat_floor, i, step);
+        // For a walkover the player fires from below, measure the far sector
+        // the crossing would land in — once per `Low` side, since a line in a
+        // flat low room can have two.
+        let mut low_crossings = Vec::new();
+        let mut low_unmeasured = 0;
+        if !USE_LIFT.contains(&l.special) {
+            for &(from, class) in &sides {
+                if class != Activator::Low {
+                    continue;
+                }
+                let far = if from == front { back } else { Some(front) };
+                match far
+                    .filter(|&t| t != from)
+                    .and_then(|t| far_depth(map, scene, i, t, step))
+                {
+                    Some((max_vertex, nearest_blocking)) => low_crossings.push(LowWalkCross {
+                        linedef: i,
+                        max_vertex,
+                        nearest_blocking,
+                    }),
+                    None => low_unmeasured += 1,
+                }
+            }
+        }
         triggers.push(Trigger {
             special: l.special,
             placement,
@@ -548,6 +738,8 @@ fn triggers_of(
                 .collect(),
             one_sided: back.is_none(),
             switch_slots,
+            low_crossings,
+            low_unmeasured,
         });
     }
     triggers
@@ -587,6 +779,10 @@ pub(crate) fn analyze_plat(
     let (mut two, mut one, mut with_special, mut blocking) = (0, 0, 0, 0);
     let (mut west, mut south, mut east, mut north) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     let mut risers = Vec::new();
+    let mut jambs = Vec::new();
+    let mut two_sided_jambs = Vec::new();
+    let mut top_faces = Vec::new();
+    let (mut uppers_drawn, mut uppers_drawn_pegtop) = (0, 0);
     let mut light_eq_all = true;
     let mut ceiling_eq_all = true;
     for b in &ss.boundary {
@@ -598,6 +794,15 @@ pub(crate) fn analyze_plat(
         }
         if !b.two_sided {
             one += 1;
+            // `Scene::build` rejects a linedef whose `two_sided` flag and back
+            // sidedef disagree, so a one-sided boundary is a genuine one-sided
+            // linedef fronted by the plat: a jamb. The engine draws only its
+            // middle slot.
+            jambs.push(Jamb {
+                texture: map.sidedefs[b.sidedef].texturemiddle.clone(),
+                dontpegtop: b.upper_unpegged,
+                dontpegbottom: b.lower_unpegged,
+            });
             continue;
         }
         two += 1;
@@ -615,17 +820,19 @@ pub(crate) fn analyze_plat(
         if scene.sectors[n].ceiling != ss.ceiling {
             ceiling_eq_all = false;
         }
-        if scene.sectors[n].floor < ss.floor {
-            // The visible lower is on the sidedef whose sector has the lower
-            // floor (`r_segs.c`, `R_StoreWallRange`): the neighbor's.
-            let l = &map.linedefs[b.linedef];
-            let nb_side = if side_sector(map, l.sidefront) == Some(n) {
-                sidedef(map, l.sidefront)
-            } else {
-                l.sideback.and_then(|s| sidedef(map, s))
-            };
-            // `Scene` resolved this boundary, so its own sidedef is in range;
-            // the neighbor's side is looked up defensively all the same.
+        // The visible lower is on the sidedef whose sector has the lower floor,
+        // and the visible upper on the one whose sector has the higher ceiling
+        // (`r_segs.c`, `R_StoreWallRange`). `Scene` resolved this boundary, so
+        // the plat's own sidedef is in range; the neighbor's is looked up
+        // defensively all the same.
+        let l = &map.linedefs[b.linedef];
+        let nb_side = if side_sector(map, l.sidefront) == Some(n) {
+            sidedef(map, l.sidefront)
+        } else {
+            l.sideback.and_then(|s| sidedef(map, s))
+        };
+        let nb = &scene.sectors[n];
+        if nb.floor < ss.floor {
             if let Some(nb_side) = nb_side {
                 risers.push(Riser {
                     texture: nb_side.texturebottom.clone(),
@@ -633,6 +840,34 @@ pub(crate) fn analyze_plat(
                     plat_side_nonblank: map.sidedefs[b.sidedef].texturebottom != "-",
                 });
             }
+        } else if nb.floor == ss.floor && nb.ceiling != ss.ceiling {
+            // Neither a riser nor a landing under the plat's own ceiling: a
+            // two-sided side wall, the shape a door track takes.
+            two_sided_jambs.push(SideWall {
+                texture: map.sidedefs[b.sidedef].texturemiddle.clone(),
+                nb_ceiling_above: nb.ceiling > ss.ceiling,
+            });
+        }
+        // A level landing under a higher ceiling: the plat is a shaft or
+        // alcove, and the upper the engine draws is the landing's.
+        if (nb.floor - ss.floor).abs() <= step
+            && nb.ceiling > ss.ceiling
+            && let Some(nb_side) = nb_side
+        {
+            top_faces.push(TopFace {
+                texture: nb_side.texturetop.clone(),
+                dontpegtop: b.upper_unpegged,
+            });
+        }
+        // Every boundary of the plat on which the engine draws an upper at all.
+        let drawn = match nb.ceiling.cmp(&ss.ceiling) {
+            Ordering::Greater => nb_side.map(|s| s.texturetop.as_str()),
+            Ordering::Less => Some(map.sidedefs[b.sidedef].texturetop.as_str()),
+            Ordering::Equal => None,
+        };
+        if drawn.is_some_and(|t| t != "-") {
+            uppers_drawn += 1;
+            uppers_drawn_pegtop += usize::from(b.upper_unpegged);
         }
     }
     let nb_floors: Vec<i32> = neighbors.iter().map(|&n| scene.sectors[n].floor).collect();
@@ -732,6 +967,12 @@ pub(crate) fn analyze_plat(
         rest,
         shape,
         risers,
+        jambs,
+        two_sided_jambs,
+        top_faces,
+        uppers_drawn,
+        uppers_drawn_pegtop,
+        floor_flat: sec.texturefloor.clone(),
         flat_same_as_level_nb: level_nb.map(|n| map.sectors[n].texturefloor == sec.texturefloor),
         flat_same_as_low_nb: low_nb.map(|n| map.sectors[n].texturefloor == sec.texturefloor),
         light_eq_all,
@@ -1182,6 +1423,171 @@ mod tests {
         assert_eq!((p.bbox_w, p.bbox_h, p.bbox_min), (0, 0, (0, 0)));
         assert_eq!(p.shape, Shape::Other);
         assert_eq!(p.triggers[0].placement, Placement::Remote);
+    }
+
+    /// A three-room shaft: room 0 is the low room the lift is called from
+    /// (floor 0, ceiling 256), room 1 the plat (floor 64, ceiling
+    /// `plat_ceiling`, tag 7, flat `STEP1`), room 2 the landing at the plat's
+    /// own floor under `landing_ceiling`. Textures are chosen so every slot
+    /// the measures read is distinguishable from every other: the riser's
+    /// visible lower is `SUPPORT2` on room 0's sidedef, the plat's own lower
+    /// is blank; the landing's upper is `BIGDOOR2` and the plat's own upper on
+    /// that same line is `PLATSIDE`, so reading the wrong side is visible; the
+    /// plat's two one-sided jambs are `DOORTRAK` (`dontpegtop`) and `STARTAN2`
+    /// (`dontpegbottom`); the low room's upper over the shaft is `STARTAN3`,
+    /// on a line with neither pegging flag.
+    fn shaft(plat_ceiling: i32, landing_ceiling: i32) -> String {
+        let mut text = String::from("namespace = \"doom\";\n");
+        for i in 0..4 {
+            let x = i * 128;
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = 0.000; }}");
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = 128.000; }}");
+        }
+        // The riser line: front is the low room, so a use fires from below.
+        text.push_str(
+            "linedef { v1 = 3; v2 = 2; sidefront = 0; sideback = 1; twosided = true; special = 62; arg0 = 7; }\n",
+        );
+        // The landing line: front is the plat, back the landing, upper-unpegged.
+        text.push_str(
+            "linedef { v1 = 5; v2 = 4; sidefront = 2; sideback = 3; twosided = true; dontpegtop = true; }\n",
+        );
+        // The plat's two one-sided jambs.
+        text.push_str(
+            "linedef { v1 = 3; v2 = 5; sidefront = 4; blocking = true; dontpegtop = true; }\n",
+        );
+        text.push_str(
+            "linedef { v1 = 4; v2 = 2; sidefront = 5; blocking = true; dontpegbottom = true; }\n",
+        );
+        // The outer walls of rooms 0 and 2, closing both loops.
+        for (v1, v2, side) in [
+            (0, 1, 6),
+            (1, 3, 7),
+            (2, 0, 8),
+            (5, 7, 9),
+            (7, 6, 10),
+            (6, 4, 11),
+        ] {
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {side}; blocking = true; }}"
+            );
+        }
+        for sd in [
+            "sector = 0; texturetop = \"STARTAN3\"; texturemiddle = \"-\"; texturebottom = \"SUPPORT2\";",
+            "sector = 1; texturetop = \"-\"; texturemiddle = \"-\"; texturebottom = \"-\";",
+            "sector = 1; texturetop = \"PLATSIDE\"; texturemiddle = \"-\"; texturebottom = \"-\";",
+            "sector = 2; texturetop = \"BIGDOOR2\"; texturemiddle = \"-\"; texturebottom = \"-\";",
+            "sector = 1; texturemiddle = \"DOORTRAK\";",
+            "sector = 1; texturemiddle = \"STARTAN2\";",
+            "sector = 0; texturemiddle = \"STARTAN2\";",
+            "sector = 0; texturemiddle = \"STARTAN2\";",
+            "sector = 0; texturemiddle = \"STARTAN2\";",
+            "sector = 2; texturemiddle = \"STARTAN2\";",
+            "sector = 2; texturemiddle = \"STARTAN2\";",
+            "sector = 2; texturemiddle = \"STARTAN2\";",
+        ] {
+            let _ = writeln!(text, "sidedef {{ {sd} }}");
+        }
+        for (flat, floor, ceiling, tag) in [
+            ("FLOOR4_8", 0, 256, 0),
+            ("STEP1", 64, plat_ceiling, 7),
+            ("FLOOR4_8", 64, landing_ceiling, 0),
+        ] {
+            let _ = writeln!(
+                text,
+                "sector {{ texturefloor = \"{flat}\"; textureceiling = \"CEIL3_5\"; heightfloor = {floor}; heightceiling = {ceiling}; lightlevel = 160; id = {tag}; }}"
+            );
+        }
+        text
+    }
+
+    #[test]
+    fn a_shafts_top_face_is_read_off_the_landings_sidedef() {
+        // The landing's ceiling (256) is above the plat's (128), so `r_segs.c`
+        // draws the upper on the landing's side — never the plat's `PLATSIDE`.
+        let f = fixture(&shaft(128, 256));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert_eq!(p.shape, Shape::Core);
+        assert_eq!(p.top_faces.len(), 1);
+        assert_eq!(p.top_faces[0].texture, "BIGDOOR2");
+        assert!(p.top_faces[0].dontpegtop);
+        // Both two-sided boundaries draw an upper: the low room's `STARTAN3`
+        // over the shaft (unpegged flag absent) and the landing's `BIGDOOR2`.
+        assert_eq!(p.uppers_drawn, 2);
+        assert_eq!(p.uppers_drawn_pegtop, 1);
+        assert_eq!(p.risers.len(), 1);
+        assert_eq!(p.risers[0].texture, "SUPPORT2");
+        assert!(!p.risers[0].plat_side_nonblank);
+        assert_eq!(p.floor_flat, "STEP1");
+        assert_eq!(p.flat_same_as_level_nb, Some(false));
+        assert_eq!(p.flat_same_as_low_nb, Some(false));
+        // The landing is at the plat's own floor under a different ceiling, so
+        // it is a two-sided side wall as well as a top face — the overlap the
+        // report states rather than hides.
+        assert_eq!(p.two_sided_jambs.len(), 1);
+        assert!(p.two_sided_jambs[0].nb_ceiling_above);
+        let mut jambs: Vec<(&str, bool, bool)> = p
+            .jambs
+            .iter()
+            .map(|j| (j.texture.as_str(), j.dontpegtop, j.dontpegbottom))
+            .collect();
+        jambs.sort_unstable();
+        assert_eq!(
+            jambs,
+            vec![("DOORTRAK", true, false), ("STARTAN2", false, true)]
+        );
+    }
+
+    #[test]
+    fn a_same_floor_neighbor_under_a_lower_ceiling_is_a_side_wall_not_a_top_face() {
+        // The landing's ceiling (96) is now *below* the plat's (128): nothing
+        // is drawn on the landing's side, the plat's own `PLATSIDE` upper is,
+        // and the edge is a side wall only.
+        let f = fixture(&shaft(128, 96));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert!(p.top_faces.is_empty());
+        assert_eq!(p.two_sided_jambs.len(), 1);
+        assert!(!p.two_sided_jambs[0].nb_ceiling_above);
+        assert_eq!(p.uppers_drawn, 2, "STARTAN3 over the shaft, PLATSIDE here");
+        assert_eq!(p.uppers_drawn_pegtop, 1);
+    }
+
+    #[test]
+    fn a_landing_sharing_the_plats_ceiling_is_neither_a_top_face_nor_a_side_wall() {
+        let f = fixture(&shaft(256, 256));
+        let p = analyze(&f, 1).expect("analyzed");
+        assert!(p.top_faces.is_empty());
+        assert!(p.two_sided_jambs.is_empty());
+        assert_eq!(p.uppers_drawn, 0, "equal ceilings all round draw no upper");
+    }
+
+    #[test]
+    fn far_sector_depth_is_measured_on_the_far_sectors_own_side() {
+        // Three 128×128 rooms in a row; the room 0 / room 1 line is `chain`'s
+        // first linedef, at x = 128. Room 2's floor is 32 — more than one
+        // step above room 1's — so the room 1 / room 2 line blocks a player
+        // walking east out of room 1.
+        let f = fixture(&chain(
+            &[0, 0, 32],
+            &[0, 0, 0],
+            &[(0, 0, false), (0, 0, false)],
+            "",
+        ));
+        // Room 1 is the line's *back* sector; room 0 its front. Both are 128
+        // deep beyond it, so a normal that followed the linedef's front side
+        // instead of the sector asked about would return -128 for one of them.
+        for far in [0, 1] {
+            let (max_vertex, nearest) =
+                far_depth(&f.map, &f.scene, 0, far, f.step).expect("measured");
+            assert!(
+                (max_vertex - 128.0).abs() < 1e-9,
+                "sector {far} spans 128 units beyond the line, got {max_vertex}"
+            );
+            // 128, not 0: the room's north and south walls run *away* from the
+            // line and touch it only at its endpoints, so they are excluded;
+            // what stops the player is the wall across the far end.
+            assert_eq!(nearest, Some(128.0), "sector {far}");
+        }
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! Places things with real clearance, not merely inside their room.
 
+use crate::compile::lifts::LiftOut;
 use crate::compile::teleports::Marker;
 use crate::compile::{CompileError, MapData};
 use crate::geom::{Pt, contains, dist_to_segment};
-use crate::ir::{Ir, ThingSkills};
+use crate::ir::{Ir, ThingSkills, square_contains};
 use crate::tables::{Tables, ThingDims};
 
 /// A thing as it will be emitted.
@@ -72,7 +73,11 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// authored apart, and why measuring the emitted geometry is still the
 /// principled choice rather than an incidental one.
 ///
-/// After every authored thing, each of `markers` —
+/// A room thing standing on one of its room's pedestals is refused rather
+/// than placed: the engine would spawn it in the pedestal's sector at the
+/// raised floor, which is not the floor the room's `things` list describes.
+/// After every room's own things come the pedestals' own — see
+/// `place_pedestal_things`. After every authored thing, each of `markers` —
 /// [`crate::compile::teleports::emit_teleports`]'s destination markers — is
 /// emitted as a `teleport_dest` thing, held to the clearance and headroom
 /// its *arriving* thing needs rather than the marker's own (the marker is in
@@ -83,26 +88,37 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// # Errors
 /// Returns [`CompileError::UnknownThing`] for an unresolvable name,
 /// [`CompileError::ThingOutsideRoom`] for a point outside its room,
-/// [`CompileError::ThingTooClose`] when radius clearance fails,
+/// [`CompileError::ThingOnPedestal`] for a room thing standing on one of its
+/// room's pedestals, [`CompileError::ThingTooClose`] when radius clearance
+/// fails,
+/// [`CompileError::PedestalNoHeadroom`] when a pedestal's raised floor
+/// leaves its own thing too little room under the host's ceiling,
 /// [`CompileError::NoHeadroom`] when the room is too short — for the
 /// tallest placed thing, or for the player if the room is empty or shorter
 /// than the player alone — [`CompileError::UnboundedRoom`] when a room's
 /// sector has no emitted linedef to measure against,
-/// [`CompileError::OverlappingStarts`] for coincident player starts,
+/// [`CompileError::OverlappingStarts`] for coincident player starts —
+/// counted across room things and pedestal things alike, since a start on a
+/// pedestal is still a start —
 /// [`CompileError::TeleportMarkerTooClose`] when a destination is closer to
 /// its sector's walls than the arriving thing's radius, and
 /// [`CompileError::TeleportMarkerNoHeadroom`] when that sector is too short
 /// for it.
 ///
+/// `lifts` carries the emitted platforms, and is read for the sector each
+/// pedestal was cut into.
+///
 /// # Panics
-/// Panics if `teleport_dest` is absent from the vocabulary table, which
-/// `tables`'s own `exit_lift_teleport_and_sector_specials_resolve` test
-/// pins present.
+/// Panics only where `place_pedestal_things` and `place_markers` document:
+/// on a missing `teleport_dest` vocabulary entry, which `tables`'s own
+/// `exit_lift_teleport_and_sector_specials_resolve` test pins present, and
+/// on geometry or IR shapes an earlier pass has already ruled out.
 pub fn place_things(
     ir: &Ir,
     tables: &Tables,
     data: &MapData,
     markers: &[Marker],
+    lifts: &[LiftOut],
 ) -> Result<Vec<ThingOut>, CompileError> {
     let mut out = Vec::new();
     let mut starts: Vec<(i32, i32)> = Vec::new();
@@ -144,6 +160,30 @@ pub fn place_things(
             if !contains(&room.footprint, thing.at) {
                 return Err(CompileError::ThingOutsideRoom {
                     room: room.id.clone(),
+                    kind: thing.kind.clone(),
+                    x: thing.at.x,
+                    y: thing.at.y,
+                });
+            }
+
+            // A thing on a pedestal's rectangle would spawn in the
+            // pedestal's sector at its raised floor, not on the room floor
+            // this list describes — the refusal `teleports::resolve_pad`
+            // makes for a pad, on the same grounds. Checked before clearance
+            // so the author is told *why* the point is wrong: measured
+            // against the room, such a point is also within a radius of the
+            // island's edges, and `ThingTooClose` would name the symptom
+            // rather than the cause. Closed on both axes: a point on the
+            // rectangle's edge already sits on the platform's boundary line.
+            if let Some(pedestal) = ir.pedestals.iter().find(|p| {
+                if p.room != room.id {
+                    return false;
+                }
+                let (lo, hi) = p.rect();
+                square_contains(lo, hi, thing.at)
+            }) {
+                return Err(CompileError::ThingOnPedestal {
+                    pedestal: pedestal.id.clone(),
                     kind: thing.kind.clone(),
                     x: thing.at.x,
                     y: thing.at.y,
@@ -196,7 +236,118 @@ pub fn place_things(
         }
     }
 
+    out.extend(place_pedestal_things(ir, tables, data, lifts, &mut starts)?);
     out.extend(place_markers(tables, data, markers)?);
+    Ok(out)
+}
+
+/// Places every thing standing on a pedestal, proving it fits up there.
+///
+/// A pedestal's things sit on the platform, not on the host room's floor, so
+/// both measurements move with it. Clearance is taken against the platform's
+/// own four edges — `lifts` names the sector `emit_lifts` cut — because
+/// stepping off an island is a fall the author did not ask for; headroom is
+/// what the rise left under the host's ceiling, which the platform keeps.
+///
+/// Containment needs no check here:
+/// [`Ir::from_json`](crate::ir::Ir::from_json) already required every one of
+/// these to sit strictly inside its pedestal's rectangle. A `_start` is
+/// legal on a pedestal — beginning the level on one is a fine thing to
+/// author — but it joins `starts`, the coincident-start ledger `place_things`
+/// keeps for room things, so two starts at one point are refused wherever
+/// they were authored. `starts` arrives already carrying every room start,
+/// since the room loop runs first.
+///
+/// # Errors
+/// Returns [`CompileError::UnknownThing`] for an unresolvable name,
+/// [`CompileError::ThingTooClose`] when the thing stands closer to the
+/// pedestal's edge than its own radius,
+/// [`CompileError::PedestalNoHeadroom`] when the risen floor leaves it less
+/// than its own height — `emit_lifts` already held that gap to the
+/// *player's* height, so only a thing taller than the player can fail that
+/// one — and [`CompileError::OverlappingStarts`] for a start sharing a point
+/// with one already placed.
+///
+/// # Panics
+/// Panics if a pedestal has no emitted platform, or names a room that does
+/// not exist — [`crate::compile::lifts::emit_lifts`] emits one platform per
+/// pedestal and [`Ir::from_json`](crate::ir::Ir::from_json) resolves every
+/// `room` before either runs — or if a pedestal's sector has no bordering
+/// linedef, impossible for a square cut as four two-sided edges.
+fn place_pedestal_things(
+    ir: &Ir,
+    tables: &Tables,
+    data: &MapData,
+    lifts: &[LiftOut],
+    starts: &mut Vec<(i32, i32)>,
+) -> Result<Vec<ThingOut>, CompileError> {
+    let mut out = Vec::new();
+    for (pi, pedestal) in ir.pedestals.iter().enumerate() {
+        let lift = lifts
+            .iter()
+            .find(|l| l.pedestal == Some(pi))
+            .expect("emit_lifts emits one platform per pedestal");
+        let host = ir.room(&pedestal.room).expect("validated by Ir::from_json");
+        let headroom = host.ceiling - (host.floor + pedestal.rise);
+        for thing in &pedestal.things {
+            let id = tables
+                .thing_id(&thing.kind)
+                .ok_or_else(|| CompileError::UnknownThing {
+                    room: pedestal.room.clone(),
+                    kind: thing.kind.clone(),
+                })?;
+
+            // The player's dimensions are the floor for anything not listed
+            // as a monster species, exactly as in `place_things`.
+            let dims: ThingDims = tables
+                .species(&thing.kind)
+                .unwrap_or_else(|| tables.player());
+
+            let have = emitted_clearance(data, lift.sector, thing.at)
+                .expect("a pedestal is cut as four two-sided edges");
+            if have < f64::from(dims.radius) {
+                return Err(CompileError::ThingTooClose {
+                    room: pedestal.room.clone(),
+                    kind: thing.kind.clone(),
+                    x: thing.at.x,
+                    y: thing.at.y,
+                    have,
+                    need: dims.radius,
+                });
+            }
+
+            if headroom < dims.height {
+                return Err(CompileError::PedestalNoHeadroom {
+                    pedestal: pedestal.id.clone(),
+                    kind: thing.kind.clone(),
+                    have: headroom,
+                    need: dims.height,
+                });
+            }
+
+            // Raised height is no exemption from telefragging: two starts at
+            // one point spawn one player inside the other whatever they are
+            // standing on.
+            if thing.kind.ends_with("_start") {
+                if starts.contains(&(thing.at.x, thing.at.y)) {
+                    return Err(CompileError::OverlappingStarts {
+                        x: thing.at.x,
+                        y: thing.at.y,
+                    });
+                }
+                starts.push((thing.at.x, thing.at.y));
+            }
+
+            out.push(ThingOut {
+                x: thing.at.x,
+                y: thing.at.y,
+                angle: thing.angle,
+                kind: id,
+                skills: thing.skills,
+                ambush: thing.ambush,
+            });
+        }
+    }
     Ok(out)
 }
 
@@ -276,12 +427,12 @@ fn place_markers(
 mod tests {
     use crate::compile::CompileError;
     use crate::compile::MapData;
-    use crate::compile::compile_reporting;
     use crate::compile::doors::emit_doors;
     use crate::compile::portals::cut_portals;
     use crate::compile::sectors::emit_sectors;
     use crate::compile::tags::TagAllocator;
     use crate::compile::things::place_things;
+    use crate::compile::{compile, compile_reporting};
     use crate::geom::{Pt, clearance};
     use crate::ir::Ir;
     use crate::tables::Tables;
@@ -314,7 +465,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data, &[]).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[], &[]).expect("placed");
         assert_eq!(things.len(), 1);
         assert_eq!(things[0].kind, 1, "player 1 start");
         assert_eq!(things[0].x, 128);
@@ -326,7 +477,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data, &[]),
+            place_things(&ir, &tables, &data, &[], &[]),
             Err(CompileError::ThingOutsideRoom { .. })
         ));
     }
@@ -339,14 +490,14 @@ mod tests {
         let ok = Ir::from_json(&ir_with_thing("player1_start", (r, 128), 128)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
             "at the radius it fits"
         );
         // One unit closer: it does not.
         let bad = Ir::from_json(&ir_with_thing("player1_start", (r - 1, 128), 128)).expect("ir");
         let data_bad = compiled_data(&bad, &tables);
         assert!(matches!(
-            place_things(&bad, &tables, &data_bad, &[]),
+            place_things(&bad, &tables, &data_bad, &[], &[]),
             Err(CompileError::ThingTooClose { .. })
         ));
     }
@@ -390,7 +541,7 @@ mod tests {
         let data = compiled_data(&ir, &tables);
         assert!(
             matches!(
-                place_things(&ir, &tables, &data, &[]),
+                place_things(&ir, &tables, &data, &[], &[]),
                 Err(CompileError::ThingTooClose { .. })
             ),
             "a point 8*sqrt(2) ~ 11.3 units from the diagonal chamfer must be rejected \
@@ -411,7 +562,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing_near_octagon_chamfer(12)).expect("ir");
         let data = compiled_data(&ir, &tables);
         assert!(
-            place_things(&ir, &tables, &data, &[]).is_ok(),
+            place_things(&ir, &tables, &data, &[], &[]).is_ok(),
             "a point 12*sqrt(2) ~ 17.0 units from the diagonal chamfer must fit against a \
              16-unit radius"
         );
@@ -424,13 +575,13 @@ mod tests {
         let ok = Ir::from_json(&ir_with_thing("player1_start", (128, 128), h)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
             "at exactly its height it fits"
         );
         let bad = Ir::from_json(&ir_with_thing("player1_start", (128, 128), h - 1)).expect("ir");
         let data_bad = compiled_data(&bad, &tables);
         assert!(matches!(
-            place_things(&bad, &tables, &data_bad, &[]),
+            place_things(&bad, &tables, &data_bad, &[], &[]),
             Err(CompileError::NoHeadroom { .. })
         ));
     }
@@ -441,7 +592,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data, &[]),
+            place_things(&ir, &tables, &data, &[], &[]),
             Err(CompileError::UnknownThing { .. })
         ));
     }
@@ -461,7 +612,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data, &[]),
+            place_things(&ir, &tables, &data, &[], &[]),
             Err(CompileError::OverlappingStarts { .. })
         ));
     }
@@ -477,7 +628,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         assert!(matches!(
-            place_things(&ir, &tables, &MapData::default(), &[]),
+            place_things(&ir, &tables, &MapData::default(), &[], &[]),
             Err(CompileError::UnboundedRoom { .. })
         ));
     }
@@ -516,7 +667,7 @@ mod tests {
         let ok = Ir::from_json(&ir_json(wall + r)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
             "exactly the radius from room b's own wall fits"
         );
 
@@ -524,7 +675,7 @@ mod tests {
         let data_bad = compiled_data(&bad, &tables);
         assert!(
             matches!(
-                place_things(&bad, &tables, &data_bad, &[]),
+                place_things(&bad, &tables, &data_bad, &[], &[]),
                 Err(CompileError::ThingTooClose { .. })
             ),
             "one unit closer than the radius does not fit"
@@ -576,7 +727,7 @@ mod tests {
         let ok = Ir::from_json(&empty_corridor_json(h)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
             "at exactly the player's height, an empty room is fine"
         );
 
@@ -584,7 +735,7 @@ mod tests {
         let data_bad = compiled_data(&bad, &tables);
         assert!(
             matches!(
-                place_things(&bad, &tables, &data_bad, &[]),
+                place_things(&bad, &tables, &data_bad, &[], &[]),
                 Err(CompileError::NoHeadroom { .. })
             ),
             "an empty room one unit too short must still be rejected"
@@ -722,12 +873,188 @@ mod tests {
         );
     }
 
+    /// A 512-unit square room with one 64x64 pedestal risen 128 units above
+    /// it, carrying a soulsphere at its center.
+    ///
+    /// A copy of `lifts::tests::PEDESTAL` rather than a shared constant: a
+    /// `#[cfg(test)] mod tests` is private to its own file, and what this
+    /// pass owns is the thing standing on the platform rather than the
+    /// platform under it.
+    const PEDESTAL: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[448,448], "angle":0 } ] }
+      ],
+      "portals":[],
+      "pedestals":[ { "id":"p", "room":"a", "at":[128,128], "rise":128, "speed":"fast",
+                      "things":[ { "kind":"soulsphere", "at":[160,160], "angle":0 } ] } ]
+    }"#;
+
+    #[test]
+    fn a_thing_on_a_pedestal_is_placed_at_its_point_with_clearance_against_the_pedestals_edges() {
+        let tables = Tables::load().expect("tables");
+        let soulsphere = tables.thing_id("soulsphere").expect("soulsphere");
+        let out = compile(&Ir::from_json(PEDESTAL).expect("ir"), &tables).expect("compiles");
+        let sphere = out
+            .things
+            .iter()
+            .find(|t| t.kind == soulsphere)
+            .expect("the pedestal's own thing is placed");
+        assert_eq!(
+            (sphere.x, sphere.y),
+            (160, 160),
+            "at its authored point, on the platform rather than the room floor"
+        );
+
+        // Too close to the pedestal's edge for the player's radius: 8 units
+        // from the x = 128 edge, against a 16-unit radius. Measured against
+        // the pedestal's own four edges — the room's walls are 128 away.
+        let tight = PEDESTAL.replacen(r#""at":[160,160]"#, r#""at":[136,160]"#, 1);
+        assert!(matches!(
+            compile(&Ir::from_json(&tight).expect("ir"), &tables),
+            Err(CompileError::ThingTooClose { .. })
+        ));
+
+        // A monster taller than the headroom over the pedestal. At ceiling
+        // 184 the risen floor leaves 56 units: exactly the player's height,
+        // so `emit_lifts` accepts the pedestal itself, and 8 short of the
+        // baron's 64 — which only this loop can catch.
+        let tall = PEDESTAL
+            .replacen(r#""kind":"soulsphere""#, r#""kind":"baron_of_hell""#, 1)
+            .replacen(r#""ceiling":256"#, r#""ceiling":184"#, 1);
+        assert!(matches!(
+            compile(&Ir::from_json(&tall).expect("ir"), &tables),
+            Err(CompileError::PedestalNoHeadroom { kind, have: 56, need: 64, .. })
+                if kind == "baron_of_hell"
+        ));
+    }
+
+    #[test]
+    fn an_unknown_vocabulary_name_on_a_pedestal_is_rejected() {
+        // The room's own things resolve through `place_things`; a pedestal's
+        // resolve in `place_pedestal_things`, which has to raise the same
+        // refusal itself. `Ir::from_json` carries an unresolvable `kind`
+        // through untouched — `an_unknown_vocabulary_name_is_rejected` shows
+        // that for a room thing — so this pass is where it is caught.
+        let tables = Tables::load().expect("tables");
+        let unknown = PEDESTAL.replacen(r#""kind":"soulsphere""#, r#""kind":"no_such_thing""#, 1);
+        let err = compile(&Ir::from_json(&unknown).expect("ir"), &tables)
+            .expect_err("an unresolvable pedestal thing is refused");
+        assert!(
+            matches!(
+                &err,
+                CompileError::UnknownThing { room, kind }
+                    if room == "a" && kind == "no_such_thing"
+            ),
+            "expected UnknownThing naming the pedestal's host room and the bad kind, got {err}"
+        );
+    }
+
+    /// `PEDESTAL`'s room and pedestal, with the pedestal carrying nothing
+    /// and a soulsphere authored in the *room* at `at` instead — the mistake
+    /// `ThingOnPedestal` exists to catch.
+    fn room_thing_at(at: (i32, i32)) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":64, "theme":"tech_base",
+              "rooms":[
+                {{ "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+                  "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+                  "things":[ {{ "kind":"player1_start", "at":[448,448], "angle":0 }},
+                             {{ "kind":"soulsphere", "at":[{},{}], "angle":0 }} ] }}
+              ],
+              "portals":[],
+              "pedestals":[ {{ "id":"p", "room":"a", "at":[128,128], "rise":128 }} ] }}"#,
+            at.0, at.1
+        )
+    }
+
+    #[test]
+    fn a_room_thing_standing_on_a_pedestal_is_refused_rather_than_placed_on_the_room_floor() {
+        let tables = Tables::load().expect("tables");
+        // The pedestal's rectangle is (128, 128)-(192, 192). A point in its
+        // interior is authored on the room's floor but would spawn 128 units
+        // up, in the platform's sector.
+        let inside = room_thing_at((160, 160));
+        assert!(
+            matches!(
+                compile(&Ir::from_json(&inside).expect("ir"), &tables),
+                Err(CompileError::ThingOnPedestal { ref pedestal, ref kind, x: 160, y: 160 })
+                    if pedestal == "p" && kind == "soulsphere"
+            ),
+            "a room thing inside the pedestal's rectangle must be refused"
+        );
+
+        // On the rectangle's own edge (x = 192, its high corner's x): the
+        // test is closed on both axes, so this is refused too.
+        let on_edge = room_thing_at((192, 160));
+        assert!(
+            matches!(
+                compile(&Ir::from_json(&on_edge).expect("ir"), &tables),
+                Err(CompileError::ThingOnPedestal { x: 192, y: 160, .. })
+            ),
+            "a room thing on the pedestal's boundary must be refused too"
+        );
+
+        // Clear of it, and clear of the island's edges by more than the
+        // player's radius: placed as authored.
+        let beside = room_thing_at((256, 160));
+        assert!(
+            compile(&Ir::from_json(&beside).expect("ir"), &tables).is_ok(),
+            "64 units clear of the rectangle is not standing on it"
+        );
+    }
+
+    /// One room, two pedestals, each carrying a player start of its own at
+    /// its center — legal, and the fixture the overlapping-start case below
+    /// is derived from.
+    const TWO_PEDESTALS: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[448,448], "angle":0 } ] }
+      ],
+      "portals":[],
+      "pedestals":[
+        { "id":"p", "room":"a", "at":[128,128], "rise":128,
+          "things":[ { "kind":"player2_start", "at":[160,160], "angle":0 } ] },
+        { "id":"q", "room":"a", "at":[256,128], "rise":128,
+          "things":[ { "kind":"player3_start", "at":[288,160], "angle":0 } ] }
+      ] }"#;
+
+    #[test]
+    fn starts_placed_on_pedestals_join_the_coincident_start_check() {
+        let tables = Tables::load().expect("tables");
+        let out = compile(&Ir::from_json(TWO_PEDESTALS).expect("ir"), &tables).expect("compiles");
+        for name in ["player2_start", "player3_start"] {
+            let kind = tables.thing_id(name).expect(name);
+            assert!(
+                out.things.iter().any(|t| t.kind == kind),
+                "{name} is emitted from its pedestal"
+            );
+        }
+
+        // The same start listed twice on one pedestal: two players would
+        // spawn inside each other, exactly as two room starts at one point
+        // would.
+        let duplicated = TWO_PEDESTALS.replacen(
+            r#"{ "kind":"player2_start", "at":[160,160], "angle":0 }"#,
+            r#"{ "kind":"player2_start", "at":[160,160], "angle":0 },
+                    { "kind":"player2_start", "at":[160,160], "angle":90 }"#,
+            1,
+        );
+        assert!(matches!(
+            compile(&Ir::from_json(&duplicated).expect("ir"), &tables),
+            Err(CompileError::OverlappingStarts { x: 160, y: 160 })
+        ));
+    }
+
     #[test]
     fn a_thing_with_no_skills_specified_emits_all_five_true() {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data, &[]).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[], &[]).expect("placed");
         let skills = things[0].skills;
         assert!(
             skills.skill1 && skills.skill2 && skills.skill3 && skills.skill4 && skills.skill5,
@@ -744,7 +1071,7 @@ mod tests {
         let ir = Ir::from_json(&json).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data, &[]).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[], &[]).expect("placed");
         let skills = things[0].skills;
         assert!(!skills.skill1 && !skills.skill2, "explicitly excluded");
         assert!(

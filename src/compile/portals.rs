@@ -40,9 +40,10 @@ pub(crate) const MAP_RANGE: std::ops::RangeInclusive<i32> = (i16::MIN as i32)..=
 /// opening survive with their own endpoints and textures intact. For a
 /// [`PortalKind::Plain`] portal this also fills the gap with an open passage
 /// sector (see `emit_gap_sector`); a door portal's gap is instead filled by
-/// [`crate::compile::doors::emit_doors`], which runs afterward and expects to
-/// find both rooms' flanking walls already cut but the gap itself still
-/// empty.
+/// [`crate::compile::doors::emit_doors`], and a [`PortalKind::Lift`]
+/// portal's by [`crate::compile::lifts::emit_lifts`] — both run afterward
+/// and expect to find both rooms' flanking walls already cut but the gap
+/// itself still empty.
 ///
 /// # Errors
 /// Returns [`CompileError::PortalOnDiagonalWall`] when the opening sits on a
@@ -53,8 +54,8 @@ pub(crate) const MAP_RANGE: std::ops::RangeInclusive<i32> = (i16::MIN as i32)..=
 /// [`CompileError::OverlappingPortals`] when two openings overlap on the same
 /// wall line, [`CompileError::OpeningNotInAWall`] when no single solid wall
 /// of a room spans the opening, and [`CompileError::PortalNoHeadroom`] when a
-/// plain portal's passage sector would have too little (or no) headroom for
-/// the player.
+/// plain portal's passage sector — or the platform of a lift portal, at its
+/// rest floor — would leave too little (or no) headroom for the player.
 pub fn cut_portals(ir: &Ir, tables: &Tables, data: &mut MapData) -> Result<(), CompileError> {
     let resolved = ir
         .portals
@@ -71,8 +72,8 @@ pub fn cut_portals(ir: &Ir, tables: &Tables, data: &mut MapData) -> Result<(), C
     Ok(())
 }
 
-/// Rejects a plain portal whose two rooms leave too little headroom in the
-/// passage sector between them.
+/// Rejects a plain or lift portal whose two rooms leave too little headroom
+/// above the sector that fills the gap between them.
 ///
 /// Runs here, in the pre-emission pass alongside
 /// [`check_no_overlapping_openings`], over every resolved portal before any
@@ -80,9 +81,10 @@ pub fn cut_portals(ir: &Ir, tables: &Tables, data: &mut MapData) -> Result<(), C
 /// `split_wall_for_opening` has already mutated `data`. Checking it here is
 /// what makes this module's own doc comment ("every portal is resolved and
 /// cross-checked before anything is emitted") actually true: a rejected map
-/// leaves no partially-cut geometry behind. Only [`PortalKind::Plain`]
-/// portals are checked — see [`CompileError::PortalNoHeadroom`]'s doc
-/// comment for why a door portal is exempt.
+/// leaves no partially-cut geometry behind. [`PortalKind::Plain`] and
+/// [`PortalKind::Lift`] portals are checked, each against the floor its own
+/// gap sector comes to rest at — see [`CompileError::PortalNoHeadroom`]'s
+/// doc comment for why a door portal is exempt.
 fn check_headroom(
     ir: &Ir,
     tables: &Tables,
@@ -90,12 +92,20 @@ fn check_headroom(
 ) -> Result<(), CompileError> {
     let need = tables.player().height;
     for (portal, geometry) in resolved {
-        if portal.kind != PortalKind::Plain {
-            continue;
-        }
         let room_a = &ir.rooms[geometry.ia];
         let room_b = &ir.rooms[geometry.ib];
-        let have = room_a.ceiling.min(room_b.ceiling) - room_a.floor.max(room_b.floor);
+        // What the player must fit above, once the sector filling the gap
+        // has come to rest: the higher floor for a plain passage, and for a
+        // lift the platform's own rest floor — the higher floor plus a
+        // barrier's `rise` (`p_plats.c`, `EV_DoPlat`, `case downWaitUpStay`:
+        // the platform's own floor is its high position). A door portal is
+        // exempt — see `CompileError::PortalNoHeadroom`'s doc comment.
+        let rest = match portal.kind {
+            PortalKind::Plain => room_a.floor.max(room_b.floor),
+            PortalKind::Lift => room_a.floor.max(room_b.floor) + portal.rise.unwrap_or(0),
+            PortalKind::Door | PortalKind::Locked => continue,
+        };
+        let have = room_a.ceiling.min(room_b.ceiling) - rest;
         if have < need {
             return Err(CompileError::PortalNoHeadroom {
                 a: portal.a.clone(),
@@ -177,9 +187,10 @@ fn cut_one(
     split_wall_for_opening(data, &far_cut, geometry.ib, &portal.b)?;
 
     // A plain portal fills the gap with an open passage sector immediately.
-    // A door portal instead gets a closed sector of its own — see
-    // `doors::emit_doors`, which runs after `cut_portals` and expects to
-    // find both flanking walls already cut but the gap itself still empty.
+    // A door portal instead gets a closed sector of its own, and a lift
+    // portal a platform — see `doors::emit_doors` and `lifts::emit_lifts`,
+    // which run after `cut_portals` and expect to find both flanking walls
+    // already cut but the gap itself still empty.
     if portal.kind == PortalKind::Plain {
         let room_a = &ir.rooms[geometry.ia];
         let room_b = &ir.rooms[geometry.ib];

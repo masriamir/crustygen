@@ -1,5 +1,6 @@
 //! Library-level tests for `crustygen::ingest` (issue #21): the binary
-//! round-trip path, exercised against a binary re-emission of entrada.
+//! round-trip path, exercised against binary re-emissions of entrada and of
+//! ascensor, the lift playtest map.
 
 mod common;
 
@@ -27,6 +28,34 @@ fn binary_entrada_loads_via_assembly() {
     assert!(!loaded.map.things.is_empty(), "assembled map has things");
     // The expected NamespaceDefaulted warning is filtered, and entrada's
     // geometry loses nothing a strict doom-format write would warn about.
+    assert!(
+        loaded.notes.is_empty(),
+        "unexpected notes: {:?}",
+        loaded.notes
+    );
+}
+
+/// Ascensor, the lift playtest map, through the same binary round trip:
+/// the platform sectors, their tags and their use/walkover specials all
+/// survive the downconvert and come back through assembly.
+#[test]
+fn binary_ascensor_loads_via_assembly() {
+    let (wad, group) = first_group(common::binary_ascensor_wad());
+    let loaded = ingest::load_map(&wad, &group).expect("binary map loads");
+    assert_eq!(loaded.origin, MapOrigin::AssembledFromBinary);
+    assert!(!loaded.map.sectors.is_empty(), "assembled map has sectors");
+    assert!(!loaded.map.things.is_empty(), "assembled map has things");
+    // The four lift specials the map emits — 62 (lift and pedestal
+    // switches), 88 and 120 (walkover lifts), 123 (fast switches on the
+    // ledge lift and the barrier) — must all come back from LINEDEFS.
+    let specials: std::collections::BTreeSet<i32> =
+        loaded.map.linedefs.iter().map(|l| l.special).collect();
+    for special in [62, 88, 120, 123] {
+        assert!(
+            specials.contains(&special),
+            "lift special {special} lost in the round trip; present: {specials:?}"
+        );
+    }
     assert!(
         loaded.notes.is_empty(),
         "unexpected notes: {:?}",

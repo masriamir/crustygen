@@ -9,6 +9,7 @@ use crustywad::{Wad, WadBuilder, WadKind};
 const TWO_ROOM: &str = include_str!("golden/two_room.json");
 const STEPPED: &str = include_str!("golden/stepped_rooms.json");
 const TELEPORTS: &str = include_str!("golden/teleports.json");
+const LIFTS: &str = include_str!("golden/lifts.json");
 
 #[test]
 fn compiler_output_matches_the_golden_fixture() {
@@ -398,4 +399,58 @@ fn teleports_and_the_ambush_flag_survive_the_round_trip() {
         .find(|t| t.type_id == marker && t.x == 448.0 && t.y == 192.0)
         .expect("island's marker");
     assert_eq!(arrival.angle, 270);
+}
+
+#[test]
+fn lift_compiler_output_matches_the_golden_fixture() {
+    let ir = Ir::from_json(LIFTS).expect("ir");
+    let tables = Tables::load().expect("tables");
+    let out = compile(&ir, &tables).expect("compiles");
+    assert_eq!(
+        out.textmap,
+        include_str!("golden/lifts.textmap"),
+        "compiler output drifted from the lifts golden fixture"
+    );
+    assert_eq!(
+        out.lifts.len(),
+        4,
+        "the lift, the fast barrier, the walkover lift and the pedestal"
+    );
+}
+
+/// Rewrites `tests/golden/lifts.textmap` from the current compiler.
+///
+/// Ignored by default so a drifting compiler fails the test above rather than
+/// silently rewriting its own expectation. Run deliberately with
+/// `cargo test --test golden_textmap regenerate_lifts_golden -- --ignored`,
+/// then read the diff before committing it.
+#[test]
+#[ignore = "regenerates a golden fixture; run explicitly"]
+fn regenerate_lifts_golden() {
+    let ir = Ir::from_json(LIFTS).expect("ir");
+    let tables = Tables::load().expect("tables");
+    let out = compile(&ir, &tables).expect("compiles");
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/lifts.textmap");
+    std::fs::write(path, &out.textmap).expect("write golden");
+}
+
+#[test]
+fn lift_output_assembles_through_crustywad() {
+    let ir = Ir::from_json(LIFTS).expect("ir");
+    let tables = Tables::load().expect("tables");
+    let out = compile(&ir, &tables).expect("compiles");
+
+    let mut builder = WadBuilder::new(WadKind::Pwad);
+    builder.add_lump("MAP01", b"");
+    builder.add_lump("TEXTMAP", out.textmap.as_bytes());
+    builder.add_lump("ENDMAP", b"");
+    let wad = Wad::from_bytes(builder.build().expect("serializes")).expect("parses");
+    let group = wad.map_group("MAP01").expect("group");
+    let map = Map::assemble(&wad, &group).expect("assembles");
+
+    assert_eq!(
+        map.sectors().len(),
+        9,
+        "four rooms, three platforms, the walkover lift's alcove and the pedestal"
+    );
 }

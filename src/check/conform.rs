@@ -11,8 +11,8 @@
 //! `combat.sound.propagation`, `combat.max_simultaneous`), and several more
 //! become `NotDerivable` only when the map itself gives [`rows`] nothing to
 //! measure; `docs/check.md`'s "Conformance" section has the full list. Unlike
-//! `scene.rs`/`invariants.rs`/`flood.rs`, all but one row here is a plain
-//! target-vs-actual comparison that re-derives no playability rule from the
+//! `scene.rs`/`invariants.rs`/`flood.rs`, all but four rows here are plain
+//! target-vs-actual comparisons that re-derive no playability rule from the
 //! pinned engine, so the only sourcing burden is the ammo ratio's
 //! damage-per-ammo figures ([`crate::tables::Tables::weapon_damage`],
 //! [`crate::tables::Tables::weapon_ammo_grant`]), the `MTF_AMBUSH` bit
@@ -20,11 +20,14 @@
 //! `[thing.flags]`), the teleport specials the two pad counts read
 //! ([`crate::tables::Tables::player_teleport_specials`],
 //! [`crate::tables::Tables::monster_teleport_specials`]), and the engine fact
-//! cited on the `MULTIPLAYER_ONLY_BIT` thing-flag constant below. The
-//! exception is `progression.exit.trigger`: a teleport exit emits the same
-//! specials as a plain walkover one, so the row borrows
+//! cited on the `MULTIPLAYER_ONLY_BIT` thing-flag constant below. The four
+//! exceptions are `progression.exit.trigger` — a teleport exit emits the
+//! same specials as a plain walkover one, so the row borrows
 //! [`crate::check::flood::teleport_only_sectors`]'s reachability predicate
-//! rather than reading the line.
+//! rather than reading the line — and the three `progression.lifts.*` rows,
+//! which read [`crate::check::plats::resolve_plats`]'s engine-style
+//! resolution of what each platform is and who can call it, rather than
+//! counting lift lines.
 //!
 //! [`rows`] implements exactly the row catalog in the Task 10 brief, in the
 //! brief's own order, and follows its verdict rules: a `MinMax` or exact-count
@@ -37,11 +40,12 @@
 
 use std::collections::{BTreeSet, HashSet};
 
+use crate::check::plats::{Activator, Rest, ScenePlat, resolve_plats};
 use crate::check::scene::{Scene, SceneThing};
 use crate::check::{ConformanceRow, MapStats, Verdict};
 use crate::spec::Spec;
 use crate::spec::frontmatter::{
-    EncounterStyle, ExitKind, ExitTrigger, Facing, Frontmatter, MinMax, Propagation,
+    EncounterStyle, ExitKind, ExitTrigger, Facing, Frontmatter, LiftTrigger, MinMax, Propagation,
 };
 use crate::tables::{AmmoType, Tables};
 
@@ -670,11 +674,120 @@ fn exit_trigger_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> Conform
     }
 }
 
-/// Every `progression.*` row: keys, locked doors, exit kind/trigger, and the
-/// four switch/walkover/lift/teleport `MinMax` counts. Extracted out of
-/// [`rows`] itself (alongside [`monster_rows`]/[`sustain_rows`]/
-/// [`lighting_rows`]) purely to keep that function under clippy's line-count
-/// lint — the row order and content are unchanged either way.
+/// `progression.lifts.count`: distinct tag-resolved plat sectors
+/// ([`resolve_plats`]) — platforms, not lift lines. A pedestal's four
+/// use-line faces, or a barrier's two, drive one platform each; a lift line
+/// whose tag names no sector drives none at all (that is V-P13/V-P14's
+/// finding, not a platform to count).
+fn count_plats(scene: &Scene, tables: &Tables) -> u32 {
+    u32::try_from(resolve_plats(scene, tables).len()).expect("plat counts fit u32")
+}
+
+/// The form a [`Rest::Top`] plat's triggers take, in the template's own
+/// `walkover | switch | both_ends` vocabulary — or `"top_only"` for a
+/// platform no trigger calls from below, which is a form no template word
+/// names (see [`lifts_trigger_row`]).
+fn lift_form(p: &ScenePlat) -> &'static str {
+    let low_use = p
+        .triggers
+        .iter()
+        .any(|t| t.use_line && t.activators.iter().any(|&(_, a)| a == Activator::Low));
+    let low_walk = p
+        .triggers
+        .iter()
+        .any(|t| !t.use_line && t.activators.iter().any(|&(_, a)| a == Activator::Low));
+    let top = p.callable_top();
+    match (low_use || low_walk, top) {
+        (true, true) => "both_ends",
+        (true, false) if low_use => "switch",
+        (true, false) => "walkover",
+        (false, _) => "top_only",
+    }
+}
+
+/// `progression.lifts.trigger`: every [`Rest::Top`] platform's [`lift_form`]
+/// against the spec's one word. [`Verdict::Pass`] iff every one of them
+/// matches; `actual` tallies the forms found (`"switch ×2, both_ends ×1"`).
+///
+/// Only platforms that rest at the top are judged. A barrier or a pedestal
+/// rests above every neighbor ([`Rest::AboveAll`]) and is not a lift the
+/// player rides up — the spec's `trigger` word is about lifts, so grading a
+/// pedestal's four switch faces against `walkover` would fail a map that is
+/// exactly what its spec asked for.
+///
+/// A `"top_only"` platform — one at rest on top with no trigger reachable
+/// from its low floor — equals no template word, so it fails this row
+/// whichever word the spec chose. That is deliberate: the same platform is
+/// already V-P5's "callable only from above" warning, and a row that could
+/// pass it would contradict the finding.
+///
+/// With no `Top` platform at all the row is a vacuous [`Verdict::Pass`],
+/// `actual` reading `"no lifts"` — a map with no lift conforms to any
+/// `trigger` word, the way a map with no monster gets `"no monsters"` rather
+/// than a graded ratio.
+fn lifts_trigger_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> ConformanceRow {
+    let target = match fm.progression.lifts.trigger {
+        LiftTrigger::Switch => "switch",
+        LiftTrigger::Walkover => "walkover",
+        LiftTrigger::BothEnds => "both_ends",
+    };
+    let tops: Vec<ScenePlat> = resolve_plats(scene, tables)
+        .into_iter()
+        .filter(|p| p.rest == Rest::Top)
+        .collect();
+    if tops.is_empty() {
+        return ConformanceRow {
+            parameter: "progression.lifts.trigger".to_owned(),
+            target: target.to_owned(),
+            actual: "no lifts".to_owned(),
+            verdict: Verdict::Pass,
+        };
+    }
+    let count = |form: &str| tops.iter().filter(|p| lift_form(p) == form).count();
+    let actual = format!(
+        "switch ×{}, walkover ×{}, both_ends ×{}",
+        count("switch"),
+        count("walkover"),
+        count("both_ends")
+    );
+    let pass = tops.iter().all(|p| lift_form(p) == target);
+    ConformanceRow {
+        parameter: "progression.lifts.trigger".to_owned(),
+        target: target.to_owned(),
+        actual,
+        verdict: if pass { Verdict::Pass } else { Verdict::Fail },
+    }
+}
+
+/// `progression.lifts.max_travel`: the largest [`ScenePlat::travel`] on the
+/// map against the spec's ceiling, [`Verdict::Pass`] iff no platform travels
+/// further. Every platform counts here, not only the [`Rest::Top`] ones
+/// [`lifts_trigger_row`] judges — the parameter bounds how far a floor may
+/// move, which a barrier or a pedestal does just as much as a lift.
+///
+/// With no platform at all, `actual` reads `"no lifts"` and the row passes
+/// vacuously.
+fn lifts_max_travel_row(fm: &Frontmatter, scene: &Scene, tables: &Tables) -> ConformanceRow {
+    let max = resolve_plats(scene, tables).iter().map(|p| p.travel).max();
+    let target = fm.progression.lifts.max_travel;
+    ConformanceRow {
+        parameter: "progression.lifts.max_travel".to_owned(),
+        target: target.to_string(),
+        actual: max.map_or_else(|| "no lifts".to_owned(), |m| m.to_string()),
+        verdict: match max {
+            None => Verdict::Pass,
+            Some(m) if m <= target => Verdict::Pass,
+            Some(_) => Verdict::Fail,
+        },
+    }
+}
+
+/// Every `progression.*` row: keys, locked doors, exit kind/trigger, the
+/// four switch/walkover/lift/teleport `MinMax` counts, and the lift trigger
+/// and travel rows. Extracted out of [`rows`] itself (alongside
+/// [`monster_rows`]/[`sustain_rows`]/[`lighting_rows`]) purely to keep that
+/// function under clippy's line-count lint — the row order and content are
+/// unchanged either way.
 fn progression_rows(
     fm: &Frontmatter,
     scene: &Scene,
@@ -685,16 +798,20 @@ fn progression_rows(
     rows.push(locked_doors_row(fm, scene, tables));
     rows.push(exit_kind_row(fm, scene, tables));
     rows.push(exit_trigger_row(fm, scene, tables));
+    // A lift's use-line face is a switch the player walks up to and presses,
+    // so it counts here as well as toward `progression.lifts.count` below.
+    // The two rows count different things — switch *lines* against
+    // *platforms* — so one pedestal contributes four to this row and one to
+    // that one, with no double-count between them.
+    let mut switch_specials = vec![
+        i32::from(tables.exit_switch_special()),
+        i32::from(tables.secret_exit_switch_special()),
+    ];
+    switch_specials.extend(tables.lift_use_specials().into_iter().map(i32::from));
     rows.push(range_row(
         "progression.switches.count".to_owned(),
         &fm.progression.switches.count,
-        count_specials(
-            scene,
-            &[
-                i32::from(tables.exit_switch_special()),
-                i32::from(tables.secret_exit_switch_special()),
-            ],
-        ),
+        count_specials(scene, &switch_specials),
     ));
     rows.push(range_row(
         "progression.walkover_triggers.count".to_owned(),
@@ -710,14 +827,10 @@ fn progression_rows(
     rows.push(range_row(
         "progression.lifts.count".to_owned(),
         &fm.progression.lifts.count,
-        count_specials(
-            scene,
-            &[
-                i32::from(tables.lift_switch_special()),
-                i32::from(tables.lift_walkover_special()),
-            ],
-        ),
+        count_plats(scene, tables),
     ));
+    rows.push(lifts_trigger_row(fm, scene, tables));
+    rows.push(lifts_max_travel_row(fm, scene, tables));
     rows.push(range_row(
         "progression.teleports.count".to_owned(),
         &fm.progression.teleports.count,
@@ -1093,10 +1206,10 @@ fn lighting_rows(fm: &Frontmatter, scene: &Scene, rows: &mut Vec<ConformanceRow>
 /// # Panics
 ///
 /// If `scene`/`stats` somehow carry more than [`u32::MAX`] of any counted
-/// item (sectors, linedefs, things, action lines, or secret sectors) — not
-/// reachable through any map this compiler or a hand-authored `TEXTMAP` this
-/// checker's own `Scene::build` accepts, since a UDMF declaration index is
-/// far narrower than that.
+/// item (sectors, linedefs, things, action lines, platforms, or secret
+/// sectors) — not reachable through any map this compiler or a hand-authored
+/// `TEXTMAP` this checker's own `Scene::build` accepts, since a UDMF
+/// declaration index is far narrower than that.
 #[must_use]
 pub fn rows(
     scene: &Scene,
@@ -1294,6 +1407,15 @@ thing { x = 160.000; y = 32.000; type = 2007; single = true; }
     /// caller should have to handle.
     fn rows_for(text: &str) -> Vec<ConformanceRow> {
         let tables = Tables::load().expect("tables");
+        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
+        rows_against(text, &doc.spec)
+    }
+
+    /// [`rows_for`]'s spec-parameterized form: the same `Scene`/[`MapStats`]
+    /// build over `text`, judged against `spec` rather than
+    /// [`test_spec_text`]'s own frontmatter.
+    fn rows_against(text: &str, spec: &Spec) -> Vec<ConformanceRow> {
+        let tables = Tables::load().expect("tables");
         let map = parse_udmf(text, Limits::default()).expect("fixture parses");
         let mut findings = Vec::new();
         let scene = Scene::build(&map, &tables, &mut findings);
@@ -1306,8 +1428,7 @@ thing { x = 160.000; y = 32.000; type = 2007; single = true; }
             things: map.things.len(),
             secret_sectors: 0,
         };
-        let doc = Spec::from_markdown(&test_spec_text(), &tables).expect("spec parses");
-        rows(&scene, &stats, "MAP01", &doc.spec, &tables)
+        rows(&scene, &stats, "MAP01", spec, &tables)
     }
 
     /// [`rows_for`] over [`FIXTURE_MAP`].
@@ -2051,5 +2172,150 @@ thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
             r.actual.contains("0.000"),
             "no ammo placed, so the ratio is zero: {r:?}"
         );
+    }
+
+    /// [`test_spec_text`] with one frontmatter block replaced: `path`'s last
+    /// dotted component names a two-space-indented block key
+    /// (`"progression.lifts"` names the `lifts:` block), and `body` replaces
+    /// every line under it. `body`'s first line is written at the block's own
+    /// four-space indent; each later line carries its own, the way the caller
+    /// writes it.
+    ///
+    /// Returns the whole [`Spec`] rather than its [`Frontmatter`] alone
+    /// because [`rows`] takes a `&Spec`; the sibling
+    /// [`frontmatter_with_exit_trigger`] can hand back a `Frontmatter` only
+    /// because it feeds a single row function directly.
+    fn spec_with(path: &str, body: &str) -> Spec {
+        let tables = Tables::load().expect("tables");
+        let key = path.rsplit('.').next().expect("a dotted path names a key");
+        let base = test_spec_text();
+        let head = format!("\n  {key}:\n");
+        let start = base
+            .find(&head)
+            .unwrap_or_else(|| panic!("no `{key}:` block in the template"))
+            + head.len();
+        // The block runs to the first line not indented past the key itself.
+        let block: usize = base[start..]
+            .lines()
+            .take_while(|l| l.starts_with("    "))
+            .map(|l| l.len() + 1)
+            .sum();
+        assert!(block > 0, "`{key}:` names an empty block");
+        let patched = format!("{}    {body}\n{}", &base[..start], &base[start + block..]);
+        assert_ne!(patched, base, "the patch changed nothing");
+        Spec::from_markdown(&patched, &tables)
+            .expect("spec parses")
+            .spec
+    }
+
+    /// The lift golden (`tests/golden/lifts.json`) compiled and emitted as
+    /// TEXTMAP: one both-ends lift, one fast barrier, one fast walkover lift
+    /// and one pedestal. The same compile -> emit round trip
+    /// `tests/check_conformance.rs` runs, so these rows judge the artifact
+    /// the checker actually sees rather than the IR behind it.
+    fn lifts_golden_textmap() -> String {
+        let tables = Tables::load().expect("tables");
+        let ir = crate::ir::Ir::from_json(include_str!("../../tests/golden/lifts.json"))
+            .expect("the lift golden parses");
+        let compiled = crate::compile::compile(&ir, &tables).expect("the lift golden compiles");
+        crate::compile::textmap::emit_textmap(&compiled.data, &compiled.things)
+    }
+
+    #[test]
+    fn lift_rows_on_the_lift_golden() {
+        let spec = spec_with(
+            "progression.lifts",
+            "count: { min: 4, max: 4 }\n    trigger: both_ends\n    max_travel: 256",
+        );
+        let rows = rows_against(&lifts_golden_textmap(), &spec);
+        assert_eq!(
+            row(&rows, "progression.lifts.count").actual,
+            "4",
+            "plats, not trigger lines"
+        );
+        assert_eq!(
+            row(&rows, "progression.switches.count").actual,
+            "8",
+            "1 exit + 1 riser + 2 barrier faces + 4 pedestal edges"
+        );
+        let trigger = row(&rows, "progression.lifts.trigger");
+        assert_eq!(trigger.actual, "switch ×0, walkover ×1, both_ends ×1");
+        assert_eq!(
+            trigger.verdict,
+            Verdict::Fail,
+            "the walkover lift does not match both_ends"
+        );
+        let travel = row(&rows, "progression.lifts.max_travel");
+        assert_eq!(
+            (travel.actual.as_str(), travel.verdict),
+            ("128", Verdict::Pass)
+        );
+    }
+
+    #[test]
+    fn a_single_switch_lift_matches_switch_and_no_lifts_pass_vacuously() {
+        let spec = spec_with(
+            "progression.lifts",
+            "count: { min: 1, max: 1 }\n    trigger: switch\n    max_travel: 64",
+        );
+        let rows = rows_against(
+            &crate::check::fixtures::chain(
+                &[0, 128, 128],
+                &[0, 7, 0],
+                &[(62, 7, false), (0, 0, false)],
+                "",
+            ),
+            &spec,
+        );
+        assert_eq!(
+            row(&rows, "progression.lifts.trigger").verdict,
+            Verdict::Pass
+        );
+        let travel = row(&rows, "progression.lifts.max_travel");
+        assert_eq!(
+            (travel.actual.as_str(), travel.verdict),
+            ("128", Verdict::Fail)
+        );
+
+        let rows = rows_against(
+            &crate::check::fixtures::chain(&[0, 0], &[0, 0], &[(0, 0, false)], ""),
+            &spec,
+        );
+        let trigger = row(&rows, "progression.lifts.trigger");
+        assert_eq!(
+            (trigger.actual.as_str(), trigger.verdict),
+            ("no lifts", Verdict::Pass)
+        );
+        assert_eq!(
+            row(&rows, "progression.lifts.max_travel").actual,
+            "no lifts"
+        );
+    }
+
+    /// A platform at rest on top whose only trigger fires from a `Level`
+    /// side (the link is flipped so the *east*, ledge-height room is the use
+    /// line's front): [`lift_form`] reads `"top_only"`, a form no template
+    /// word names, so the row fails whichever word the spec chose. The same
+    /// platform is V-P5's "callable only from above" warning, and this pins
+    /// that the two never disagree.
+    #[test]
+    fn a_top_only_lift_matches_no_template_word() {
+        let text = crate::check::fixtures::chain(
+            &[0, 128, 128],
+            &[0, 7, 0],
+            &[(0, 0, false), (62, 7, true)],
+            "",
+        );
+        for word in ["switch", "walkover", "both_ends"] {
+            let spec = spec_with(
+                "progression.lifts",
+                &format!("count: {{ min: 1, max: 1 }}\n    trigger: {word}\n    max_travel: 256"),
+            );
+            let rows = rows_against(&text, &spec);
+            let r = row(&rows, "progression.lifts.trigger");
+            assert_eq!(r.target, word);
+            assert_eq!(r.actual, "switch ×0, walkover ×0, both_ends ×0", "{r:?}");
+            assert_eq!(r.verdict, Verdict::Fail, "{r:?}");
+        }
     }
 }
