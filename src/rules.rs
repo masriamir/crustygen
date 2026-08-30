@@ -1,12 +1,12 @@
 //! Playability invariants checked against compiled output.
 //!
 //! `check_all` implements a deliberately partial rule catalog: **P3** (passage
-//! width), **P4** (door opening clearance), **P7** (no softlock), **P8** (no
-//! missing textures), **P9** (no texture scaling), **P15** (teleport
-//! pairing), **P19** (light bounds), **P24** (key and lock coherence),
-//! **P26** (teleport-only exit rooms), and **P27** (no sealed monster
-//! rooms). **P7** floods `(sector, keys-held)` states over the emitted
-//! geometry — see [`crate::reach`].
+//! width), **P4** (door opening clearance), **P5** (lift travel and return),
+//! **P7** (no softlock), **P8** (no missing textures), **P9** (no texture
+//! scaling), **P15** (teleport pairing), **P19** (light bounds), **P24** (key
+//! and lock coherence), **P26** (teleport-only exit rooms), and **P27** (no
+//! sealed monster rooms). **P7** floods `(sector, keys-held)` states over the
+//! emitted geometry — see [`crate::reach`].
 //!
 //! **P1** (step height between connected rooms) has been **retired**: it
 //! capped the floor delta between connected rooms in either direction, but
@@ -66,6 +66,7 @@ pub fn check_all(ir: &Ir, tables: &Tables, out: &Compiled) -> Vec<RuleViolation>
     check_teleport_pairing(tables, out, &mut v);
     check_teleport_exit_rooms(ir, out, &mut v);
     check_sealed_monster_rooms(ir, tables, out, &mut v);
+    check_lift_return(tables, out, &mut v);
     check_reachability(ir, tables, out, &mut v);
     v
 }
@@ -437,11 +438,95 @@ fn check_sealed_monster_rooms(
     }
 }
 
+/// P5: every platform travels more than a step, lowers to the floor of the
+/// sector(s) it serves, and can be called from that floor. Re-derived from
+/// the emitted geometry the way `EV_DoPlat` reads it: `low` is the minimum
+/// floor over the platform's two-sided neighbors (`P_FindLowestFloorSurrounding`,
+/// starting at its own floor), and a use special fires from its front
+/// sector only (`P_UseSpecialLine`) while a walkover fires from whichever
+/// side can cross at rest (`P_TryMove`'s step rule).
+fn check_lift_return(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>) {
+    let step = tables.step_height();
+    let use_specials = tables.lift_use_specials();
+    let walk_specials = tables.lift_walkover_specials();
+    let floor = |s: usize| out.data.sectors[s].floor;
+    for lift in &out.lifts {
+        let subject = format!("sector {} ({:?} tag {})", lift.sector, lift.shape, lift.tag);
+        let mut low = floor(lift.sector);
+        let mut lowest_neighbor = None;
+        for line in &out.data.linedefs {
+            let Some(back) = line.back else { continue };
+            let (f, b) = (
+                out.data.sidedefs[line.front].sector,
+                out.data.sidedefs[back].sector,
+            );
+            let other = if f == lift.sector {
+                b
+            } else if b == lift.sector {
+                f
+            } else {
+                continue;
+            };
+            if floor(other) < low {
+                low = floor(other);
+                lowest_neighbor = Some(other);
+            }
+        }
+        let travel = floor(lift.sector) - low;
+        if travel <= step {
+            v.push(RuleViolation {
+                rule: "P5",
+                subject: subject.clone(),
+                detail: format!("the platform travels {travel}, no more than the {step}-unit step"),
+            });
+            continue;
+        }
+        for &c in &lift.callable_from {
+            if floor(c) != low {
+                v.push(RuleViolation {
+                    rule: "P5",
+                    subject: subject.clone(),
+                    detail: format!(
+                        "sector {c} calls the lift from floor {}, but its lowest neighbor is sector {} at {low}: the platform will not stop at the caller",
+                        floor(c),
+                        lowest_neighbor.unwrap_or(c)
+                    ),
+                });
+            }
+        }
+        let callable_from_low = out.data.linedefs.iter().any(|line| {
+            if line.tag != lift.tag {
+                return false;
+            }
+            let f = out.data.sidedefs[line.front].sector;
+            let b = line.back.map(|s| out.data.sidedefs[s].sector);
+            if use_specials.contains(&line.special) {
+                floor(f) == low
+            } else if walk_specials.contains(&line.special) {
+                let Some(b) = b else { return false };
+                (floor(f) == low && floor(b) - floor(f) <= step)
+                    || (floor(b) == low && floor(f) - floor(b) <= step)
+            } else {
+                false
+            }
+        });
+        if !callable_from_low {
+            v.push(RuleViolation {
+                rule: "P5",
+                subject,
+                detail: "no trigger fires from the low floor: the lift is callable only from \
+                          above, a trap for a player below"
+                    .to_owned(),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::compile::{CompileError, compile, compile_reporting};
     use crate::ir::Ir;
-    use crate::rules::{RuleViolation, check_all, check_teleport_pairing};
+    use crate::rules::{RuleViolation, check_all, check_lift_return, check_teleport_pairing};
     use crate::tables::Tables;
 
     /// Two rooms joined by a plain portal, with tunable floors, width, and
@@ -1462,6 +1547,70 @@ mod tests {
                 // The room's own entry, not the recess off it: `contains`
                 // would accept either.
                 .any(|x| x.subject == "room `high`" && x.detail.contains("never be visited")),
+            "{v:?}"
+        );
+    }
+
+    /// Compiles the `lifts` golden fixture (rooms `low`, `ledge`, `far`,
+    /// `north` at sectors 0-3; platforms 4 (low<->ledge), 5 (the
+    /// ledge<->far barrier), 7 (the low<->north walkover lift), and pedestal
+    /// 8), returning the tables alongside the compiled output so P5 tests can
+    /// damage `Compiled` by hand.
+    fn lifts_compiled() -> (Tables, crate::compile::Compiled) {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(include_str!("../tests/golden/lifts.json")).expect("ir");
+        let out = compile(&ir, &tables).expect("compiles");
+        (tables, out)
+    }
+
+    #[test]
+    fn p5_passes_on_the_lift_golden() {
+        let (tables, out) = lifts_compiled();
+        let mut v = Vec::new();
+        check_lift_return(&tables, &out, &mut v);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn p5_catches_a_platform_that_travels_no_more_than_a_step() {
+        let (tables, mut out) = lifts_compiled();
+        let plat = out.lifts[0].sector;
+        out.data.sectors[plat].floor = 24; // room `low` is at 0
+        let mut v = Vec::new();
+        check_lift_return(&tables, &out, &mut v);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == "P5" && x.detail.contains("travels 24")),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn p5_catches_a_neighbor_lower_than_the_room_the_lift_serves() {
+        let (tables, mut out) = lifts_compiled();
+        // Sink the ledge (sector 1) below the low room: the engine now sends the
+        // low<->ledge platform to -64, the ledge's floor, not to room `low` at 0,
+        // which is the sector that calls it.
+        out.data.sectors[1].floor = -64;
+        let mut v = Vec::new();
+        check_lift_return(&tables, &out, &mut v);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == "P5" && x.detail.contains("lowest neighbor is sector 1")),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn p5_catches_a_lift_callable_only_from_above() {
+        let (tables, mut out) = lifts_compiled();
+        let low_line = out.lifts[0].low_line.unwrap();
+        out.data.linedefs[low_line].special = 0; // strip the riser switch; the top-face walkover remains
+        let mut v = Vec::new();
+        check_lift_return(&tables, &out, &mut v);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == "P5" && x.detail.contains("only from above")),
             "{v:?}"
         );
     }
