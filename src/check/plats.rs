@@ -452,7 +452,7 @@ pub fn broken_lift_lines(scene: &Scene, tables: &Tables) -> Vec<usize> {
 mod tests {
     use std::collections::BTreeSet;
 
-    use super::{Activator, Rest, ScenePlat, broken_lift_lines, resolve_plats};
+    use super::{Activator, Rest, ScenePlat, broken_lift_lines, dead_end_pocket, resolve_plats};
     use crate::check::Subject;
     use crate::check::fixtures::{chain, pocket_lift, scene_of};
     use crate::check::invariants::check_lift_return;
@@ -665,6 +665,71 @@ mod tests {
             vec![(0, Activator::Low), (1, Activator::Low)]
         );
         assert!(plats[0].callable_low());
+    }
+
+    /// `dead_end_pocket` measures one sector's depth behind one line, so a
+    /// sector that line does not bound has nothing behind it to measure and
+    /// is no pocket at all — the guard that keeps the depth from being taken
+    /// against an edge belonging to some other part of the map.
+    ///
+    /// Read on `pocket_lift`'s own scene so the negative sits beside the
+    /// positive it is not: the pocket really is one, the platform two
+    /// sectors along the chain is not, and the only difference between the
+    /// two calls is which sector the line bounds.
+    #[test]
+    fn a_sector_the_line_does_not_bound_is_no_pocket_behind_it() {
+        let (scene, tables) = scene_of(&pocket_lift(16, false));
+        let (step, radius) = (tables.step_height(), tables.player().radius);
+        // Linedef 0 is the `88` walkover between the low room (0) and the
+        // pocket (1). The platform (2) lies beyond the pocket and shares no
+        // boundary with that line.
+        assert!(
+            dead_end_pocket(&scene, 0, 1, step, radius),
+            "the 16-deep dead end behind the walkover is a pocket"
+        );
+        assert!(
+            !dead_end_pocket(&scene, 0, 2, step, radius),
+            "the platform does not border linedef 0, so nothing of it lies behind it"
+        );
+    }
+
+    /// A zero-length linedef gives no direction to measure a depth along, so
+    /// no sector is a pocket behind it.
+    ///
+    /// Reachable: `Scene::build` validates a linedef's cross-references —
+    /// `v1`, `v2`, both sidedefs and their sectors — but never its geometry,
+    /// and `process_linedef` never compares `v1` to `v2`, so a degenerate
+    /// line becomes a boundary whose two endpoints coincide. Without the
+    /// guard the normal is `0.0 / 0.0` and every `perp` is `NaN`, which
+    /// `f64::max` discards in favor of the running `0.0` — a depth of zero,
+    /// and the function would call this room the shallowest pocket there is.
+    #[test]
+    fn a_zero_length_line_is_no_ones_pocket() {
+        // `chain`'s 3 rooms use sidedefs 0..=11 (2 per link, 8 walls), so
+        // the appended one is 12; vertex 0 is the low room's own corner.
+        let text = chain(
+            &LIFT_FLOORS,
+            &LIFT_TAGS,
+            &[(62, 7, false), (0, 0, false)],
+            "linedef { v1 = 0; v2 = 0; sidefront = 12; blocking = true; }\n\
+             sidedef { sector = 0; texturemiddle = \"STARTAN2\"; }\n",
+        );
+        let (scene, tables) = scene_of(&text);
+        let degenerate = scene.sectors[0]
+            .boundary
+            .iter()
+            .find(|b| b.a == b.b)
+            .expect("the degenerate line reaches the scene as a zero-length edge");
+        assert!(
+            !dead_end_pocket(
+                &scene,
+                degenerate.linedef,
+                0,
+                tables.step_height(),
+                tables.player().radius
+            ),
+            "a line with no direction encloses nothing"
+        );
     }
 
     #[test]

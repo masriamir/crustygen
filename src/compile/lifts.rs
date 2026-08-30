@@ -687,7 +687,7 @@ fn emit_portal_lift(
 
 #[cfg(test)]
 mod tests {
-    use super::{LiftOut, LiftShape, emit_lifts};
+    use super::{LiftOut, LiftShape, emit_lifts, unpeg_landing_upper};
     use crate::compile::tags::TagAllocator;
     use crate::compile::{
         CompileError, MapData, compile, doors, exits, portals, sectors, teleports,
@@ -1274,6 +1274,147 @@ mod tests {
         assert!(
             !data.linedefs[l.top_line.unwrap()].upper_unpegged,
             "the level room shares the platform's ceiling"
+        );
+    }
+
+    /// `LIFT` as a walkover with a 32-deep near alcove, and room `a` given
+    /// the map's tallest ceiling.
+    ///
+    /// The platform then takes `room_a.ceiling.min(room_b.ceiling)` = 256
+    /// while room `a` and the alcove that borrows its ceiling both stand at
+    /// 320 — so every line the two no-op tests below reach has a sector
+    /// taller than the platform on *both* sides, and any reading of
+    /// `unpeg_landing_upper` that did not return early would set the flag.
+    fn tall_walkover() -> String {
+        LIFT.replacen(
+            r#""floor":0, "ceiling":192"#,
+            r#""floor":0, "ceiling":320"#,
+            1,
+        )
+        .replacen(
+            r#""at":[256,128] }"#,
+            r#""at":[256,128], "trigger":"walkover", "alcove_near":32 }"#,
+            1,
+        )
+    }
+
+    /// `unpeg_landing_upper` is a no-op on a one-sided line. `r_segs.c`
+    /// draws an upper only where two sectors meet, so a wall has no upper
+    /// for `ML_DONTPEGTOP` to anchor — the platform's own jambs included.
+    #[test]
+    fn unpegging_a_one_sided_line_of_the_platform_changes_nothing() {
+        let Built {
+            mut data, lifts, ..
+        } = compile_data(&tall_walkover());
+        let plat = lifts[0].sector;
+        assert_eq!(
+            data.sectors[plat].ceiling, 256,
+            "the platform takes the lower of the two rooms' ceilings"
+        );
+        let jamb = data
+            .linedefs
+            .iter()
+            .position(|ld| ld.back.is_none() && data.sidedefs[ld.front].sector == plat)
+            .expect("the platform is flanked by one-sided jambs");
+        let before = format!("{data:?}");
+        unpeg_landing_upper(&mut data, jamb, plat);
+        assert!(
+            !data.linedefs[jamb].upper_unpegged,
+            "linedef {jamb} is one-sided: there is no upper to anchor"
+        );
+        assert_eq!(
+            format!("{data:?}"),
+            before,
+            "the call changed nothing at all"
+        );
+    }
+
+    /// And a no-op on a two-sided line neither of whose sectors is the
+    /// platform. The pass walks the platform's own two faces, so the flag
+    /// is the platform's landing to set — a line elsewhere in the map is
+    /// some other construction's business even when its two ceilings differ.
+    #[test]
+    fn unpegging_a_line_that_does_not_border_the_platform_changes_nothing() {
+        let Built {
+            mut data, lifts, ..
+        } = compile_data(&tall_walkover());
+        let plat = lifts[0].sector;
+        // Sectors: a (0), b (1), the alcove (2), the platform (3). The
+        // alcove's outer threshold joins room `a` to the alcove and touches
+        // the platform on neither side.
+        let outer = data
+            .linedefs
+            .iter()
+            .position(|ld| {
+                (
+                    data.sidedefs[ld.front].sector,
+                    ld.back.map(|b| data.sidedefs[b].sector),
+                ) == (0, Some(2))
+            })
+            .expect("the alcove's outer threshold fronts room a");
+        assert!(
+            [0, 2]
+                .iter()
+                .all(|&s| data.sectors[s].ceiling > data.sectors[plat].ceiling),
+            "both of that line's sectors stand above the platform, so a \
+             misread of either would set the flag"
+        );
+        let before = format!("{data:?}");
+        unpeg_landing_upper(&mut data, outer, plat);
+        assert!(
+            !data.linedefs[outer].upper_unpegged,
+            "linedef {outer} borders the platform on neither side"
+        );
+        assert_eq!(
+            format!("{data:?}"),
+            before,
+            "the call changed nothing at all"
+        );
+    }
+
+    /// The platform is read off whichever side of the line carries it, and
+    /// the taller *other* side is the landing whose upper gets anchored.
+    ///
+    /// Every emitter today winds a platform's boundary the same way round:
+    /// `portals::emit_opening` always files its `sector_a` as the front and
+    /// `sector_b` as the back, and both callers pass the platform as
+    /// `sector_b` — `emit_segment` as its `this_sector`,
+    /// `emit_island_edges` as the pedestal's island. So no emitted line
+    /// reaches the front-side arm at all, and stating the rule costs a line
+    /// wound the other way: the same low face with its two sidedefs
+    /// exchanged, which is all this function reads off it.
+    #[test]
+    fn the_platform_is_recognized_on_the_lines_front_side_too() {
+        let Built {
+            mut data, lifts, ..
+        } = compile_data(&tall_walkover());
+        let plat = lifts[0].sector;
+        let low = lifts[0].low_line.expect("a portal lift has a low face");
+        let (front, back) = (
+            data.linedefs[low].front,
+            data.linedefs[low].back.expect("the low face is two-sided"),
+        );
+        let alcove = data.sidedefs[front].sector;
+        assert_eq!(
+            (alcove, data.sidedefs[back].sector),
+            (2, plat),
+            "as emitted, the alcove fronts the low face and the platform backs it"
+        );
+        assert!(
+            data.linedefs[low].upper_unpegged,
+            "the emission already anchored it through the back-side arm"
+        );
+
+        // Cleared and swapped, so what follows is this call's own doing and
+        // reaches the platform through the other arm.
+        data.linedefs[low].upper_unpegged = false;
+        data.linedefs[low].front = back;
+        data.linedefs[low].back = Some(front);
+        unpeg_landing_upper(&mut data, low, plat);
+        assert!(
+            data.linedefs[low].upper_unpegged,
+            "the alcove's 320 ceiling stands over the platform's 256 whichever \
+             side of the line each is on"
         );
     }
 

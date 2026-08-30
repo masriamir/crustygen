@@ -9,7 +9,7 @@ membership verdict, `lift::teleport`'s shape recognizer, `lift::plat`'s
 platform recognizer and the `crustygen-corpus` corpus sweep (see
 `docs/corpus.md`), plus the `crustygen-build` CLI over the compiler
 (`src/bin/crustygen-build.rs` — see `docs/build.md`).
-751 tests (615 lib + 3 crustygen-build unit + 17 build_cli + 12 check_adversarial + 16 check_cli +
+756 tests (620 lib + 3 crustygen-build unit + 17 build_cli + 12 check_adversarial + 16 check_cli +
 7 check_conformance + 10 corpus_cli + 1 first_map + 10 golden_textmap + 17 lift_cli + 1
 plat_recognizer + 3 spec_documents + 1 teleport_recognizer + 5 vanilla_wad + 4
 vocabulary_arbiter + 3 vocabulary_tables + 1 walking_skeleton + 25 in the `liftprobe` example),
