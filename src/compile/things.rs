@@ -4,7 +4,7 @@ use crate::compile::lifts::LiftOut;
 use crate::compile::teleports::Marker;
 use crate::compile::{CompileError, MapData};
 use crate::geom::{Pt, contains, dist_to_segment};
-use crate::ir::{Ir, ThingSkills};
+use crate::ir::{Ir, ThingSkills, square_contains};
 use crate::tables::{Tables, ThingDims};
 
 /// A thing as it will be emitted.
@@ -73,7 +73,10 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// authored apart, and why measuring the emitted geometry is still the
 /// principled choice rather than an incidental one.
 ///
-/// After every room's own things come the pedestals' — see
+/// A room thing standing on one of its room's pedestals is refused rather
+/// than placed: the engine would spawn it in the pedestal's sector at the
+/// raised floor, which is not the floor the room's `things` list describes.
+/// After every room's own things come the pedestals' own — see
 /// `place_pedestal_things`. After every authored thing, each of `markers` —
 /// [`crate::compile::teleports::emit_teleports`]'s destination markers — is
 /// emitted as a `teleport_dest` thing, held to the clearance and headroom
@@ -85,14 +88,18 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// # Errors
 /// Returns [`CompileError::UnknownThing`] for an unresolvable name,
 /// [`CompileError::ThingOutsideRoom`] for a point outside its room,
-/// [`CompileError::ThingTooClose`] when radius clearance fails,
+/// [`CompileError::ThingOnPedestal`] for a room thing standing on one of its
+/// room's pedestals, [`CompileError::ThingTooClose`] when radius clearance
+/// fails,
 /// [`CompileError::PedestalNoHeadroom`] when a pedestal's raised floor
 /// leaves its own thing too little room under the host's ceiling,
 /// [`CompileError::NoHeadroom`] when the room is too short — for the
 /// tallest placed thing, or for the player if the room is empty or shorter
 /// than the player alone — [`CompileError::UnboundedRoom`] when a room's
 /// sector has no emitted linedef to measure against,
-/// [`CompileError::OverlappingStarts`] for coincident player starts,
+/// [`CompileError::OverlappingStarts`] for coincident player starts —
+/// counted across room things and pedestal things alike, since a start on a
+/// pedestal is still a start —
 /// [`CompileError::TeleportMarkerTooClose`] when a destination is closer to
 /// its sector's walls than the arriving thing's radius, and
 /// [`CompileError::TeleportMarkerNoHeadroom`] when that sector is too short
@@ -159,6 +166,28 @@ pub fn place_things(
                 });
             }
 
+            // A thing on a pedestal's rectangle would spawn in the
+            // pedestal's sector at its raised floor, not on the room floor
+            // this list describes — the refusal `teleports::resolve_pad`
+            // makes for a pad, on the same grounds. Checked before clearance
+            // so the author is told *why* the point is wrong: measured
+            // against the room, such a point is also within a radius of the
+            // island's edges, and `ThingTooClose` would name the symptom
+            // rather than the cause. Closed on both axes: a point on the
+            // rectangle's edge already sits on the platform's boundary line.
+            if let Some(pedestal) = ir
+                .pedestals
+                .iter()
+                .find(|p| p.room == room.id && square_contains(p.rect().0, p.rect().1, thing.at))
+            {
+                return Err(CompileError::ThingOnPedestal {
+                    pedestal: pedestal.id.clone(),
+                    kind: thing.kind.clone(),
+                    x: thing.at.x,
+                    y: thing.at.y,
+                });
+            }
+
             let have = emitted_clearance(data, room_idx, thing.at).ok_or_else(|| {
                 CompileError::UnboundedRoom {
                     room: room.id.clone(),
@@ -205,7 +234,7 @@ pub fn place_things(
         }
     }
 
-    out.extend(place_pedestal_things(ir, tables, data, lifts)?);
+    out.extend(place_pedestal_things(ir, tables, data, lifts, &mut starts)?);
     out.extend(place_markers(tables, data, markers)?);
     Ok(out)
 }
@@ -220,16 +249,22 @@ pub fn place_things(
 ///
 /// Containment needs no check here:
 /// [`Ir::from_json`](crate::ir::Ir::from_json) already required every one of
-/// these to sit strictly inside its pedestal's rectangle. Nor is a `_start`
-/// special-cased — standing the player on a pedestal is legal.
+/// these to sit strictly inside its pedestal's rectangle. A `_start` is
+/// legal on a pedestal — beginning the level on one is a fine thing to
+/// author — but it joins `starts`, the coincident-start ledger `place_things`
+/// keeps for room things, so two starts at one point are refused wherever
+/// they were authored. `starts` arrives already carrying every room start,
+/// since the room loop runs first.
 ///
 /// # Errors
 /// Returns [`CompileError::UnknownThing`] for an unresolvable name,
 /// [`CompileError::ThingTooClose`] when the thing stands closer to the
-/// pedestal's edge than its own radius, and
+/// pedestal's edge than its own radius,
 /// [`CompileError::PedestalNoHeadroom`] when the risen floor leaves it less
-/// than its own height. `emit_lifts` already held that gap to the *player's*
-/// height, so only a thing taller than the player can fail the last one.
+/// than its own height — `emit_lifts` already held that gap to the
+/// *player's* height, so only a thing taller than the player can fail that
+/// one — and [`CompileError::OverlappingStarts`] for a start sharing a point
+/// with one already placed.
 ///
 /// # Panics
 /// Panics if a pedestal has no emitted platform, or names a room that does
@@ -242,6 +277,7 @@ fn place_pedestal_things(
     tables: &Tables,
     data: &MapData,
     lifts: &[LiftOut],
+    starts: &mut Vec<(i32, i32)>,
 ) -> Result<Vec<ThingOut>, CompileError> {
     let mut out = Vec::new();
     for (pi, pedestal) in ir.pedestals.iter().enumerate() {
@@ -285,6 +321,19 @@ fn place_pedestal_things(
                     have: headroom,
                     need: dims.height,
                 });
+            }
+
+            // Raised height is no exemption from telefragging: two starts at
+            // one point spawn one player inside the other whatever they are
+            // standing on.
+            if thing.kind.ends_with("_start") {
+                if starts.contains(&(thing.at.x, thing.at.y)) {
+                    return Err(CompileError::OverlappingStarts {
+                        x: thing.at.x,
+                        y: thing.at.y,
+                    });
+                }
+                starts.push((thing.at.x, thing.at.y));
             }
 
             out.push(ThingOut {
@@ -876,6 +925,104 @@ mod tests {
             compile(&Ir::from_json(&tall).expect("ir"), &tables),
             Err(CompileError::PedestalNoHeadroom { kind, have: 56, need: 64, .. })
                 if kind == "baron_of_hell"
+        ));
+    }
+
+    /// `PEDESTAL`'s room and pedestal, with the pedestal carrying nothing
+    /// and a soulsphere authored in the *room* at `at` instead — the mistake
+    /// `ThingOnPedestal` exists to catch.
+    fn room_thing_at(at: (i32, i32)) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":64, "theme":"tech_base",
+              "rooms":[
+                {{ "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+                  "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+                  "things":[ {{ "kind":"player1_start", "at":[448,448], "angle":0 }},
+                             {{ "kind":"soulsphere", "at":[{},{}], "angle":0 }} ] }}
+              ],
+              "portals":[],
+              "pedestals":[ {{ "id":"p", "room":"a", "at":[128,128], "rise":128 }} ] }}"#,
+            at.0, at.1
+        )
+    }
+
+    #[test]
+    fn a_room_thing_standing_on_a_pedestal_is_refused_rather_than_placed_on_the_room_floor() {
+        let tables = Tables::load().expect("tables");
+        // The pedestal's rectangle is (128, 128)-(192, 192). A point in its
+        // interior is authored on the room's floor but would spawn 128 units
+        // up, in the platform's sector.
+        let inside = room_thing_at((160, 160));
+        assert!(
+            matches!(
+                compile(&Ir::from_json(&inside).expect("ir"), &tables),
+                Err(CompileError::ThingOnPedestal { ref pedestal, ref kind, x: 160, y: 160 })
+                    if pedestal == "p" && kind == "soulsphere"
+            ),
+            "a room thing inside the pedestal's rectangle must be refused"
+        );
+
+        // On the rectangle's own edge (x = 192, its high corner's x): the
+        // test is closed on both axes, so this is refused too.
+        let on_edge = room_thing_at((192, 160));
+        assert!(
+            matches!(
+                compile(&Ir::from_json(&on_edge).expect("ir"), &tables),
+                Err(CompileError::ThingOnPedestal { x: 192, y: 160, .. })
+            ),
+            "a room thing on the pedestal's boundary must be refused too"
+        );
+
+        // Clear of it, and clear of the island's edges by more than the
+        // player's radius: placed as authored.
+        let beside = room_thing_at((256, 160));
+        assert!(
+            compile(&Ir::from_json(&beside).expect("ir"), &tables).is_ok(),
+            "64 units clear of the rectangle is not standing on it"
+        );
+    }
+
+    /// One room, two pedestals, each carrying a player start of its own at
+    /// its center — legal, and the fixture the overlapping-start case below
+    /// is derived from.
+    const TWO_PEDESTALS: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[448,448], "angle":0 } ] }
+      ],
+      "portals":[],
+      "pedestals":[
+        { "id":"p", "room":"a", "at":[128,128], "rise":128,
+          "things":[ { "kind":"player2_start", "at":[160,160], "angle":0 } ] },
+        { "id":"q", "room":"a", "at":[256,128], "rise":128,
+          "things":[ { "kind":"player3_start", "at":[288,160], "angle":0 } ] }
+      ] }"#;
+
+    #[test]
+    fn starts_placed_on_pedestals_join_the_coincident_start_check() {
+        let tables = Tables::load().expect("tables");
+        let out = compile(&Ir::from_json(TWO_PEDESTALS).expect("ir"), &tables).expect("compiles");
+        for name in ["player2_start", "player3_start"] {
+            let kind = tables.thing_id(name).expect(name);
+            assert!(
+                out.things.iter().any(|t| t.kind == kind),
+                "{name} is emitted from its pedestal"
+            );
+        }
+
+        // The same start listed twice on one pedestal: two players would
+        // spawn inside each other, exactly as two room starts at one point
+        // would.
+        let duplicated = TWO_PEDESTALS.replacen(
+            r#"{ "kind":"player2_start", "at":[160,160], "angle":0 }"#,
+            r#"{ "kind":"player2_start", "at":[160,160], "angle":0 },
+                    { "kind":"player2_start", "at":[160,160], "angle":90 }"#,
+            1,
+        );
+        assert!(matches!(
+            compile(&Ir::from_json(&duplicated).expect("ir"), &tables),
+            Err(CompileError::OverlappingStarts { x: 160, y: 160 })
         ));
     }
 

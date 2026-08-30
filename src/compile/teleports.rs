@@ -411,17 +411,7 @@ fn larger(a: ThingDims, b: ThingDims) -> ThingDims {
 ///
 /// An island's edges use it with the host on the front, so the caller
 /// supplies the points in the direction whose right-hand side is the host.
-///
-/// `pub(crate)`, like [`emit_island_edges`] above it: the island-cutting
-/// pair is shared with [`crate::compile::lifts`], which cuts a pedestal the
-/// same way a teleport pad is cut.
-pub(crate) fn push_two_sided(
-    data: &mut MapData,
-    p1: Pt,
-    p2: Pt,
-    front: usize,
-    back: usize,
-) -> usize {
+fn push_two_sided(data: &mut MapData, p1: Pt, p2: Pt, front: usize, back: usize) -> usize {
     let v1 = vertex_index(&mut data.vertices, p1);
     let v2 = vertex_index(&mut data.vertices, p2);
     let front_side = data.sidedefs.len();

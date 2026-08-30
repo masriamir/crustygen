@@ -360,6 +360,32 @@ pub enum CompileError {
         /// Y coordinate.
         y: i32,
     },
+    /// An authored room thing stands on a pedestal's rectangle; it would
+    /// spawn in the pedestal's sector at its raised floor, not on the room
+    /// floor the author placed it on.
+    ///
+    /// The pedestal twin of
+    /// [`TeleportThingOnPad`](Self::TeleportThingOnPad), and refused for the
+    /// same reason: a room's `things` describe the room's own floor, and an
+    /// island inside it is a different sector at a different height. The
+    /// rectangle is closed on both axes — a point on its edge is already on
+    /// the platform's boundary line — but it is *not* grown by the thing's
+    /// radius the way a pad's is, because a pedestal is authored geometry
+    /// the author may deliberately stand something beside.
+    ///
+    /// A thing genuinely meant to ride the platform goes in the pedestal's
+    /// own [`things`](crate::ir::Pedestal::things) list instead.
+    #[error("thing `{kind}` at ({x}, {y}) stands on pedestal `{pedestal}`")]
+    ThingOnPedestal {
+        /// The pedestal it stands on.
+        pedestal: String,
+        /// The vocabulary name.
+        kind: String,
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+    },
     /// A thing sits closer to a wall than its own radius.
     #[error(
         "thing `{kind}` at ({x}, {y}) in room `{room}` has {have:.1} units of clearance but needs {need}"
