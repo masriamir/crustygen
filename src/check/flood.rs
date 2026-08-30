@@ -160,7 +160,7 @@
 //!
 //! Interned the same way [`reach::graph_from_compiled`] does: by the locked
 //! special a key opens ([`Tables::locked_door_kinds`]), not by key-thing
-//! name, so a card and skull of one colour share a class (`EV_VerticalDoor`,
+//! name, so a card and skull of one color share a class (`EV_VerticalDoor`,
 //! pinned `p_doors.c:371-403`, accepts either). [`run_flood`] reports a hard
 //! finding rather than panicking when the vocabulary ever lists more classes
 //! than a [`reach::KeyMask`] can hold — this module runs on arbitrary input,
@@ -200,7 +200,7 @@ fn intern_lock_classes(tables: &Tables) -> Option<(Vec<u16>, Vec<Vec<String>>)> 
     // only ever parses the two `include_str!`-embedded tables compiled into
     // this crate, and the pinned `data/vocabulary.toml` lists exactly three
     // distinct locked-door specials (26/27/28 — blue/yellow/red, card and
-    // skull of a colour sharing one special), far under `KeyMask::BITS`
+    // skull of a color sharing one special), far under `KeyMask::BITS`
     // (8). Exercising this branch would need a `Tables` built from a
     // vocabulary this crate does not ship, which no constructor offers.
     if specials.len() > KeyMask::BITS as usize {
@@ -229,7 +229,7 @@ fn class_of(specials: &[u16], special: u16) -> Option<KeyClass> {
 }
 
 /// Renders a [`KeyMask`] as the key-kind names it holds, comma-joined (a
-/// colour class with more than one kind joins those with `/`, matching
+/// color class with more than one kind joins those with `/`, matching
 /// `rules.rs`'s own `check_reachability` wording), or `"no keys"` for an
 /// empty mask.
 fn keys_in_words(mask: KeyMask, class_names: &[Vec<String>]) -> String {
@@ -684,7 +684,7 @@ pub fn teleport_only_sectors(scene: &Scene, tables: &Tables) -> Option<Vec<bool>
 }
 
 /// V-P24 (engine form): every locked-door special present has at least one
-/// key thing of its colour class placed, and every placed key thing opens
+/// key thing of its color class placed, and every placed key thing opens
 /// at least one door present.
 ///
 /// Re-derived at the class level, not the specific key-kind level
@@ -1225,7 +1225,7 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         // share_a_colour_class` pins at the `reach.rs` layer.
         assert!(
             stranding.message.contains("blue_card/blue_skull"),
-            "expected the colour class's full kind list in the stranded wording: {stranding:?}"
+            "expected the color class's full kind list in the stranded wording: {stranding:?}"
         );
     }
 

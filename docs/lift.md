@@ -8,7 +8,7 @@ measurements are corpus telemetry, and they are what drive the vocabulary
 roadmap: which linedef specials, sector specials, and thing types are common
 and unambiguous enough across real maps to justify a recognizer.
 
-## Current scope: telemetry, vocabulary membership, and the teleport recognizer
+## Current scope: telemetry, vocabulary membership, and two recognizers
 
 The census interprets nothing: `crustygen-lift` surveys a WAD's maps — UDMF
 or classic Doom binary format, through the same shared `crustygen::ingest`
@@ -33,8 +33,34 @@ the IR would have to misrepresent them: `self_referencing` (the line's front
 and back sector are the same) and `broken` (tag 0, no tagged sector, no
 marker on the tag, or a one-sided line that can never fire). A destination
 holding several markers is `ambiguous` — reported, not refused, since the
-engine's pick is deterministic. The other recognizers, the ones that name
-rooms and doors, arrive later (below).
+engine's pick is deterministic.
+
+`lift::plat` is the second, over platforms. It reads the same engine-side
+resolution the verifier does — `check::plats`, shared by the flood, the
+rules, the conformance rows and this recognizer, so the four cannot drift on
+what a platform travels to or who can fire its triggers. Every sector a lift
+line names by tag is resolved the way `EV_DoPlat` reads it (the floor it
+travels to is `P_FindLowestFloorSurrounding`'s; a use line fires from its
+front sector only, a walkover from whichever side can cross it at rest), and
+then classified into the three shapes the IR can state: a **lift** (at rest
+level with a landing, dropping to a low room), a **pedestal** (at rest above
+its one neighbor) and a **barrier** (at rest above two or more neighbors that
+share a floor). Eight refusals name what cannot be stated, judged in a fixed
+precedence so a platform wrong in several ways reports its most fundamental
+reason rather than an order-of-evaluation accident: `dead` (it travels 0, so
+there is no movement to state), `shared_tag` (more than one sector answers to
+the tag, where one IR lift is one platform), `one_shot`, `mixed_speed`,
+`unsupported_rest`, `top_only` (no trigger fires from below — the lift a
+player underneath cannot call), `one_way_barrier` (it lowers for one side
+only) and `conflicting_action` (a non-lift special names the tag too). A lift
+line whose tag names no sector at all is not a refused platform but a broken
+line, counted alongside the refusals. `shared_tag` and `one_way_barrier` are
+gates the shape probe behind `docs/measurements/lift-shapes-2026-08-29.md`
+never applied, so these shape counts are subsets of that measurement's rather
+than the same numbers.
+
+The other recognizers, the ones that name rooms and doors, arrive later
+(below).
 
 ## The CLI contract
 
@@ -55,23 +81,25 @@ A map assembled from binary format (rather than parsed from a native
 surveyed map in the census/histogram shape above; the origin suffix is a
 human-output-only annotation and is not part of the JSON record.
 
-`--vocabulary` appends a verdict per map on **four** axes. Three are
+`--vocabulary` appends a verdict per map on **five** axes. Three are
 membership: whether every non-zero linedef special and sector special, and
 every thing type, is in the compiler's emittable vocabulary
 (`Tables::emittable_line_specials`, `named_sector_specials`, `thing_kinds`),
 with the unknown values listed per axis, plus — on the line axis only —
 whether every non-zero linedef special the map carries is one the pinned
-vanilla engine dispatches (`(outside vanilla)` when not). The fourth is the
-teleport recognizer's, and it is the one axis that reads geometry: a map
-passes it when the recognizer refused none of its teleport lines. A refusal
-appends `(teleports refused: N)`, naming the count. A map with no teleport
-line and a map whose every teleport line was recognized read the same —
-silence on that axis — because there is nothing there the lifter would have
-to drop. `--json` carries the same four-axis verdict alongside a
-`teleports` object with the full shape and refusal counts.
+vanilla engine dispatches (`(outside vanilla)` when not). The other two are
+the recognizers', and they are the axes that read geometry: a map passes the
+fourth when the teleport recognizer refused none of its teleport lines, and
+the fifth when the plat recognizer refused no platform and every lift line
+named one. A refusal appends `(teleports refused: N)` or `(lifts refused: N)`,
+naming the count. A map with no teleport line and a map whose every teleport
+line was recognized read the same — silence on that axis — because there is
+nothing there the lifter would have to drop; the lift axis reads the same
+way. `--json` carries the same five-axis verdict alongside a `teleports`
+object and a `lifts` object, each with the full shape and refusal counts.
 
 The three membership axes are an upper bound on lift yield, not a geometric
-judgment; the teleport axis narrows that bound where it can.
+judgment; the teleport and lift axes narrow that bound where they can.
 
 **Per-map failure policy.** A group that fails to load through the shared
 ingest path — for example an unsupported binary format (Hexen, Doom 64), a
@@ -90,10 +118,10 @@ Exit codes:
 
 ## Next stages
 
-- **The remaining recognizers** — rooms, doors, keys, exits. Teleports are
-  done (above); everything else is still a raw histogram. The recognizers
-  arrive in blocker order, which the corpus measurement re-ranks after every
-  vocabulary release (`docs/corpus.md`).
+- **The remaining recognizers** — rooms, doors, keys, exits. Teleports and
+  lifts are done (above); everything else is still a raw histogram. The
+  recognizers arrive in blocker order, which the corpus measurement re-ranks
+  after every vocabulary release (`docs/corpus.md`).
 - **Map-spec emission** — recognized constructs become a crustygen map-spec
   document, with map-level atomicity: a map lifts completely or not at all.
 - **Semantic round-trip QA** — a lifted spec recompiles and passes

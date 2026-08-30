@@ -82,7 +82,7 @@ pub struct ConformanceRow {
     pub target: String,
     /// The measured value, rendered as text.
     pub actual: String,
-    /// The judgement.
+    /// The judgment.
     pub verdict: Verdict,
 }
 

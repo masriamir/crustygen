@@ -297,15 +297,17 @@ secret_switch = 51
 secret_walkover = 124
 source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, P_UseSpecialLine: 'case 11: // Exit level / P_ChangeSwitchTexture(line,0); / G_ExitLevel ();' (switch, normal) and 'case 51: // Secret EXIT / P_ChangeSwitchTexture(line,0); / G_SecretExitLevel ();' (switch, secret) — both call P_ChangeSwitchTexture with useAgain=0, vanilla's one-shot ('S1') form. p_spec.c, P_CrossSpecialLine: 'case 52: // EXIT! / G_ExitLevel ();' (walkover, normal) and 'case 124: // Secret EXIT / G_SecretExitLevel ();' (walkover, secret), both in the function's leading 'TRIGGERS' block (one-shot; the level ending makes the usual line->special=0 reset moot). https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_switch.c and .../p_spec.c"
 
-# Line specials for a lift: Doom's "PlatDownWaitUpStay" plat, which starts
-# down and, on trigger, raises to meet the highest neighboring floor, waits,
-# then lowers back. `progression.lifts.trigger` needs a switch and a
-# walkover form.
+# Line specials for a lift: Doom's "PlatDownWaitUpStay" plat, which rests at
+# its own floor and, on trigger, lowers to the lowest neighboring floor, waits
+# and rises back — `p_plats.c`, `EV_DoPlat`, `case downWaitUpStay`, which sets
+# `plat->high = sec->floorheight`, `plat->low =
+# P_FindLowestFloorSurrounding(sec)` and starts it `down`.
+# `progression.lifts.trigger` needs a switch and a walkover form.
 #
 # The repeatable ("SR"/"WR") forms below are used rather than the one-shot
 # ("S1"/"W1") forms vanilla also defines for the same action (21 switch, 10
-# walkover): P5 requires a lift to be "operable from both ends", and a
-# once-only special would strand whichever side rode it first.
+# walkover): P5 requires a lift to be callable from the floor it lowers to,
+# and a once-only special would strand whichever side rode it first.
 [specials.lift]
 switch = 62
 walkover = 88

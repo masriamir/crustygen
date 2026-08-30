@@ -397,7 +397,9 @@ error and nothing is produced.
     }
   ],
   "portals": [
-    { "a": "entry", "b": "hall", "kind": "door", "lock": null, "width": 128, "at": [512, 128] }
+    { "a": "entry", "b": "hall", "kind": "door", "lock": null, "width": 128, "at": [512, 128] },
+    { "a": "hall", "b": "vault", "kind": "lift", "width": 128, "at": [768, 384],
+      "trigger": "switch", "speed": "normal" }
   ],
   "teleports": [
     { "id": "entry_to_vault",
@@ -406,6 +408,15 @@ error and nothing is produced.
       "to": { "room": "vault", "at": [96, 96], "angle": 90 },
       "monsters_only": false,
       "repeatable": true }
+  ],
+  "pedestals": [
+    { "id": "prize",
+      "room": "vault",
+      "at": [320, 320],
+      "size": [64, 64],
+      "rise": 128,
+      "speed": "normal",
+      "things": [{ "kind": "soulsphere", "at": [352, 352], "angle": 0 }] }
   ],
   "exits": [
     { "room": "vault", "trigger": "teleport", "secret": false, "width": 64, "at": [0, 64] }
@@ -420,9 +431,9 @@ Clockwise is not a stylistic choice: a linedef's front (right) sidedef must face
 interior, and the right-hand side of a directed edge only faces inward when the boundary winds
 clockwise. Verified empirically rather than assumed — measuring the signed area of every sector
 boundary in nine Freedoom maps across both IWADs, oriented so the sector sits on the front side,
-gives 2611 clockwise and 0 counter-clockwise. Portal `kind` is one of `plain`, `door`, `locked`;
-`lock` names a key when `kind` is `locked`. Texture names in the IR are concrete, having already
-been resolved from the template's high-level vocabulary.
+gives 2611 clockwise and 0 counter-clockwise. Portal `kind` is one of `plain`, `door`, `locked`,
+`lift`; `lock` names a key when `kind` is `locked`. Texture names in the IR are concrete, having
+already been resolved from the template's high-level vocabulary.
 
 **Teleports are not portals.** A portal joins two rooms through their shared wall; a teleport
 relocates whatever crosses it, and the two rooms need not touch. They live in their own
@@ -463,6 +474,30 @@ room by at least `MIN_PORTAL_GAP` (`TeleportPadRecessTooClose`), and its span on
 must not overlap or even touch another opening cut into that same wall — a portal's opening or
 the level exit's segment (`TeleportPadBesideOpening`). A walkover exit's own alcove is not yet
 held to either rule; see `KNOWN-GAPS.md`.
+
+**Lifts and pedestals are platforms.** A `downWaitUpStay` sector (`p_plats.c`, `EV_DoPlat`) rests
+at its own floor and travels to the lowest floor among its two-sided neighbors
+(`P_FindLowestFloorSurrounding`) and back. The fourth portal `kind`, `lift`, fills the portal gap
+with one: between rooms at different floors it is a **lift**, resting level with the higher room
+and dropping to the lower room's floor; between rooms at one floor it is a **barrier**, resting
+`rise` above the shared floor — required there, rejected when the floors differ, and rejected
+outright on any other kind. `speed` picks `normal` (62/88) or `fast` (123/120, `blazeDWUS`), and
+`trigger` places the lines: `switch` puts a use special on the platform's low face, so the riser
+itself is the switch; `walkover` puts a walkover special on the outer threshold of the low room's
+alcove, which that room must therefore declare; `both_ends` is the switch plus a walkover on the
+platform's top face. A barrier has no low room and so offers only `switch`. A lift names no
+`door_thickness` — its own platform sector is what fills the gap.
+
+**A pedestal is that same platform with no portal under it**: a raised island cut inside one room,
+carried in its own `pedestals` list as `{ id, room, at, size, rise, speed, things }`. `at` is the
+rectangle's low corner (minimum x, minimum y) and `size` its width and height, each a positive
+multiple of 8, defaulting to `Ir::PEDESTAL_DEFAULT_SIZE` (64) square; the rectangle must lie
+strictly inside its room. The host room is the platform's only neighbor, so the travel is exactly
+`rise`. All four edges carry the use special, so the platform can be called down from whichever
+side the player walks up to, and `things` are the things that ride it — placed at the raised
+floor, each strictly inside the rectangle. A room's own `things` may not stand on a pedestal
+(they would spawn in the platform's sector rather than on the room floor the author gave them);
+they belong in the pedestal's own list instead.
 
 ## 7. Compiler contract
 
@@ -519,10 +554,16 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
 - **P4 — Door opening.** A door's effective opening is the lowest adjacent ceiling less the
   engine's door clearance allowance, measured from the door sector's floor. That opening — not
   the nominal door height — must satisfy P2 for everything that passes through it.
-- **P5 — Lift travel and return.** A lift's travel must not exceed `progression.lifts.max_travel`,
-  its raised and lowered floors must each satisfy P1 against whatever they meet, and it must be
-  operable from both ends unless the region it serves is deliberately one-way and still satisfies
-  P7. A lift reachable only from the top is a trap.
+- **P5 — Lift travel and return** *(implemented)*. Every platform rests at its own floor and
+  travels to the lowest floor among its two-sided neighbors (`P_FindLowestFloorSurrounding`), so
+  the floor it lowers to is not an authored choice — it is whatever its lowest neighbor stands
+  at. That travel must exceed the engine's step height, since under it the player simply walks
+  up, and must not exceed `progression.lifts.max_travel`. Every sector that calls the platform
+  must itself stand at that lowest floor, or the platform will not stop where the caller is. And
+  some trigger must fire from that floor: a use special from its front sector (`P_UseSpecialLine`
+  is front-side only), or a walkover from whichever side can cross the line at rest. A trigger on
+  top is optional — the descent is free — but a lift callable only from above is a trap for the
+  player below.
 - **P6 — Monster mobility.** A monster's roaming region must not be split by a drop exceeding
   the engine's step height, unless the drop is deliberately one-way.
 - **P7 — No softlock.** Every region the player can enter must retain a path back to the
@@ -540,7 +581,11 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
   texture height. Violations degrade to a warning rather than an error — the result is ugly, not
   broken.
 - **P11 — Peg flags.** Door and lift portals set the unpegged flags appropriate to the moving
-  sector, so the texture does not slide with it.
+  sector. A door's track is lower-unpegged so `DOORTRAK` stays put while the ceiling animates
+  open; a lift riser keeps the unpegged flag **clear**, which anchors the lower texture to the
+  back sector's floor — on the platform's low face that back sector is the platform itself, so
+  the riser rides with it. Clear is also the corpus's convention: 96 % of risers carry neither
+  flag (`docs/measurements/lift-shapes-2026-08-29.md` §G).
 - **P12 — Sky coherence.** Sky ceilings use the sky flat. Two adjacent sky sectors at differing
   heights are permitted; a sky sector adjacent to a non-sky sector still obeys P8.
 
@@ -613,9 +658,10 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
 
 The thresholds P1–P27 depend on live in `engine.toml` alongside `vocabulary.toml`: maximum step
 height; player radius and height; per-species radius and height; the door clearance allowance;
-lift speeds; barrel blast radius and damage; decoration radii, heights, and blocking flags;
-sector damage specials by tier; the secret sector special; the sky flat name; the valid light
-range; and which specials consume a tag.
+the `[plat]` block behind every platform (the `downWaitUpStay` and `blazeDWUS` speeds, the wait
+at the bottom, and `MAXPLATS`); barrel blast radius and damage; decoration radii, heights, and
+blocking flags; sector damage specials by tier; the secret sector special; the sky flat name;
+the valid light range; and which specials consume a tag.
 
 Both tables follow the same sourcing rule: **every entry carries a citation — a `source` field
 recording a primary source, a `derivation` for a computed value, or `curated` for a judgment call

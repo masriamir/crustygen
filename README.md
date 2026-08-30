@@ -4,8 +4,9 @@ Compiles a hand-authored room-graph IR into a UDMF `TEXTMAP`, packs it into a
 playable Doom PWAD, and emits a binary Doom-format twin.
 
 The compiler removes coordinate bookkeeping, not layout design. You describe
-rooms, portals, doors, things and an exit; it produces watertight geometry,
-allocates tags, and refuses to emit a map a player could not walk through.
+rooms, portals, doors, lifts, teleports, things and an exit; it produces
+watertight geometry, allocates tags, and refuses to emit a map a player could
+not walk through.
 
 ```
 map-spec (Markdown)  →  parse  →  Spec        (not yet wired to the IR)
@@ -32,7 +33,7 @@ directly as JSON and built with `crustygen-build` (see
 [`docs/build.md`](docs/build.md)). See [Known gaps](#known-gaps).
 
 ```bash
-cargo test                                   # 623 tests
+cargo test                                   # 735 tests
 cargo run --bin crustygen-build -- tests/fixtures/entrada_base.json out.wad
 cargo run --bin crustygen-check -- maps/entrada.wad \
     --spec tests/fixtures/entrada.spec.md
@@ -67,16 +68,19 @@ chocolate-doom -iwad doom2.wad -file maps/entrada_doom.wad -warp 1
 ## How it works
 
 An IR document names rooms (clockwise, grid-snapped footprints with a floor,
-ceiling, light and textures), portals between them, things inside them, and
-an exit. Rooms are authored **apart**: the void between two rooms is real,
-solid wall, and the compiler fills it with a passage — or, for a door, a
-chain of up to three sectors. See [`docs/geometry.md`](docs/geometry.md).
+ceiling, light and textures), portals between them — plain, door, locked or
+lift — teleports and pedestals, things inside them, and an exit. Rooms are
+authored **apart**: the void between two rooms is real, solid wall, and the
+compiler fills it with a passage — or, for a door, a chain of up to three
+sectors. See [`docs/geometry.md`](docs/geometry.md).
 
 Compilation runs a fixed pass order, each pass depending on the last: emit
 room sectors, resolve secret specials, cut portals, emit doors, carve exits,
-emit teleport pads and their destination markers (`emit_teleports`), check no
-two emitted sectors overlap, apply height textures, place things, check no
-action sits at tag 0, render `TEXTMAP`, then run the playability catalog. A
+emit teleport pads and their destination markers (`emit_teleports`), emit the
+`downWaitUpStay` platforms behind lifts, barriers and pedestals
+(`emit_lifts`), check no two emitted sectors overlap, apply height textures,
+place things, check no action sits at tag 0, render `TEXTMAP`, then run the
+playability catalog. A
 violation is a hard error, not a warning — a door the player cannot fit
 through is a broken map, not a missed target.
 
@@ -90,13 +94,14 @@ assembled and rendered to the same form — and re-derive the same invariants
 from the emitted geometry, reusing the sourced tables and the reachability
 core but nothing from `compile/` or `rules.rs` — the logic under
 cross-examination.
-Sixteen checks, from dangling cross-references to a key-aware flood — with
-directed teleport edges resolved the way `EV_Teleport` resolves them — that
-proves the map can still be finished. Given a map-spec it also grades a fixed
-catalog of frontmatter parameters against their actual values — a parameter
-with no sourced geometric meaning is an explicit not-derivable row rather than
-a silent gap, and a structurally broken map marks every row not-run rather
-than judging one against corrupt geometry. Exit 0 clean, 1 on a defect, 2 on
+Seventeen checks, from dangling cross-references to a key-aware flood — with
+directed teleport edges resolved the way `EV_Teleport` resolves them, and lift
+edges the way `EV_DoPlat` does — that proves the map can still be finished.
+Given a map-spec it also grades a fixed catalog of frontmatter parameters
+against their actual values — a parameter with no sourced geometric meaning is
+an explicit not-derivable row rather than a silent gap, and a structurally
+broken map marks every row not-run rather than judging one against corrupt
+geometry. Exit 0 clean, 1 on a defect, 2 on
 bad input. See [`docs/check.md`](docs/check.md).
 
 ## Surveying a WAD
@@ -108,13 +113,15 @@ counts and linedef/sector/thing-type histograms per map, human-readable or as
 `--json`. That layer interprets nothing — no table lookups, no spec
 emission. See [`docs/lift.md`](docs/lift.md).
 
-`crustygen-lift --vocabulary` adds a per-map verdict on four axes: whether
+`crustygen-lift --vocabulary` adds a per-map verdict on five axes: whether
 every special and thing type is in the compiler's emittable vocabulary, plus
-the **teleport recognizer**, which resolves every teleport line the way
-`EV_Teleport` does, classifies the pad shape it lands on, and refuses the
-shapes the IR cannot state. That fourth axis is the first thing here that
-reads geometry rather than a table. `crustygen-corpus <dir>` sweeps a
-directory of idgames zips into the corpus expressibility report the
+two recognizers — the **teleport recognizer**, which resolves every teleport
+line the way `EV_Teleport` does, classifies the pad shape it lands on, and
+refuses the shapes the IR cannot state, and the **plat recognizer**, which
+resolves every platform a lift line names the way `EV_DoPlat` does, classifies
+it as a lift, a pedestal or a barrier, and refuses the rest. Those two axes
+are the ones that read geometry rather than a table. `crustygen-corpus <dir>`
+sweeps a directory of idgames zips into the corpus expressibility report the
 vocabulary roadmap is re-ordered from — still an upper bound. See
 [`docs/corpus.md`](docs/corpus.md).
 
@@ -146,10 +153,10 @@ the four id/Final Doom IWADs. See
 | [`docs/map-spec.md`](docs/map-spec.md) | The map-spec document format, the parser's API, and the enforcement split |
 | [`docs/build.md`](docs/build.md) | The build stage: the `crustygen-build` CLI contract, its per-stage exit codes, and byte-reproducibility of the committed map |
 | [`docs/check.md`](docs/check.md) | The layer-4 verifier: the check catalog, the flood's construction rules, conformance verdicts, and the CLI contract |
-| [`docs/lift.md`](docs/lift.md) | The lifter's charter, its telemetry and teleport-recognizer scope, and the `crustygen-lift` CLI contract |
-| [`docs/corpus.md`](docs/corpus.md) | The corpus sweep: what "expressible" means on its four axes (and does not), the `crustygen-corpus` CLI contract, and the per-release re-run procedure |
+| [`docs/lift.md`](docs/lift.md) | The lifter's charter, its telemetry and its two recognizers' scope, and the `crustygen-lift` CLI contract |
+| [`docs/corpus.md`](docs/corpus.md) | The corpus sweep: what "expressible" means on its five axes (and does not), the `crustygen-corpus` CLI contract, and the per-release re-run procedure |
 | [`docs/geometry.md`](docs/geometry.md) | Worked coordinates for the gap and door-chain constructions |
-| [`docs/verticality.md`](docs/verticality.md) | Height differences, and the stairs/lifts phases that follow |
+| [`docs/verticality.md`](docs/verticality.md) | Height differences, the shipped lift phase, and the stairs phase still to come |
 | [`docs/measurements/`](docs/measurements/) | Corpus measurements: the retail-IWAD verticality survey, the idgames expressibility instrument, the teleport before/after, and the lift shape probe |
 | [`examples/`](examples/) | Reproducible measurement probes (`liftprobe`), kept so a measurement can be re-derived when the sample or the loader changes; compiled and linted by CI, never run by tests |
 
@@ -172,12 +179,12 @@ The honest list is [`KNOWN-GAPS.md`](KNOWN-GAPS.md). The headlines:
   a missing start or exit is a hard finding there, and V-P20 checks each
   pickup for prop embedding and flood reachability — but on a built WAD, one
   stage later.
-- **15 of 27 playability rules** are enforced by the compiler; the verifier
-  re-derives fourteen of them from the emitted map and adds P20. The
+- **16 of 27 playability rules** are enforced by the compiler; the verifier
+  re-derives fifteen of them from the emitted map and adds P20. The
   exception is P26 (teleport-only exit room), which the verifier grades as a
   conformance row rather than as a check — a teleport exit emits exactly a
   plain walkover exit's specials, so nothing on the line tells them apart.
-- **Texture alignment is minimal** — only an exit switch is centred; offsets
+- **Texture alignment is minimal** — only an exit switch is centered; offsets
   do not accumulate across collinear runs.
 
 ## License

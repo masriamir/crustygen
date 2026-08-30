@@ -148,7 +148,7 @@ prints as `{id} {severity} {subject}: {message}`.
 | `V-P15` | Every teleport line's tag resolves the way `EV_Teleport` resolves it — the first sector, in declaration order, that both carries the tag and holds a `teleport_dest` marker — to a sector holding **exactly one** marker, with the player's headroom and radius clearance at the marker. Clearance is measured against the destination's **non-passable** boundary segments only, the same rule V-P25 applies to a start. Judged once per linedef, from its front mirror: `EV_Teleport` returns immediately on a back-side crossing, so the back mirror triggers nothing to check. A tag-0 teleport line is V-P14's finding, not repeated here. | Error |
 | `V-P19` | Every sector's `lightlevel` is inside `Tables::light_range()`. Unconditional, spec or no spec. | Error |
 | `V-P20` | **Embedding:** no collectible (pickup, ammo, weapon, `backpack`, key, or one of the eight powerups) sits inside a blocking prop's radius. **Reachability:** every collectible's sector is one the V-P7 flood actually reached; runs only when the flood ran. | Error |
-| `V-P24` | Every locked-door **class** present has at least one key of that colour placed, and every placed key opens at least one door present. Class-level, because `26` is all an emitted linedef retains — it opens to either `blue_card` or `blue_skull`. Doors dedupe by `(door sector, class)`, so one physical door with two faces reports once. | Error |
+| `V-P24` | Every locked-door **class** present has at least one key of that color placed, and every placed key opens at least one door present. Class-level, because `26` is all an emitted linedef retains — it opens to either `blue_card` or `blue_skull`. Doors dedupe by `(door sector, class)`, so one physical door with two faces reports once. | Error |
 | `V-P25` | Every player start clears its sector's **non-passable** walls by at least the player's radius (an open doorway cannot crush you against it); clears every other thing whose name resolves to a blocking prop on **both axes at once** by `prop.radius + player.radius` (`PIT_CheckThing`'s own axis-aligned `blockdist` box, not a circular distance); and no two starts of any kind are within telefrag distance (`2 × radius`) of each other. | Error |
 | `V-P27` | Every sector holding a monster has at least one two-sided boundary, or is a teleport destination. A fully one-sided monster sector can never be woken by sight or sound and is never entered, so its monsters are scenery the player never meets. **Two-sided**, not passable: sound and sight both travel through a two-sided line the player cannot walk across (a window, a fence), so a blocking two-sided boundary is still a way in for the wake-up this rule is about. | Error |
 
@@ -196,7 +196,7 @@ cannot recover that, so this module names both and accepts a goal set that can
 only ever be too generous, never falsely unfinishable.
 
 **Key classes are interned by lock, not by key name** — a card and a skull of
-one colour share a class, because `EV_VerticalDoor` accepts either. Where
+one color share a class, because `EV_VerticalDoor` accepts either. Where
 `graph_from_compiled` `assert!`s that the vocabulary fits a `KeyMask`, this
 module reports a hard finding instead: it runs on arbitrary input.
 
@@ -481,7 +481,7 @@ doing its job on real content, not a false positive.
   warning above is a *linedef*-special check: `check_recognized_specials`
   reads `Boundary::special`, and a damaging floor is a **sector** special
   (`data/engine.toml`'s `[sector.damage]`, a numerically distinct space, as
-  that table's own neighbouring comment spells out).
+  that table's own neighboring comment spells out).
   `SceneSector::special` is populated by `Scene::build` but read nowhere in
   `src/check/` — the secret-sector count in `MapStats` reads the raw
   `UdmfMap`'s own `sector.special` directly (`check/mod.rs`), not the
@@ -500,7 +500,7 @@ doing its job on real content, not a false positive.
 - **P24's authored-intent form.** `rules.rs`'s IR-side `check_key_lock_coherence`
   compares the authored lock string (`"blue_card"`) against placed thing kinds
   by exact equality — it polices what the author *said*. V-P24 cannot: an
-  emitted `26` names a colour class, not a card. The two rules deliberately
+  emitted `26` names a color class, not a card. The two rules deliberately
   disagree on a map that locks `"blue_card"` and places a `blue_skull`
   (`KNOWN-GAPS.md` records why neither should be "fixed" into agreement).
 - **The rest of the catalog.** P1 (retired), P6, P10, P12, P16, P17, P18,
