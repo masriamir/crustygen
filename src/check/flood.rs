@@ -133,15 +133,24 @@
 //!   there presses or crosses the line and rides.
 //! - **A remote trigger only.** When every `Low` activator is some sector
 //!   the platform does not border, the callers are instead every neighbor
-//!   standing at the platform's `low` floor (within a step of it, and more
-//!   than a step below the platform's rest floor) — the sectors the
-//!   lowered platform is level with. This is deliberately optimistic: the
-//!   flood cannot model the walk from a remote switch back to the platform,
-//!   nor the wait before it rises again, so it credits the ride rather than
-//!   inventing a softlock. A platform no trigger fires from below
-//!   ([`plats::ScenePlat::callable_low`] false) gets no edge at all — that
-//!   is the top-only lift a player below cannot call, and the flood should
-//!   see the wall it really is.
+//!   more than a step below the platform's rest floor — the ones that
+//!   cannot climb onto it as it stands. This is deliberately optimistic:
+//!   the flood cannot model the walk from a remote switch back to the
+//!   platform, nor the wait before it rises again, so it credits the ride
+//!   rather than inventing a softlock. A platform no trigger fires from
+//!   below ([`plats::ScenePlat::callable_low`] false) gets no edge at all —
+//!   that is the top-only lift a player below cannot call, and the flood
+//!   should see the wall it really is.
+//!
+//! Either way the caller must share a
+//! [`Boundary::passable`](crate::check::scene::Boundary::passable) boundary
+//! with the platform: boarding is a crossing, and `PIT_CheckLine` refuses a
+//! blocking one exactly as it does for the boundary edges above. (A blocking
+//! two-sided line can still *fire* a use trigger — `P_UseSpecialLine` is a
+//! raycast, not a crossing — so a switch pressed through a window lowers a
+//! platform the presser cannot then board.) The platform's own neighbor set
+//! stays wider on purpose: `P_FindLowestFloorSurrounding` counts every
+//! two-sided neighbor when it picks the floor to travel to, blocking or not.
 //!
 //! Pairs are deduped, as the teleport edges are: a pedestal's four island
 //! edges all name the same (host, platform) pair, and a barrier is called
@@ -482,14 +491,28 @@ fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool
     }
     let step = tables.step_height();
     for plat in plats::resolve_plats(scene, tables) {
+        // Boarding is a crossing like any other, so a caller needs at least
+        // one *passable* boundary with the platform. `ScenePlat::neighbors`
+        // is deliberately the engine's wider set — `EV_DoPlat`'s
+        // `P_FindLowestFloorSurrounding` counts every two-sided neighbor,
+        // `ML_BLOCKING` or not, because a blocking line still bounds the
+        // sector it borders — so the flood narrows it here rather than there.
+        let boardable: BTreeSet<usize> = scene.sectors[plat.sector]
+            .boundary
+            .iter()
+            .filter(|b| b.passable())
+            .filter_map(|b| b.neighbor)
+            .collect();
+        // Every neighbor more than a step below the platform at rest: the
+        // ones that cannot climb onto it as it stands, and so are the ones a
+        // ride is worth an edge for. No lower bound against `plat.low` — a
+        // neighbor above it still boards, by dropping onto the lowered
+        // platform, and drops are free.
         let neighbors_at_low: Vec<usize> = plat
             .neighbors
             .iter()
             .copied()
-            .filter(|&n| {
-                scene.sectors[n].floor >= plat.low - step
-                    && scene.sectors[n].floor < scene.sectors[plat.sector].floor - step
-            })
+            .filter(|&n| scene.sectors[n].floor < scene.sectors[plat.sector].floor - step)
             .collect();
         let adjacent_callers = plat.low_activator_neighbors();
         // Remote-only activators: every low neighbor gets the edge, ungated
@@ -506,7 +529,7 @@ fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool
         } else {
             adjacent_callers.into_iter().collect()
         };
-        for c in callers {
+        for c in callers.into_iter().filter(|c| boardable.contains(c)) {
             if lift_pairs.insert((c, plat.sector)) {
                 edges.push(Edge {
                     a: c,
@@ -1862,6 +1885,76 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
         assert!(
             findings.iter().any(|f| f.check == "V-P7"),
             "the start is stranded below a top-only lift: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn a_platform_only_a_remote_switch_calls_is_still_boarded_from_its_low_neighbor() {
+        // Five rooms in a row. The platform is room 1 (tag 7); it borders
+        // room 0 (low) and room 2 (level). The switch sits on the line
+        // between rooms 3 and 4 and fronts room 3 — a `Low` activator the
+        // platform does not border, so `low_activator_neighbors` is empty
+        // while `callable_low` holds, which is the remote-only branch.
+        let (scene, tables) = fixtures::scene_of(&fixtures::chain(
+            &[0, 128, 128, 0, 0],
+            &[0, 7, 0, 0, 0],
+            &[(0, 0, false), (0, 0, false), (0, 0, false), (62, 7, false)],
+            "",
+        ));
+        let (specials, _class_names) = intern_lock_classes(&tables).expect("small vocabulary");
+        let plats = plats::resolve_plats(&scene, &tables);
+        assert_eq!(plats.len(), 1);
+        assert_eq!(
+            plats[0].triggers[0].activators,
+            vec![(3, plats::Activator::Low)],
+            "the switch fires from room 3 alone"
+        );
+        assert!(
+            plats[0].low_activator_neighbors().is_empty() && plats[0].callable_low(),
+            "a Low activator the platform does not border"
+        );
+        let edges = build_edges(&scene, &tables, &specials, true);
+        let lifts: Vec<&Edge> = edges.iter().filter(|e| e.kind == EdgeKind::Lift).collect();
+        assert_eq!(
+            lifts.len(),
+            1,
+            "the low room boards the platform the remote switch lowers: {edges:?}"
+        );
+        assert_eq!(
+            (lifts[0].a, lifts[0].b),
+            (0, 1),
+            "from the low neighbor, not the level one"
+        );
+    }
+
+    #[test]
+    fn a_platform_behind_a_blocking_line_is_not_boardable_across_it() {
+        // The same riser switch, on a two-sided line flagged solid: a window
+        // the player presses through but cannot walk through.
+        let (scene, tables) = fixtures::scene_of(
+            &fixtures::chain(
+                &[0, 128, 128],
+                &[0, 7, 0],
+                &[(62, 7, false), (0, 0, false)],
+                "",
+            )
+            .replacen(
+                "special = 62; arg0 = 7; }",
+                "special = 62; arg0 = 7; blocking = true; }",
+                1,
+            ),
+        );
+        let (specials, _class_names) = intern_lock_classes(&tables).expect("small vocabulary");
+        let plats = plats::resolve_plats(&scene, &tables);
+        assert_eq!(
+            plats[0].low_activator_neighbors(),
+            BTreeSet::from([0]),
+            "the switch still fires: `P_UseSpecialLine` is a raycast, not a crossing"
+        );
+        let edges = build_edges(&scene, &tables, &specials, true);
+        assert!(
+            !edges.iter().any(|e| e.kind == EdgeKind::Lift),
+            "but nobody can board across a blocking line: {edges:?}"
         );
     }
 }

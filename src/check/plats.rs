@@ -18,8 +18,20 @@
 //!
 //! The classification rules are the lift shape probe's
 //! (`examples/liftprobe/common.rs`, `docs/measurements/lift-shapes-2026-08-29.md`),
-//! moved crate-side: the probe measures the idgames corpus with them, this
-//! module judges an emitted map with them, and both read one set of rules.
+//! moved crate-side: the probe measures the idgames corpus with them and this
+//! module judges an emitted map with them.
+//!
+//! **One deliberate divergence from the probe.** A walkover trigger is
+//! credited here only across a boundary the player can actually cross
+//! ([`Boundary::passable`]): `P_CrossSpecialLine` runs from `P_TryMove`'s
+//! `spechit` bookkeeping, and `PIT_CheckLine` (pinned `p_map.c:214-217`)
+//! rejects a one-sided or `ML_BLOCKING` line for any non-missile *before*
+//! that list is ever populated, so a walkover lift line the player cannot
+//! walk through fires nothing — the same gate `flood.rs` applies to walkover
+//! exits and teleports. The probe's `activator_sides` omits it because it is
+//! measuring what map authors *drew*, where crediting the side is the
+//! conservative reading; a checker that must not call a map finishable it
+//! cannot finish needs the engine's own answer instead.
 
 use std::collections::BTreeSet;
 
@@ -330,12 +342,15 @@ pub fn resolve_plats(scene: &Scene, tables: &Tables) -> Vec<ScenePlat> {
 
 /// Lift lines that can never fire a plat: tag 0, or a tag naming no sector.
 ///
-/// Each linedef is named once, from its front mirror, in sector declaration
-/// order — `special` and `tag` are linedef-wide, so the back mirror of a
-/// two-sided lift line would otherwise report the same line twice.
+/// Ascending by linedef declaration index, each named once. The walk is over
+/// sectors' boundaries, so the raw order would be sector-then-boundary and
+/// only coincidentally sorted; a `BTreeSet` makes it the caller-visible index
+/// order instead. Front mirrors only — `special` and `tag` are linedef-wide,
+/// so the back mirror of a two-sided lift line would otherwise report the
+/// same line twice.
 #[must_use]
 pub fn broken_lift_lines(scene: &Scene, tables: &Tables) -> Vec<usize> {
-    let lift: Vec<i32> = tables.lift_specials().into_iter().map(i32::from).collect();
+    let lift = LiftSpecials::resolve(tables).all;
     scene
         .sectors
         .iter()
@@ -343,6 +358,8 @@ pub fn broken_lift_lines(scene: &Scene, tables: &Tables) -> Vec<usize> {
         .filter(|b| b.fronts_this && lift.contains(&b.special))
         .filter(|b| b.tag == 0 || !scene.sectors.iter().any(|s| s.tag == b.tag))
         .map(|b| b.linedef)
+        .collect::<BTreeSet<usize>>()
+        .into_iter()
         .collect()
 }
 
@@ -388,10 +405,41 @@ mod tests {
         assert_eq!(p.triggers.len(), 1);
         let t = &p.triggers[0];
         assert!(t.use_line && t.repeatable && !t.fast);
+        assert_eq!(
+            (t.linedef, t.special),
+            (0, 62),
+            "the trigger names the line it came from"
+        );
+        assert!(
+            !t.lower_unpegged,
+            "`chain` writes no pegging flags, and the riser wants the flag clear"
+        );
         assert_eq!((t.front, t.back), (0, Some(1)));
         assert_eq!(t.activators, vec![(0, Activator::Low)]);
         assert!(p.callable_low() && !p.callable_top());
         assert_eq!(p.low_activator_neighbors(), BTreeSet::from([0]));
+        assert!(
+            p.other_actions.is_empty(),
+            "nothing but the lift line names tag 7: {:?}",
+            p.other_actions
+        );
+
+        // The same line with `ML_DONTPEGBOTTOM` set, so the flag is read off
+        // the linedef rather than assumed clear.
+        let (_, _, pegged) = plats_of(
+            &chain(
+                &LIFT_FLOORS,
+                &LIFT_TAGS,
+                &[(62, 7, false), (0, 0, false)],
+                "",
+            )
+            .replacen(
+                "special = 62; arg0 = 7; }",
+                "special = 62; arg0 = 7; dontpegbottom = true; }",
+                1,
+            ),
+        );
+        assert!(pegged[0].triggers[0].lower_unpegged);
     }
 
     #[test]
@@ -435,6 +483,29 @@ mod tests {
         ));
         assert_eq!(p.len(), 2);
         assert!(p.iter().all(|x| x.shared_tag == 2));
+
+        // Three non-lift lines naming the plat's own tag, declared out of
+        // order and one of them twice: `other_actions` sorts and dedupes
+        // them, and none of them becomes a trigger.
+        let (_, _, p) = plats_of(&chain(
+            &[0, 128, 128, 0, 0],
+            &[0, 7, 0, 0, 0],
+            &[
+                (62, 7, false),
+                (26, 7, false),
+                (11, 7, false),
+                (26, 7, false),
+            ],
+            "",
+        ));
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].other_actions, vec![11, 26]);
+        assert_eq!(
+            p[0].triggers.len(),
+            1,
+            "only the lift special is a trigger: {:?}",
+            p[0].triggers
+        );
     }
 
     #[test]
