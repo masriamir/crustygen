@@ -231,10 +231,15 @@ impl LiftSpecials {
 /// thing->y, ld)` before and after the move — the thing's **center** crosses,
 /// not its box — but it returns first at `tmfloorz - thing->z > 24*FRACUNIT`,
 /// and `PIT_CheckLine` has by then raised `tmfloorz` for every line the
-/// **box** straddles, `P_BoxOnLineSide` (`p_maputl.c`) counting an edge that
-/// merely touches a line as straddling it. So the center stays strictly more
-/// than `radius` from anything that stops the box, and a sector shallower
-/// than that with no other way out admits no center at all. But shallowness
+/// **box** straddles. `PIT_CheckLine`'s own bounding-box early-out
+/// (`p_map.c:191-195`, `<=`/`>=`) returns before `P_BoxOnLineSide` is asked
+/// when the box merely touches a line, so the center may rest exactly
+/// `radius` from a blocking edge but no closer. A pocket exactly `radius`
+/// deep therefore puts the center exactly *on* its threshold, which
+/// `P_PointOnLineSide` (`p_maputl.c:76-81`, `if (x <= line->v1->x)`)
+/// groups with the near side — no side change, no crossing — and a
+/// shallower pocket with no other way out admits no center at all. But
+/// shallowness
 /// alone proves nothing: the census's §G3 found 3 / 30 / 64 low-side
 /// walkovers whose far sector reaches no further than 16, and all but 0 / 3 /
 /// 6 of them are *open* — thin trigger strips cut across a corridor, which

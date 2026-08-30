@@ -601,11 +601,13 @@ pub enum CompileError {
     /// line. Yet the same function returns at `tmfloorz - thing->z >
     /// 24*FRACUNIT` (lines 477-479) before that walk ever runs, and
     /// `PIT_CheckLine` raises `tmfloorz` to the platform's floor for any line
-    /// the moving **box** straddles — `P_BoxOnLineSide`
-    /// (`p_maputl.c:109-153`) reporting a box whose edge merely touches the
-    /// line as straddling it, since its tests are strict `<`/`>`. So the
-    /// center can never come within the player's radius of the platform's
-    /// face, and an alcove no deeper than that radius has no standing room
+    /// the moving **box** straddles — while `PIT_CheckLine`'s bounding-box
+    /// early-out (`p_map.c:191-195`, `<=`/`>=`) lets a box merely touch the
+    /// line. So the center can come exactly the player's radius from the
+    /// platform's face but no closer; an alcove exactly that deep puts the
+    /// center on the threshold line, which `P_PointOnLineSide`
+    /// (`p_maputl.c:76-81`) counts as not crossed, and a shallower alcove
+    /// has no standing room
     /// beyond the threshold at all.
     ///
     /// `depth` is the low room's own alcove — `alcove_near` when room `a` is

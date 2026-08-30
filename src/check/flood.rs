@@ -142,7 +142,7 @@
 //!   that is the top-only lift a player below cannot call, and the flood
 //!   should see the wall it really is.
 //!
-//! Those activator sets already exclude a walkover whose far side is a
+//! Those activator sets already exclude a walkover either side of which is a
 //! dead-end pocket no deeper than the player's radius
 //! ([`crate::check::plats`]'s `dead_end_pocket`): the engine never lets the
 //! player's center in, so the flood must not credit a lift called across one.

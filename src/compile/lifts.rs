@@ -118,7 +118,7 @@ pub struct LiftOut {
 /// above the platform's — the landing over a shaft or an alcove.
 ///
 /// `r_segs.c`'s `R_StoreWallRange` draws a two-sided line's upper only under
-/// `if (worldhigh < worldtop)` (lines 565-587), i.e. on the sidedef whose own
+/// `if (worldhigh < worldtop)` (lines 570-588), i.e. on the sidedef whose own
 /// sector has the *higher* ceiling: the landing's, never the platform's. With
 /// `ML_DONTPEGTOP` clear the engine takes `vtop = backsector->ceilingheight +
 /// textureheight[...]`, putting the texture's **bottom** row on the
@@ -454,11 +454,15 @@ fn emit_portal_lift(
     // CENTER crosses, not the box. But the move is rejected first, at
     // `tmfloorz - thing->z > 24*FRACUNIT`, and `PIT_CheckLine` has already
     // raised `tmfloorz` to the platform's resting floor for every line the
-    // box straddles: `P_BoxOnLineSide` (`p_maputl.c`) tests the box's edges
-    // with strict comparisons, so an edge merely touching the platform's
-    // face counts as straddling it. The center therefore stays strictly more
-    // than `radius` from that face, and an alcove only `radius` deep — or
-    // less — is a dead end the center never enters. The trigger line is
+    // box straddles. `PIT_CheckLine`'s bounding-box early-out
+    // (`p_map.c:191-195`, `<=`/`>=`) lets a box merely touch the platform's
+    // face, so the center may rest exactly `radius` from it but no closer.
+    // An alcove exactly `radius` deep puts the center exactly on the
+    // threshold line, which `P_PointOnLineSide` (`p_maputl.c:76-81`,
+    // `if (x <= line->v1->x)`) groups with the near side — no side change,
+    // no crossing; a shallower one is a dead end the center never enters.
+    // `radius + 1` is the first depth that admits a crossing. The trigger
+    // line is
     // then unfireable and the lift unreachable from below, which no later
     // layer can see: the reach flood credits the alcove because the geometry
     // is there.
