@@ -40,10 +40,11 @@ pub struct SectorOut {
     /// recess), which belong to no room and so have no
     /// [`crate::ir::Room::wall_tex`] of their own to read.
     pub wall_tex: String,
-    /// For an island teleport pad, the index of the room sector it is carved
-    /// inside. [`sectors::check_no_sector_overlaps`] exempts exactly that
-    /// pair — a pad lies inside its host by construction — and tests every
-    /// other pair as usual. `None` for every other sector.
+    /// For an island — a teleport pad or a pedestal — the index of the room
+    /// sector it is carved inside. [`sectors::check_no_sector_overlaps`]
+    /// exempts exactly that pair, since an island lies inside its host by
+    /// construction, and tests every other pair as usual. `None` for every
+    /// other sector.
     pub host: Option<usize>,
 }
 
@@ -564,12 +565,70 @@ pub enum CompileError {
         /// The player's diameter.
         need: i32,
     },
+    /// A pedestal's [`crate::ir::Pedestal::rise`] is no more than the
+    /// player's step height, so they could walk up onto it rather than
+    /// riding it down.
+    ///
+    /// The pedestal form of [`LiftRiseTooLow`](Self::LiftRiseTooLow): a
+    /// pedestal's only neighbor is its host, so its rise *is* its travel and
+    /// is what must clear the step.
+    #[error(
+        "pedestal `{pedestal}` rises only {rise}, within the {step}-unit step: the player would walk onto it"
+    )]
+    PedestalRiseTooLow {
+        /// The pedestal.
+        pedestal: String,
+        /// The declared rise.
+        rise: i32,
+        /// The player's step height.
+        step: i32,
+    },
+    /// A pedestal's rectangle is narrower than the player's own diameter on
+    /// at least one side, so they could not stand on it.
+    ///
+    /// The pedestal form of [`LiftTooShallow`](Self::LiftTooShallow), held
+    /// to the same bound and for the same reason: measured against the
+    /// diameter rather than the radius, because the player is a cylinder
+    /// that must fit entirely between two opposite edges. Both sides are
+    /// reported, since either may be the offending one.
+    #[error("pedestal `{pedestal}` is {width}x{height}, but the player is {min} units across")]
+    PedestalTooSmall {
+        /// The pedestal.
+        pedestal: String,
+        /// The rectangle's width.
+        width: i32,
+        /// The rectangle's height.
+        height: i32,
+        /// The player's diameter.
+        min: i32,
+    },
+    /// A pedestal's risen floor leaves less headroom under its host's
+    /// ceiling than something standing on it needs.
+    ///
+    /// Raised from two passes, for the two things that must fit:
+    /// [`lifts::emit_lifts`] for the player, who has to ride the platform up
+    /// whatever else is on it, and [`things::place_things`] for each thing
+    /// the pedestal carries, which may be taller than the player. `kind`
+    /// names which — `player` for the first.
+    #[error("pedestal `{pedestal}` has {have} units of headroom but `{kind}` needs {need}")]
+    PedestalNoHeadroom {
+        /// The pedestal.
+        pedestal: String,
+        /// The vocabulary name of the thing that does not fit, or `player`
+        /// for the rider the platform must clear regardless of its cargo.
+        kind: String,
+        /// The gap between the risen floor and the host's ceiling.
+        have: i32,
+        /// Required height.
+        need: i32,
+    },
     /// The map emits more platforms than the engine can run at once.
     ///
     /// `MAXPLATS` bounds `p_plats.c`'s active-plat table, and overflowing it
-    /// is fatal in the pinned source. Counted over every emitted platform,
-    /// not over some estimate of how many could move together: nothing here
-    /// can prove a player will not set them all going at once.
+    /// is fatal in the pinned source. Counted over every emitted platform —
+    /// lift portals, barriers and pedestals alike — not over some estimate
+    /// of how many could move together: nothing here can prove a player will
+    /// not set them all going at once.
     #[error("the map has {count} platforms but the engine allows {max} active at once")]
     TooManyPlats {
         /// The number of platforms emitted.
@@ -609,7 +668,7 @@ pub struct Compiled {
     pub tags: TagAllocator,
     /// The teleport destination markers, for rule P15.
     pub markers: Vec<teleports::Marker>,
-    /// The emitted platforms — lifts and barriers.
+    /// The emitted platforms — lifts, barriers and pedestals.
     pub lifts: Vec<lifts::LiftOut>,
 }
 
@@ -652,12 +711,14 @@ pub struct Compiled {
 ///    the overlap check since it emits sectors.
 /// 7. [`lifts::emit_lifts`] fills every lift portal's gap with one
 ///    `downWaitUpStay` platform sector — again optionally flanked by
-///    alcoves — tagging each from the same [`TagAllocator`]. Runs after
-///    `cut_portals` left that gap empty (step 3), and before the overlap
-///    check since it emits sectors. Its risers must be written before step
-///    9: `heights` fills only empty texture slots, and the platform's own
-///    top-face riser is invisible at load-time heights, so `heights` would
-///    never write it.
+///    alcoves — and cuts every pedestal as a hosted island inside its room,
+///    tagging each from the same [`TagAllocator`]. Runs after `cut_portals`
+///    left that gap empty (step 3), after `emit_teleports` (step 6) so a
+///    pedestal's island edges are emitted against the same finished pad
+///    geometry, and before the overlap check since it emits sectors. Its
+///    risers must be written before step 9: `heights` fills only empty
+///    texture slots, and the platform's own top-face riser is invisible at
+///    load-time heights, so `heights` would never write it.
 /// 8. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
 ///    that overlap in 2-D — a gap sector driven through a third room, or two
 ///    gap sectors from unrelated portals crossing each other. Must run after

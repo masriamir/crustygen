@@ -1,5 +1,5 @@
 //! Lifts: `downWaitUpStay` platforms filling a portal gap (lift, barrier)
-//! or standing as an island inside a room (pedestal — a later pass).
+//! or standing as an island inside a room (pedestal).
 //!
 //! Every platform rests at its own floor and travels to the lowest
 //! neighboring floor and back (`p_plats.c`, `EV_DoPlat`, `case
@@ -31,6 +31,19 @@
 //! convention: risers are pegged 96 % of the time
 //! (`docs/measurements/lift-shapes-2026-08-29.md` §G).
 //!
+//! A pedestal is that same platform with no portal under it: a hosted
+//! island cut inside one room — [`crate::compile::teleports`]'s pad
+//! construction, reused — whose floor rests [`crate::ir::Pedestal::rise`]
+//! above its host's. The host is its only neighbor, so
+//! `P_FindLowestFloorSurrounding` finds the host's floor and the travel is
+//! exactly the rise. There is no low face to pick out: all four edges are
+//! low faces, the island winding puts the host on the front of each, and
+//! every one carries the use special so the player can call the pedestal
+//! down from whichever side they walk up to. Each edge's riser goes on that
+//! same host sidedef — the host's floor is the lower one, so it is the side
+//! `r_segs.c` draws — with the pegging flags clear, exactly as on a portal
+//! lift's low face and for the same reason.
+//!
 //! The gap itself is already open when this pass runs:
 //! [`crate::compile::portals::cut_portals`] cuts both rooms' own walls for a
 //! lift portal but leaves the void between them empty, exactly as it does
@@ -40,6 +53,7 @@ use crate::compile::portals::{
     Cut, emit_jambs, emit_opening, emit_segment, mark_secret_thresholds, resolve_portal,
 };
 use crate::compile::tags::TagAllocator;
+use crate::compile::teleports::emit_island_edges;
 use crate::compile::{CompileError, MapData, SectorOut};
 use crate::ir::{Ir, LiftSpeed, LiftTrigger, Portal, PortalKind, Room};
 use crate::tables::{Tables, ThingDims};
@@ -114,10 +128,19 @@ fn sector_like(room: &Room, floor: i32, ceiling: i32, wall_tex: &str, tag: u16) 
 /// [`CompileError::LiftRiseTooLow`] when a barrier's rise is no more than a
 /// step, [`CompileError::LiftTooShallow`] when the alcoves leave the
 /// platform narrower than the player's diameter,
-/// [`CompileError::TooManyPlats`] when the map wants more platforms than the
-/// engine's `MAXPLATS` can run at once, and whatever `resolve_portal` raises
+/// [`CompileError::PedestalRiseTooLow`] when a pedestal rises no more than a
+/// step, [`CompileError::PedestalTooSmall`] when a pedestal's rectangle is
+/// narrower than the player's diameter, [`CompileError::PedestalNoHeadroom`]
+/// when a pedestal's risen floor leaves the player less than their own
+/// height under the host's ceiling, [`CompileError::TooManyPlats`] when the
+/// map wants more platforms than the engine's `MAXPLATS` can run at once,
+/// and whatever `resolve_portal` raises
 /// (`NotAdjacent`, `PortalOffWall`, `PortalOnDiagonalWall`, `PortalTooWide`)
 /// if a lift portal's rooms are not adjacent on a wall v1 can cut.
+///
+/// # Panics
+/// Panics if a pedestal names a room that does not exist, which
+/// [`crate::ir::Ir::from_json`] rejects before this pass ever runs.
 pub fn emit_lifts(
     ir: &Ir,
     tables: &Tables,
@@ -147,7 +170,88 @@ pub fn emit_lifts(
             ir, tables, data, tags, pi, portal, &riser, &trim, step, player,
         )?);
     }
-    // pedestals: Task 4
+    for (i, p) in ir.pedestals.iter().enumerate() {
+        // A pedestal the player can step onto is not a platform: it is a
+        // block of scenery carrying a `downWaitUpStay` special nobody needs.
+        // Judged on the rise, which for a pedestal is also the travel.
+        if p.rise <= step {
+            return Err(CompileError::PedestalRiseTooLow {
+                pedestal: p.id.clone(),
+                rise: p.rise,
+                step,
+            });
+        }
+
+        // And a pedestal the player cannot stand on top of is not one
+        // either. Both sides are checked: the player is a cylinder, so the
+        // narrower side is what decides, whichever it is.
+        let (lo, hi) = p.rect();
+        let (w, h) = (hi.x - lo.x, hi.y - lo.y);
+        let min = player.radius * 2;
+        if w < min || h < min {
+            return Err(CompileError::PedestalTooSmall {
+                pedestal: p.id.clone(),
+                width: w,
+                height: h,
+                min,
+            });
+        }
+
+        // The platform keeps its host's ceiling, so rising eats the room's
+        // headroom. Checked for the player here, whatever the pedestal
+        // carries — they must be able to ride it up; `things::place_things`
+        // checks the cargo against the same gap, where thing dimensions are
+        // already being resolved.
+        let host = ir
+            .rooms
+            .iter()
+            .position(|r| r.id == p.room)
+            .expect("validated by Ir::from_json");
+        let room = &ir.rooms[host];
+        let floor = room.floor + p.rise;
+        let have = room.ceiling - floor;
+        if have < player.height {
+            return Err(CompileError::PedestalNoHeadroom {
+                pedestal: p.id.clone(),
+                kind: "player".to_owned(),
+                have,
+                need: player.height,
+            });
+        }
+
+        // `host` marks the island as a hole inside its host room, which is
+        // what `sectors::check_no_sector_overlaps` exempts from the overlap
+        // test — a pedestal lies inside its host by construction.
+        let sector = data.sectors.len();
+        let tag = tags.allocate(sector, &format!("pedestal {}", p.id));
+        let mut s = sector_like(room, floor, room.ceiling, &riser, tag);
+        s.host = Some(host);
+        data.sectors.push(s);
+
+        // Every edge is a low face, so every edge is a switch: the host
+        // surrounds the island, and `P_UseSpecialLine` fires from the front
+        // side, which the island winding binds to the host. The riser goes
+        // on that same sidedef, the lower-floored one `r_segs.c` draws.
+        let special = tables.lift_special(true, p.speed == LiftSpeed::Fast);
+        for line in emit_island_edges(data, lo, hi, host, sector) {
+            data.linedefs[line].special = special;
+            data.linedefs[line].tag = tag;
+            let front = data.linedefs[line].front;
+            riser.clone_into(&mut data.sidedefs[front].lower);
+        }
+
+        out.push(LiftOut {
+            sector,
+            shape: LiftShape::Pedestal,
+            travel: p.rise,
+            callable_from: vec![host],
+            tag,
+            portal: None,
+            pedestal: Some(i),
+            low_line: None,
+            top_line: None,
+        });
+    }
 
     // `MAXPLATS` bounds how many plats the engine can have *active* at
     // once, and `P_AddActivePlat` calls `I_Error` past it (the citation on
@@ -878,6 +982,184 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A 512-unit square room holding one default-size (64x64) pedestal at
+    /// (128, 128), risen 128 units above the floor and carrying a soulsphere
+    /// at its center.
+    ///
+    /// The ceiling is 256 rather than something tighter so the risen
+    /// platform still clears the player: at floor 128 it leaves 128 units of
+    /// headroom, and the rejection fixtures below squeeze that deliberately.
+    const PEDESTAL: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[448,448], "angle":0 } ] }
+      ],
+      "portals":[],
+      "pedestals":[ { "id":"p", "room":"a", "at":[128,128], "rise":128, "speed":"fast",
+                      "things":[ { "kind":"soulsphere", "at":[160,160], "angle":0 } ] } ]
+    }"#;
+
+    #[test]
+    fn a_pedestal_is_a_hosted_island_risen_above_its_room_with_the_switch_on_every_edge() {
+        let Built {
+            tables,
+            data,
+            tags,
+            lifts,
+        } = compile_data(PEDESTAL);
+        let riser = tables
+            .texture("lift_riser", "tech_base")
+            .expect("the theme names a lift riser");
+        assert_eq!(lifts.len(), 1);
+        let l = &lifts[0];
+        assert_eq!(l.shape, LiftShape::Pedestal);
+        assert_eq!(
+            (l.travel, l.callable_from.clone(), l.pedestal),
+            (128, vec![0], Some(0)),
+            "it travels its whole rise, is called from its host room, and names its pedestal"
+        );
+        assert_eq!(
+            (l.portal, l.low_line, l.top_line),
+            (None, None, None),
+            "a pedestal belongs to no portal and has no single low or top face"
+        );
+        let s = &data.sectors[l.sector];
+        assert_eq!(
+            (s.floor, s.ceiling, s.host),
+            (128, 256, Some(0)),
+            "risen by its rise, up to the host's ceiling, and hosted by the host"
+        );
+        assert_eq!(s.wall_tex, riser, "the theme's lift riser");
+        assert_eq!(s.tag, l.tag);
+        assert_ne!(l.tag, 0);
+        let edges: Vec<usize> = data
+            .linedefs
+            .iter()
+            .enumerate()
+            .filter(|(_, ld)| ld.back.is_some_and(|b| data.sidedefs[b].sector == l.sector))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(edges.len(), 4, "one edge per side of the island");
+        for i in edges {
+            let ld = &data.linedefs[i];
+            assert_eq!(
+                data.sidedefs[ld.front].sector, 0,
+                "linedef {i}: the host is on the front, the side `P_UseSpecialLine` fires from"
+            );
+            assert_eq!(
+                ld.special,
+                tables.lift_special(true, true),
+                "linedef {i}: the fast use special, since the fixture rides fast"
+            );
+            assert_eq!(ld.tag, l.tag, "linedef {i}");
+            assert_eq!(
+                data.sidedefs[ld.front].lower, riser,
+                "linedef {i}: the host's sidedef shows the riser"
+            );
+            assert!(
+                !ld.lower_unpegged,
+                "linedef {i}: flags clear, so the riser rides with the platform"
+            );
+        }
+        assert!(
+            tags.manifest()
+                .iter()
+                .any(|e| e.tag == l.tag && e.purpose == "pedestal p"),
+            "the tag manifest names the pedestal"
+        );
+    }
+
+    #[test]
+    fn pedestal_rejections() {
+        let tables = Tables::load().expect("tables");
+        let low = PEDESTAL.replacen(r#""rise":128"#, r#""rise":16"#, 1);
+        assert!(matches!(
+            compile(&Ir::from_json(&low).expect("ir"), &tables),
+            Err(CompileError::PedestalRiseTooLow {
+                rise: 16,
+                step: 24,
+                ..
+            })
+        ));
+
+        // 24 units across is narrower than the player's 32-unit diameter, so
+        // they could not stand on it; the thing moves with the shrunken
+        // rectangle so `Ir::from_json` still accepts the fixture.
+        let small = PEDESTAL
+            .replacen(r#""rise":128,"#, r#""rise":128, "size":[24,64],"#, 1)
+            .replacen(r#""at":[160,160]"#, r#""at":[140,160]"#, 1);
+        assert!(matches!(
+            compile(&Ir::from_json(&small).expect("ir"), &tables),
+            Err(CompileError::PedestalTooSmall {
+                width: 24,
+                min: 32,
+                ..
+            })
+        ));
+
+        // A 160 ceiling over a floor risen to 128 leaves 32 units, short of
+        // the player's own 56.
+        let squat = PEDESTAL.replacen(r#""ceiling":256"#, r#""ceiling":160"#, 1);
+        assert!(matches!(
+            compile(&Ir::from_json(&squat).expect("ir"), &tables),
+            Err(CompileError::PedestalNoHeadroom {
+                have: 32,
+                need: 56,
+                ..
+            })
+        ));
+    }
+
+    /// Every pedestal is a platform of its own, so a map can exhaust
+    /// `MAXPLATS` on pedestals alone — with no portal in it at all.
+    #[test]
+    fn more_than_max_active_platforms_is_refused() {
+        let tables = Tables::load().expect("tables");
+        let max = tables.plat().max_active;
+        assert_eq!(
+            max, 30,
+            "MAXPLATS, which the lattice below is sized against"
+        );
+
+        // A 128-unit lattice of 64-unit squares, 15 to a row, inside a
+        // 2048-unit room: every pedestal clears its neighbors and the room's
+        // own walls by 64 units, so nothing but the platform count is at
+        // issue. Built in a loop rather than by hand — 31 hand-written
+        // rectangles would be 31 chances to typo one into an overlap.
+        let json = |count: usize| -> String {
+            let pedestals: Vec<String> = (0..count)
+                .map(|k| {
+                    let (x, y) = (64 + 128 * (k % 15), 64 + 128 * (k / 15));
+                    format!(r#"{{ "id":"p{k}", "room":"a", "at":[{x},{y}], "rise":64 }}"#)
+                })
+                .collect();
+            format!(
+                r#"{{ "seed":1, "grid":64, "theme":"tech_base",
+                  "rooms":[
+                    {{ "id":"a", "footprint":[[0,0],[0,2048],[2048,2048],[2048,0]],
+                       "floor":0, "ceiling":256, "light":160,
+                       "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+                       "things":[ {{ "kind":"player1_start", "at":[1024,1600], "angle":0 }} ] }}
+                  ],
+                  "portals":[],
+                  "pedestals":[ {} ] }}"#,
+                pedestals.join(", ")
+            )
+        };
+
+        let over = json(max + 1);
+        assert!(matches!(
+            compile(&Ir::from_json(&over).expect("ir"), &tables),
+            Err(CompileError::TooManyPlats { count: 31, max: 30 })
+        ));
+        let at_max = json(max);
+        assert!(
+            compile(&Ir::from_json(&at_max).expect("ir"), &tables).is_ok(),
+            "exactly `MAXPLATS` pedestals compile clean"
+        );
     }
 
     #[test]

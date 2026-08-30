@@ -73,7 +73,8 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// authored apart, and why measuring the emitted geometry is still the
 /// principled choice rather than an incidental one.
 ///
-/// After every authored thing, each of `markers` —
+/// After every room's own things come the pedestals' — see
+/// `place_pedestal_things`. After every authored thing, each of `markers` —
 /// [`crate::compile::teleports::emit_teleports`]'s destination markers — is
 /// emitted as a `teleport_dest` thing, held to the clearance and headroom
 /// its *arriving* thing needs rather than the marker's own (the marker is in
@@ -85,6 +86,8 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// Returns [`CompileError::UnknownThing`] for an unresolvable name,
 /// [`CompileError::ThingOutsideRoom`] for a point outside its room,
 /// [`CompileError::ThingTooClose`] when radius clearance fails,
+/// [`CompileError::PedestalNoHeadroom`] when a pedestal's raised floor
+/// leaves its own thing too little room under the host's ceiling,
 /// [`CompileError::NoHeadroom`] when the room is too short — for the
 /// tallest placed thing, or for the player if the room is empty or shorter
 /// than the player alone — [`CompileError::UnboundedRoom`] when a room's
@@ -95,19 +98,20 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// [`CompileError::TeleportMarkerNoHeadroom`] when that sector is too short
 /// for it.
 ///
-/// `lifts` carries the emitted platforms; it is accepted now so the pass
-/// order is settled, and is not yet read.
+/// `lifts` carries the emitted platforms, and is read for the sector each
+/// pedestal was cut into.
 ///
 /// # Panics
-/// Panics if `teleport_dest` is absent from the vocabulary table, which
-/// `tables`'s own `exit_lift_teleport_and_sector_specials_resolve` test
-/// pins present.
+/// Panics only where `place_pedestal_things` and `place_markers` document:
+/// on a missing `teleport_dest` vocabulary entry, which `tables`'s own
+/// `exit_lift_teleport_and_sector_specials_resolve` test pins present, and
+/// on geometry or IR shapes an earlier pass has already ruled out.
 pub fn place_things(
     ir: &Ir,
     tables: &Tables,
     data: &MapData,
     markers: &[Marker],
-    _lifts: &[LiftOut],
+    lifts: &[LiftOut],
 ) -> Result<Vec<ThingOut>, CompileError> {
     let mut out = Vec::new();
     let mut starts: Vec<(i32, i32)> = Vec::new();
@@ -201,7 +205,98 @@ pub fn place_things(
         }
     }
 
+    out.extend(place_pedestal_things(ir, tables, data, lifts)?);
     out.extend(place_markers(tables, data, markers)?);
+    Ok(out)
+}
+
+/// Places every thing standing on a pedestal, proving it fits up there.
+///
+/// A pedestal's things sit on the platform, not on the host room's floor, so
+/// both measurements move with it. Clearance is taken against the platform's
+/// own four edges — `lifts` names the sector `emit_lifts` cut — because
+/// stepping off an island is a fall the author did not ask for; headroom is
+/// what the rise left under the host's ceiling, which the platform keeps.
+///
+/// Containment needs no check here:
+/// [`Ir::from_json`](crate::ir::Ir::from_json) already required every one of
+/// these to sit strictly inside its pedestal's rectangle. Nor is a `_start`
+/// special-cased — standing the player on a pedestal is legal.
+///
+/// # Errors
+/// Returns [`CompileError::UnknownThing`] for an unresolvable name,
+/// [`CompileError::ThingTooClose`] when the thing stands closer to the
+/// pedestal's edge than its own radius, and
+/// [`CompileError::PedestalNoHeadroom`] when the risen floor leaves it less
+/// than its own height. `emit_lifts` already held that gap to the *player's*
+/// height, so only a thing taller than the player can fail the last one.
+///
+/// # Panics
+/// Panics if a pedestal has no emitted platform, or names a room that does
+/// not exist — [`crate::compile::lifts::emit_lifts`] emits one platform per
+/// pedestal and [`Ir::from_json`](crate::ir::Ir::from_json) resolves every
+/// `room` before either runs — or if a pedestal's sector has no bordering
+/// linedef, impossible for a square cut as four two-sided edges.
+fn place_pedestal_things(
+    ir: &Ir,
+    tables: &Tables,
+    data: &MapData,
+    lifts: &[LiftOut],
+) -> Result<Vec<ThingOut>, CompileError> {
+    let mut out = Vec::new();
+    for (pi, pedestal) in ir.pedestals.iter().enumerate() {
+        let lift = lifts
+            .iter()
+            .find(|l| l.pedestal == Some(pi))
+            .expect("emit_lifts emits one platform per pedestal");
+        let host = ir.room(&pedestal.room).expect("validated by Ir::from_json");
+        let headroom = host.ceiling - (host.floor + pedestal.rise);
+        for thing in &pedestal.things {
+            let id = tables
+                .thing_id(&thing.kind)
+                .ok_or_else(|| CompileError::UnknownThing {
+                    room: pedestal.room.clone(),
+                    kind: thing.kind.clone(),
+                })?;
+
+            // The player's dimensions are the floor for anything not listed
+            // as a monster species, exactly as in `place_things`.
+            let dims: ThingDims = tables
+                .species(&thing.kind)
+                .unwrap_or_else(|| tables.player());
+
+            let have = emitted_clearance(data, lift.sector, thing.at)
+                .expect("a pedestal is cut as four two-sided edges");
+            if have < f64::from(dims.radius) {
+                return Err(CompileError::ThingTooClose {
+                    room: pedestal.room.clone(),
+                    kind: thing.kind.clone(),
+                    x: thing.at.x,
+                    y: thing.at.y,
+                    have,
+                    need: dims.radius,
+                });
+            }
+
+            if headroom < dims.height {
+                return Err(CompileError::PedestalNoHeadroom {
+                    pedestal: pedestal.id.clone(),
+                    kind: thing.kind.clone(),
+                    have: headroom,
+                    need: dims.height,
+                });
+            }
+
+            out.push(ThingOut {
+                x: thing.at.x,
+                y: thing.at.y,
+                angle: thing.angle,
+                kind: id,
+                skills: thing.skills,
+                ambush: thing.ambush,
+            });
+        }
+    }
     Ok(out)
 }
 
@@ -281,12 +376,12 @@ fn place_markers(
 mod tests {
     use crate::compile::CompileError;
     use crate::compile::MapData;
-    use crate::compile::compile_reporting;
     use crate::compile::doors::emit_doors;
     use crate::compile::portals::cut_portals;
     use crate::compile::sectors::emit_sectors;
     use crate::compile::tags::TagAllocator;
     use crate::compile::things::place_things;
+    use crate::compile::{compile, compile_reporting};
     use crate::geom::{Pt, clearance};
     use crate::ir::Ir;
     use crate::tables::Tables;
@@ -725,6 +820,63 @@ mod tests {
             "expected TeleportMarkerNoHeadroom naming the teleport delivering onto b's pad, \
              got {err}"
         );
+    }
+
+    /// A 512-unit square room with one 64x64 pedestal risen 128 units above
+    /// it, carrying a soulsphere at its center.
+    ///
+    /// A copy of `lifts::tests::PEDESTAL` rather than a shared constant: a
+    /// `#[cfg(test)] mod tests` is private to its own file, and what this
+    /// pass owns is the thing standing on the platform rather than the
+    /// platform under it.
+    const PEDESTAL: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[448,448], "angle":0 } ] }
+      ],
+      "portals":[],
+      "pedestals":[ { "id":"p", "room":"a", "at":[128,128], "rise":128, "speed":"fast",
+                      "things":[ { "kind":"soulsphere", "at":[160,160], "angle":0 } ] } ]
+    }"#;
+
+    #[test]
+    fn a_thing_on_a_pedestal_is_placed_at_its_point_with_clearance_against_the_pedestals_edges() {
+        let tables = Tables::load().expect("tables");
+        let soulsphere = tables.thing_id("soulsphere").expect("soulsphere");
+        let out = compile(&Ir::from_json(PEDESTAL).expect("ir"), &tables).expect("compiles");
+        let sphere = out
+            .things
+            .iter()
+            .find(|t| t.kind == soulsphere)
+            .expect("the pedestal's own thing is placed");
+        assert_eq!(
+            (sphere.x, sphere.y),
+            (160, 160),
+            "at its authored point, on the platform rather than the room floor"
+        );
+
+        // Too close to the pedestal's edge for the player's radius: 8 units
+        // from the x = 128 edge, against a 16-unit radius. Measured against
+        // the pedestal's own four edges — the room's walls are 128 away.
+        let tight = PEDESTAL.replacen(r#""at":[160,160]"#, r#""at":[136,160]"#, 1);
+        assert!(matches!(
+            compile(&Ir::from_json(&tight).expect("ir"), &tables),
+            Err(CompileError::ThingTooClose { .. })
+        ));
+
+        // A monster taller than the headroom over the pedestal. At ceiling
+        // 184 the risen floor leaves 56 units: exactly the player's height,
+        // so `emit_lifts` accepts the pedestal itself, and 8 short of the
+        // baron's 64 — which only this loop can catch.
+        let tall = PEDESTAL
+            .replacen(r#""kind":"soulsphere""#, r#""kind":"baron_of_hell""#, 1)
+            .replacen(r#""ceiling":256"#, r#""ceiling":184"#, 1);
+        assert!(matches!(
+            compile(&Ir::from_json(&tall).expect("ir"), &tables),
+            Err(CompileError::PedestalNoHeadroom { kind, have: 56, need: 64, .. })
+                if kind == "baron_of_hell"
+        ));
     }
 
     #[test]
