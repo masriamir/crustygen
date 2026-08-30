@@ -17,9 +17,19 @@
 //! the low neighbor's sidedef, visible at rest; on the top face it is the
 //! platform's own sidedef, visible only once the platform has gone down —
 //! which the [`crate::compile::heights`] pass, reading load-time floors,
-//! would leave blank. Both are written here, flag-clear, so the texture
-//! rides with the platform (`ML_DONTPEGBOTTOM` clear anchors the lower to
-//! the back sector's floor).
+//! would leave blank.
+//!
+//! Both are written here with both pegging flags clear, but that means a
+//! different thing on each face, because `ML_DONTPEGBOTTOM` clear anchors a
+//! lower texture to the *back* sector's floor. On the low face the drawn
+//! sidedef is the low neighbor's and its back sector is the platform, so
+//! that riser rides with the platform — the opposite of a door track, which
+//! is lower-unpegged so `DOORTRAK` stays put. On the top face the drawn
+//! sidedef is the platform's own and its back sector is the level room,
+//! whose floor never moves, so that riser hangs from a fixed top and grows
+//! downward as the platform descends. Clear on both is the corpus
+//! convention: risers are pegged 96 % of the time
+//! (`docs/measurements/lift-shapes-2026-08-29.md` §G).
 //!
 //! The gap itself is already open when this pass runs:
 //! [`crate::compile::portals::cut_portals`] cuts both rooms' own walls for a
@@ -533,6 +543,9 @@ mod tests {
             tags,
             lifts,
         } = compile_data(LIFT);
+        let riser = tables
+            .texture("lift_riser", "tech_base")
+            .expect("the theme names a lift riser");
         assert_eq!(lifts.len(), 1);
         let l = &lifts[0];
         assert_eq!(l.shape, LiftShape::Lift);
@@ -547,7 +560,7 @@ mod tests {
         assert_eq!(plat.ceiling, 192, "the lower of the two ceilings");
         assert_eq!(plat.light, 144, "the level room's light");
         assert_eq!(plat.floor_tex, "FLAT1", "the level room's flat");
-        assert_eq!(plat.wall_tex, "SUPPORT3", "the theme's lift riser");
+        assert_eq!(plat.wall_tex, riser, "the theme's lift riser");
         assert_eq!(plat.tag, l.tag);
         assert_ne!(l.tag, 0);
         let low = l.low_line.expect("a portal lift has a low face");
@@ -566,11 +579,8 @@ mod tests {
         );
         // Riser textures: the low room's sidedef on the low face, the
         // platform's own on the top face.
-        assert_eq!(data.sidedefs[data.linedefs[low].front].lower, "SUPPORT3");
-        assert_eq!(
-            data.sidedefs[data.linedefs[top].back.unwrap()].lower,
-            "SUPPORT3"
-        );
+        assert_eq!(data.sidedefs[data.linedefs[low].front].lower, riser);
+        assert_eq!(data.sidedefs[data.linedefs[top].back.unwrap()].lower, riser);
         assert_eq!(
             data.sidedefs[data.linedefs[top].front].lower, "",
             "the level room's sidedef shows nothing"
@@ -626,6 +636,9 @@ mod tests {
             lifts,
             ..
         } = compile_data(&json);
+        let riser = tables
+            .texture("lift_riser", "tech_base")
+            .expect("the theme names a lift riser");
         let l = &lifts[0];
         // Sectors: a, b, alcove (pushed first), platform.
         assert_eq!(data.sectors.len(), 4);
@@ -662,9 +675,96 @@ mod tests {
             "nothing on the riser for a walkover lift"
         );
         assert_eq!(
-            data.sidedefs[data.linedefs[low].front].lower, "SUPPORT3",
+            data.sidedefs[data.linedefs[low].front].lower, riser,
             "the alcove's sidedef carries the riser"
         );
+    }
+
+    /// `LIFT` with the two rooms' floors swapped, so room `b` is the low one
+    /// and every side of the construction lands on the opposite half: the
+    /// alcove is the *far* one, the platform's low face is the segment's
+    /// *far* line, and `callable_from` names the far neighbor.
+    ///
+    /// Its own test rather than a variation on the walkover one because the
+    /// `a_is_low == false` arm and the far-alcove block are otherwise
+    /// unexercised — every other fixture puts room `a` on the low floor, and
+    /// the two that set `alcove_far` are rejected at the depth check before
+    /// reaching either.
+    #[test]
+    fn a_reversed_lift_with_a_far_alcove_puts_everything_on_the_other_side() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":128, "ceiling":256, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[ { "kind":"player1_start", "at":[128,128], "angle":0 } ] },
+            { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":144,
+              "floor_tex":"FLAT1", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[ { "a":"a", "b":"b", "kind":"lift", "width":64, "at":[256,128],
+                        "trigger":"walkover", "alcove_far":16 } ]
+        }"#;
+        let Built {
+            tables,
+            data,
+            lifts,
+            ..
+        } = compile_data(json);
+        let riser = tables
+            .texture("lift_riser", "tech_base")
+            .expect("the theme names a lift riser");
+        let l = &lifts[0];
+        // Sectors: a, b, the far alcove (the only one, so still the first
+        // pushed), platform.
+        assert_eq!(data.sectors.len(), 4);
+        let alcove = 2;
+        assert_eq!(data.sectors[alcove].floor, 0, "room b's floor, the low one");
+        assert_eq!(
+            l.callable_from,
+            vec![alcove],
+            "the far alcove, not the near one"
+        );
+        let outer = data
+            .linedefs
+            .iter()
+            .position(|ld| {
+                let (f, b) = (
+                    data.sidedefs[ld.front].sector,
+                    ld.back.map(|b| data.sidedefs[b].sector),
+                );
+                f == 1 && b == Some(alcove)
+            })
+            .expect("the alcove's outer threshold fronts room b");
+        assert_eq!(
+            data.linedefs[outer].special,
+            tables.lift_special(false, false)
+        );
+        assert_eq!(data.linedefs[outer].tag, l.tag);
+        let low = l.low_line.expect("a portal lift has a low face");
+        let top = l.top_line.expect("and a top face");
+        assert_eq!(sides(&data, low), (alcove, Some(l.sector)));
+        assert_eq!(
+            data.linedefs[low].special, 0,
+            "nothing on the riser for a walkover lift"
+        );
+        assert_eq!(
+            data.sidedefs[data.linedefs[low].front].lower, riser,
+            "the alcove's sidedef carries the riser"
+        );
+        assert_eq!(
+            data.sidedefs[data.linedefs[top].back.unwrap()].lower,
+            riser,
+            "and the platform's own sidedef the top face's"
+        );
+        assert_eq!(
+            data.sidedefs[data.linedefs[top].front].lower, "",
+            "room a, the level room, shows nothing"
+        );
+        for i in [low, top] {
+            assert!(
+                !data.linedefs[i].lower_unpegged,
+                "flags clear on both faces"
+            );
+        }
     }
 
     #[test]
@@ -682,6 +782,9 @@ mod tests {
             lifts,
             ..
         } = compile_data(&json);
+        let riser = tables
+            .texture("lift_riser", "tech_base")
+            .expect("the theme names a lift riser");
         let l = &lifts[0];
         assert_eq!(l.shape, LiftShape::Barrier);
         assert_eq!(data.sectors[l.sector].floor, 96);
@@ -693,7 +796,7 @@ mod tests {
                 tables.lift_special(true, false)
             );
             assert_eq!(data.linedefs[line].tag, l.tag);
-            assert_eq!(data.sidedefs[data.linedefs[line].front].lower, "SUPPORT3");
+            assert_eq!(data.sidedefs[data.linedefs[line].front].lower, riser);
             assert!(!data.linedefs[line].lower_unpegged);
         }
     }
