@@ -224,17 +224,22 @@ frontmatter fields (`identity.title`/`.author`/`.iwad`/`.outputs`/`.seed`,
 most of `combat`'s administrative fields, `progression.doors`'s
 speed/behavior settings, and others) have no row at all: nothing this checker
 does turns on their value. Unlike the rest of the module, all of these rows
-but one re-derive no playability rule — each is a target-vs-actual
+but four re-derive no playability rule — each is a target-vs-actual
 comparison — so the only sourcing burden is the ammo ratio's damage figures,
 the two thing-flag bits (`MTF_AMBUSH` = 8; multiplayer-only = 16, which the
 pinned source writes as a raw literal with no named constant), and the
-teleport specials the two pad counts read. The one exception is
+teleport specials the two pad counts read. The exceptions are
 `progression.exit.trigger`, which borrows the flood's teleport-only
-predicate; see the `NotDerivable` discussion below.
+predicate (see the `NotDerivable` discussion below), and the three
+`progression.lifts.*` rows, which read `check::plats`' engine-style plat
+resolution — platforms and who can call them — rather than counting lift
+lines. `progression.lifts.trigger` grades only the platforms that rest at
+the top, since a barrier or a pedestal is not a lift the player rides, and a
+map with no such platform passes it vacuously with actual `no lifts`.
 
-Thirty-six rows are fixed, plus one per spec monster species, one per placed
-species the spec never names (always `Fail`, target `absent`), and one per
-`sustain.powerups[]` entry. Entrada against its paired spec produces 49.
+Thirty-eight rows are fixed, plus one per spec monster species, one per
+placed species the spec never names (always `Fail`, target `absent`), and one
+per `sustain.powerups[]` entry. Entrada against its paired spec produces 51.
 
 **Verdict discipline.** A range (`MinMax`) or exact-count or boolean target is
 `Pass`/`Fail` — those are decidable. A **scalar continuous** target
@@ -386,7 +391,7 @@ every conformance row as `{parameter}: {verdict} (target {target}, actual
 then a one-line summary:
 
 ```
-0 blocking, 0 warning(s), 49 conformance row(s), 3 tag(s)
+0 blocking, 0 warning(s), 51 conformance row(s), 3 tag(s)
 ```
 
 Exit codes:
