@@ -591,6 +591,40 @@ pub enum CompileError {
         /// The player's diameter.
         need: i32,
     },
+    /// A [`crate::ir::LiftTrigger::Walkover`] lift's low-side alcove is no
+    /// deeper than the player's own radius, so the trigger can never fire.
+    ///
+    /// The walkover special sits on that alcove's *outer* threshold, and
+    /// `P_TryMove` (`p_map.c:446-517`) fires a crossing only from its
+    /// `spechit` walk, which compares `P_PointOnLineSide(thing->x, thing->y,
+    /// ld)` before and after the move: the thing's **center** must cross the
+    /// line. Yet the same function returns at `tmfloorz - thing->z >
+    /// 24*FRACUNIT` (lines 477-479) before that walk ever runs, and
+    /// `PIT_CheckLine` raises `tmfloorz` to the platform's floor for any line
+    /// the moving **box** straddles — `P_BoxOnLineSide`
+    /// (`p_maputl.c:109-153`) reporting a box whose edge merely touches the
+    /// line as straddling it, since its tests are strict `<`/`>`. So the
+    /// center can never come within the player's radius of the platform's
+    /// face, and an alcove no deeper than that radius has no standing room
+    /// beyond the threshold at all.
+    ///
+    /// `depth` is the low room's own alcove — `alcove_near` when room `a` is
+    /// the low one, `alcove_far` otherwise.
+    #[error(
+        "portal `{a}` <-> `{b}` is a walkover lift whose low room's alcove is {depth} units deep, \
+         but the walkover fires only when the player's center crosses its threshold line, which \
+         needs at least {need}"
+    )]
+    LiftAlcoveTooShallow {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The low room's alcove depth.
+        depth: i32,
+        /// The player's radius plus one.
+        need: i32,
+    },
     /// A pedestal's [`crate::ir::Pedestal::rise`] is no more than the
     /// player's step height, so they could walk up onto it rather than
     /// riding it down.

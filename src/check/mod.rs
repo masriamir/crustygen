@@ -374,6 +374,120 @@ thing { x = 320.0; y = 64.0; angle = 0; type = 14; single = true; }
         (scene, tables)
     }
 
+    /// A walkover lift whose trigger line has a pocket behind it: a low room
+    /// (`x ∈ [0, 128]`, floor 0), the pocket (`depth` units wide, floor 0),
+    /// the platform (64 wide, floor 128, `id = 7`) and a landing beyond it,
+    /// all `y ∈ [0, 128]` under a 256 ceiling. **Linedef 0** is the `88`
+    /// walkover naming tag 7, on the low room's own wall at `x = 128`.
+    ///
+    /// With `open_side` the pocket also opens north into a corridor at its
+    /// own floor, so the same depth is a thin *through* strip rather than a
+    /// dead end — the shape the census's §G3 found in DOOM E1M3 and MAP04,
+    /// which the player crosses without trouble.
+    ///
+    /// Sectors: 0 low room, 1 pocket, 2 platform, 3 landing, and 4 the
+    /// corridor when `open_side`. Every linedef is wound so its own sector
+    /// lies on the right of `v1 -> v2`.
+    pub(crate) fn pocket_lift(depth: i32, open_side: bool) -> String {
+        use std::fmt::Write as _;
+
+        let (x1, x2) = (128, 128 + depth);
+        let (x3, x4) = (x2 + 64, x2 + 192);
+        let mut text = String::from("namespace = \"doom\";\n");
+        for (x, y) in [
+            (0, 0),
+            (0, 128),
+            (x1, 0),
+            (x1, 128),
+            (x2, 0),
+            (x2, 128),
+            (x3, 0),
+            (x3, 128),
+            (x4, 0),
+            (x4, 128),
+            (x1, 256),
+            (x2, 256),
+        ] {
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = {y}.000; }}");
+        }
+        let mut sidedefs = String::new();
+        let mut next = 0usize;
+        let mut side = |sidedefs: &mut String, sector: usize, two_sided: bool| {
+            let tex = if two_sided {
+                "texturemiddle = \"-\"; texturebottom = \"SUPPORT3\";"
+            } else {
+                "texturemiddle = \"STARTAN2\";"
+            };
+            let _ = writeln!(sidedefs, "sidedef {{ sector = {sector}; {tex} }}");
+            next += 1;
+            next - 1
+        };
+        let mut link = |text: &mut String,
+                        sidedefs: &mut String,
+                        v: (usize, usize),
+                        s: (usize, usize),
+                        special: &str| {
+            let (sf, sb) = (side(sidedefs, s.0, true), side(sidedefs, s.1, true));
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {}; v2 = {}; sidefront = {sf}; sideback = {sb}; twosided = true; {special} }}",
+                v.0, v.1
+            );
+        };
+        link(
+            &mut text,
+            &mut sidedefs,
+            (3, 2),
+            (0, 1),
+            "special = 88; arg0 = 7;",
+        );
+        link(&mut text, &mut sidedefs, (5, 4), (1, 2), "");
+        link(&mut text, &mut sidedefs, (7, 6), (2, 3), "");
+        if open_side {
+            link(&mut text, &mut sidedefs, (3, 5), (1, 4), "");
+        }
+        let mut wall =
+            |text: &mut String, sidedefs: &mut String, v1: usize, v2: usize, s: usize| {
+                let sf = side(sidedefs, s, false);
+                let _ = writeln!(
+                    text,
+                    "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {sf}; blocking = true; }}"
+                );
+            };
+        let mut walls = vec![
+            (0, 1, 0),
+            (1, 3, 0),
+            (2, 0, 0),
+            (4, 2, 1),
+            (5, 7, 2),
+            (6, 4, 2),
+            (7, 9, 3),
+            (9, 8, 3),
+            (8, 6, 3),
+        ];
+        if open_side {
+            walls.extend([(3, 10, 4), (10, 11, 4), (11, 5, 4)]);
+        } else {
+            walls.push((3, 5, 1));
+        }
+        for (v1, v2, s) in walls {
+            wall(&mut text, &mut sidedefs, v1, v2, s);
+        }
+        text.push_str(&sidedefs);
+        let mut floors = vec![(0, 0), (0, 0), (128, 7), (128, 0)];
+        if open_side {
+            floors.push((0, 0));
+        }
+        for (floor, tag) in floors {
+            let _ = writeln!(
+                text,
+                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; \
+                 heightfloor = {floor}; heightceiling = 256; lightlevel = 160; id = {tag}; }}"
+            );
+        }
+        text
+    }
+
     /// A row of 128×128 boxes, room `i` spanning `x ∈ [i·128, (i+1)·128]`,
     /// `y ∈ [0, 128]`, ceilings at 256. `floors[i]` and `tags[i]` are room
     /// `i`'s floor and sector tag. `links[i]` describes the two-sided line

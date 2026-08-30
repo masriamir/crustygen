@@ -142,6 +142,11 @@
 //!   that is the top-only lift a player below cannot call, and the flood
 //!   should see the wall it really is.
 //!
+//! Those activator sets already exclude a walkover whose far side is a
+//! dead-end pocket no deeper than the player's radius
+//! ([`crate::check::plats`]'s `dead_end_pocket`): the engine never lets the
+//! player's center in, so the flood must not credit a lift called across one.
+//!
 //! One-shot triggers (S1/W1: 21, 10, 122, 121 — [`Tables::lift_specials`]
 //! minus [`Tables::lift_repeatable_specials`]) earn the same edge as the
 //! repeatable ones. The flood computes what a walk can *ever* reach, and a

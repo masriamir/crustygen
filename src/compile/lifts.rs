@@ -39,6 +39,17 @@
 //! platform's ceiling never moves — and the corpus names no convention to
 //! follow, so the rendering argument decides; see that function.
 //!
+//! A `walkover` lift's trigger is not on the platform at all: it is on the
+//! outer threshold of the low room's alcove, so the alcove has to be
+//! standing room, not a slot. `P_TryMove` fires a walkover only when the
+//! thing's *center* crosses the line, and refuses the move outright when the
+//! *box* would straddle a line raising `tmfloorz` more than a step — so the
+//! center never comes within the player's radius of the platform's face, and
+//! an alcove that shallow can never be entered. `emit_portal_lift` refuses
+//! one ([`CompileError::LiftAlcoveTooShallow`]); the verifier's
+//! [`crate::check::plats`] applies the same reading to a map it is only
+//! reading.
+//!
 //! A pedestal is that same platform with no portal under it: a hosted
 //! island cut inside one room — [`crate::compile::teleports`]'s pad
 //! construction, reused — whose floor rests [`crate::ir::Pedestal::rise`]
@@ -177,6 +188,9 @@ fn sector_like(room: &Room, floor: i32, ceiling: i32, wall_tex: &str, tag: u16) 
 /// [`CompileError::LiftRiseTooLow`] when a barrier's rise is no more than a
 /// step, [`CompileError::LiftTooShallow`] when the alcoves leave the
 /// platform narrower than the player's diameter,
+/// [`CompileError::LiftAlcoveTooShallow`] when a walkover lift's low-side
+/// alcove is no deeper than the player's radius, so their center could never
+/// cross the trigger line,
 /// [`CompileError::PedestalRiseTooLow`] when a pedestal rises no more than a
 /// step, [`CompileError::PedestalTooSmall`] when a pedestal's rectangle is
 /// narrower than the player's diameter, [`CompileError::PedestalNoHeadroom`]
@@ -425,6 +439,41 @@ fn emit_portal_lift(
         });
     }
 
+    // Which room stands on the low floor. A barrier rests above both, so it
+    // has none — and its trigger is a switch on either face, never the
+    // walkover the next check judges.
+    let a_is_low = !barrier && room_a.floor < room_b.floor;
+
+    // A walkover lift's trigger sits on the low room's alcove's *outer*
+    // threshold, and the player has to get their center past that line for
+    // it to fire at all.
+    //
+    // `P_TryMove` (`p_map.c`) walks `spechit` only after the move is
+    // accepted, and fires a line when `P_PointOnLineSide (thing->x,
+    // thing->y, ld)` differs from the same test at the old position — the
+    // CENTER crosses, not the box. But the move is rejected first, at
+    // `tmfloorz - thing->z > 24*FRACUNIT`, and `PIT_CheckLine` has already
+    // raised `tmfloorz` to the platform's resting floor for every line the
+    // box straddles: `P_BoxOnLineSide` (`p_maputl.c`) tests the box's edges
+    // with strict comparisons, so an edge merely touching the platform's
+    // face counts as straddling it. The center therefore stays strictly more
+    // than `radius` from that face, and an alcove only `radius` deep — or
+    // less — is a dead end the center never enters. The trigger line is
+    // then unfireable and the lift unreachable from below, which no later
+    // layer can see: the reach flood credits the alcove because the geometry
+    // is there.
+    if portal.trigger == LiftTrigger::Walkover {
+        let alcove = if a_is_low { alcove_near } else { alcove_far };
+        if alcove <= player.radius {
+            return Err(CompileError::LiftAlcoveTooShallow {
+                a: portal.a.clone(),
+                b: portal.b.clone(),
+                depth: alcove,
+                need: player.radius + 1,
+            });
+        }
+    }
+
     // Alcoves first, exactly as `emit_doors` pushes them, each at its own
     // room's floor and ceiling: an alcove is a piece of the room it opens
     // off, not of the platform.
@@ -552,9 +601,9 @@ fn emit_portal_lift(
     mark_secret_thresholds(data, room_a.secret != room_b.secret, thresholds);
 
     // Which face is the low one: the face whose neighbor stands on the low
-    // floor. A barrier rests above both rooms, so its near face is "low" by
-    // convention only — both faces get the same treatment below.
-    let a_is_low = !barrier && room_a.floor < room_b.floor;
+    // floor (`a_is_low`, resolved with the alcove depth above). A barrier
+    // rests above both rooms, so its near face is "low" by convention only —
+    // both faces get the same treatment below.
     let (low_line, top_line, low_neighbor, low_outer) = if barrier || a_is_low {
         (seg.near_line, seg.far_line, near_neighbor, near_outer)
     } else {
@@ -829,7 +878,7 @@ mod tests {
     fn a_walkover_lift_puts_the_special_on_the_low_alcoves_outer_threshold() {
         let json = LIFT.replacen(
             r#""at":[256,128] }"#,
-            r#""at":[256,128], "trigger":"walkover", "alcove_near":16 }"#,
+            r#""at":[256,128], "trigger":"walkover", "alcove_near":32 }"#,
             1,
         );
         let Built {
@@ -880,6 +929,71 @@ mod tests {
             data.sidedefs[data.linedefs[low].front].lower, riser,
             "the alcove's sidedef carries the riser"
         );
+        // The 64-unit gap less the 32-unit alcove: room `a`'s wall at 256,
+        // the outer threshold on it, the low face 32 further in, and room
+        // `b`'s wall at 320 carrying the top face.
+        let x_of = |line: usize| {
+            let ld = &data.linedefs[line];
+            let (p, q) = (data.vertices[ld.v1], data.vertices[ld.v2]);
+            assert_eq!(p.x, q.x, "linedef {line} is a vertical cut");
+            p.x
+        };
+        let top = l.top_line.expect("a portal lift has a top face");
+        assert_eq!((x_of(outer), x_of(low), x_of(top)), (256, 288, 320));
+    }
+
+    /// A `walkover` lift's alcove has to be deeper than the player's radius
+    /// or the trigger on its outer threshold can never fire — the compile
+    /// error this pins, and the two shapes it must *not* touch.
+    ///
+    /// The mutation check: delete the `LiftAlcoveTooShallow` guard in
+    /// `emit_portal_lift` and the first case here compiles clean, which is
+    /// exactly the map the playtest found unfinishable.
+    #[test]
+    fn a_walkover_lifts_alcove_must_admit_the_players_center() {
+        let tables = Tables::load().expect("tables");
+        let walkover = |alcove: i32| {
+            LIFT.replacen(
+                r#""at":[256,128] }"#,
+                &format!(r#""at":[256,128], "trigger":"walkover", "alcove_near":{alcove} }}"#),
+                1,
+            )
+        };
+        for alcove in [8, 16] {
+            let ir = Ir::from_json(&walkover(alcove)).expect("ir");
+            let err = compile(&ir, &tables).expect_err("the alcove admits no center");
+            assert!(
+                matches!(
+                    err,
+                    CompileError::LiftAlcoveTooShallow { depth, need, .. }
+                        if depth == alcove && need == 17
+                ),
+                "alcove {alcove}: expected LiftAlcoveTooShallow needing 17, got {err}"
+            );
+        }
+        // 32 is the first depth that clears the 16-unit radius, and on this
+        // 64-unit gap it is also the last that leaves the platform its own
+        // 32: the boundary case from both sides at once.
+        assert!(
+            compile(&Ir::from_json(&walkover(32)).expect("ir"), &tables).is_ok(),
+            "32 clears the radius"
+        );
+
+        // The rule is walkover-only. `switch` puts its trigger on the riser
+        // and `both_ends` adds one on the platform's top face, so neither
+        // needs the alcove to be standing room — a 16-unit buffer is fine.
+        for trigger in ["switch", "both_ends"] {
+            let json = LIFT.replacen(
+                r#""at":[256,128] }"#,
+                &format!(r#""at":[256,128], "trigger":"{trigger}", "alcove_near":16 }}"#),
+                1,
+            );
+            let ir = Ir::from_json(&json).expect("ir");
+            assert!(
+                compile(&ir, &tables).is_ok(),
+                "a {trigger} lift needs no walkable alcove"
+            );
+        }
     }
 
     /// `LIFT` with the two rooms' floors swapped, so room `b` is the low one
@@ -903,7 +1017,7 @@ mod tests {
               "floor_tex":"FLAT1", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
           ],
           "portals":[ { "a":"a", "b":"b", "kind":"lift", "width":64, "at":[256,128],
-                        "trigger":"walkover", "alcove_far":16 } ]
+                        "trigger":"walkover", "alcove_far":32 } ]
         }"#;
         let Built {
             tables,
@@ -988,10 +1102,10 @@ mod tests {
     ///
     /// Worked example: room `a`'s own wall sits at x=256 and room `b`'s at
     /// x=192, a 64-unit gap; portal width 64 at (256,128) opens y in
-    /// [96,160]; `alcove_far` 16 puts the alcove at x in [192,208] and the
-    /// platform at x in [208,256] — a signed depth of
-    /// `(208 - 256) * -1 == 48`, which the same expression read with the
-    /// sign the other way round would make -48 and refuse.
+    /// [96,160]; `alcove_far` 32 puts the alcove at x in [192,224] and the
+    /// platform at x in [224,256] — a signed depth of
+    /// `(224 - 256) * -1 == 32`, which the same expression read with the
+    /// sign the other way round would make -32 and refuse.
     #[test]
     fn a_lift_whose_room_a_lies_east_of_room_b_builds_the_same_platform_mirrored() {
         let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
@@ -1003,7 +1117,7 @@ mod tests {
               "floor_tex":"FLAT1", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
           ],
           "portals":[ { "a":"a", "b":"b", "kind":"lift", "width":64, "at":[256,128],
-                        "trigger":"walkover", "alcove_far":16 } ]
+                        "trigger":"walkover", "alcove_far":32 } ]
         }"#;
         let Built {
             tables,
@@ -1040,8 +1154,8 @@ mod tests {
         assert_eq!(plat.wall_tex, riser);
 
         // The whole point of the fixture: the platform is built *westward*
-        // from room a's wall, so the alcove is the 16 units nearest room b
-        // and the platform is the 48 the depth check measured.
+        // from room a's wall, so the alcove is the 32 units nearest room b
+        // and the platform is the 32 the depth check measured.
         let x_of = |line: usize| {
             let ld = &data.linedefs[line];
             let (a, b) = (data.vertices[ld.v1], data.vertices[ld.v2]);
@@ -1052,8 +1166,8 @@ mod tests {
         let top = l.top_line.expect("and a top face");
         assert_eq!(
             (x_of(top), x_of(low)),
-            (256, 208),
-            "the top face is room a's own wall; the low face stops 16 short of room b's"
+            (256, 224),
+            "the top face is room a's own wall; the low face stops 32 short of room b's"
         );
         // Front/back: `emit_opening` binds the neighbor to the front and the
         // platform to the back on both faces, whichever way the wall winds.

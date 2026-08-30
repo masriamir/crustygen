@@ -1057,7 +1057,8 @@ impl Ir {
     /// [`Self::DOOR_DIMENSIONS`] plus 64, because a lift alcove is not only a
     /// buffer the way a door's is. On a [`LiftTrigger::Walkover`] lift it is
     /// the strip the player must stand *inside* for the trigger to fire, so
-    /// it has to be deeper than the player's own radius (16) — which leaves
+    /// it has to be deeper than the player's own radius
+    /// ([`crate::compile::CompileError::LiftAlcoveTooShallow`]) — which leaves
     /// 32 as the only workable door dimension and nothing above it for an
     /// approach strip the player walks along rather than merely steps into.
     /// 64 is the next size up on the same 8-unit ladder, and the module the

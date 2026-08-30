@@ -34,6 +34,21 @@
 //! measuring what map authors *drew*, where crediting the side is the
 //! conservative reading; a checker that must not call a map finishable it
 //! cannot finish needs the engine's own answer instead.
+//!
+//! **A second divergence, same argument.** A walkover is credited only when
+//! neither side of it is a dead-end pocket no deeper than the player's radius
+//! (`dead_end_pocket`). `P_TryMove` fires a walkover from its `spechit`
+//! walk, which asks whether the thing's *center* changed sides
+//! (`P_PointOnLineSide (thing->x, thing->y, ld)`) — but it refuses the move
+//! first, at `tmfloorz - thing->z > 24*FRACUNIT`, and `PIT_CheckLine` raises
+//! `tmfloorz` for every line the moving *box* straddles, with
+//! `P_BoxOnLineSide` (`p_maputl.c`) counting a box edge that merely touches a
+//! line as straddling it. A pocket that shallow therefore admits no center,
+//! so nobody crosses into it and nobody stands in it to cross out. The
+//! probe's `activator_sides` has no such gate — it measures what authors drew
+//! — and the depth alone would be the wrong test anyway: §G3 of the census
+//! finds thin *open* trigger strips 16 deep that play perfectly, which is why
+//! the closed-on-every-other-side half of the predicate is not optional.
 
 use std::collections::BTreeSet;
 
@@ -207,6 +222,61 @@ impl LiftSpecials {
     }
 }
 
+/// Whether `sector` is a pocket behind `linedef` that no player center can
+/// ever occupy: every other boundary of it is one they cannot pass, and no
+/// point of it lies more than `radius` beyond that line.
+///
+/// Both halves are required, and the corpus is why. `P_TryMove` fires a
+/// walkover from its `spechit` walk, comparing `P_PointOnLineSide (thing->x,
+/// thing->y, ld)` before and after the move — the thing's **center** crosses,
+/// not its box — but it returns first at `tmfloorz - thing->z > 24*FRACUNIT`,
+/// and `PIT_CheckLine` has by then raised `tmfloorz` for every line the
+/// **box** straddles, `P_BoxOnLineSide` (`p_maputl.c`) counting an edge that
+/// merely touches a line as straddling it. So the center stays strictly more
+/// than `radius` from anything that stops the box, and a sector shallower
+/// than that with no other way out admits no center at all. But shallowness
+/// alone proves nothing: the census's §G3 found 3 / 30 / 64 low-side
+/// walkovers whose far sector reaches no further than 16, and all but 0 / 3 /
+/// 6 of them are *open* — thin trigger strips cut across a corridor, which
+/// the player crosses without ever being stopped, because the box may
+/// legitimately overhang whatever lies past a passable boundary.
+///
+/// A two-sided boundary flagged `ML_BLOCKING` counts as unpassable here (the
+/// engine refuses the move at `PIT_CheckLine`), which is one place this
+/// differs from the probe's own `far_depth`, whose brief defined blocking as
+/// one-sided-or-a-step only.
+fn dead_end_pocket(scene: &Scene, linedef: usize, sector: usize, step: i32, radius: i32) -> bool {
+    let ss = &scene.sectors[sector];
+    // `sector`'s own mirror of the line, so walking `a` -> `b` always keeps
+    // `sector` on the right and `(dy, -dx)` points into it.
+    let Some(edge) = ss.boundary.iter().find(|b| b.linedef == linedef) else {
+        return false;
+    };
+    let (dx, dy) = (edge.b.0 - edge.a.0, edge.b.1 - edge.a.1);
+    let len = dx.hypot(dy);
+    if len == 0.0 {
+        return false;
+    }
+    let (nx, ny) = (dy / len, -dx / len);
+    let perp = |p: (f64, f64)| (p.0 - edge.a.0) * nx + (p.1 - edge.a.1) * ny;
+    let mut deepest = 0.0_f64;
+    for b in &ss.boundary {
+        deepest = deepest.max(perp(b.a)).max(perp(b.b));
+        // The line being crossed is the way in, not an obstruction.
+        if b.linedef == linedef {
+            continue;
+        }
+        let walkable = b
+            .neighbor
+            .filter(|_| b.passable())
+            .is_some_and(|n| scene.sectors[n].floor - ss.floor <= step);
+        if walkable {
+            return false;
+        }
+    }
+    deepest <= f64::from(radius)
+}
+
 /// Every lift line naming `tag`, as the trigger it is for the plat at
 /// sector `plat`: which sectors fire it, and each one's [`Activator`] class.
 ///
@@ -218,7 +288,7 @@ fn triggers_for(
     specials: &LiftSpecials,
     plat: usize,
     tag: i32,
-    step: i32,
+    (step, radius): (i32, i32),
 ) -> Vec<SceneTrigger> {
     lines
         .iter()
@@ -230,14 +300,21 @@ fn triggers_for(
                 // `P_UseSpecialLine`: the front side alone.
                 activators.push((front, classify(scene, plat, front, step)));
             } else if let Some(back) = b.neighbor.filter(|_| b.passable()) {
+                // A walkover with a dead-end pocket on either side fires from
+                // neither: nobody can cross *into* the pocket, and nobody can
+                // stand in it to cross *out*. The same shape as the
+                // `passable()` gate above, one layer further out.
+                let pocket = [front, back]
+                    .iter()
+                    .any(|&s| dead_end_pocket(scene, b.linedef, s, step, radius));
                 // `P_CrossSpecialLine` has no side gate, so either side fires
                 // it — from whichever the player can actually cross at rest
                 // (`P_TryMove`'s step rule).
                 let (ff, bf) = (scene.sectors[front].floor, scene.sectors[back].floor);
-                if bf - ff <= step {
+                if !pocket && bf - ff <= step {
                     activators.push((front, classify(scene, plat, front, step)));
                 }
-                if ff - bf <= step {
+                if !pocket && ff - bf <= step {
                     activators.push((back, classify(scene, plat, back, step)));
                 }
             }
@@ -265,6 +342,7 @@ fn triggers_for(
 #[must_use]
 pub fn resolve_plats(scene: &Scene, tables: &Tables) -> Vec<ScenePlat> {
     let step = tables.step_height();
+    let radius = tables.player().radius;
     let specials = LiftSpecials::resolve(tables);
     // (front sector, boundary) of every lift line, once (`fronts_this`):
     // `special` is linedef-wide, so the back mirror of a two-sided lift line
@@ -334,7 +412,7 @@ pub fn resolve_plats(scene: &Scene, tables: &Tables) -> Vec<ScenePlat> {
                 rest,
                 distinct_neighbor_floors: floors.iter().copied().collect::<BTreeSet<i32>>().len(),
                 shared_tag: scene.sectors.iter().filter(|s| s.tag == ss.tag).count(),
-                triggers: triggers_for(scene, &lines, &specials, sector, ss.tag, step),
+                triggers: triggers_for(scene, &lines, &specials, sector, ss.tag, (step, radius)),
                 other_actions,
                 neighbors,
             }
@@ -370,7 +448,9 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::{Activator, Rest, ScenePlat, broken_lift_lines, resolve_plats};
-    use crate::check::fixtures::chain;
+    use crate::check::Subject;
+    use crate::check::fixtures::{chain, pocket_lift, scene_of};
+    use crate::check::invariants::check_lift_return;
     use crate::check::scene::Scene;
     use crate::tables::Tables;
     use crustywad::map::udmf::parse_udmf;
@@ -521,6 +601,65 @@ mod tests {
             t.activators
         );
         assert!(!plats[0].callable_low() && !plats[0].callable_top());
+    }
+
+    /// A walkover whose far sector is a dead end no deeper than the player's
+    /// radius fires from neither side: `P_TryMove` never lets a center in
+    /// there, so nobody crosses into the pocket and nobody stands in it to
+    /// cross out. The plat is then callable only from above — V-P5's warning.
+    ///
+    /// The other two cases are the ones the rule must leave alone: the same
+    /// pocket 32 deep (a center fits, so both sides fire), and a 16-deep strip
+    /// that is *open* at one end, which is what the census's §G3 found in
+    /// DOOM E1M3 and MAP04 and which plays perfectly.
+    #[test]
+    fn a_walkover_into_a_dead_end_shallower_than_the_radius_fires_from_neither_side() {
+        let (_, _, plats) = plats_of(&pocket_lift(16, false));
+        assert_eq!(plats.len(), 1);
+        let p = &plats[0];
+        assert_eq!((p.sector, p.tag, p.low, p.travel), (2, 7, 0, 128));
+        assert_eq!(
+            p.triggers.len(),
+            1,
+            "the 88 line is still the plat's trigger"
+        );
+        assert!(
+            p.triggers[0].activators.is_empty(),
+            "a center that cannot enter the pocket fires nothing: {:?}",
+            p.triggers[0].activators
+        );
+        assert!(!p.callable_low() && !p.callable_top());
+        assert!(p.low_activator_neighbors().is_empty());
+
+        // And the finding that follows, read through the check that owns it.
+        let mut findings = Vec::new();
+        let (scene, tables) = scene_of(&pocket_lift(16, false));
+        check_lift_return(&scene, &tables, &mut findings);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(
+            findings[0].check == "V-P5"
+                && findings[0].subject == Subject::Sector(2)
+                && findings[0].message.contains("only from above"),
+            "{findings:?}"
+        );
+
+        // 32 clears the 16-unit radius, so both sides of the same line fire.
+        let (_, _, plats) = plats_of(&pocket_lift(32, false));
+        assert_eq!(
+            plats[0].triggers[0].activators,
+            vec![(0, Activator::Low), (1, Activator::Low)]
+        );
+        assert!(plats[0].callable_low());
+
+        // Still 16 deep, but with a passable boundary of its own: the box may
+        // overhang through it, so the crossing is real and the depth alone
+        // must not condemn it.
+        let (_, _, plats) = plats_of(&pocket_lift(16, true));
+        assert_eq!(
+            plats[0].triggers[0].activators,
+            vec![(0, Activator::Low), (1, Activator::Low)]
+        );
+        assert!(plats[0].callable_low());
     }
 
     #[test]
