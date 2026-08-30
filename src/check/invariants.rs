@@ -269,6 +269,16 @@ pub fn check_door_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Fin
 /// below the plat's) carrying `dontpegbottom`, which anchors the lower to
 /// the ceiling so it stays put while the platform moves out from under it
 /// (`r_segs.c`). Rendering only, hence a Warning.
+///
+/// Only `dontpegbottom` is judged. `dontpegtop` is deliberately unjudged on a
+/// platform: a plat's ceiling never moves, so the flag changes nothing as the
+/// platform travels — it only picks which row of the landing's upper sits at
+/// which height, and the corpus names no convention either way (51.4 % / 6.0 %
+/// / 21.5 % of lift top faces carry it,
+/// `docs/measurements/lift-shapes-2026-08-29.md` §G2). This compiler sets it
+/// on a landing's upper for seam alignment
+/// ([`crate::compile::lifts`]'s `unpeg_landing_upper`); a map that leaves it
+/// clear is not wrong, so there is nothing here to warn about.
 pub fn check_lift_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
     for plat in resolve_plats(scene, tables) {
         let floor = scene.sectors[plat.sector].floor;

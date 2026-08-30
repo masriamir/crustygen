@@ -19,17 +19,25 @@
 //! which the [`crate::compile::heights`] pass, reading load-time floors,
 //! would leave blank.
 //!
-//! Both are written here with both pegging flags clear, but that means a
-//! different thing on each face, because `ML_DONTPEGBOTTOM` clear anchors a
-//! lower texture to the *back* sector's floor. On the low face the drawn
-//! sidedef is the low neighbor's and its back sector is the platform, so
-//! that riser rides with the platform — the opposite of a door track, which
-//! is lower-unpegged so `DOORTRAK` stays put. On the top face the drawn
+//! Both are written here lower-pegged (`ML_DONTPEGBOTTOM` clear), but that
+//! means a different thing on each face, because `ML_DONTPEGBOTTOM` clear
+//! anchors a lower texture to the *back* sector's floor. On the low face the
+//! drawn sidedef is the low neighbor's and its back sector is the platform,
+//! so that riser rides with the platform — the opposite of a door track,
+//! which is lower-unpegged so `DOORTRAK` stays put. On the top face the drawn
 //! sidedef is the platform's own and its back sector is the level room,
 //! whose floor never moves, so that riser hangs from a fixed top and grows
 //! downward as the platform descends. Clear on both is the corpus
 //! convention: risers are pegged 96 % of the time
 //! (`docs/measurements/lift-shapes-2026-08-29.md` §G).
+//!
+//! The *upper* flag goes the other way on a platform boundary whose
+//! neighbor's ceiling is the taller one: that neighbor's sidedef draws an
+//! upper, and `unpeg_landing_upper` sets `ML_DONTPEGTOP` on the line so the
+//! upper starts at the landing's own ceiling rather than at the platform's,
+//! which is where the one-sided walls beside it start. Cosmetic — the
+//! platform's ceiling never moves — and the corpus names no convention to
+//! follow, so the rendering argument decides; see that function.
 //!
 //! A pedestal is that same platform with no portal under it: a hosted
 //! island cut inside one room — [`crate::compile::teleports`]'s pad
@@ -93,6 +101,47 @@ pub struct LiftOut {
     pub low_line: Option<usize>,
     /// The platform's top-face threshold (portals only).
     pub top_line: Option<usize>,
+}
+
+/// Unpegs the upper on a platform boundary whose neighbor's ceiling stands
+/// above the platform's — the landing over a shaft or an alcove.
+///
+/// `r_segs.c`'s `R_StoreWallRange` draws a two-sided line's upper only under
+/// `if (worldhigh < worldtop)` (lines 565-587), i.e. on the sidedef whose own
+/// sector has the *higher* ceiling: the landing's, never the platform's. With
+/// `ML_DONTPEGTOP` clear the engine takes `vtop = backsector->ceilingheight +
+/// textureheight[...]`, putting the texture's **bottom** row on the
+/// platform's ceiling; the one-sided walls flanking that landing take
+/// `rw_midtexturemid = worldtop` (lines 456-475, `ML_DONTPEGBOTTOM` clear),
+/// putting their **top** row on the landing's own ceiling. Two neighboring
+/// surfaces then start the same texture at different rows — a visible seam.
+/// Set, `rw_toptexturemid = worldtop` anchors the upper at the landing's
+/// ceiling too and the rows line up.
+///
+/// The corpus states no convention to follow here — `ML_DONTPEGTOP` is on
+/// 51.4 % / 6.0 % / 21.5 % of lift top faces across the three populations
+/// (`docs/measurements/lift-shapes-2026-08-29.md` §G2) — so the rendering
+/// argument decides. Nothing is at stake beyond appearance: a platform's
+/// ceiling never moves, so unlike the riser's `ML_DONTPEGBOTTOM` this flag
+/// changes no texture's behavior as the platform travels.
+///
+/// A no-op on a one-sided line (the engine never reads `ML_DONTPEGTOP`
+/// there), on a line that does not border `plat`, and where the two ceilings
+/// are equal or the neighbor's is the lower one.
+fn unpeg_landing_upper(data: &mut MapData, line: usize, plat: usize) {
+    let ld = &data.linedefs[line];
+    let Some(back) = ld.back else { return };
+    let (front_sector, back_sector) = (data.sidedefs[ld.front].sector, data.sidedefs[back].sector);
+    let neighbor = if front_sector == plat {
+        back_sector
+    } else if back_sector == plat {
+        front_sector
+    } else {
+        return;
+    };
+    if data.sectors[neighbor].ceiling > data.sectors[plat].ceiling {
+        data.linedefs[line].upper_unpegged = true;
+    }
 }
 
 /// A sector borrowing `room`'s light and flats, at explicit heights and with
@@ -238,6 +287,10 @@ pub fn emit_lifts(
             data.linedefs[line].tag = tag;
             let front = data.linedefs[line].front;
             riser.clone_into(&mut data.sidedefs[front].lower);
+            // A pedestal keeps its host's ceiling, so this never fires
+            // today; it is here so the rule is stated once for every
+            // platform shape rather than only where it currently bites.
+            unpeg_landing_upper(data, line, sector);
         }
 
         out.push(LiftOut {
@@ -445,6 +498,12 @@ fn emit_portal_lift(
         seg.sector, plat,
         "the platform segment was pushed at the predicted index"
     );
+
+    // Whichever of the platform's two faces has a taller neighbor draws that
+    // neighbor's upper, and wants it anchored at the neighbor's own ceiling.
+    for line in [seg.near_line, seg.far_line] {
+        unpeg_landing_upper(data, line, plat);
+    }
 
     // Each present alcove's own *outer* threshold and jambs, exactly as
     // `emit_doors` builds them — its inner threshold is one of the
@@ -719,10 +778,21 @@ mod tests {
         );
         for i in [low, top] {
             assert!(
-                !data.linedefs[i].lower_unpegged && !data.linedefs[i].upper_unpegged,
-                "flags clear: the riser rides with the platform"
+                !data.linedefs[i].lower_unpegged,
+                "linedef {i}: lower-pegged, so the riser rides with the platform"
             );
         }
+        // `LIFT` gives room `a` a 192 ceiling and room `b` a 256 one, so the
+        // platform's is 192: the low face's two ceilings match and the top
+        // face's neighbor is 64 taller and draws the upper this flag aligns.
+        assert!(
+            !data.linedefs[low].upper_unpegged,
+            "no upper is drawn where the two ceilings are equal"
+        );
+        assert!(
+            data.linedefs[top].upper_unpegged,
+            "the landing's upper is anchored at the landing's own ceiling"
+        );
         assert!(
             tags.manifest()
                 .iter()
@@ -1028,12 +1098,65 @@ mod tests {
             (riser, riser, ""),
             "room a, the level room, is the one side that shows nothing"
         );
-        for i in [low, top] {
+        // Lower-pegged on both faces. The platform takes room `b`'s 192
+        // ceiling, which the far alcove in front of its low face shares, so
+        // the only upper drawn is room `a`'s, over the top face.
+        for (i, upper) in [(low, false), (top, true)] {
             assert!(
-                !data.linedefs[i].lower_unpegged && !data.linedefs[i].upper_unpegged,
-                "linedef {i}: both pegging flags clear"
+                !data.linedefs[i].lower_unpegged && data.linedefs[i].upper_unpegged == upper,
+                "linedef {i}: lower-pegged, and the upper flag follows the taller neighbor"
             );
         }
+    }
+
+    /// The upper flag follows the *ceilings*, not the floors: it is set on
+    /// whichever platform face has the taller neighbor, and on neither when
+    /// the ceilings match.
+    ///
+    /// `LIFT` itself covers the common case (the level room above is also the
+    /// taller one). These two variants pin the other two: all three ceilings
+    /// equal, where no upper is drawn at all; and a low room taller than the
+    /// platform, where the flag lands on the *low* face — the opposite side
+    /// from `LIFT`'s, which a rule written off the floors would get wrong.
+    #[test]
+    fn the_upper_flag_tracks_which_neighbor_has_the_taller_ceiling() {
+        let flat = LIFT.replacen(
+            r#""floor":128, "ceiling":256"#,
+            r#""floor":128, "ceiling":192"#,
+            1,
+        );
+        let Built { data, lifts, .. } = compile_data(&flat);
+        let l = &lifts[0];
+        assert_eq!(
+            data.sectors[l.sector].ceiling, 192,
+            "both rooms are at 192, so the platform is too"
+        );
+        for line in [l.low_line.unwrap(), l.top_line.unwrap()] {
+            assert!(
+                !data.linedefs[line].upper_unpegged,
+                "linedef {line}: equal ceilings draw no upper, so nothing to unpeg"
+            );
+        }
+
+        // Room `a`, the LOW room, given the tallest ceiling in the map: the
+        // platform takes room `b`'s 256, so it is room `a`'s sidedef on the
+        // low face that draws an upper.
+        let tall_low = LIFT.replacen(
+            r#""floor":0, "ceiling":192"#,
+            r#""floor":0, "ceiling":320"#,
+            1,
+        );
+        let Built { data, lifts, .. } = compile_data(&tall_low);
+        let l = &lifts[0];
+        assert_eq!(data.sectors[l.sector].ceiling, 256, "room b's, the lower");
+        assert!(
+            data.linedefs[l.low_line.unwrap()].upper_unpegged,
+            "the low room is the taller side here, so its upper is the one anchored"
+        );
+        assert!(
+            !data.linedefs[l.top_line.unwrap()].upper_unpegged,
+            "the level room shares the platform's ceiling"
+        );
     }
 
     #[test]
