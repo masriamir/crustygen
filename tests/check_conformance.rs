@@ -1,11 +1,13 @@
 //! Conformance e2e: each committed fixture's emitted TEXTMAP judged against
 //! its hand-paired spec — entrada against `tests/fixtures/entrada.spec.md`,
 //! salto (the teleport playtest map) against
-//! `tests/fixtures/salto.spec.md`. Every derivable frontmatter number in
+//! `tests/fixtures/salto.spec.md`, ascensor (the lift playtest map) against
+//! `tests/fixtures/ascensor.spec.md`. Every derivable frontmatter number in
 //! those specs was hand-set to that map's own compiled actuals, so a clean
-//! run must show zero `Fail` rows — proving `check::run`'s `conform::rows`
-//! end to end against real compiled maps, not just the unit fixtures
-//! `src/check/conform.rs` already carries.
+//! run must show zero `Fail` rows (ascensor's lift-trigger row is the one
+//! deliberate exception, documented on its own test) — proving
+//! `check::run`'s `conform::rows` end to end against real compiled maps, not
+//! just the unit fixtures `src/check/conform.rs` already carries.
 
 use crustygen::check::{ConformanceRow, Severity, Subject, Verdict, run};
 use crustygen::compile::compile;
@@ -20,6 +22,9 @@ const ENTRADA: &str = include_str!("fixtures/entrada_base.json");
 const ENTRADA_SPEC: &str = include_str!("fixtures/entrada.spec.md");
 const SALTO: &str = include_str!("fixtures/salto_base.json");
 const SALTO_SPEC: &str = include_str!("fixtures/salto.spec.md");
+const ASCENSOR: &str = include_str!("fixtures/ascensor_base.json");
+const ASCENSOR_SPEC: &str = include_str!("fixtures/ascensor.spec.md");
+const ASCENSOR_SWITCH_SPEC: &str = include_str!("fixtures/ascensor_switch.spec.md");
 
 /// Compiles `ir_json`, emits its TEXTMAP, parses it back, and runs
 /// [`crustygen::check::run`] against `spec_text` parsed through
@@ -271,4 +276,87 @@ fn salto_conforms_to_its_paired_spec_including_the_four_teleport_rows() {
         .expect("deaf ratio");
     assert_eq!(deaf.verdict, Verdict::Info, "{deaf:?}");
     assert!(deaf.actual.starts_with("1.000"), "{deaf:?}");
+}
+
+/// Ascensor's own conformance run: the lift playtest map judged against
+/// `tests/fixtures/ascensor.spec.md`. Every derivable number in that spec
+/// was set from ascensor's own compiled output, with one deliberate
+/// exception — `progression.lifts.trigger`, which asks for `switch` while
+/// the map mixes all three trigger shapes, and so must Fail naming what the
+/// map actually carries. Every other row is `Pass`, `Info` or
+/// `NotDerivable`, and no row is `NotRun`.
+#[test]
+fn ascensor_conforms_to_its_paired_spec_except_the_lift_trigger_row() {
+    let rows = conformance_rows_for(ASCENSOR, ASCENSOR_SPEC);
+
+    let failed: Vec<_> = rows.iter().filter(|r| r.verdict == Verdict::Fail).collect();
+    let failed_params: Vec<&str> = failed.iter().map(|r| r.parameter.as_str()).collect();
+    assert_eq!(
+        failed_params,
+        vec!["progression.lifts.trigger"],
+        "the trigger row is the only expected Fail: {failed:?}"
+    );
+    assert_eq!(
+        failed[0].actual, "switch ×1, walkover ×1, both_ends ×1",
+        "{:?}",
+        failed[0]
+    );
+
+    let not_run: Vec<_> = rows
+        .iter()
+        .filter(|r| r.verdict == Verdict::NotRun)
+        .collect();
+    assert!(
+        not_run.is_empty(),
+        "unexpected NotRun rows (broken scene): {not_run:?}"
+    );
+
+    // The lift rows the platform toolchain actually produces, named so a
+    // regression in any one of them fails here by name.
+    for parameter in [
+        "progression.lifts.count",
+        "progression.lifts.max_travel",
+        "progression.exit.trigger",
+        "progression.switches.count",
+    ] {
+        let row = rows
+            .iter()
+            .find(|r| r.parameter == parameter)
+            .expect(parameter);
+        assert_eq!(row.verdict, Verdict::Pass, "{row:?}");
+    }
+}
+
+/// The same map against `tests/fixtures/ascensor_switch.spec.md` — the
+/// identical document asking for `both_ends` instead — showing the trigger
+/// row's *other* failure text: the actual is the map's own trigger mix
+/// either way, and only the target moves. (The row's Pass case is a unit
+/// fixture in `src/check/conform.rs`.)
+#[test]
+fn the_lift_trigger_row_names_the_same_mix_whichever_trigger_the_spec_asks_for() {
+    let asked_switch = conformance_rows_for(ASCENSOR, ASCENSOR_SPEC);
+    let asked_both_ends = conformance_rows_for(ASCENSOR, ASCENSOR_SWITCH_SPEC);
+    assert_eq!(
+        asked_switch.len(),
+        asked_both_ends.len(),
+        "the variant must not add or remove rows"
+    );
+
+    for (switch, both_ends) in asked_switch.iter().zip(asked_both_ends.iter()) {
+        assert_eq!(switch.parameter, both_ends.parameter, "row order drifted");
+        if switch.parameter == "progression.lifts.trigger" {
+            assert_eq!(switch.target, "switch", "{switch:?}");
+            assert_eq!(both_ends.target, "both_ends", "{both_ends:?}");
+            assert_eq!(switch.actual, both_ends.actual, "the actual must not move");
+            assert_eq!(switch.verdict, Verdict::Fail, "{switch:?}");
+            assert_eq!(both_ends.verdict, Verdict::Fail, "{both_ends:?}");
+        } else {
+            assert_eq!(
+                (&switch.target, &switch.actual, switch.verdict),
+                (&both_ends.target, &both_ends.actual, both_ends.verdict),
+                "row `{}` changed unexpectedly",
+                switch.parameter
+            );
+        }
+    }
 }

@@ -1,7 +1,7 @@
-//! Shared fixture builders for the integration tests: entrada compiled to a
-//! UDMF PWAD, the same map round-tripped into a classic binary-format PWAD
-//! (with real nodes, via crustywad's one-shot builder), and a raw
-//! TEXTMAP-wrapping helper.
+//! Shared fixture builders for the integration tests: entrada (and
+//! ascensor, the lift map) compiled to a UDMF PWAD, the same map
+//! round-tripped into a classic binary-format PWAD (with real nodes, via
+//! crustywad's one-shot builder), and a raw TEXTMAP-wrapping helper.
 
 // Each `tests/*.rs` file that does `mod common;` compiles this module into
 // its own independent integration-test crate, and no single consumer uses
@@ -27,19 +27,22 @@ pub const ENTRADA: &str = include_str!("../fixtures/entrada_base.json");
 /// committed `maps/salto.wad`.
 pub const SALTO: &str = include_str!("../fixtures/salto_base.json");
 
-/// Compiles entrada and packs it as a minimal un-noded UDMF PWAD.
-pub fn udmf_entrada_wad() -> Vec<u8> {
+/// The ascensor base IR fixture — the lift playtest map, paired with the
+/// committed `maps/ascensor.wad`.
+pub const ASCENSOR: &str = include_str!("../fixtures/ascensor_base.json");
+
+/// Compiles `ir_json` and packs it as a minimal un-noded UDMF PWAD.
+fn udmf_wad(ir_json: &str) -> Vec<u8> {
     let tables = Tables::load().expect("tables load");
-    let ir = Ir::from_json(ENTRADA).expect("ir parses");
-    let compiled = compile(&ir, &tables).expect("entrada compiles");
+    let ir = Ir::from_json(ir_json).expect("ir parses");
+    let compiled = compile(&ir, &tables).expect("fixture compiles");
     pack_udmf(&compiled, "MAP01").expect("packs")
 }
 
-/// Compiles entrada, assembles it, and re-emits it as a classic Doom
-/// binary-format PWAD with real nodes — the vanilla-input fixture for the
-/// ingest/check/lift tests. No retail WAD is involved (redistributability).
-pub fn binary_entrada_wad() -> Vec<u8> {
-    let udmf = udmf_entrada_wad();
+/// Assembles a UDMF PWAD and re-emits it as a classic Doom binary-format
+/// PWAD with real nodes — the vanilla-input shape the ingest/check/lift
+/// tests read. No retail WAD is involved (redistributability).
+fn binary_wad(udmf: Vec<u8>) -> Vec<u8> {
     let wad = Wad::from_bytes(udmf).expect("udmf fixture parses");
     let group = wad
         .map_groups()
@@ -57,6 +60,29 @@ pub fn binary_entrada_wad() -> Vec<u8> {
     )
     .expect("binary map with nodes builds");
     builder.build().expect("wad builds")
+}
+
+/// Compiles entrada and packs it as a minimal un-noded UDMF PWAD.
+pub fn udmf_entrada_wad() -> Vec<u8> {
+    udmf_wad(ENTRADA)
+}
+
+/// Compiles entrada, assembles it, and re-emits it as a classic Doom
+/// binary-format PWAD with real nodes.
+pub fn binary_entrada_wad() -> Vec<u8> {
+    binary_wad(udmf_entrada_wad())
+}
+
+/// Compiles ascensor — the lift playtest map — and packs it as a minimal
+/// un-noded UDMF PWAD.
+pub fn udmf_ascensor_wad() -> Vec<u8> {
+    udmf_wad(ASCENSOR)
+}
+
+/// Compiles ascensor, assembles it, and re-emits it as a classic Doom
+/// binary-format PWAD with real nodes — the lift map's vanilla twin.
+pub fn binary_ascensor_wad() -> Vec<u8> {
+    binary_wad(udmf_ascensor_wad())
 }
 
 /// The binary entrada WAD plus a second, deliberately unloadable map group:
