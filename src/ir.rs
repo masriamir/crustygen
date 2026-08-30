@@ -254,10 +254,11 @@ pub struct Portal {
     /// When present, must be one of [`Ir::DOOR_DIMENSIONS`]
     /// ([`IrError::InvalidDoorDimension`] otherwise). Meaningless (and
     /// rejected) on a [`PortalKind::Plain`] portal. On a [`PortalKind::Lift`]
-    /// this is a buffer, or, when the low room is `a` and
-    /// [`Self::trigger`] is [`LiftTrigger::Walkover`]/[`LiftTrigger::BothEnds`],
-    /// the strip that carries the walkover trigger line
-    /// ([`IrError::LiftWalkoverNeedsAlcove`] otherwise). See
+    /// this is a buffer, or, when the low room is `a` and [`Self::trigger`]
+    /// is [`LiftTrigger::Walkover`], the strip that carries the walkover
+    /// trigger line ([`IrError::LiftWalkoverNeedsAlcove`] otherwise) —
+    /// [`LiftTrigger::BothEnds`] puts its second line on the platform's top
+    /// face, not in an alcove, so it needs none. See
     /// [`Self::alcove_far`] for the naming rationale — "near" and "far" name
     /// room `a`'s and room `b`'s own walls, mirroring the compiler's
     /// internal `near`/`far` facing-wall terminology, not a "front"/"behind"
@@ -291,7 +292,12 @@ pub struct Portal {
     #[serde(default)]
     pub trigger: LiftTrigger,
     /// Barrier only: how far the platform rests above the two rooms' shared
-    /// floor. Required when the floors are equal, rejected when they differ.
+    /// floor. Required when the floors are equal, rejected when they differ,
+    /// and rejected outright on any portal that is not
+    /// [`PortalKind::Lift`] ([`IrError::RiseOnNonLiftPortal`]) — unlike
+    /// [`Self::speed`]/[`Self::trigger`], which a non-lift kind simply
+    /// ignores, this follows the reject-don't-degrade posture
+    /// [`Self::door_thickness`] already takes on a plain or locked portal.
     #[serde(default)]
     pub rise: Option<i32>,
 }
@@ -437,14 +443,23 @@ pub struct Pedestal {
 
 impl Pedestal {
     /// The rectangle as `(lo, hi)` corners.
+    ///
+    /// The high corner saturates rather than overflowing: `size` has no
+    /// upper bound of its own below [`IrError::PedestalSizeNotMultipleOf8`],
+    /// so `at + size` can exceed `i32` outright on unvalidated input.
+    /// [`Ir::from_json`] range-checks `at` and the high corner with checked
+    /// arithmetic *before* ever calling this, so a saturated result here
+    /// never actually surfaces from validated IR — this only keeps the
+    /// method itself panic-free for any [`Pedestal`] `from_json` accepted,
+    /// not just one that has already passed that validation.
     #[must_use]
     pub fn rect(&self) -> (Pt, Pt) {
         let [w, h] = self.size.unwrap_or([Ir::PEDESTAL_DEFAULT_SIZE; 2]);
         (
             self.at,
             Pt {
-                x: self.at.x + w,
-                y: self.at.y + h,
+                x: self.at.x.saturating_add(w),
+                y: self.at.y.saturating_add(h),
             },
         )
     }
@@ -818,6 +833,19 @@ pub enum IrError {
         /// The second room.
         b: String,
     },
+    /// A portal that is not [`PortalKind::Lift`] sets [`Portal::rise`],
+    /// which only a lift portal has — unlike [`Portal::speed`]/
+    /// [`Portal::trigger`], which a non-lift kind simply ignores, this
+    /// follows the reject-don't-degrade posture
+    /// [`IrError::DoorFieldsOnPlainPortal`] already takes on a door field
+    /// set on a plain portal.
+    #[error("portal `{a}` <-> `{b}` sets `rise`, which only a lift portal has")]
+    RiseOnNonLiftPortal {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+    },
     /// A lift portal whose rooms sit at different floors also sets
     /// [`Portal::rise`], which only means something on a barrier (equal
     /// floors) — an ordinary lift's rest floor is simply the higher room's.
@@ -839,9 +867,11 @@ pub enum IrError {
         /// The second room.
         b: String,
     },
-    /// A [`LiftTrigger::Walkover`]/[`LiftTrigger::BothEnds`] lift's low room
-    /// names no [`Portal::alcove_near`]/[`Portal::alcove_far`] (whichever
-    /// sits on that room's own wall) to carry the walkover trigger line.
+    /// A [`LiftTrigger::Walkover`] lift's low room names no
+    /// [`Portal::alcove_near`]/[`Portal::alcove_far`] (whichever sits on
+    /// that room's own wall) to carry the walkover trigger line.
+    /// [`LiftTrigger::BothEnds`] never raises this: its second line sits on
+    /// the platform's own top face, not in an alcove.
     #[error(
         "portal `{a}` <-> `{b}` is a walkover lift but the low room `{low_room}` has no alcove \
          ({field}) to carry the trigger line"
@@ -1104,12 +1134,13 @@ impl Ir {
     /// [`IrError::TeleportDestinationsShareSector`] for two teleports that
     /// deliver to different points of the same emitted sector,
     /// [`IrError::DoorThicknessOnLift`] for a lift portal that sets
-    /// `door_thickness`, [`IrError::LiftRiseOnUnequalFloors`] for a lift
-    /// portal whose rooms sit at different floors but that sets `rise`,
-    /// [`IrError::BarrierMissingRise`] for a lift portal whose rooms sit at
+    /// `door_thickness`, [`IrError::RiseOnNonLiftPortal`] for a portal that
+    /// is not a lift but sets `rise`, [`IrError::LiftRiseOnUnequalFloors`]
+    /// for a lift portal whose rooms sit at different floors but that sets
+    /// `rise`, [`IrError::BarrierMissingRise`] for a lift portal whose rooms sit at
     /// one floor but that names no `rise`, [`IrError::LiftWalkoverNeedsAlcove`]
-    /// for a walkover/both-ends lift whose low room names no alcove to carry
-    /// the trigger line, [`IrError::BarrierTrigger`] for a barrier that sets
+    /// for a walkover lift whose low room names no alcove to carry the
+    /// trigger line, [`IrError::BarrierTrigger`] for a barrier that sets
     /// a trigger other than `switch`, [`IrError::DuplicatePedestal`] for a
     /// repeated pedestal id, [`IrError::PedestalUnknownRoom`] for a pedestal
     /// naming a room that does not exist, [`IrError::PedestalRiseNotPositive`]
@@ -1657,9 +1688,19 @@ impl Ir {
         Ok(())
     }
 
-    /// Validates every [`PortalKind::Lift`] portal's `rise`/`trigger`
-    /// against its barrier/lift status.
+    /// Validates every portal's [`Portal::rise`] — rejected outright on
+    /// anything but [`PortalKind::Lift`] — and, for every
+    /// [`PortalKind::Lift`] portal, its `rise`/`trigger` against its
+    /// barrier/lift status.
     fn validate_lifts(ir: &Self) -> Result<(), IrError> {
+        for portal in &ir.portals {
+            if portal.kind != PortalKind::Lift && portal.rise.is_some() {
+                return Err(IrError::RiseOnNonLiftPortal {
+                    a: portal.a.clone(),
+                    b: portal.b.clone(),
+                });
+            }
+        }
         for portal in ir.portals.iter().filter(|p| p.kind == PortalKind::Lift) {
             let barrier = ir.is_barrier(portal);
             match (barrier, portal.rise) {
@@ -1738,18 +1779,33 @@ impl Ir {
                 });
             }
             let room = ir.room(&p.room).expect("checked above");
-            let (lo, hi) = p.rect();
-            for q in [lo, hi] {
-                if !MAP_RANGE.contains(&q.x) || !MAP_RANGE.contains(&q.y) {
-                    return Err(IrError::CoordinateOutOfRange {
-                        subject: format!("pedestal `{}`", p.id),
-                        x: q.x,
-                        y: q.y,
-                        min: *MAP_RANGE.start(),
-                        max: *MAP_RANGE.end(),
-                    });
-                }
+            // Range-checked before `rect()` is ever called: `size` has no
+            // upper bound of its own, so `at + size` can overflow `i32`
+            // outright, and `rect()`'s saturating sum would then read as a
+            // plausible-looking corner unless it is compared against
+            // `MAP_RANGE` after being computed with checked arithmetic here.
+            if !MAP_RANGE.contains(&p.at.x) || !MAP_RANGE.contains(&p.at.y) {
+                return Err(IrError::CoordinateOutOfRange {
+                    subject: format!("pedestal `{}`", p.id),
+                    x: p.at.x,
+                    y: p.at.y,
+                    min: *MAP_RANGE.start(),
+                    max: *MAP_RANGE.end(),
+                });
             }
+            let hi_x = p.at.x.checked_add(w);
+            let hi_y = p.at.y.checked_add(h);
+            let in_range = |v: Option<i32>| v.is_some_and(|v| MAP_RANGE.contains(&v));
+            if !in_range(hi_x) || !in_range(hi_y) {
+                return Err(IrError::CoordinateOutOfRange {
+                    subject: format!("pedestal `{}`", p.id),
+                    x: hi_x.unwrap_or(i32::MAX),
+                    y: hi_y.unwrap_or(i32::MAX),
+                    min: *MAP_RANGE.start(),
+                    max: *MAP_RANGE.end(),
+                });
+            }
+            let (lo, hi) = p.rect();
             // The island pad's containment test, verbatim: every corner
             // strictly inside, no room vertex inside the rectangle, no wall
             // through it.
@@ -3083,6 +3139,20 @@ mod tests {
     }
 
     #[test]
+    fn rise_is_rejected_on_non_lift_portals() {
+        let plain = ir_with_gap(8).replace(r#""at":[64,32] }"#, r#""at":[64,32], "rise":96 }"#);
+        assert!(matches!(
+            Ir::from_json(&plain),
+            Err(IrError::RiseOnNonLiftPortal { .. })
+        ));
+        let door = ir_with_door(32, r#", "door_thickness":32, "rise":96"#);
+        assert!(matches!(
+            Ir::from_json(&door),
+            Err(IrError::RiseOnNonLiftPortal { .. })
+        ));
+    }
+
+    #[test]
     fn rise_is_required_on_equal_floors_and_rejected_on_unequal_ones() {
         let json = with(
             LIFT_BASE,
@@ -3142,6 +3212,18 @@ mod tests {
             LIFT_BASE,
             r#""at":[256,128] }"#,
             r#""at":[256,128], "trigger":"walkover", "alcove_near":16 }"#,
+        );
+        assert!(Ir::from_json(&json).is_ok());
+    }
+
+    #[test]
+    fn a_both_ends_lift_needs_no_alcove() {
+        // Unlike `walkover`, `both_ends`'s second trigger line sits on the
+        // platform's own top face, not in the low room's alcove.
+        let json = with(
+            LIFT_BASE,
+            r#""at":[256,128] }"#,
+            r#""at":[256,128], "trigger":"both_ends" }"#,
         );
         assert!(Ir::from_json(&json).is_ok());
     }
@@ -3244,6 +3326,31 @@ mod tests {
             ),
             "touching counts as overlap, as for pads"
         );
+    }
+
+    #[test]
+    fn a_pedestal_whose_corner_would_overflow_is_rejected_not_panicked() {
+        // `at` alone is already outside the binary map range: caught before
+        // `rect()` is ever called, so `at + size` (the default 64x64) never
+        // executes.
+        let huge_at = with(PEDESTAL_BASE, r#""at":[128,128]"#, r#""at":[2147483647,0]"#);
+        assert!(matches!(
+            Ir::from_json(&huge_at),
+            Err(IrError::CoordinateOutOfRange { .. })
+        ));
+        // `at` is in range and `size` is a legal positive multiple of 8, so
+        // only the high corner's own `at + size` sum — computed with
+        // checked, not saturating, arithmetic — catches this one.
+        let small_at = with(PEDESTAL_BASE, r#""at":[128,128]"#, r#""at":[8,8]"#);
+        let huge_size = with(
+            &small_at,
+            r#""rise":128,"#,
+            r#""rise":128, "size":[2147483640,8],"#,
+        );
+        assert!(matches!(
+            Ir::from_json(&huge_size),
+            Err(IrError::CoordinateOutOfRange { .. })
+        ));
     }
 
     #[test]
