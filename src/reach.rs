@@ -56,6 +56,21 @@
 //! P15 over the marker (`compile::things`, `check::invariants`). These edges
 //! are also the graph's only directed ones (see [`Edge`]).
 //!
+//! [`EdgeKind::Lift`] edges skip both rules too, for a different reason: the
+//! platform *moves*. `lift_edges` adds one undirected edge per
+//! `(caller, platform)` pair the compiler recorded on
+//! [`crate::compile::lifts::LiftOut::callable_from`] — a lift's low room (or
+//! its alcove), both neighbors of a barrier, a pedestal's host — because
+//! `downWaitUpStay` (`p_plats.c`) brings the platform down to that caller's
+//! floor and carries them back up. The step rule would refuse that crossing
+//! on the platform's *rest* heights, which is the one position the player
+//! never has to climb from; the crossing window is guaranteed instead by the
+//! compiler's headroom check on the platform at rest, its tightest position.
+//! Only the call is special-cased: the platform node keeps its rest floor, so
+//! every other boundary it has stays an ordinary [`EdgeKind::Open`] edge
+//! under both rules — level room ↔ platform at equal floors, and the drop
+//! back down to the low room as a free descent.
+//!
 //! # The vacuous-pass gate
 //!
 //! P7 runs only when the map has a player 1 start and at least one exit;
@@ -118,7 +133,7 @@ pub enum EdgeKind {
     },
     /// A teleport: crossing `a`'s trigger edge relocates the player to `b`.
     ///
-    /// The first directed edge in the graph — `EV_Teleport` (pinned
+    /// The only directed edge in the graph — `EV_Teleport` (pinned
     /// `p_telept.c`) fires only for a front-side crossing (`if (side == 1)
     /// return 0;`) and relocates rather than moves, so neither the step cap
     /// nor the crossing window applies, and nothing leads back. `check`
@@ -127,6 +142,16 @@ pub enum EdgeKind {
     /// unmodeled case — returning to reuse it — is recorded in
     /// `KNOWN-GAPS.md` as a P7 limitation.
     Teleport,
+    /// A platform a player can call from `a` and ride: the one crossing the
+    /// step rule wrongly refuses — low side → platform — is exactly what a
+    /// callable lift permits (`p_plats.c`, `downWaitUpStay`: the platform
+    /// comes to the caller's floor and carries them up). The platform's node
+    /// keeps its rest floor, so its other edges stay ordinary: level room ↔
+    /// platform is `Open` at equal floors, platform → low room is a free
+    /// descent. Bidirectional, and exempt from both geometric rules — the
+    /// crossing window is guaranteed by the compiler's headroom check on the
+    /// platform at rest, its tightest position.
+    Lift,
 }
 
 /// A boundary between two nodes. Undirected — passability is evaluated per
@@ -220,7 +245,7 @@ fn passable(from: &Node, to: &Node, kind: &EdgeKind, mask: KeyMask, limits: &Lim
                     mask & (1 << k) != 0
                 })
         }
-        EdgeKind::Teleport => true,
+        EdgeKind::Teleport | EdgeKind::Lift => true,
     }
 }
 
@@ -503,6 +528,7 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
     }
 
     edges.extend(teleport_edges(tables, out));
+    edges.extend(lift_edges(out));
 
     Some(BuiltGraph {
         graph: ReachGraph {
@@ -551,6 +577,25 @@ fn teleport_edges(tables: &Tables, out: &Compiled) -> Vec<Edge> {
                 b: dest,
                 kind: EdgeKind::Teleport,
             });
+        }
+    }
+    edges
+}
+
+/// One [`EdgeKind::Lift`] edge per distinct `(caller, platform)` pair the
+/// compiler recorded on [`Compiled::lifts`].
+fn lift_edges(out: &Compiled) -> Vec<Edge> {
+    let mut seen: HashSet<(NodeIdx, NodeIdx)> = HashSet::new();
+    let mut edges = Vec::new();
+    for lift in &out.lifts {
+        for &from in &lift.callable_from {
+            if seen.insert((from, lift.sector)) {
+                edges.push(Edge {
+                    a: from,
+                    b: lift.sector,
+                    kind: EdgeKind::Lift,
+                });
+            }
         }
     }
     edges
@@ -751,6 +796,28 @@ mod tests {
         assert!(
             check(&through_open, &LIMITS).unfinishable,
             "zero window blocks an open edge"
+        );
+    }
+
+    #[test]
+    fn a_lift_edge_climbs_more_than_a_step_where_an_open_edge_refuses() {
+        let limits = Limits {
+            player_height: 56,
+            max_step: 24,
+        };
+        let low = node(0, 128, 0);
+        let plat = node(128, 256, 0);
+        assert!(
+            !passable(&low, &plat, &EdgeKind::Open, 0, &limits),
+            "128 up is not a step"
+        );
+        assert!(
+            passable(&low, &plat, &EdgeKind::Lift, 0, &limits),
+            "a callable lift carries the player up"
+        );
+        assert!(
+            passable(&plat, &low, &EdgeKind::Lift, 0, &limits),
+            "and descent is free either way"
         );
     }
 
@@ -1026,7 +1093,7 @@ mod tests {
             .iter()
             .filter_map(|e| match &e.kind {
                 EdgeKind::Door { lock } => Some(*lock),
-                EdgeKind::Open | EdgeKind::Teleport => None,
+                EdgeKind::Open | EdgeKind::Teleport | EdgeKind::Lift => None,
             })
             .collect();
         assert_eq!(locks, vec![None, None], "both door faces, neither locked");
@@ -1069,7 +1136,7 @@ mod tests {
             .iter()
             .filter_map(|e| match &e.kind {
                 EdgeKind::Door { lock } => Some(*lock),
-                EdgeKind::Open | EdgeKind::Teleport => None,
+                EdgeKind::Open | EdgeKind::Teleport | EdgeKind::Lift => None,
             })
             .collect();
         assert!(!lock_classes.is_empty(), "the door faces are Door edges");
@@ -1265,5 +1332,38 @@ mod tests {
             (0, 1),
             "from the host room to room b"
         );
+    }
+
+    #[test]
+    fn the_lift_golden_is_finishable_and_the_pedestal_is_reachable() {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(include_str!("../tests/golden/lifts.json")).expect("ir");
+        let out = crate::compile::compile(&ir, &tables).expect("compiles");
+        let built = graph_from_compiled(&ir, &tables, &out).expect("start and exit");
+        let lifts: Vec<&Edge> = built
+            .graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Lift)
+            .collect();
+        assert_eq!(
+            lifts.len(),
+            5,
+            "lift (from low), barrier (from ledge and far), walkover lift (from the alcove), pedestal (from low)"
+        );
+        let findings = check(
+            &built.graph,
+            &Limits {
+                player_height: tables.player().height,
+                max_step: tables.step_height(),
+            },
+        );
+        assert!(!findings.unfinishable);
+        assert!(
+            findings.unreachable.is_empty(),
+            "{:?}",
+            findings.unreachable
+        );
+        assert!(findings.stranded.is_empty());
     }
 }

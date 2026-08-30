@@ -125,27 +125,30 @@ emits a thing there.
 
 ## The check catalog
 
-Sixteen ids. `V-Pn` re-derives playability rule `Pn` from §7.3; `V-S` is the
+Seventeen ids in eighteen rows — `V-P11` earns one row for doors and one for
+lifts. `V-Pn` re-derives playability rule `Pn` from §7.3; `V-S` is the
 structural/unclassifiable-input family. Every finding names a subject (sector,
 linedef, or thing, by TEXTMAP declaration index — or the map as a whole) and
 prints as `{id} {severity} {subject}: {message}`.
 
 | Id | What it derives | Severity |
 |---|---|---|
-| `V-S` | **Structural:** a linedef whose `v1`/`v2`/`sidefront`/`sideback`/sidedef-`sector` reference is out of range; a `twosided` flag disagreeing with `sideback`'s presence; a sector boundary that does not close; a thing inside no closed sector. **Unknown vocabulary:** a thing whose `type_id` names nothing (`unknown thing type {n}`); a linedef special this checker does not model. | Error for the four structural cases; Warning for the two unknown-vocabulary cases |
+| `V-S` | **Structural:** a linedef whose `v1`/`v2`/`sidefront`/`sideback`/sidedef-`sector` reference is out of range; a `twosided` flag disagreeing with `sideback`'s presence; a sector boundary that does not close; a thing inside no closed sector. **Unknown vocabulary:** a thing whose `type_id` names nothing (`unknown thing type {n}`); a linedef special this checker does not model — the eight lift specials are modeled now (`V-P5` and the flood's lift edges), so they no longer draw it. | Error for the four structural cases; Warning for the two unknown-vocabulary cases |
 | `V-P2` | A thing's sector has `ceiling - floor` at least the thing's required height: a monster species' own height, else a blocking/hanging prop's, else the player's height for the five start kinds. Pickups, keys and ammo pin no requirement. **No door-sector exemption** — a door sector's emitted heights are its *closed* state, and something standing in one is unplayable exactly as reported. | Error |
 | `V-P3` | Every passable boundary is at least `2 × player radius` long. Door faces are exempt (their clear width is V-P4's business); one visit per linedef. | Error |
 | `V-P4` | For each door sector — found structurally, as the `neighbor` of a `fronts_this` door-special boundary, i.e. the line's **back** sector, which is what `EV_DoDoor` operates on — `min(neighbor ceilings across its own door boundaries) − door_clearance_allowance − its own floor` is at least the player's height. Measures the *emitted* door floor, not `rules.rs`'s pre-layout `max(a.floor, b.floor)` proxy. | Error |
+| `V-P5` | Every platform (a sector named by a lift line's tag) travels — its floor is above its lowest two-sided neighbor's, the floor `EV_DoPlat` sends it to — and can be called from that floor: some trigger line's activator sector (a use special's front sector; either side a walkover can be crossed from at rest, excluding a walkover with a dead-end pocket no deeper than the player's radius on either side, which `P_TryMove` lets no center into) stands at the low floor. A platform callable only from above is P5's trap; whether the region below still finishes is V-P7's verdict, so both findings are Warnings. | Warning |
 | `V-P7` | The key-aware flood: no player 1 start; an extra player 1 start; a start in no sector; no exit line; more lock classes than a `KeyMask` holds; the map is unfinishable; a reachable `(sector, keys)` state can no longer reach an exit; a sector no walk reaches. | Error |
 | `V-P8` | A one-sided line's front `texturemiddle` is not `"-"`; two sectors with differing floors give the **lower-floor** side a `texturebottom`; differing ceilings give the **higher-ceiling** side a `texturetop`. Re-derived from `r_segs.c`'s `R_StoreWallRange` (lines 570 and 589), not from the compile-side `visible_*_side` pair. | Error |
 | `V-P9` | No sidedef carries a `scalex*`/`scaley*` UDMF extension — vanilla's renderer has no per-sidedef scaling, so their presence means a source-port-only effect. Named by the first linedef referencing the sidedef, else by the map (an orphan sidedef). | Error |
-| `V-P11` | No door-special line carries `dontpegtop` or `dontpegbottom` on its own face. **A convention pin, not an engine rule** — `ML_DONTPEGBOTTOM` is inert on a typical door face, whose visible texture lives in the upper slot — which is why it is a Warning, the same downgrade §9 gives P10. Measured: 247 of 255 door-special lines in `DOOM2.WAD` carry neither. | Warning |
+| `V-P11` (doors) | No door-special line carries `dontpegtop` or `dontpegbottom` on its own face. **A convention pin, not an engine rule** — `ML_DONTPEGBOTTOM` is inert on a typical door face, whose visible texture lives in the upper slot — which is why it is a Warning, the same downgrade §9 gives P10. Measured: 247 of 255 door-special lines in `DOOM2.WAD` carry neither. | Warning |
+| `V-P11` (lifts) | No riser — a two-sided boundary of a platform whose neighbor's floor is below it — carries `dontpegbottom`: flag-clear anchors the lower to the platform's floor so it rides with it (`r_segs.c`); 96 % of corpus risers are flag-clear (`docs/measurements/lift-shapes-2026-08-29.md` §G). Rendering only. | Warning |
 | `V-P13` | An action line's tag resolves to at least one sector (a dead action otherwise). **The four exit specials are exempt** — `G_ExitLevel`/`G_SecretExitLevel` are `void (void)` and neither the switch nor the walkover path ever looks a tag up, so an unresolved tag there was never going to be read. Symmetrically, a sector carrying a tag no action line references is a stale tag. | Error for an unresolvable action tag; Warning for a stale sector tag |
 | `V-P14` | No action line carries tag 0. Tag 0 is not "no tag" — it is the tag every untagged sector already has, so one stray zero opens every door. | Error |
 | `V-P15` | Every teleport line's tag resolves the way `EV_Teleport` resolves it — the first sector, in declaration order, that both carries the tag and holds a `teleport_dest` marker — to a sector holding **exactly one** marker, with the player's headroom and radius clearance at the marker. Clearance is measured against the destination's **non-passable** boundary segments only, the same rule V-P25 applies to a start. Judged once per linedef, from its front mirror: `EV_Teleport` returns immediately on a back-side crossing, so the back mirror triggers nothing to check. A tag-0 teleport line is V-P14's finding, not repeated here. | Error |
 | `V-P19` | Every sector's `lightlevel` is inside `Tables::light_range()`. Unconditional, spec or no spec. | Error |
 | `V-P20` | **Embedding:** no collectible (pickup, ammo, weapon, `backpack`, key, or one of the eight powerups) sits inside a blocking prop's radius. **Reachability:** every collectible's sector is one the V-P7 flood actually reached; runs only when the flood ran. | Error |
-| `V-P24` | Every locked-door **class** present has at least one key of that colour placed, and every placed key opens at least one door present. Class-level, because `26` is all an emitted linedef retains — it opens to either `blue_card` or `blue_skull`. Doors dedupe by `(door sector, class)`, so one physical door with two faces reports once. | Error |
+| `V-P24` | Every locked-door **class** present has at least one key of that color placed, and every placed key opens at least one door present. Class-level, because `26` is all an emitted linedef retains — it opens to either `blue_card` or `blue_skull`. Doors dedupe by `(door sector, class)`, so one physical door with two faces reports once. | Error |
 | `V-P25` | Every player start clears its sector's **non-passable** walls by at least the player's radius (an open doorway cannot crush you against it); clears every other thing whose name resolves to a blocking prop on **both axes at once** by `prop.radius + player.radius` (`PIT_CheckThing`'s own axis-aligned `blockdist` box, not a circular distance); and no two starts of any kind are within telefrag distance (`2 × radius`) of each other. | Error |
 | `V-P27` | Every sector holding a monster has at least one two-sided boundary, or is a teleport destination. A fully one-sided monster sector can never be woken by sight or sound and is never entered, so its monsters are scenery the player never meets. **Two-sided**, not passable: sound and sight both travel through a two-sided line the player cannot walk across (a window, a fence), so a blocking two-sided boundary is still a way in for the wake-up this rule is about. | Error |
 
@@ -193,7 +196,7 @@ cannot recover that, so this module names both and accepts a goal set that can
 only ever be too generous, never falsely unfinishable.
 
 **Key classes are interned by lock, not by key name** — a card and a skull of
-one colour share a class, because `EV_VerticalDoor` accepts either. Where
+one color share a class, because `EV_VerticalDoor` accepts either. Where
 `graph_from_compiled` `assert!`s that the vocabulary fits a `KeyMask`, this
 module reports a hard finding instead: it runs on arbitrary input.
 
@@ -221,17 +224,22 @@ frontmatter fields (`identity.title`/`.author`/`.iwad`/`.outputs`/`.seed`,
 most of `combat`'s administrative fields, `progression.doors`'s
 speed/behavior settings, and others) have no row at all: nothing this checker
 does turns on their value. Unlike the rest of the module, all of these rows
-but one re-derive no playability rule — each is a target-vs-actual
+but four re-derive no playability rule — each is a target-vs-actual
 comparison — so the only sourcing burden is the ammo ratio's damage figures,
 the two thing-flag bits (`MTF_AMBUSH` = 8; multiplayer-only = 16, which the
 pinned source writes as a raw literal with no named constant), and the
-teleport specials the two pad counts read. The one exception is
+teleport specials the two pad counts read. The exceptions are
 `progression.exit.trigger`, which borrows the flood's teleport-only
-predicate; see the `NotDerivable` discussion below.
+predicate (see the `NotDerivable` discussion below), and the three
+`progression.lifts.*` rows, which read `check::plats`' engine-style plat
+resolution — platforms and who can call them — rather than counting lift
+lines. `progression.lifts.trigger` grades only the platforms that rest at
+the top, since a barrier or a pedestal is not a lift the player rides, and a
+map with no such platform passes it vacuously with actual `no lifts`.
 
-Thirty-six rows are fixed, plus one per spec monster species, one per placed
-species the spec never names (always `Fail`, target `absent`), and one per
-`sustain.powerups[]` entry. Entrada against its paired spec produces 49.
+Thirty-eight rows are fixed, plus one per spec monster species, one per
+placed species the spec never names (always `Fail`, target `absent`), and one
+per `sustain.powerups[]` entry. Entrada against its paired spec produces 51.
 
 **Verdict discipline.** A range (`MinMax`) or exact-count or boolean target is
 `Pass`/`Fail` — those are decidable. A **scalar continuous** target
@@ -383,7 +391,7 @@ every conformance row as `{parameter}: {verdict} (target {target}, actual
 then a one-line summary:
 
 ```
-0 blocking, 0 warning(s), 49 conformance row(s), 3 tag(s)
+0 blocking, 0 warning(s), 51 conformance row(s), 3 tag(s)
 ```
 
 Exit codes:
@@ -415,38 +423,40 @@ different numbering the checks do not model.
 Checking vanilla retail content this way can legitimately surface documented
 authoring-convention warnings, which are expected, not defects: V-P11 flags
 a door face carrying an unpegged flag, and a small minority of `DOOM2.WAD`'s
-own door-special lines do — this document's own V-P11 entry (above) already
-measures it, at 247 of 255 carrying neither. A binary-sourced map drawing
-that warning is the checker doing its job on real content, not a false
-positive.
+own door-special lines do — the V-P11 door row (above) already measures it, at
+247 of 255 carrying neither — and the V-P11 lift row flags a lower-unpegged
+platform riser, which about 4 % of retail and idgames risers are (§G of the
+lift measurement). A binary-sourced map drawing either warning is the checker
+doing its job on real content, not a false positive.
 
 ## What the verifier deliberately does not check
 
-- **Lifts.** Their linedef specials (62 and 88) are sourced and reachable
-  through `Tables`, but this compiler emits neither and neither
-  `invariants.rs` nor `flood.rs` models a moving floor. They are therefore
-  kept **out** of the recognized-special set on purpose: a map carrying one
-  draws a `V-S` warning saying this checker does not model that special and
-  the flood cannot vouch for its effect on traversal, instead of a silent
-  pass. Recognizing them without understanding them would make the flood
-  optimistic — it could call a map finishable that a player diverted or
-  blocked by that line could not finish.
+- **Specials this checker does not model.** A linedef special outside
+  `check_recognized_specials`'s set draws a `V-S` warning saying exactly
+  that — and that the flood cannot vouch for its effect on traversal —
+  instead of a silent pass: recognizing a special without understanding it
+  would make the flood optimistic, letting it call a map finishable that a
+  player diverted or blocked by that line could not finish. The eight lift
+  specials sat in that unmodeled set until the flood learned to ride a
+  platform; they are recognized now (`plats::resolve_plats`,
+  `EdgeKind::Lift`, and V-P5 alongside V-P11's lift row), so a lift line no
+  longer draws the warning.
 
-  **Teleports are the opposite case, and the contrast is the rule.** All four
-  teleport specials (97/39/126/125) *are* in the recognized set, because the
-  flood does model them. What is modeled: a `fronts_this` boundary carrying
-  either **player** teleport special contributes one **directed**
-  `EdgeKind::Teleport` edge from its own sector to the sector its tag
-  resolves to. Front side only — `EV_Teleport` returns before doing anything
-  when `side == 1`, so the back mirror of the same linedef builds no edge.
-  Engine-style resolution — the destination is the first sector, in
-  declaration order, that both carries the tag and holds a `teleport_dest`
-  marker; a tag matching sectors that hold no marker resolves past them, and
-  a tag matching none at all yields no edge, because the line fires nothing
-  (which is V-P15's finding, not the flood's). Directed, because a teleport
-  relocates the player rather than opening a way back. The edge is gated on
-  `Boundary::passable`, exactly as the walkover exits are. V-P15 then checks
-  that every teleport line's tag pairs with exactly one marker that the
+  **Teleports are modeled the same way, and the contrast with an unmodeled
+  special is the rule.** All four teleport specials (97/39/126/125) *are* in
+  the recognized set, because the flood does model them. What is modeled: a
+  `fronts_this` boundary carrying either **player** teleport special
+  contributes one **directed** `EdgeKind::Teleport` edge from its own sector
+  to the sector its tag resolves to. Front side only — `EV_Teleport` returns
+  before doing anything when `side == 1`, so the back mirror of the same
+  linedef builds no edge. Engine-style resolution — the destination is the
+  first sector, in declaration order, that both carries the tag and holds a
+  `teleport_dest` marker; a tag matching sectors that hold no marker resolves
+  past them, and a tag matching none at all yields no edge, because the line
+  fires nothing (which is V-P15's finding, not the flood's). Directed, because
+  a teleport relocates the player rather than opening a way back. The edge is
+  gated on `Boundary::passable`, exactly as the walkover exits are. V-P15 then
+  checks that every teleport line's tag pairs with exactly one marker that the
   player fits at, and V-P27 that no monster sector is sealed away from both
   sight and a teleport arrival.
 
@@ -471,7 +481,7 @@ positive.
   warning above is a *linedef*-special check: `check_recognized_specials`
   reads `Boundary::special`, and a damaging floor is a **sector** special
   (`data/engine.toml`'s `[sector.damage]`, a numerically distinct space, as
-  that table's own neighbouring comment spells out).
+  that table's own neighboring comment spells out).
   `SceneSector::special` is populated by `Scene::build` but read nowhere in
   `src/check/` — the secret-sector count in `MapStats` reads the raw
   `UdmfMap`'s own `sector.special` directly (`check/mod.rs`), not the
@@ -490,10 +500,10 @@ positive.
 - **P24's authored-intent form.** `rules.rs`'s IR-side `check_key_lock_coherence`
   compares the authored lock string (`"blue_card"`) against placed thing kinds
   by exact equality — it polices what the author *said*. V-P24 cannot: an
-  emitted `26` names a colour class, not a card. The two rules deliberately
+  emitted `26` names a color class, not a card. The two rules deliberately
   disagree on a map that locks `"blue_card"` and places a `blue_skull`
   (`KNOWN-GAPS.md` records why neither should be "fixed" into agreement).
-- **The rest of the catalog.** P1 (retired), P5, P6, P10, P12, P16, P17, P18,
+- **The rest of the catalog.** P1 (retired), P6, P10, P12, P16, P17, P18,
   P21, P22, P23 have no `V-` id — the set the compiler leaves uncovered, less
   P20, which the verifier does cover. P26 is the one compiler-side rule with
   no `V-` id: a teleport exit emits exactly a plain walkover exit's specials,

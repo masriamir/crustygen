@@ -3,6 +3,7 @@
 pub mod doors;
 pub mod exits;
 pub mod heights;
+pub mod lifts;
 pub mod portals;
 pub mod sectors;
 pub mod tags;
@@ -39,10 +40,11 @@ pub struct SectorOut {
     /// recess), which belong to no room and so have no
     /// [`crate::ir::Room::wall_tex`] of their own to read.
     pub wall_tex: String,
-    /// For an island teleport pad, the index of the room sector it is carved
-    /// inside. [`sectors::check_no_sector_overlaps`] exempts exactly that
-    /// pair — a pad lies inside its host by construction — and tests every
-    /// other pair as usual. `None` for every other sector.
+    /// For an island — a teleport pad or a pedestal — the index of the room
+    /// sector it is carved inside. [`sectors::check_no_sector_overlaps`]
+    /// exempts exactly that pair, since an island lies inside its host by
+    /// construction, and tests every other pair as usual. `None` for every
+    /// other sector.
     pub host: Option<usize>,
 }
 
@@ -358,6 +360,32 @@ pub enum CompileError {
         /// Y coordinate.
         y: i32,
     },
+    /// An authored room thing stands on a pedestal's rectangle; it would
+    /// spawn in the pedestal's sector at its raised floor, not on the room
+    /// floor the author placed it on.
+    ///
+    /// The pedestal twin of
+    /// [`TeleportThingOnPad`](Self::TeleportThingOnPad), and refused for the
+    /// same reason: a room's `things` describe the room's own floor, and an
+    /// island inside it is a different sector at a different height. The
+    /// rectangle is closed on both axes — a point on its edge is already on
+    /// the platform's boundary line — but it is *not* grown by the thing's
+    /// radius the way a pad's is, because a pedestal is authored geometry
+    /// the author may deliberately stand something beside.
+    ///
+    /// A thing genuinely meant to ride the platform goes in the pedestal's
+    /// own [`things`](crate::ir::Pedestal::things) list instead.
+    #[error("thing `{kind}` at ({x}, {y}) stands on pedestal `{pedestal}`")]
+    ThingOnPedestal {
+        /// The pedestal it stands on.
+        pedestal: String,
+        /// The vocabulary name.
+        kind: String,
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+    },
     /// A thing sits closer to a wall than its own radius.
     #[error(
         "thing `{kind}` at ({x}, {y}) in room `{room}` has {have:.1} units of clearance but needs {need}"
@@ -498,6 +526,178 @@ pub enum CompileError {
         /// Y coordinate.
         y: i32,
     },
+    /// A lift portal's two rooms differ by no more than the player's step
+    /// height, so the platform would carry them somewhere they could
+    /// already walk.
+    ///
+    /// `P_TryMove` lets the player climb any difference up to
+    /// `max_step_height` unaided, so a platform under that is inert
+    /// scenery with a `downWaitUpStay` special on it. A plain portal says
+    /// the same thing with no moving sector at all.
+    #[error(
+        "portal `{a}` <-> `{b}` is a lift but its rooms' floors differ by {delta}, within the {step}-unit step: use a plain portal"
+    )]
+    LiftTravelTooShort {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The floor difference, which is also the platform's travel.
+        delta: i32,
+        /// The player's step height.
+        step: i32,
+    },
+    /// A barrier's [`crate::ir::Portal::rise`] is no more than the player's
+    /// step height, so they could step over the risen platform instead of
+    /// riding it.
+    ///
+    /// The barrier form of [`LiftTravelTooShort`](Self::LiftTravelTooShort):
+    /// a barrier's two rooms are level by definition, so its rise *is* its
+    /// travel and is what must clear the step.
+    #[error(
+        "portal `{a}` <-> `{b}` is a barrier but rises only {rise}, within the {step}-unit step: the player would step over it"
+    )]
+    LiftRiseTooLow {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The declared rise.
+        rise: i32,
+        /// The player's step height.
+        step: i32,
+    },
+    /// A lift portal's alcoves leave the platform shallower than the
+    /// player's own diameter, so they could not stand on it.
+    ///
+    /// The platform fills whatever the alcoves leave of the gap (a lift
+    /// declares no thickness of its own), so deep alcoves in a narrow gap
+    /// squeeze it. Measured against the diameter rather than the radius: the
+    /// player is a cylinder that must fit entirely between the two faces.
+    ///
+    /// `depth` is signed along the direction of travel through the gap, so
+    /// alcoves that overrun the gap entirely report a negative depth rather
+    /// than the healthy-looking absolute separation of two reversed faces.
+    #[error(
+        "portal `{a}` <-> `{b}` leaves {depth} units for the platform, but the player is {need} units across"
+    )]
+    LiftTooShallow {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The platform's depth along the gap axis.
+        depth: i32,
+        /// The player's diameter.
+        need: i32,
+    },
+    /// A [`crate::ir::LiftTrigger::Walkover`] lift's low-side alcove is no
+    /// deeper than the player's own radius, so the trigger can never fire.
+    ///
+    /// The walkover special sits on that alcove's *outer* threshold, and
+    /// `P_TryMove` (`p_map.c:446-517`) fires a crossing only from its
+    /// `spechit` walk, which compares `P_PointOnLineSide(thing->x, thing->y,
+    /// ld)` before and after the move: the thing's **center** must cross the
+    /// line. Yet the same function returns at `tmfloorz - thing->z >
+    /// 24*FRACUNIT` (lines 477-479) before that walk ever runs, and
+    /// `PIT_CheckLine` raises `tmfloorz` to the platform's floor for any line
+    /// the moving **box** straddles — while `PIT_CheckLine`'s bounding-box
+    /// early-out (`p_map.c:191-195`, `<=`/`>=`) lets a box merely touch the
+    /// line. So the center can come exactly the player's radius from the
+    /// platform's face but no closer; an alcove exactly that deep puts the
+    /// center on the threshold line, which `P_PointOnLineSide`
+    /// (`p_maputl.c:76-81`) counts as not crossed, and a shallower alcove
+    /// has no standing room
+    /// beyond the threshold at all.
+    ///
+    /// `depth` is the low room's own alcove — `alcove_near` when room `a` is
+    /// the low one, `alcove_far` otherwise.
+    #[error(
+        "portal `{a}` <-> `{b}` is a walkover lift whose low room's alcove is {depth} units deep, \
+         but the walkover fires only when the player's center crosses its threshold line, which \
+         needs at least {need}"
+    )]
+    LiftAlcoveTooShallow {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The low room's alcove depth.
+        depth: i32,
+        /// The player's radius plus one.
+        need: i32,
+    },
+    /// A pedestal's [`crate::ir::Pedestal::rise`] is no more than the
+    /// player's step height, so they could walk up onto it rather than
+    /// riding it down.
+    ///
+    /// The pedestal form of [`LiftRiseTooLow`](Self::LiftRiseTooLow): a
+    /// pedestal's only neighbor is its host, so its rise *is* its travel and
+    /// is what must clear the step.
+    #[error(
+        "pedestal `{pedestal}` rises only {rise}, within the {step}-unit step: the player would walk onto it"
+    )]
+    PedestalRiseTooLow {
+        /// The pedestal.
+        pedestal: String,
+        /// The declared rise.
+        rise: i32,
+        /// The player's step height.
+        step: i32,
+    },
+    /// A pedestal's rectangle is narrower than the player's own diameter on
+    /// at least one side, so they could not stand on it.
+    ///
+    /// The pedestal form of [`LiftTooShallow`](Self::LiftTooShallow), held
+    /// to the same bound and for the same reason: measured against the
+    /// diameter rather than the radius, because the player is a cylinder
+    /// that must fit entirely between two opposite edges. Both sides are
+    /// reported, since either may be the offending one.
+    #[error("pedestal `{pedestal}` is {width}x{height}, but the player is {min} units across")]
+    PedestalTooSmall {
+        /// The pedestal.
+        pedestal: String,
+        /// The rectangle's width.
+        width: i32,
+        /// The rectangle's height.
+        height: i32,
+        /// The player's diameter.
+        min: i32,
+    },
+    /// A pedestal's risen floor leaves less headroom under its host's
+    /// ceiling than something standing on it needs.
+    ///
+    /// Raised from two passes, for the two things that must fit:
+    /// [`lifts::emit_lifts`] for the player, who has to ride the platform up
+    /// whatever else is on it, and [`things::place_things`] for each thing
+    /// the pedestal carries, which may be taller than the player. `kind`
+    /// names which — `player` for the first.
+    #[error("pedestal `{pedestal}` has {have} units of headroom but `{kind}` needs {need}")]
+    PedestalNoHeadroom {
+        /// The pedestal.
+        pedestal: String,
+        /// The vocabulary name of the thing that does not fit, or `player`
+        /// for the rider the platform must clear regardless of its cargo.
+        kind: String,
+        /// The gap between the risen floor and the host's ceiling.
+        have: i32,
+        /// Required height.
+        need: i32,
+    },
+    /// The map emits more platforms than the engine can run at once.
+    ///
+    /// `MAXPLATS` bounds `p_plats.c`'s active-plat table, and overflowing it
+    /// is fatal in the pinned source. Counted over every emitted platform —
+    /// lift portals, barriers and pedestals alike — not over some estimate
+    /// of how many could move together: nothing here can prove a player will
+    /// not set them all going at once.
+    #[error("the map has {count} platforms but the engine allows {max} active at once")]
+    TooManyPlats {
+        /// The number of platforms emitted.
+        count: usize,
+        /// `MAXPLATS`.
+        max: usize,
+    },
     /// The compiled map breaks one or more playability rules.
     #[error(
         "map breaks {} playability rule(s): {}",
@@ -530,6 +730,8 @@ pub struct Compiled {
     pub tags: TagAllocator,
     /// The teleport destination markers, for rule P15.
     pub markers: Vec<teleports::Marker>,
+    /// The emitted platforms — lifts, barriers and pedestals.
+    pub lifts: Vec<lifts::LiftOut>,
 }
 
 /// Compiles a room graph into UDMF `TEXTMAP` text.
@@ -549,9 +751,10 @@ pub struct Compiled {
 ///    (rooms are authored apart — see [`crate::ir::Portal`] — so a portal
 ///    never shares a single coincident wall between its two rooms). For a
 ///    [`crate::ir::PortalKind::Plain`] portal this also fills the gap
-///    between the two openings with an open passage sector; for a door
-///    portal it leaves both flanking walls cut but the gap itself still
-///    empty, because that gap is a closed sector rather than a single line.
+///    between the two openings with an open passage sector; for a door or
+///    lift portal it leaves both flanking walls cut but the gap itself still
+///    empty, because that gap is a sector of its own rather than a single
+///    line.
 /// 4. [`doors::emit_doors`] fills that gap with a dedicated closed sector for
 ///    every door portal — optionally flanked by up to two trim alcove
 ///    sectors ([`crate::ir::Portal::alcove_near`]/
@@ -568,29 +771,39 @@ pub struct Compiled {
 ///    exits so a wall pad and an exit compete for wall spans through
 ///    `portals::split_wall_for_opening` like any two openings, and before
 ///    the overlap check since it emits sectors.
-/// 7. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
+/// 7. [`lifts::emit_lifts`] fills every lift portal's gap with one
+///    `downWaitUpStay` platform sector — again optionally flanked by
+///    alcoves — and cuts every pedestal as a hosted island inside its room,
+///    tagging each from the same [`TagAllocator`]. Runs after `cut_portals`
+///    left that gap empty (step 3) and before the overlap check since it
+///    emits sectors. Its risers must be written before step 9: `heights`
+///    fills only empty texture slots, and the platform's own top-face riser
+///    is invisible at load-time heights, so `heights` would never write it.
+/// 8. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
 ///    that overlap in 2-D — a gap sector driven through a third room, or two
 ///    gap sectors from unrelated portals crossing each other. Must run after
-///    every sector-emitting pass (steps 1, 3, 4, 5, 6) and before anything
-///    that trusts the geometry is sound, which is everything from here on.
-/// 8. [`heights::apply_height_textures`] writes the upper and lower textures
+///    every sector-emitting pass (steps 1, 3, 4, 5, 6, 7) and before
+///    anything that trusts the geometry is sound, which is everything from
+///    here on.
+/// 9. [`heights::apply_height_textures`] writes the upper and lower textures
 ///    every height difference exposes, on the one side `r_segs.c` draws.
 ///    Runs after every sector-emitting pass because it reads final floor and
 ///    ceiling heights, and after the overlap check because it trusts the
 ///    geometry it walks.
-/// 9. [`things::place_things`] places every thing, measuring clearance and
-///    headroom against the geometry emitted by steps 1–6 — not the IR's
-///    declared footprints, which an exit alcove can still make stale even
-///    though a door no longer does — so it must run after doors, exits, and
-///    teleport pads are carved, not before. It also places step 6's
-///    markers, holding each to the clearance its arriving thing needs.
-/// 10. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
+/// 10. [`things::place_things`] places every thing, measuring clearance and
+///     headroom against the geometry emitted by steps 1–7 — not the IR's
+///     declared footprints, which an exit alcove can still make stale even
+///     though a door no longer does — so it must run after doors, exits,
+///     teleport pads, and platforms are carved, not before. It also places
+///     step 6's markers, holding each to the clearance its arriving thing
+///     needs.
+/// 11. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
 ///     at tag 0, which would match every untagged sector in-engine.
-/// 11. [`textmap::emit_textmap`] renders the final, validated geometry.
-/// 12. [`crate::rules::check_all`] runs the playability catalog over the
+/// 12. [`textmap::emit_textmap`] renders the final, validated geometry.
+/// 13. [`crate::rules::check_all`] runs the playability catalog over the
 ///     result and fails the compile if anything is violated.
 ///
-/// Step 12 is part of `compile` rather than a separate call the caller may
+/// Step 13 is part of `compile` rather than a separate call the caller may
 /// forget, because the design makes playability violations hard errors: "a
 /// door the player cannot fit through is a broken map, not a missed target".
 /// Leaving `check_all` optional meant every rule in `rules` was inert unless
@@ -635,9 +848,10 @@ pub fn compile_reporting(
     doors::emit_doors(ir, tables, &mut data, &mut tags)?;
     exits::emit_exits(ir, tables, &mut data, &mut tags)?;
     let markers = teleports::emit_teleports(ir, tables, &mut data, &mut tags)?;
+    let lifts = lifts::emit_lifts(ir, tables, &mut data, &mut tags)?;
     sectors::check_no_sector_overlaps(ir, &data)?;
     heights::apply_height_textures(&mut data);
-    let things = things::place_things(ir, tables, &data, &markers)?;
+    let things = things::place_things(ir, tables, &data, &markers, &lifts)?;
     tags::check_no_action_at_tag_zero(&data)?;
     let textmap = textmap::emit_textmap(&data, &things);
     let compiled = Compiled {
@@ -646,6 +860,7 @@ pub fn compile_reporting(
         things,
         tags,
         markers,
+        lifts,
     };
     let violations = check_all(ir, tables, &compiled);
     Ok((compiled, violations))

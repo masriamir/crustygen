@@ -9,6 +9,7 @@
 //! `heights::visible_lower_side`/`visible_upper_side` being the single,
 //! un-cross-checked place that comparison is made compile-side).
 
+use crate::check::plats::resolve_plats;
 use crate::check::scene::Scene;
 use crate::check::{Finding, Severity, Subject, TagEntry};
 use crate::tables::Tables;
@@ -258,6 +259,38 @@ pub fn check_door_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Fin
                          lower-unpegged; faces carry neither flag",
                         b.special, b.upper_unpegged, b.lower_unpegged
                     ),
+                });
+            }
+        }
+    }
+}
+
+/// V-P11 for lifts — a riser (a plat boundary whose neighbor's floor is
+/// below the plat's) carrying `dontpegbottom`, which anchors the lower to
+/// the ceiling so it stays put while the platform moves out from under it
+/// (`r_segs.c`). Rendering only, hence a Warning.
+///
+/// Only `dontpegbottom` is judged. `dontpegtop` is deliberately unjudged on a
+/// platform: a plat's ceiling never moves, so the flag changes nothing as the
+/// platform travels — it only picks which row of the landing's upper sits at
+/// which height, and the corpus names no convention either way (51.4 % / 6.0 %
+/// / 21.5 % of lift top faces carry it,
+/// `docs/measurements/lift-shapes-2026-08-29.md` §G2). This compiler sets it
+/// on a landing's upper for seam alignment
+/// ([`crate::compile::lifts`]'s `unpeg_landing_upper`); a map that leaves it
+/// clear is not wrong, so there is nothing here to warn about.
+pub fn check_lift_pegging(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    for plat in resolve_plats(scene, tables) {
+        let floor = scene.sectors[plat.sector].floor;
+        for b in &scene.sectors[plat.sector].boundary {
+            let Some(n) = b.neighbor else { continue };
+            if scene.sectors[n].floor < floor && b.lower_unpegged {
+                findings.push(Finding {
+                    check: "V-P11",
+                    severity: Severity::Warning,
+                    subject: Subject::Linedef(b.linedef),
+                    message: "lift riser carries dontpegbottom; flag-clear rides with the platform"
+                        .to_owned(),
                 });
             }
         }
@@ -990,8 +1023,9 @@ pub fn check_door_openings(scene: &Scene, tables: &Tables, findings: &mut Vec<Fi
 
 /// The linedef specials this checker recognizes as modeled: `0` (no
 /// special), a manual or locked door ([`door_specials`]), the four exit
-/// specials (switch/walkover crossed with normal/secret), and the four
-/// teleport specials ([`Tables::teleport_specials`]).
+/// specials (switch/walkover crossed with normal/secret), the four teleport
+/// specials ([`Tables::teleport_specials`]), and the eight lift specials
+/// ([`Tables::lift_specials`]).
 fn recognized_specials(tables: &Tables) -> Vec<i32> {
     let mut specials = door_specials(tables);
     specials.push(0);
@@ -1000,6 +1034,7 @@ fn recognized_specials(tables: &Tables) -> Vec<i32> {
     specials.push(i32::from(tables.secret_exit_switch_special()));
     specials.push(i32::from(tables.secret_exit_walkover_special()));
     specials.extend(tables.teleport_specials().into_iter().map(i32::from));
+    specials.extend(tables.lift_specials().into_iter().map(i32::from));
     specials
 }
 
@@ -1027,15 +1062,12 @@ fn recognized_specials(tables: &Tables) -> Vec<i32> {
 /// Severity stays [`Severity::Warning`]: an unrecognized special is not
 /// proof the map is broken, only proof this checker cannot vouch for it.
 ///
-/// **Lift specials are deliberately not in the recognized set.**
-/// `Tables::lift_switch_special` and `lift_walkover_special` are sourced,
-/// but no pass emits them and the flood does not model a moving floor.
-/// Recognizing them here without the flood actually understanding them
-/// would be dishonest: a map that somehow carried one would get a silent
-/// pass instead of the warning that correctly says "this checker does not
-/// know what this line does." The four teleport specials **are** in the
-/// set, since the flood models them (`flood.rs`, "Edges") and
-/// [`check_teleport_pairing`] (V-P15) checks their pairing.
+/// **The eight lift specials are in the set because the flood now models
+/// them** (`flood.rs`, "Lift edges", via [`crate::check::plats`]): a lift
+/// line names a platform by tag, and the flood rides it as an
+/// [`crate::reach::EdgeKind::Lift`] edge from every sector that can call it.
+/// The four teleport specials are in the set for the same reason (`flood.rs`,
+/// "Edges"), with [`check_teleport_pairing`] (V-P15) checking their pairing.
 ///
 /// Each linedef is visited once (`fronts_this` only): `special` is
 /// linedef-wide, so both mirrors of a two-sided line would otherwise report
@@ -1056,6 +1088,38 @@ pub fn check_recognized_specials(scene: &Scene, tables: &Tables, findings: &mut 
                     "linedef carries special {}, which this checker does not model — the \
                      reachability flood cannot vouch for its effect on traversal",
                     b.special
+                ),
+            });
+        }
+    }
+}
+
+/// V-P5 — lift travel and return, re-derived from the map the way
+/// `EV_DoPlat` reads it ([`crate::check::plats`]). Warnings, not errors: a
+/// dead lift is a no-op, and whether a top-only lift traps anyone is V-P7's
+/// verdict.
+pub fn check_lift_return(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    for plat in resolve_plats(scene, tables) {
+        if plat.travel == 0 {
+            findings.push(Finding {
+                check: "V-P5",
+                severity: Severity::Warning,
+                subject: Subject::Sector(plat.sector),
+                message: format!(
+                    "lift never moves: its floor {} is already the lowest around it",
+                    scene.sectors[plat.sector].floor
+                ),
+            });
+            continue;
+        }
+        if !plat.callable_low() {
+            findings.push(Finding {
+                check: "V-P5",
+                severity: Severity::Warning,
+                subject: Subject::Sector(plat.sector),
+                message: format!(
+                    "lift is callable only from above: no trigger fires from its low floor {}",
+                    plat.low
                 ),
             });
         }
@@ -1245,7 +1309,7 @@ pub fn check_sealed_monster_rooms(scene: &Scene, tables: &Tables, findings: &mut
 mod tests {
     use super::*;
     use crate::check;
-    use crate::check::fixtures::{self, TELEPORT_MAP};
+    use crate::check::fixtures::{self, TELEPORT_MAP, chain};
     use crate::check::scene::{SceneSector, SceneThing};
     use crustywad::Limits;
     use crustywad::map::udmf::parse_udmf;
@@ -2425,5 +2489,79 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         let mut findings = Vec::new();
         check_recognized_specials(&scene, &tables, &mut findings);
         assert!(findings.is_empty(), "97 is modeled now: {findings:?}");
+    }
+
+    /// Parses `text`, builds its [`Scene`] and runs one check over it.
+    fn findings_of_check(
+        text: &str,
+        check: fn(&Scene, &Tables, &mut Vec<Finding>),
+    ) -> Vec<Finding> {
+        let tables = Tables::load().expect("tables");
+        let map = parse_udmf(text, Limits::default()).expect("fixture parses");
+        let scene = Scene::build(&map, &tables, &mut Vec::new());
+        let mut findings = Vec::new();
+        check(&scene, &tables, &mut findings);
+        findings
+    }
+
+    #[test]
+    fn v_p5_names_a_dead_lift_and_a_top_only_lift_and_passes_a_real_one() {
+        let dead = findings_of_check(
+            &chain(&[0, 0, 0], &[0, 7, 0], &[(62, 7, false), (0, 0, false)], ""),
+            check_lift_return,
+        );
+        assert_eq!(dead.len(), 1);
+        assert!(
+            dead[0].check == "V-P5"
+                && dead[0].severity == Severity::Warning
+                && dead[0].message.contains("never moves")
+        );
+        assert_eq!(dead[0].subject, Subject::Sector(1));
+
+        let top_only = findings_of_check(
+            &chain(
+                &[0, 128, 128],
+                &[0, 7, 0],
+                &[(0, 0, false), (62, 7, true)],
+                "",
+            ),
+            check_lift_return,
+        );
+        assert_eq!(top_only.len(), 1);
+        assert!(
+            top_only[0].message.contains("only from above"),
+            "{top_only:?}"
+        );
+
+        let fine = findings_of_check(
+            &chain(
+                &[0, 128, 128],
+                &[0, 7, 0],
+                &[(62, 7, false), (0, 0, false)],
+                "",
+            ),
+            check_lift_return,
+        );
+        assert!(fine.is_empty(), "{fine:?}");
+    }
+
+    #[test]
+    fn v_p11_warns_on_an_unpegged_riser_only() {
+        let text = chain(
+            &[0, 128, 128],
+            &[0, 7, 0],
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        );
+        assert!(findings_of_check(&text, check_lift_pegging).is_empty());
+        let unpegged = text.replacen("special = 62;", "special = 62; dontpegbottom = true;", 1);
+        let f = findings_of_check(&unpegged, check_lift_pegging);
+        assert_eq!(f.len(), 1);
+        assert!(
+            f[0].check == "V-P11"
+                && f[0].subject == Subject::Linedef(0)
+                && f[0].message.contains("dontpegbottom"),
+            "{f:?}"
+        );
     }
 }

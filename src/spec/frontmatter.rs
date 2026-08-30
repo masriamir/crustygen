@@ -301,11 +301,14 @@ pub struct Lifts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LiftTrigger {
-    /// Walking onto the lift activates it.
+    /// Walking toward the lift from the low room activates it: the special
+    /// sits on the outer threshold of the low room's alcove, not on the
+    /// platform itself (see [`crate::ir::LiftTrigger::Walkover`]).
     Walkover,
     /// A switch activates the lift.
     Switch,
-    /// The lift can be activated from either end.
+    /// The lift can be activated from either end: the switch on its low
+    /// face, plus a walkover on the platform's top face.
     BothEnds,
 }
 
