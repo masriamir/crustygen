@@ -691,6 +691,19 @@ The same posture the teleport edge above takes, and optimistic in one
 direction only: a platform *no* trigger fires from below gets no edge at all,
 so the top-only trap stays the wall it really is.
 
+**A one-shot lift line (S1/W1: 21, 10, 122, 121) earns the same flood edge as
+a repeatable one.** The flood is a reachability set, and one call carries the
+caller up once, which is all reachability needs — the way down is a drop, not a
+trigger. The edge is wrong only when the single use is spent before the
+player gets it: `P_CrossSpecialLine` (pinned `p_spec.c:503-535`) lets
+non-player things fire specials 10 and 88, so a monster crossing a W1 plat
+line consumes the map's one call, and the player who arrives later finds a
+wall the flood called a ride. That is a monster-timing question the flood has
+no monsters to pose; the recognizer, which judges expressibility rather than
+reachability, refuses every one-shot (`Refusal::OneShot`) because no IR lift
+states one. The idgames sample carries 179 one-shot lift lines against 8,135 repeatable
+ones (2.2 %), 30 of them W1 (`docs/measurements/lift-shapes-2026-08-29.md` §A).
+
 **V-P15 sizes the destination for the player, even on a monsters-only line.**
 Headroom and radius clearance at the marker are measured against
 `Tables::player`, so a species wider than the player (a pinky is 30 to the

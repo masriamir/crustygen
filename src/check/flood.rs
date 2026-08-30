@@ -142,6 +142,19 @@
 //!   that is the top-only lift a player below cannot call, and the flood
 //!   should see the wall it really is.
 //!
+//! One-shot triggers (S1/W1: 21, 10, 122, 121 — [`Tables::lift_specials`]
+//! minus [`Tables::lift_repeatable_specials`]) earn the same edge as the
+//! repeatable ones. The flood computes what a walk can *ever* reach, and a
+//! platform called once carries its caller up once, which is all a
+//! reachability set needs; the drop back down is the ordinary boundary
+//! edge and needs no trigger. What a one-shot does lose is the second call,
+//! which no node's reachability depends on. The one hazard this does not
+//! model is a W1 line spent before the player arrives: `P_CrossSpecialLine`
+//! (pinned `p_spec.c:503-535`) lets a non-player thing fire specials 10 and
+//! 88 too, so a monster wandering across a W1 plat line consumes it — a
+//! timing question the flood, which has no monsters, cannot pose. Recorded
+//! in `KNOWN-GAPS.md` beside the remote-switch optimism above.
+//!
 //! Either way the caller must share a
 //! [`Boundary::passable`](crate::check::scene::Boundary::passable) boundary
 //! with the platform: boarding is a crossing, and `PIT_CheckLine` refuses a
