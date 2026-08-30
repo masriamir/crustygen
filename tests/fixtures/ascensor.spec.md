@@ -276,7 +276,7 @@ document asking `both_ends` instead, which fails the same row with the same
 
 This spec was derived from `salto.spec.md`; the keys that differ, and why:
 
-- `scale.size` reset to 2400x1200 (salto: 1500x1200) — wider, shorter.
+- `scale.size` reset to 2400x1200 (salto: 1500x1200) — wider, same height budget.
   Ascensor's emitted bounding box is 2240x1088: the six rooms run west to
   east as one chain, and salto's 1500-unit width budget fails on it.
 - `scale.sectors` left at salto's 12..20. Ascensor emits 13: 6 rooms + 3

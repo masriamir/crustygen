@@ -45,6 +45,17 @@ fn binary_ascensor_loads_via_assembly() {
     assert_eq!(loaded.origin, MapOrigin::AssembledFromBinary);
     assert!(!loaded.map.sectors.is_empty(), "assembled map has sectors");
     assert!(!loaded.map.things.is_empty(), "assembled map has things");
+    // The four lift specials the map emits — 62 (lift and pedestal
+    // switches), 88 and 120 (walkover lifts), 123 (fast switches on the
+    // ledge lift and the barrier) — must all come back from LINEDEFS.
+    let specials: std::collections::BTreeSet<i32> =
+        loaded.map.linedefs.iter().map(|l| l.special).collect();
+    for special in [62, 88, 120, 123] {
+        assert!(
+            specials.contains(&special),
+            "lift special {special} lost in the round trip; present: {specials:?}"
+        );
+    }
     assert!(
         loaded.notes.is_empty(),
         "unexpected notes: {:?}",
