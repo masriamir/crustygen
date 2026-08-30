@@ -276,20 +276,12 @@ fn a_non_utf8_textmap_is_bucketed_as_unparseable() {
     assert_eq!(report["buckets"]["wads"], 1);
 }
 
-/// The lift golden, compiled and packed as a one-map UDMF PWAD.
-fn lifts_wad() -> Vec<u8> {
-    let tables = crustygen::tables::Tables::load().expect("tables");
-    let ir = crustygen::ir::Ir::from_json(include_str!("golden/lifts.json")).expect("ir parses");
-    let compiled = crustygen::compile::compile(&ir, &tables).expect("compiles");
-    crustygen::pack::pack_udmf(&compiled, "MAP01").expect("packs")
-}
-
 /// The plat recognizer reaches the sweep: a swept lift map is classified on
 /// the fifth axis, its counts land in the JSON record, and the report grows
 /// a `## Lifts` section carrying the shape census.
 #[test]
 fn a_lift_map_is_recognized_reported_and_carried_into_the_json_record() {
-    let dir = corpus_dir("lifts", &[("l.wad", lifts_wad())]);
+    let dir = corpus_dir("lifts", &[("l.wad", common::udmf_lifts_wad())]);
     let json_path = dir.join("out.json");
     let report_out = bin().arg(&dir).output().unwrap();
     let out = bin()

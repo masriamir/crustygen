@@ -31,6 +31,11 @@ pub const SALTO: &str = include_str!("../fixtures/salto_base.json");
 /// committed `maps/ascensor.wad`.
 pub const ASCENSOR: &str = include_str!("../fixtures/ascensor_base.json");
 
+/// The lift golden IR — one lift, one barrier, one walkover lift and a
+/// pedestal — for the CLI tests that need a map every platform of which the
+/// recognizer accepts.
+pub const LIFTS: &str = include_str!("../golden/lifts.json");
+
 /// Compiles `ir_json` and packs it as a minimal un-noded UDMF PWAD.
 fn udmf_wad(ir_json: &str) -> Vec<u8> {
     let tables = Tables::load().expect("tables load");
@@ -83,6 +88,11 @@ pub fn udmf_ascensor_wad() -> Vec<u8> {
 /// binary-format PWAD with real nodes — the lift map's vanilla twin.
 pub fn binary_ascensor_wad() -> Vec<u8> {
     binary_wad(udmf_ascensor_wad())
+}
+
+/// Compiles the lift golden and packs it as a minimal un-noded UDMF PWAD.
+pub fn udmf_lifts_wad() -> Vec<u8> {
+    udmf_wad(LIFTS)
 }
 
 /// The binary entrada WAD plus a second, deliberately unloadable map group:

@@ -307,21 +307,12 @@ thing { x = 32; y = 32; type = 1; }
     assert_eq!(value[0]["teleports"]["broken"], 1);
 }
 
-/// The lift golden, compiled and packed as a one-map UDMF PWAD: three lift
-/// portals and one pedestal, none of them refused.
-fn lifts_wad() -> Vec<u8> {
-    let tables = crustygen::tables::Tables::load().expect("tables");
-    let ir = crustygen::ir::Ir::from_json(include_str!("golden/lifts.json")).expect("ir parses");
-    let compiled = crustygen::compile::compile(&ir, &tables).expect("compiles");
-    crustygen::pack::pack_udmf(&compiled, "MAP01").expect("packs")
-}
-
 /// A map whose every platform the recognizer accepts passes the fifth axis:
 /// the JSON verdict says so, the `lifts` object carries the shape census,
 /// and the human line stays silent about lifts.
 #[test]
 fn a_recognized_lift_map_passes_the_lift_axis() {
-    let path = write_temp(&lifts_wad(), "lifts-ok");
+    let path = write_temp(&common::udmf_lifts_wad(), "lifts-ok");
     let human = bin()
         .args([path.to_str().unwrap(), "--vocabulary"])
         .output()
