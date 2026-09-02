@@ -101,19 +101,23 @@ struct TargetFacts {
 
 impl TargetFacts {
     /// Whether the target could be emitted by a v1 floor construct: one
-    /// opening action, no stranded rider, a tag of its own, no conflicting
-    /// special, a resolved destination, and at least one non-gun trigger a
-    /// player can actually fire.
-    fn v1_candidate(&self) -> bool {
+    /// family, a resolved destination, an opening sub-shape (an
+    /// [`Effect::Opening`] whose rider is not stranded, or an
+    /// [`OpeningShape::Reveal`]), no conflicting non-floor special on its
+    /// tag, and at least one non-gun trigger a player can actually fire.
+    ///
+    /// Sharing a tag is deliberately *not* disqualifying: a tag naming
+    /// several sectors is emittable when every member qualifies on its own,
+    /// so §H prices that restriction as its own row rather than folding it
+    /// into the gate.
+    fn candidate(&self) -> bool {
         let [action] = &self.actions[..] else {
             return false;
         };
         let Some(facts) = &action.facts else {
             return false;
         };
-        facts.effect == Effect::Opening
-            && facts.rider != Rider::Loses
-            && self.shared_tag_n == 1
+        facts.opening.is_some()
             && !self.conflicted()
             && self.triggers.iter().all(|t| t.kind != TriggerKind::Gun)
             && self.triggers.iter().any(has_activator)
@@ -371,6 +375,7 @@ struct OpeningAgg {
     joins_neighbor_floor: u64,
     new_pairs: Hist,
     bidirectional: u64,
+    already_connected: u64,
     flat_eq_nb: u64,
     light_eq_nb: u64,
     ceiling_eq_all: u64,
@@ -381,6 +386,20 @@ struct OpeningAgg {
     /// §E, per sub-shape.
     kind_combo: Hist,
     repeat_split: Hist,
+}
+
+/// §C — the `Neutral/down/sealed` cell: the single largest population in the
+/// sample, and the one the definitions say least about. Recorded per action,
+/// so a target driven by two families contributes twice.
+#[derive(Default)]
+struct NeutralSealedAgg {
+    n: u64,
+    neighbor_count: Hist,
+    enterable_after: u64,
+    already_connected: u64,
+    things_any: u64,
+    thing_names: Hist,
+    joins_neighbor_floor: u64,
 }
 
 /// §F — the sidedefs the engine draws on a target's boundaries.
@@ -416,6 +435,8 @@ struct Agg {
     // A
     family_lines: BTreeMap<FloorType, u64>,
     family_maps: BTreeMap<FloorType, u64>,
+    special_lines: BTreeMap<i32, u64>,
+    special_maps: BTreeMap<i32, u64>,
     kind_lines: Hist,
     kind_maps: Hist,
     also_raises_ceiling: u64,
@@ -450,6 +471,8 @@ struct Agg {
     quirk_needs_texture: u64,
     quirk_direction_disagrees: u64,
     effect_table: Hist,
+    neutral_table: Hist,
+    neutral_sealed_down: NeutralSealedAgg,
     // D
     openings: BTreeMap<OpeningShape, OpeningAgg>,
     // E
@@ -478,19 +501,13 @@ struct Agg {
     chain_two_families: u64,
     chain_dest_movable: u64,
     // H
-    baseline_all_axes: u64,
-    naive_line: u64,
-    naive_all: u64,
-    gated_line: u64,
-    gated_all: u64,
-    no_remote_line: u64,
-    no_remote_all: u64,
-    no_chain_line: u64,
-    no_chain_all: u64,
+    arbiter: BTreeMap<usize, ArbiterRow>,
     maps_refused: u64,
     refusal: Hist,
     // I
     perpetual: PerpetualAgg,
+    one_shot_lift_n: u64,
+    mixed_lift_n: u64,
     one_shot_lift_shapes: BTreeMap<Shape, u64>,
     mixed_lift_shapes: BTreeMap<Shape, u64>,
 }
@@ -508,12 +525,20 @@ pub(crate) fn run(label: &str, dirs: &[String]) {
 }
 
 /// The arbiter facts the shared vocabulary layer decides for one map.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is one independent axis of the arbiter's verdict; §H reports them \
+              separately and never as a combined state"
+)]
 struct MapVerdict {
     /// Every axis but the linedef specials is expressible.
     others_ok: bool,
     /// The map is expressible today, on every axis — the baseline §H
     /// reproduces before it proposes anything.
     expressible: bool,
+    /// Every linedef special is already emittable: the baseline's own line
+    /// axis, before any floor special joins the set.
+    line_specials_ok: bool,
     /// Every out-of-set linedef special is a non-gun floor special: the
     /// naïve line axis, which accepts the whole §1.1 table but not the two
     /// gun forms, since those stay out of the emittable set.
@@ -556,6 +581,7 @@ fn map_verdict(
             && verdict.teleports_ok
             && verdict.lifts_ok,
         expressible: verdict.expressible,
+        line_specials_ok: verdict.line_specials_ok,
         line_ok: verdict
             .unknown_line_specials
             .iter()
@@ -607,7 +633,6 @@ fn map_ctx<'a>(map: &'a UdmfMap, scene: &'a Scene, tables: &Tables) -> MapCtx<'a
 fn survey_map(name: &str, map: &UdmfMap, tables: &Tables, vocab: &Vocabulary, agg: &mut Agg) {
     let scene = Scene::build(map, tables, &mut Vec::new());
     let verdict = map_verdict(name, map, &scene, tables, vocab);
-    agg.baseline_all_axes += u64::from(verdict.expressible);
 
     survey_specials(map, agg);
     let ctx = map_ctx(map, &scene, tables);
@@ -656,12 +681,15 @@ fn survey_map(name: &str, map: &UdmfMap, tables: &Tables, vocab: &Vocabulary, ag
 /// §A — every tracked special's line and map counts.
 fn survey_specials(map: &UdmfMap, agg: &mut Agg) {
     let mut families: BTreeSet<FloorType> = BTreeSet::new();
+    let mut specials: BTreeSet<i32> = BTreeSet::new();
     let mut kinds: BTreeSet<&'static str> = BTreeSet::new();
     let mut adjacent: BTreeSet<&'static str> = BTreeSet::new();
     for l in &map.linedefs {
         if let Some((ty, kind, repeatable)) = floor_type(l.special) {
             *agg.family_lines.entry(ty).or_default() += 1;
+            *agg.special_lines.entry(l.special).or_default() += 1;
             families.insert(ty);
+            specials.insert(l.special);
             let label = trigger_label(kind, repeatable);
             agg.kind_lines.add(label);
             kinds.insert(label);
@@ -680,6 +708,9 @@ fn survey_specials(map: &UdmfMap, agg: &mut Agg) {
     }
     for ty in families {
         *agg.family_maps.entry(ty).or_default() += 1;
+    }
+    for special in specials {
+        *agg.special_maps.entry(special).or_default() += 1;
     }
     for k in kinds {
         agg.kind_maps.add(k);
@@ -802,22 +833,76 @@ fn survey_lift_carryover(ctx: &MapCtx<'_>, tables: &Tables, agg: &mut Agg) {
         }
     }
 
+    survey_one_shot_lifts(ctx, tables, agg);
+}
+
+/// The repeatable twin of each one-shot lift special: `p_switch.c:389-392`
+/// (21) against `:544-547` (62), and `:479-482` (122) against `:616-619`
+/// (123); `p_spec.c:579-581` (10) against `:857-859` (88), and `:754-756`
+/// (121) against `:929-931` (120). Each pair dispatches the same
+/// `EV_DoPlat` type at the same speed from the same side; only
+/// `useAgain` / the `RETRIGGERS` block differ.
+const ONE_SHOT_TWIN: [(i32, i32); 4] = [(21, 62), (10, 88), (122, 123), (121, 120)];
+
+/// §I(ii) — the shapes of the lift plats the lift work left out.
+///
+/// `analyze_plat`'s `clean` gate requires **every** trigger to be repeatable
+/// (`all_repeat`, `common.rs`), so on the real map a plat with no repeatable
+/// trigger is `Shape::Other` by construction and the row says nothing at all
+/// about its geometry. To make the row answer the question it is asked —
+/// what would these plats *be* if the engine let them fire again — the pass
+/// rewrites each one-shot special to its repeatable twin and re-derives the
+/// shape from that. **This is a what-if, not a measurement of the maps as
+/// shipped**: the plats really are one-shot, and the row is only evidence
+/// about their shape, never about their behavior.
+fn survey_one_shot_lifts(ctx: &MapCtx<'_>, tables: &Tables, agg: &mut Agg) {
     let step = tables.step_height();
+    let mut all_one_shot: BTreeSet<usize> = BTreeSet::new();
+    let mut mixed: BTreeSet<usize> = BTreeSet::new();
     for plat in ctx.index.plat_sectors(ctx.map) {
         let Some(facts) = common::analyze_plat(ctx.map, ctx.scene, &ctx.index, plat, step) else {
             continue;
         };
-        let repeatable: Vec<bool> = facts
+        let repeatable = facts
             .triggers
             .iter()
-            .map(|t| REPEATABLE_LIFT.contains(&t.special))
-            .collect();
-        if repeatable.iter().all(|r| !r) {
+            .filter(|t| REPEATABLE_LIFT.contains(&t.special))
+            .count();
+        if repeatable == 0 {
+            all_one_shot.insert(plat);
+        } else if repeatable < facts.triggers.len() {
+            mixed.insert(plat);
+        }
+    }
+    if all_one_shot.is_empty() && mixed.is_empty() {
+        return;
+    }
+    agg.one_shot_lift_n += count_len(all_one_shot.len());
+    agg.mixed_lift_n += count_len(mixed.len());
+
+    let mut what_if = ctx.map.clone();
+    for l in &mut what_if.linedefs {
+        if let Some(&(_, twin)) = ONE_SHOT_TWIN.iter().find(|&&(one, _)| one == l.special) {
+            l.special = twin;
+        }
+    }
+    let scene = Scene::build(&what_if, tables, &mut Vec::new());
+    let index = common::MapIndex::build(&what_if, &scene);
+    for &plat in &all_one_shot {
+        if let Some(facts) = common::analyze_plat(&what_if, &scene, &index, plat, step) {
             *agg.one_shot_lift_shapes.entry(facts.shape).or_default() += 1;
-        } else if repeatable.iter().any(|r| !r) {
+        }
+    }
+    for &plat in &mixed {
+        if let Some(facts) = common::analyze_plat(&what_if, &scene, &index, plat, step) {
             *agg.mixed_lift_shapes.entry(facts.shape).or_default() += 1;
         }
     }
+}
+
+/// `n` as a `u64`, for a count that came from a container's length.
+fn count_len(n: usize) -> u64 {
+    u64::try_from(n).expect("a count fits u64")
 }
 
 /// The activator class as the floor report names it. `Activator::Plat` is
@@ -944,29 +1029,57 @@ fn record_target(ctx: &MapCtx<'_>, t: &TargetFacts, agg: &mut Agg) {
                 // the geometry, so this table does too, and the disagreement is
                 // counted rather than averaged away.
                 agg.quirk_direction_disagrees += u64::from((up || down) && a.ty.raises() != up);
+                let direction = if up {
+                    "up"
+                } else if down {
+                    "down"
+                } else {
+                    "level"
+                };
+                let sealed = |yes: bool| if yes { "enterable" } else { "sealed" };
                 agg.effect_table.add(format!(
-                    "{:?}/{}/{}/{:?}",
+                    "{:?}/{direction}/{}/{:?}",
                     f.effect,
-                    if up {
-                        "up"
-                    } else if down {
-                        "down"
-                    } else {
-                        "level"
-                    },
-                    if f.enterable_before {
-                        "enterable"
-                    } else {
-                        "sealed"
-                    },
+                    sealed(f.enterable_before),
                     f.rider
                 ));
+                if f.effect == Effect::Neutral {
+                    agg.neutral_table.add(format!(
+                        "{direction}/{}→{}/travel{}step",
+                        sealed(f.enterable_before),
+                        sealed(f.enterable_after),
+                        if a.travel <= ctx.step { "≤" } else { ">" }
+                    ));
+                    if down && !f.enterable_before {
+                        record_neutral_sealed(t, f, agg);
+                    }
+                }
             }
         }
     }
 
     if let Some(shape) = t.opening() {
         record_opening(ctx, t, shape, agg);
+    }
+}
+
+/// One `Neutral/down/sealed` action: a floor that lowers behind a wall
+/// nobody could climb, and changes nobody's reach.
+fn record_neutral_sealed(t: &TargetFacts, facts: &EffectFacts, agg: &mut Agg) {
+    let n = &mut agg.neutral_sealed_down;
+    n.n += 1;
+    n.neighbor_count.add(match t.neighbors.len() {
+        1 => "1",
+        2 => "2",
+        3 => "3",
+        _ => "4+",
+    });
+    n.enterable_after += u64::from(facts.enterable_after);
+    n.already_connected += u64::from(facts.neighbors_already_connected);
+    n.joins_neighbor_floor += u64::from(facts.joins_neighbor_floor);
+    n.things_any += u64::from(!t.things.is_empty());
+    for name in &t.things {
+        n.thing_names.add(name.clone());
     }
 }
 
@@ -997,6 +1110,7 @@ fn record_opening(ctx: &MapCtx<'_>, t: &TargetFacts, shape: OpeningShape, agg: &
         _ => "6+".to_owned(),
     });
     o.bidirectional += u64::from(facts.new_pair_bidirectional);
+    o.already_connected += u64::from(facts.neighbors_already_connected);
     let flat = &ctx.map.sectors[t.sector].texturefloor;
     let light = ctx.scene.sectors[t.sector].light;
     o.flat_eq_nb += u64::from(
@@ -1054,7 +1168,10 @@ fn record_opening(ctx: &MapCtx<'_>, t: &TargetFacts, shape: OpeningShape, agg: &
             record_wall_rendering(ctx, t, agg);
         }
         OpeningShape::Bridge => record_bridge_rendering(ctx, t, action, dest, agg),
-        OpeningShape::OtherOpening => {}
+        // A reveal draws no new face: the target was already sealed behind
+        // whatever its neighbors show, and §F measures the faces a wall or a
+        // walkway presents.
+        OpeningShape::Reveal | OpeningShape::OtherOpening => {}
     }
 }
 
@@ -1131,6 +1248,28 @@ fn record_bridge_rendering(
     }
 }
 
+/// §H's rows, in report order. Each is priced against the permissive gate
+/// **G** so the cost of one restriction can be read off on its own.
+const ARBITER_ROWS: [&str; 8] = [
+    "baseline today (teleports + lifts, no floors)",
+    "naive — every non-gun floor special",
+    "G — no tag-0/dangling floor line, no gun line, every target a candidate",
+    "G + every floor tag names one sector",
+    "G + no Reveal target",
+    "G + no Remote trigger",
+    "G + no chain (§G)",
+    "G + all four restrictions (strict)",
+];
+
+/// One §H row's two counts.
+#[derive(Default)]
+struct ArbiterRow {
+    /// Maps whose linedef specials clear this row.
+    line: u64,
+    /// Maps that clear it on every axis.
+    all: u64,
+}
+
 fn record_arbiter(
     targets: &[TargetFacts],
     verdict: &MapVerdict,
@@ -1139,36 +1278,71 @@ fn record_arbiter(
     has_floor_line: bool,
     agg: &mut Agg,
 ) {
-    // The shape half of the gate, kept separate from the line axis so the
-    // refusal histogram describes only what §H's reason list can name: a map
-    // whose *other* unknown specials sink it is not "refused by the gate".
-    let shape_ok = !bad_tag && !has_gun && targets.iter().all(TargetFacts::v1_candidate);
-    let gate = verdict.line_ok && shape_ok;
-    let no_remote = gate
-        && targets.iter().all(|t| {
-            t.triggers
-                .iter()
-                .all(|tr| tr.placement != Placement::Remote)
-        });
-    let no_chain = gate
-        && targets.iter().all(|t| {
-            !t.nb_floor_target && !t.nb_lift_plat && !t.nb_door && !t.dest_neighbor_movable
-        });
-    agg.naive_line += u64::from(verdict.line_ok);
-    agg.gated_line += u64::from(gate);
-    agg.no_remote_line += u64::from(no_remote);
-    agg.no_chain_line += u64::from(no_chain);
-    agg.naive_all += u64::from(verdict.line_ok && verdict.others_ok);
-    agg.gated_all += u64::from(verdict.others_ok && gate);
-    agg.no_remote_all += u64::from(verdict.others_ok && no_remote);
-    agg.no_chain_all += u64::from(verdict.others_ok && no_chain);
-    if has_floor_line && !shape_ok {
+    // The permissive gate: everything the shape work can express, with a
+    // shared tag allowed when every member sector qualifies on its own.
+    let g = !bad_tag && !has_gun && targets.iter().all(TargetFacts::candidate);
+    let single_tags = targets.iter().all(|t| t.shared_tag_n == 1);
+    let no_reveal = targets
+        .iter()
+        .all(|t| t.opening() != Some(OpeningShape::Reveal));
+    let no_remote = targets.iter().all(|t| {
+        t.triggers
+            .iter()
+            .all(|tr| tr.placement != Placement::Remote)
+    });
+    let no_chain = targets
+        .iter()
+        .all(|t| !t.nb_floor_target && !t.nb_lift_plat && !t.nb_door && !t.dest_neighbor_movable);
+
+    // Row 0 is the baseline as it stands today; every other row's line half
+    // is the naive line axis, narrowed by that row's own restriction.
+    let rows = [
+        (verdict.line_specials_ok, verdict.expressible),
+        (verdict.line_ok, verdict.line_ok && verdict.others_ok),
+        (
+            verdict.line_ok && g,
+            verdict.line_ok && g && verdict.others_ok,
+        ),
+        (
+            verdict.line_ok && g && single_tags,
+            verdict.line_ok && g && single_tags && verdict.others_ok,
+        ),
+        (
+            verdict.line_ok && g && no_reveal,
+            verdict.line_ok && g && no_reveal && verdict.others_ok,
+        ),
+        (
+            verdict.line_ok && g && no_remote,
+            verdict.line_ok && g && no_remote && verdict.others_ok,
+        ),
+        (
+            verdict.line_ok && g && no_chain,
+            verdict.line_ok && g && no_chain && verdict.others_ok,
+        ),
+        {
+            let strict = g && single_tags && no_reveal && no_remote && no_chain;
+            (
+                verdict.line_ok && strict,
+                verdict.line_ok && strict && verdict.others_ok,
+            )
+        },
+    ];
+    for (i, (line, all)) in rows.into_iter().enumerate() {
+        let row = agg.arbiter.entry(i).or_default();
+        row.line += u64::from(line);
+        row.all += u64::from(all);
+    }
+
+    if has_floor_line && !g {
         agg.maps_refused += 1;
         agg.refusal.add(refusal_reason(targets, bad_tag, has_gun));
     }
 }
 
-/// The first applicable refusal reason, in the order §H fixes.
+/// The first applicable refusal reason, in the order §H fixes. Each reason
+/// is tested across **every** target before the next is considered, so the
+/// order is a property of the map and not of the order its sectors happen to
+/// be declared in.
 fn refusal_reason(targets: &[TargetFacts], bad_tag: bool, has_gun: bool) -> &'static str {
     if bad_tag {
         return "dangling/tag-0";
@@ -1176,29 +1350,46 @@ fn refusal_reason(targets: &[TargetFacts], bad_tag: bool, has_gun: bool) -> &'st
     if has_gun {
         return "gun";
     }
-    for t in targets {
-        if t.shared_tag_n != 1 {
-            return "shared tag";
-        }
+    if targets.iter().any(TargetFacts::conflicted) {
+        return "conflict";
     }
-    for t in targets {
-        if t.conflicted() {
-            return "conflict";
-        }
+    if targets.iter().any(|t| t.actions.len() > 1) {
+        return ">=2 families";
     }
-    for t in targets {
-        if t.actions.len() > 1 {
-            return ">=2 families";
-        }
+    // Past the ">=2 families" pass every target has exactly one action, and
+    // `analyze_target` never returns a target with none.
+    let verdict = |t: &TargetFacts| {
+        t.actions[0]
+            .facts
+            .as_ref()
+            .map(|f| (f.effect, f.rider, f.opening))
+    };
+    if targets.iter().any(|t| verdict(t).is_none()) {
+        return "unresolved destination";
     }
-    for t in targets {
-        match t.actions[0].facts.as_ref() {
-            None => return "unresolved destination",
-            Some(f) if f.effect == Effect::Dead => return "dead",
-            Some(f) if f.effect != Effect::Opening => return "closing/mixed/neutral",
-            Some(f) if f.rider == Rider::Loses => return "rider loses",
-            Some(_) => {}
-        }
+    if targets
+        .iter()
+        .any(|t| matches!(verdict(t), Some((Effect::Dead, ..))))
+    {
+        return "dead";
+    }
+    if targets
+        .iter()
+        .any(|t| matches!(verdict(t), Some((Effect::Closing | Effect::Mixed, ..))))
+    {
+        return "closing/mixed";
+    }
+    if targets
+        .iter()
+        .any(|t| matches!(verdict(t), Some((Effect::Neutral, _, None))))
+    {
+        return "neutral (not a reveal)";
+    }
+    if targets
+        .iter()
+        .any(|t| matches!(verdict(t), Some((_, Rider::Loses, _))))
+    {
+        return "rider loses";
     }
     "no activator"
 }
@@ -1238,6 +1429,25 @@ fn report_usage(agg: &Agg) {
             pct(maps, agg.maps)
         );
     }
+    println!(
+        "\n**Per special** — every number in the dispatch table, so a count \
+here can be cross-checked against a corpus blocker table line for line.\n"
+    );
+    for special in floor_all() {
+        let (ty, kind, repeatable) = floor_type(special).expect("a table special");
+        println!(
+            "- {special} ({}, {}): {} lines · {} maps ({})",
+            trigger_label(kind, repeatable),
+            ty.label(),
+            agg.special_lines.get(&special).copied().unwrap_or(0),
+            agg.special_maps.get(&special).copied().unwrap_or(0),
+            pct(
+                agg.special_maps.get(&special).copied().unwrap_or(0),
+                agg.maps
+            )
+        );
+    }
+    println!();
     println!("- trigger kind, lines: {}", agg.kind_lines.all());
     println!("- trigger kind, maps: {}", agg.kind_maps.all());
     println!(
@@ -1334,6 +1544,37 @@ fn report_effects(agg: &Agg) {
         agg.actions - agg.quirk_needs_texture,
         agg.effect_table.all()
     );
+    println!(
+        "\n**Neutral decomposed** — direction, whether the target could be \
+stepped onto before and after, and whether the move is within one step.\n"
+    );
+    println!("- {}", agg.neutral_table.all());
+    let n = &agg.neutral_sealed_down;
+    println!(
+        "\n**Neutral/down/sealed** — {} actions: a floor that lowers behind a wall \
+nobody could climb.\n",
+        n.n
+    );
+    println!("- neighbors: {}", n.neighbor_count.all());
+    println!(
+        "- standable once it has moved (a Reveal but for the reach sets): {} ({}) · \
+destination equals a neighbor's floor: {} ({})",
+        n.enterable_after,
+        pct(n.enterable_after, n.n),
+        n.joins_neighbor_floor,
+        pct(n.joins_neighbor_floor, n.n)
+    );
+    println!(
+        "- ≥2 neighbors already mutually reachable before, inside the local graph: {} ({})",
+        n.already_connected,
+        pct(n.already_connected, n.n)
+    );
+    println!(
+        "- holding ≥1 thing: {} ({}) · thing names top 12: {}",
+        n.things_any,
+        pct(n.things_any, n.n),
+        n.thing_names.top(12)
+    );
 }
 
 fn report_openings(agg: &Agg) {
@@ -1343,6 +1584,7 @@ fn report_openings(agg: &Agg) {
         OpeningShape::DropWall,
         OpeningShape::LedgeLower,
         OpeningShape::Bridge,
+        OpeningShape::Reveal,
         OpeningShape::OtherOpening,
     ] {
         let o = agg.openings.get(&shape).unwrap_or(&empty);
@@ -1394,6 +1636,16 @@ fn report_openings(agg: &Agg) {
                 "- pocket neighbors (their only two-sided edges are with the target): {} · things in them top 12: {}",
                 o.closets,
                 o.closet_things.top(12)
+            );
+        }
+        if shape == OpeningShape::Reveal {
+            // A reveal gains nobody a destination by construction, so the
+            // question is whether the neighbors were joined anyway: where
+            // they were, the target was decoration rather than a gate.
+            println!(
+                "- ≥2 neighbors already mutually reachable before: {} ({})",
+                o.already_connected,
+                pct(o.already_connected, o.n)
             );
         }
         println!(
@@ -1505,37 +1757,19 @@ fn report_chains(agg: &Agg) {
 
 fn report_arbiter(agg: &Agg) {
     println!("\n## H. Arbiter\n");
-    println!(
-        "- baseline, all axes today (teleports + lifts, no floors): {} ({})",
-        agg.baseline_all_axes,
-        pct(agg.baseline_all_axes, agg.maps)
-    );
-    for (what, line, all) in [
-        (
-            "naïve (every non-gun floor special)",
-            agg.naive_line,
-            agg.naive_all,
-        ),
-        ("shape-gated", agg.gated_line, agg.gated_all),
-        (
-            "gated + remote refused",
-            agg.no_remote_line,
-            agg.no_remote_all,
-        ),
-        (
-            "gated + chains refused",
-            agg.no_chain_line,
-            agg.no_chain_all,
-        ),
-    ] {
+    let empty = ArbiterRow::default();
+    for (i, what) in ARBITER_ROWS.iter().enumerate() {
+        let row = agg.arbiter.get(&i).unwrap_or(&empty);
         println!(
-            "- {what}: line axis {line} ({}) · all axes {all} ({})",
-            pct(line, agg.maps),
-            pct(all, agg.maps)
+            "- {what}: line axis {} ({}) · all axes {} ({})",
+            row.line,
+            pct(row.line, agg.maps),
+            row.all,
+            pct(row.all, agg.maps)
         );
     }
     println!(
-        "- maps with ≥1 floor line: {} · refused by the gate: {} ({} of those)",
+        "- maps with ≥1 floor line: {} · refused by G: {} ({} of those)",
         agg.maps_with_floor_line,
         agg.maps_refused,
         pct(agg.maps_refused, agg.maps_with_floor_line)
@@ -1568,11 +1802,20 @@ fn report_carryover(agg: &Agg) {
             .join(" · ")
     };
     println!(
-        "- lift plats whose triggers are all one-shot: {}",
+        "\n`analyze_plat` refuses a plat with any one-shot trigger, so every plat \
+below is `Other` on the map as shipped. The shapes are a **what-if**: each \
+one-shot special rewritten to its repeatable twin (21→62, 10→88, 122→123, \
+121→120) and the shape re-derived, which is the only way the row can say \
+anything about their geometry.\n"
+    );
+    println!(
+        "- lift plats whose triggers are all one-shot: {} · what-if shape: {}",
+        agg.one_shot_lift_n,
         shapes(&agg.one_shot_lift_shapes)
     );
     println!(
-        "- lift plats mixing one-shot and repeatable triggers: {}",
+        "- lift plats mixing one-shot and repeatable triggers: {} · what-if shape: {}",
+        agg.mixed_lift_n,
         shapes(&agg.mixed_lift_shapes)
     );
 }
@@ -1602,43 +1845,13 @@ mod tests {
     use std::fmt::Write as _;
 
     use crate::common::is_lift;
-    use crate::common::tests::{Fixture, chain, chain_full, fixture, tee};
+    use crate::common::tests::{Fixture, chain, chain_full, fixture, panel, tee};
 
     /// The floor facts of the target at `sector`, for a fixture with one
     /// tagged floor sector.
     fn target(f: &Fixture, sector: usize) -> TargetFacts {
         let tables = Tables::load().expect("tables");
-        let index = common::MapIndex::build(&f.map, &f.scene);
-        let all_floor = floor_all();
-        let mut floor_targets = BTreeSet::new();
-        for l in &f.map.linedefs {
-            if l.args[0] != 0
-                && all_floor.contains(&l.special)
-                && let Some(v) = index.by_tag.get(&l.args[0])
-            {
-                floor_targets.extend(v.iter().copied());
-            }
-        }
-        let lift_specials: BTreeSet<i32> =
-            tables.lift_specials().into_iter().map(i32::from).collect();
-        let other_emittable: BTreeSet<i32> = tables
-            .emittable_line_specials()
-            .into_iter()
-            .map(i32::from)
-            .filter(|s| !lift_specials.contains(s) && !all_floor.contains(s))
-            .collect();
-        let ctx = MapCtx {
-            map: &f.map,
-            scene: &f.scene,
-            step: f.step,
-            player_height: tables.player().height,
-            floor_targets,
-            lift_plats: BTreeSet::new(),
-            door_sectors: BTreeSet::new(),
-            lift_specials,
-            other_emittable,
-            index,
-        };
+        let ctx = map_ctx(&f.map, &f.scene, &tables);
         analyze_target(&ctx, sector).expect("the target is analyzed")
     }
 
@@ -1843,7 +2056,7 @@ mod tests {
             verdict(&t),
             (Destination::Height(0), Effect::Neutral, Rider::Loses, None)
         );
-        assert!(!t.v1_candidate(), "a descender is not a v1 candidate");
+        assert!(!t.candidate(), "a descender is not a candidate");
     }
 
     #[test]
@@ -1973,8 +2186,15 @@ mod tests {
             let t = target(&f, sector);
             assert_eq!(t.shared_tag_n, 2);
             assert!(!t.conflict_lift);
-            assert!(!t.v1_candidate(), "a shared tag is refused");
+            // Neither is a candidate, but the shared tag is not why: sector 1
+            // is Neutral and no reveal, sector 2 has nothing below it at all.
+            assert!(!t.candidate());
         }
+        assert_eq!(
+            refusal_reason(&[target(&f, 1)], false, false),
+            "neutral (not a reveal)"
+        );
+        assert_eq!(refusal_reason(&[target(&f, 2)], false, false), "dead");
 
         // A 62 line naming tag 5 as well: a lift conflict on the same tag.
         let mut text = chain(
@@ -2032,7 +2252,7 @@ mod tests {
         assert_eq!(t.triggers[0].activators, vec![Activator::None]);
         assert!(!has_activator(&t.triggers[0]));
         assert!(t.triggers[0].hops.is_none());
-        assert!(!t.v1_candidate(), "no side can fire it");
+        assert!(!t.candidate(), "no side can fire it");
     }
 
     #[test]
@@ -2073,6 +2293,180 @@ mod tests {
             t.triggers[0].activators,
             vec![Activator::Level, Activator::Plat]
         );
+    }
+
+    #[test]
+    fn a_sealed_block_that_lowers_into_reach_is_a_reveal() {
+        // A sealed block inside a host room: 64 units up with no headroom at
+        // all, so nobody can be on it. Lowering it to the host's floor gains
+        // no neighbor a destination — there is only one neighbor — but the
+        // block itself becomes standable.
+        let f = fixture(&chain_full(
+            &[0, 64],
+            &[256, 64],
+            &[0, 7],
+            &[(23, 7, false)],
+            "",
+        ));
+        let t = target(&f, 1);
+        assert_eq!(
+            verdict(&t),
+            (
+                Destination::Height(0),
+                Effect::Neutral,
+                Rider::NotApplicable,
+                Some(OpeningShape::Reveal)
+            )
+        );
+        let facts = t.actions[0].facts.as_ref().expect("classified");
+        assert!(!facts.enterable_before && facts.enterable_after);
+        assert_eq!(facts.new_pairs, 0, "a reveal gains nobody a destination");
+        assert!(!facts.neighbors_already_connected, "there is one neighbor");
+        assert!(t.candidate(), "a reveal is emittable");
+    }
+
+    #[test]
+    fn a_sealed_panel_between_rooms_already_joined_is_a_reveal_not_a_drop_wall() {
+        // A and B border each other as well as T, so dropping T joins
+        // nothing that was not already joined: the panel reveals itself.
+        let f = fixture(&panel(
+            &[0, 0, 64],
+            &[256, 256, 64],
+            &[0, 0, 7],
+            &[(23, 7), (0, 0), (0, 0)],
+            "",
+        ));
+        let t = target(&f, 2);
+        assert_eq!(t.neighbors, BTreeSet::from([0, 1]));
+        assert_eq!(
+            verdict(&t),
+            (
+                Destination::Height(0),
+                Effect::Neutral,
+                Rider::NotApplicable,
+                Some(OpeningShape::Reveal)
+            )
+        );
+        let facts = t.actions[0].facts.as_ref().expect("classified");
+        assert!(
+            facts.neighbors_already_connected,
+            "A and B could already reach each other both ways"
+        );
+    }
+
+    #[test]
+    fn a_sealed_block_that_stays_sealed_is_neutral_not_a_reveal() {
+        // 32 units of headroom before and 48 after: never enough for the
+        // player, so nothing is revealed even though the floor moves.
+        let f = fixture(&chain_full(
+            &[48, 64],
+            &[256, 96],
+            &[0, 7],
+            &[(23, 7, false)],
+            "",
+        ));
+        let t = target(&f, 1);
+        assert_eq!(
+            verdict(&t),
+            (
+                Destination::Height(48),
+                Effect::Neutral,
+                Rider::NotApplicable,
+                None
+            )
+        );
+        let facts = t.actions[0].facts.as_ref().expect("classified");
+        assert!(!facts.enterable_before && !facts.enterable_after);
+        assert!(!t.candidate());
+    }
+
+    #[test]
+    fn an_opening_that_strands_its_rider_is_no_candidate() {
+        // T sits 40 up under a 100 ceiling, reachable only from the ledge P
+        // at its own height. Dropping it to 0 joins A and B — neither could
+        // climb to it — but costs anyone standing on it the step back up to
+        // P, which is the one destination the rider had.
+        let f = fixture(&tee(
+            &[0, 40, 0, 40],
+            &[256, 100, 256, 100],
+            &[0, 7, 0, 0],
+            &[(23, 7), (0, 0), (0, 0)],
+            "",
+        ));
+        let t = target(&f, 1);
+        assert_eq!(
+            verdict(&t),
+            (Destination::Height(0), Effect::Opening, Rider::Loses, None)
+        );
+        assert!(!t.candidate());
+        assert_eq!(refusal_reason(&[t], false, false), "rider loses");
+    }
+
+    #[test]
+    fn a_shared_tag_whose_members_each_qualify_is_accepted() {
+        // Two sealed blocks on one tag: the first drops a wall between two
+        // host rooms, the second reveals itself at the end of the row. The
+        // permissive gate takes both; only the shared-tag row prices them.
+        let f = fixture(&chain_full(
+            &[0, 64, 0, 64],
+            &[256, 64, 256, 64],
+            &[0, 7, 0, 7],
+            &[(23, 7, false), (0, 0, false), (0, 0, false)],
+            "",
+        ));
+        let wall = target(&f, 1);
+        assert_eq!(wall.shared_tag_n, 2);
+        assert_eq!(wall.opening(), Some(OpeningShape::DropWall));
+        assert!(wall.candidate(), "a shared tag no longer disqualifies");
+        let reveal = target(&f, 3);
+        assert_eq!(reveal.shared_tag_n, 2);
+        assert_eq!(reveal.opening(), Some(OpeningShape::Reveal));
+        assert!(reveal.candidate());
+    }
+
+    #[test]
+    fn the_one_shot_what_if_reports_the_shape_a_repeatable_twin_would_have() {
+        // A 21 riser is `downWaitUpStay` fired once: `analyze_plat` calls it
+        // `Other` because its `clean` gate wants every trigger repeatable, so
+        // the shipped map says nothing about the plat's geometry.
+        let f = fixture(&chain(
+            &[0, 128, 128],
+            &[0, 7, 0],
+            &[(21, 7, false), (0, 0, false)],
+            "",
+        ));
+        let tables = Tables::load().expect("tables");
+        let index = common::MapIndex::build(&f.map, &f.scene);
+        assert_eq!(
+            common::analyze_plat(&f.map, &f.scene, &index, 1, f.step)
+                .expect("analyzed")
+                .shape,
+            Shape::Other
+        );
+
+        // Rewriting 21 to its repeatable twin 62 leaves a plain Core lift,
+        // which is what the §I row is asking about.
+        let ctx = map_ctx(&f.map, &f.scene, &tables);
+        let mut agg = Agg::default();
+        survey_one_shot_lifts(&ctx, &tables, &mut agg);
+        assert_eq!(agg.one_shot_lift_n, 1);
+        assert_eq!(agg.mixed_lift_n, 0);
+        assert_eq!(agg.one_shot_lift_shapes, BTreeMap::from([(Shape::Core, 1)]));
+        assert!(agg.mixed_lift_shapes.is_empty());
+
+        // A plat with one one-shot and one repeatable trigger lands in the
+        // mixed row instead, and the substitution makes it Core there too.
+        let f = fixture(&chain(
+            &[0, 128, 128],
+            &[0, 7, 0],
+            &[(21, 7, false), (88, 7, false)],
+            "",
+        ));
+        let ctx = map_ctx(&f.map, &f.scene, &tables);
+        let mut agg = Agg::default();
+        survey_one_shot_lifts(&ctx, &tables, &mut agg);
+        assert_eq!((agg.one_shot_lift_n, agg.mixed_lift_n), (0, 1));
+        assert_eq!(agg.mixed_lift_shapes, BTreeMap::from([(Shape::Core, 1)]));
     }
 
     #[test]
@@ -2183,7 +2577,7 @@ mod tests {
         let t = target(&f, 1);
         assert_eq!(t.actions[0].destination, Destination::NeedsTexture);
         assert!(t.actions[0].facts.is_none());
-        assert!(!t.v1_candidate(), "an unresolved destination is refused");
+        assert!(!t.candidate(), "an unresolved destination is refused");
     }
 
     #[test]
@@ -2232,30 +2626,78 @@ mod tests {
         assert_eq!(t.actions.len(), 2);
         assert!(t.conflict_second_family && t.conflict_two_way);
         assert!(!t.conflicted(), "a second floor family is not a conflict");
-        assert!(!t.v1_candidate());
+        assert!(!t.candidate());
         assert_eq!(refusal_reason(&[t], false, false), ">=2 families");
     }
 
     #[test]
     fn refusal_reasons_are_reported_in_the_fixed_order() {
-        let f = fixture(&chain(
+        let drop_wall = fixture(&chain(
             &[0, 96, 0],
             &[0, 7, 0],
             &[(23, 7, false), (0, 0, false)],
             "",
         ));
-        let t = target(&f, 1);
-        assert!(t.v1_candidate(), "the plain drop wall is a candidate");
+        assert!(
+            target(&drop_wall, 1).candidate(),
+            "the plain drop wall is a candidate"
+        );
         assert_eq!(refusal_reason(&[], true, true), "dangling/tag-0");
         assert_eq!(refusal_reason(&[], false, true), "gun");
-        // A dead target is refused for being dead, not for anything later.
+
+        // One fixture per remaining arm.
         let dead = fixture(&chain(
             &[0, 0, 0],
             &[0, 7, 0],
             &[(23, 7, false), (0, 0, false)],
             "",
         ));
+        let closing = fixture(&chain(
+            &[0, 0, 0],
+            &[0, 7, 0],
+            &[(101, 7, false), (0, 0, false)],
+            "",
+        ));
+        let neutral = fixture(&chain(
+            &[128, 128, 0],
+            &[0, 7, 0],
+            &[(23, 7, false), (0, 0, false)],
+            "",
+        ));
+        let unresolved = fixture(&chain(
+            &[0, 0, 0],
+            &[0, 7, 0],
+            &[(30, 7, false), (0, 0, false)],
+            "",
+        ));
         assert_eq!(refusal_reason(&[target(&dead, 1)], false, false), "dead");
+        assert_eq!(
+            refusal_reason(&[target(&closing, 1)], false, false),
+            "closing/mixed"
+        );
+        assert_eq!(
+            refusal_reason(&[target(&neutral, 1)], false, false),
+            "neutral (not a reveal)"
+        );
+        assert_eq!(
+            refusal_reason(&[target(&unresolved, 1)], false, false),
+            "unresolved destination"
+        );
+
+        // The order is a property of the map: an unresolved destination on
+        // one target outranks a dead action on another whichever way round
+        // they are declared, and a bad tag outranks both.
+        let pair = [target(&dead, 1), target(&unresolved, 1)];
+        assert_eq!(
+            refusal_reason(&pair, false, false),
+            "unresolved destination"
+        );
+        let reversed = [target(&unresolved, 1), target(&dead, 1)];
+        assert_eq!(
+            refusal_reason(&reversed, false, false),
+            "unresolved destination"
+        );
+        assert_eq!(refusal_reason(&pair, true, false), "dangling/tag-0");
     }
 
     #[test]
