@@ -103,7 +103,12 @@ fn check_headroom(
         let rest = match portal.kind {
             PortalKind::Plain => room_a.floor.max(room_b.floor),
             PortalKind::Lift => room_a.floor.max(room_b.floor) + portal.rise.unwrap_or(0),
-            PortalKind::Door | PortalKind::Locked => continue,
+            // A door portal is exempt, and so, for now, are the two floor
+            // kinds: nothing here emits the sector that fills a drop wall's
+            // or a bridge's gap yet, so there is no rest floor to measure.
+            PortalKind::Door | PortalKind::Locked | PortalKind::DropWall | PortalKind::Bridge => {
+                continue;
+            }
         };
         let have = room_a.ceiling.min(room_b.ceiling) - rest;
         if have < need {
