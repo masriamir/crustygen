@@ -6,17 +6,22 @@
 //! ```text
 //! cargo run --release --example liftprobe -- census <label> <dir>...
 //! cargo run --release --example liftprobe -- shapes <label> <dir>...
+//! cargo run --release --example liftprobe -- floors <label> <dir>...
 //! ```
 //!
 //! `census` is the first pass (usage, rest, travel, topology, triggers,
 //! rendering, conflicts, arbiter); `shapes` the second (per-shape facts and
-//! multi-sector tag groups). Each `<dir>` is swept non-recursively for
-//! `.zip` and `.wad` files exactly as `crustygen-corpus` sweeps a sample;
-//! several directories form one population. Both passes print Markdown to
-//! stdout; load failures go to stderr.
+//! multi-sector tag groups); `floors` the third (sub-project 4a: what a
+//! tagged floor action is — destination, effect on the local graph, opening
+//! sub-shape, triggers, rendering, chains and its own arbiter). Each `<dir>`
+//! is swept non-recursively for `.zip` and `.wad` files exactly as
+//! `crustygen-corpus` sweeps a sample; several directories form one
+//! population, and a `<dir>` that names a file instead is that one archive or
+//! WAD. Every pass prints Markdown to stdout; load failures go to stderr.
 
 mod census;
 mod common;
+mod floors;
 mod shapes;
 
 fn main() {
@@ -28,8 +33,11 @@ fn main() {
         [pass, label, dirs @ ..] if !dirs.is_empty() && pass == "shapes" => {
             shapes::run(label, dirs);
         }
+        [pass, label, dirs @ ..] if !dirs.is_empty() && pass == "floors" => {
+            floors::run(label, dirs);
+        }
         _ => {
-            eprintln!("usage: liftprobe <census|shapes> <label> <dir>...");
+            eprintln!("usage: liftprobe <census|shapes|floors> <label> <dir>...");
             std::process::exit(2);
         }
     }
