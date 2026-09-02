@@ -32,6 +32,15 @@ wait_tics = 105
 max_active = 30
 source = "id-Software/DOOM linuxdoom-1.10/p_spec.h: '#define PLATWAIT 3', '#define PLATSPEED FRACUNIT', '#define MAXPLATS 30'; linuxdoom-1.10/p_plats.c, EV_DoPlat: 'case downWaitUpStay: plat->speed = PLATSPEED * 4; ... plat->wait = 35*PLATWAIT;' and 'case blazeDWUS: plat->speed = PLATSPEED * 8;' — speeds in map units per tic (FRACUNIT is one unit), wait in tics (35 per second); P_AddActivePlat: 'I_Error (\"P_AddActivePlat: no more plats!\");' past MAXPLATS simultaneously active plats. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_spec.h and .../p_plats.c"
 
+[floor]
+speed = 1
+turbo_multiplier = 4
+plat_change_divisor = 2
+source = "id-Software/DOOM linuxdoom-1.10/p_spec.h: '#define FLOORSPEED FRACUNIT' (line 600) — one map unit per tic; linuxdoom-1.10/p_floor.c, EV_DoFloor: 'case turboLower: ... floor->speed = FLOORSPEED * 4;' (line 310) and 'case raiseFloorTurbo: ... floor->speed = FLOORSPEED*4;' (334) — the turbo multiplier; linuxdoom-1.10/p_plats.c, EV_DoPlat: 'case raiseToNearestAndChange: plat->speed = PLATSPEED/2;' and 'case raiseAndChange: plat->speed = PLATSPEED/2;' — the raise-and-change plats move at half a unit per tic. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_spec.h, .../p_floor.c and .../p_plats.c"
+drop_wall_thickness = [8, 16, 32, 64]
+bridge_depth_step = 8
+curated = "Not engine constants. A drop wall's depth along its gap and the 8-unit grain of a bridge's pit depth are authoring choices bounded by the corpus: drop walls have a min side under 64 on 54 % of the sample (modal bounding box 16x64, then 64x64 and 16x128) and bridge travels are multiples of 8 with median 96 (docs/measurements/floor-shapes-2026-09-02.md §D). The list mirrors `Ir::LIFT_ALCOVE_DIMENSIONS`."
+
 [light]
 min = 0
 max = 255

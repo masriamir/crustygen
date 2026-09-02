@@ -344,6 +344,7 @@ struct Engine {
     door: Door,
     flat: Flat,
     plat: PlatConstants,
+    floor: FloorConstants,
     light: LightRange,
     player: ThingDims,
     species: HashMap<String, SpeciesEntry>,
@@ -398,6 +399,126 @@ pub struct PlatConstants {
     pub max_active: usize,
 }
 
+/// The two engine floor types the compiler emits, and the axis a trigger's
+/// targets must agree on (§3.1 of the floors spec: one trigger is one tag is
+/// one special).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FloorFamily {
+    /// `lowerFloorToLowest`: down to `P_FindLowestFloorSurrounding` — the
+    /// drop wall and the reveal.
+    LowerToLowest,
+    /// `raiseFloorToNearest`: up to `P_FindNextHighestFloor` — the bridge.
+    RaiseToNearest,
+}
+
+/// Every engine floor type the dispatch tables reach, `p_spec.h`'s `floor_e`
+/// plus the two one-way `EV_DoPlat` raise types — the recognizer's vocabulary
+/// for naming what a map carries, whether or not the compiler emits it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FloorEngineType {
+    /// To the highest neighboring floor.
+    LowerFloor,
+    /// To the lowest neighboring floor.
+    LowerFloorToLowest,
+    /// To the highest neighboring floor plus 8, at four times the speed.
+    TurboLower,
+    /// To the lowest neighboring ceiling, capped at the sector's own.
+    RaiseFloor,
+    /// `RaiseFloor` minus 8, crushing.
+    RaiseFloorCrush,
+    /// To the next highest neighboring floor.
+    RaiseFloorToNearest,
+    /// `RaiseFloorToNearest` at four times the speed.
+    RaiseFloorTurbo,
+    /// Up 24.
+    RaiseFloor24,
+    /// Up 24, taking the trigger line's front sector's flat and special.
+    RaiseFloor24AndChange,
+    /// Up 512.
+    RaiseFloor512,
+    /// Up by the shortest lower texture on the sector's two-sided lines.
+    RaiseToTexture,
+    /// To the lowest neighboring floor, taking a neighbor's flat on arrival.
+    LowerAndChange,
+    /// The `raiseAndChange` plat, amount 24.
+    PlatRaiseAndChange24,
+    /// The `raiseAndChange` plat, amount 32.
+    PlatRaiseAndChange32,
+    /// The `raiseToNearestAndChange` plat.
+    PlatRaiseToNearestAndChange,
+}
+
+impl FloorEngineType {
+    /// Whether the type sends the floor up (`direction = 1`) rather than
+    /// down, per `EV_DoFloor`'s cases and the plat types' `status = up`.
+    #[must_use]
+    pub fn raises(self) -> bool {
+        !matches!(
+            self,
+            Self::LowerFloor | Self::LowerFloorToLowest | Self::TurboLower | Self::LowerAndChange
+        )
+    }
+}
+
+/// How a floor line fires: walkover once or repeatably, use once or
+/// repeatably, or by gunshot once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, serde::Serialize)]
+pub enum FloorForm {
+    /// `P_CrossSpecialLine`, TRIGGERS block (`line->special = 0`).
+    W1,
+    /// `P_CrossSpecialLine`, RETRIGGERS block.
+    WR,
+    /// `P_UseSpecialLine`, SWITCHES block (`P_ChangeSwitchTexture(line,0)`).
+    S1,
+    /// `P_UseSpecialLine`, BUTTONS block (`P_ChangeSwitchTexture(line,1)`).
+    SR,
+    /// `P_ShootSpecialLine`.
+    G1,
+}
+
+impl FloorForm {
+    /// Whether the line fires from `P_UseSpecialLine` or `P_ShootSpecialLine`
+    /// — front side only — rather than from a crossing.
+    #[must_use]
+    pub fn front_only(self) -> bool {
+        matches!(self, Self::S1 | Self::SR | Self::G1)
+    }
+
+    /// Whether the line survives its first use.
+    #[must_use]
+    pub fn repeatable(self) -> bool {
+        matches!(self, Self::WR | Self::SR)
+    }
+}
+
+/// `[specials.floor]`: the four emitted forms and the sourced recognized list.
+#[derive(Debug, Deserialize)]
+struct FloorSpecials {
+    lower_switch: u16,
+    lower_walkover: u16,
+    raise_switch: u16,
+    raise_walkover: u16,
+    recognized: Vec<(u16, FloorEngineType, FloorForm)>,
+}
+
+/// `[floor]`: `p_spec.h`/`p_floor.c`/`p_plats.c` speeds plus two curated
+/// authoring grains.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct FloorConstants {
+    /// `FLOORSPEED`, map units per tic.
+    pub speed: i32,
+    /// `turboLower`/`raiseFloorTurbo` run at `FLOORSPEED * 4`.
+    pub turbo_multiplier: i32,
+    /// The raise-and-change plats run at `PLATSPEED / 2`.
+    pub plat_change_divisor: i32,
+    /// The legal depths of a drop wall along its gap (curated).
+    pub drop_wall_thickness: [i32; 4],
+    /// The grain a bridge's pit depth must be a multiple of (curated).
+    pub bridge_depth_step: i32,
+}
+
 /// The four teleporter line specials, keyed by who may cross and whether
 /// the line survives its first use.
 #[derive(Debug, Deserialize)]
@@ -420,6 +541,7 @@ struct Specials {
     locked: HashMap<String, toml::Value>,
     exit: ExitSpecials,
     lift: LiftSpecials,
+    floor: FloorSpecials,
     teleport: TeleportSpecials,
 }
 
@@ -762,6 +884,46 @@ impl Tables {
         self.engine.plat
     }
 
+    /// The emitted floor special for a family and a trigger form: 23/38 for
+    /// `lowerFloorToLowest` (switch/walkover), 18/119 for
+    /// `raiseFloorToNearest` — the one-shot forms.
+    #[must_use]
+    pub fn floor_special(&self, family: FloorFamily, use_line: bool) -> u16 {
+        let f = &self.vocabulary.specials.floor;
+        match (family, use_line) {
+            (FloorFamily::LowerToLowest, true) => f.lower_switch,
+            (FloorFamily::LowerToLowest, false) => f.lower_walkover,
+            (FloorFamily::RaiseToNearest, true) => f.raise_switch,
+            (FloorFamily::RaiseToNearest, false) => f.raise_walkover,
+        }
+    }
+
+    /// The four emitted floor specials.
+    #[must_use]
+    pub fn floor_specials(&self) -> [u16; 4] {
+        let f = &self.vocabulary.specials.floor;
+        [
+            f.lower_switch,
+            f.lower_walkover,
+            f.raise_switch,
+            f.raise_walkover,
+        ]
+    }
+
+    /// Every special the engine dispatches to a floor action, with its engine
+    /// type and form — the verifier's and recognizer's vocabulary. Includes
+    /// the four emitted ones.
+    #[must_use]
+    pub fn recognized_floor_specials(&self) -> Vec<(u16, FloorEngineType, FloorForm)> {
+        self.vocabulary.specials.floor.recognized.clone()
+    }
+
+    /// The pinned floor constants.
+    #[must_use]
+    pub fn floor(&self) -> FloorConstants {
+        self.engine.floor
+    }
+
     /// The linedef special for a teleporter line. `monsters_only` selects the
     /// `!thing->player`-guarded pair (126/125); `repeatable` selects the
     /// RETRIGGERS form, which keeps its special after firing.
@@ -837,7 +999,9 @@ impl Tables {
     /// 121) also breaks
     /// `sourced_but_unemitted_specials_stay_out_of_the_emittable_set`.
     /// A new pass therefore lands its fixture and updates both tests by
-    /// rule.
+    /// rule. Also includes the four one-shot floor specials
+    /// ([`Self::floor_specials`], `crate::compile::floors`) — never the
+    /// other 44 the table recognizes.
     #[must_use]
     pub fn emittable_line_specials(&self) -> BTreeSet<u16> {
         let mut set = BTreeSet::from([
@@ -850,6 +1014,7 @@ impl Tables {
         set.extend(self.locked_door_kinds().into_iter().map(|(_, s)| s));
         set.extend(self.teleport_specials());
         set.extend(self.lift_repeatable_specials());
+        set.extend(self.floor_specials());
         set
     }
 
@@ -1142,7 +1307,7 @@ impl Tables {
 
 #[cfg(test)]
 mod tests {
-    use super::{AmmoType, Tables};
+    use super::{AmmoType, FloorEngineType, FloorFamily, FloorForm, Tables};
 
     /// Compares two `f64` values within a small absolute tolerance rather
     /// than `==` — every derived weapon-damage/ammo-ratio figure this file
@@ -2239,6 +2404,58 @@ mod tests {
             assert!(all.contains(&s));
         }
         assert_eq!(t.lift_fast_specials(), [123, 122, 120, 121]);
+    }
+
+    #[test]
+    fn the_four_emitted_floor_specials_are_the_one_shot_forms_and_distinct() {
+        let t = Tables::load().expect("tables");
+        assert_eq!(t.floor_special(FloorFamily::LowerToLowest, true), 23);
+        assert_eq!(t.floor_special(FloorFamily::LowerToLowest, false), 38);
+        assert_eq!(t.floor_special(FloorFamily::RaiseToNearest, true), 18);
+        assert_eq!(t.floor_special(FloorFamily::RaiseToNearest, false), 119);
+        let four = t.floor_specials();
+        let set: std::collections::BTreeSet<u16> = four.into_iter().collect();
+        assert_eq!(set.len(), 4, "distinct");
+        for s in four {
+            assert!(
+                t.recognized_floor_specials()
+                    .iter()
+                    .any(|&(r, _, _)| r == s),
+                "every emitted special is also recognized: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_recognized_floor_list_carries_every_dispatch_table_number_once() {
+        let t = Tables::load().expect("tables");
+        let all = t.recognized_floor_specials();
+        assert_eq!(all.len(), 48, "15 families over the W1/WR/S1/SR/G1 forms");
+        let set: std::collections::BTreeSet<u16> = all.iter().map(|&(s, _, _)| s).collect();
+        assert_eq!(set.len(), 48, "no number twice");
+        // The forms the compiler writes are S1/W1 forms of their family.
+        assert!(all.contains(&(23, FloorEngineType::LowerFloorToLowest, FloorForm::S1)));
+        assert!(all.contains(&(38, FloorEngineType::LowerFloorToLowest, FloorForm::W1)));
+        assert!(all.contains(&(18, FloorEngineType::RaiseFloorToNearest, FloorForm::S1)));
+        assert!(all.contains(&(119, FloorEngineType::RaiseFloorToNearest, FloorForm::W1)));
+        // The gun forms are recognized so the verifier can name them.
+        assert!(all.contains(&(24, FloorEngineType::RaiseFloor, FloorForm::G1)));
+        assert!(all.contains(&(
+            47,
+            FloorEngineType::PlatRaiseToNearestAndChange,
+            FloorForm::G1
+        )));
+    }
+
+    #[test]
+    fn floor_constants_are_the_engines() {
+        let t = Tables::load().expect("tables");
+        let f = t.floor();
+        assert_eq!(f.speed, 1, "FLOORSPEED = FRACUNIT, one unit per tic");
+        assert_eq!(f.turbo_multiplier, 4);
+        assert_eq!(f.plat_change_divisor, 2);
+        assert_eq!(f.drop_wall_thickness, [8, 16, 32, 64]);
+        assert_eq!(f.bridge_depth_step, 8);
     }
 
     #[test]
