@@ -1,22 +1,29 @@
-//! `liftprobe` — the corpus measurement behind Project G sub-project 3
-//! (lifts). Not a shipped tool: a reproducible probe, kept so the numbers in
-//! `docs/measurements/lift-shapes-2026-08-29.md` can be re-derived when the
+//! `liftprobe` — the corpus measurements behind Project G sub-project 3
+//! (lifts) and sub-project 4a (floor actions). Not a shipped tool: a
+//! reproducible probe, kept so the numbers in
+//! `docs/measurements/lift-shapes-2026-08-29.md` and
+//! `docs/measurements/floor-shapes-2026-09-02.md` can be re-derived when the
 //! sample or the loader changes.
 //!
 //! ```text
-//! cargo run --release --example liftprobe -- census <label> <dir>...
-//! cargo run --release --example liftprobe -- shapes <label> <dir>...
+//! cargo run --release --example liftprobe -- census <label> <dir-or-file>...
+//! cargo run --release --example liftprobe -- shapes <label> <dir-or-file>...
+//! cargo run --release --example liftprobe -- floors <label> <dir-or-file>...
 //! ```
 //!
 //! `census` is the first pass (usage, rest, travel, topology, triggers,
 //! rendering, conflicts, arbiter); `shapes` the second (per-shape facts and
-//! multi-sector tag groups). Each `<dir>` is swept non-recursively for
-//! `.zip` and `.wad` files exactly as `crustygen-corpus` sweeps a sample;
-//! several directories form one population. Both passes print Markdown to
-//! stdout; load failures go to stderr.
+//! multi-sector tag groups); `floors` the third (sub-project 4a: what a
+//! tagged floor action is — destination, effect on the local graph, opening
+//! sub-shape, triggers, rendering, chains and its own arbiter). Each `<dir-or-file>`
+//! is swept non-recursively for `.zip` and `.wad` files exactly as
+//! `crustygen-corpus` sweeps a sample; several directories form one
+//! population, and one that names a file instead is that one archive or
+//! WAD. Every pass prints Markdown to stdout; load failures go to stderr.
 
 mod census;
 mod common;
+mod floors;
 mod shapes;
 
 fn main() {
@@ -28,8 +35,11 @@ fn main() {
         [pass, label, dirs @ ..] if !dirs.is_empty() && pass == "shapes" => {
             shapes::run(label, dirs);
         }
+        [pass, label, dirs @ ..] if !dirs.is_empty() && pass == "floors" => {
+            floors::run(label, dirs);
+        }
         _ => {
-            eprintln!("usage: liftprobe <census|shapes> <label> <dir>...");
+            eprintln!("usage: liftprobe <census|shapes|floors> <label> <dir-or-file>...");
             std::process::exit(2);
         }
     }

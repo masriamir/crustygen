@@ -12,10 +12,10 @@
 //! an unlistable directory is fatal (exit 2).
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::path::{Path, PathBuf};
 
-use crustygen::check::scene::{Scene, SceneThing};
+use crustygen::check::scene::{Boundary, Scene, SceneThing};
 use crustygen::ingest;
 use crustygen::lift::corpus::map_hash;
 use crustywad::archive::Archive;
@@ -76,9 +76,11 @@ pub(crate) fn side_sector(map: &UdmfMap, side: i32) -> Option<usize> {
 }
 
 /// Walks every `.zip`/`.wad` in `dirs` (non-recursively, like
-/// `crustygen-corpus`) and calls `visit` once per unique loaded map. Returns
-/// the unique-map count. Unreadable archives, WADs and map groups are named
-/// on stderr and skipped.
+/// `crustygen-corpus`) and calls `visit` once per unique loaded map. An entry
+/// that names a file rather than a directory is that one archive or WAD, so a
+/// smoke run can point straight at a single map file. Returns the unique-map
+/// count. Unreadable archives, WADs and map groups are named on stderr and
+/// skipped.
 pub(crate) fn sweep(dirs: &[String], mut visit: impl FnMut(&str, &UdmfMap)) -> u64 {
     let options = ParseOptions {
         strictness: Strictness::Lenient,
@@ -87,20 +89,26 @@ pub(crate) fn sweep(dirs: &[String], mut visit: impl FnMut(&str, &UdmfMap)) -> u
     let mut seen: BTreeSet<String> = BTreeSet::new();
     let mut maps = 0;
     for dir in dirs {
-        let entries = match std::fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(e) => {
-                // A population that cannot be listed is not a partial result;
-                // fail plainly, with the usage exit code, rather than panic.
-                eprintln!("cannot list {dir}: {e}");
-                std::process::exit(2);
-            }
+        let named = Path::new(dir);
+        let mut candidates: Vec<PathBuf> = if named.is_file() {
+            vec![named.to_path_buf()]
+        } else {
+            let entries = match std::fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    // A population that cannot be listed is not a partial
+                    // result; fail plainly, with the usage exit code, rather
+                    // than panic.
+                    eprintln!("cannot list {dir}: {e}");
+                    std::process::exit(2);
+                }
+            };
+            entries
+                .filter_map(Result::ok)
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && (has_ext(p, "zip") || has_ext(p, "wad")))
+                .collect()
         };
-        let mut candidates: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.is_file() && (has_ext(p, "zip") || has_ext(p, "wad")))
-            .collect();
         candidates.sort();
         for path in &candidates {
             if has_ext(path, "zip") {
@@ -247,17 +255,30 @@ pub(crate) enum Rest {
     Intermediate,
 }
 
-/// Where a trigger line sits relative to the plat it drives.
+/// Where a trigger line sits relative to the sector it drives.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum Placement {
-    /// The plat is the line's front sector.
+    /// The target is the line's front sector.
     OnPlatFront,
-    /// The plat is the line's back sector.
+    /// The target is the line's back sector.
     OnPlatBack,
-    /// A side is a neighbor of the plat, but not the plat.
+    /// A side is a neighbor of the target, but not the target.
     Adjacent,
-    /// Neither side is the plat or a neighbor.
+    /// Neither side is the target or a neighbor.
     Remote,
+}
+
+impl Placement {
+    /// The label the floor report prints. The lift passes keep saying "plat",
+    /// which is what their measurement doc calls the same position.
+    pub(crate) fn target_label(self) -> &'static str {
+        match self {
+            Self::OnPlatFront => "OnTargetFront",
+            Self::OnPlatBack => "OnTargetBack",
+            Self::Adjacent => "Adjacent",
+            Self::Remote => "Remote",
+        }
+    }
 }
 
 /// The sector a player must stand in to fire a trigger, relative to the plat.
@@ -508,35 +529,62 @@ impl<'a> MapIndex<'a> {
     }
 }
 
+/// The sector a player fires a trigger from, classified against the target's
+/// floor. Target-agnostic: `target` is a plat for the lift passes and a
+/// tagged floor sector for the `floors` pass.
 fn classify_activator(
     scene: &Scene,
-    plat: usize,
-    plat_floor: i32,
+    target: usize,
+    target_floor: i32,
     sector: usize,
     step: i32,
 ) -> Activator {
-    if sector == plat {
+    if sector == target {
         return Activator::Plat;
     }
     let floor = scene.sectors[sector].floor;
-    if floor < plat_floor - step {
+    if floor < target_floor - step {
         Activator::Low
-    } else if floor > plat_floor + step {
+    } else if floor > target_floor + step {
         Activator::Above
     } else {
         Activator::Level
     }
 }
 
-/// The sides of a lift line that can fire it, per the engine's dispatch
-/// rules, as `(sector, class)` pairs.
+/// Where a trigger line sits relative to `target`. A dangling front side is
+/// simply not the target and not a neighbor.
+fn placement_of(
+    target: usize,
+    neighbors: &BTreeSet<usize>,
+    front: Option<usize>,
+    back: Option<usize>,
+) -> Placement {
+    if front == Some(target) {
+        Placement::OnPlatFront
+    } else if back == Some(target) {
+        Placement::OnPlatBack
+    } else if front.is_some_and(|f| neighbors.contains(&f))
+        || back.is_some_and(|b| neighbors.contains(&b))
+    {
+        Placement::Adjacent
+    } else {
+        Placement::Remote
+    }
+}
+
+/// The sides of a trigger line that can fire it, per the engine's dispatch
+/// rules, as `(sector, class)` pairs. `front_only` selects the
+/// `P_UseSpecialLine` / `P_ShootSpecialLine` rule (the front side alone) over
+/// `P_CrossSpecialLine`'s (either side the player can step from).
 fn activator_sides(
     map: &UdmfMap,
     scene: &Scene,
-    plat: usize,
-    plat_floor: i32,
+    target: usize,
+    target_floor: i32,
     line_idx: usize,
     step: i32,
+    front_only: bool,
 ) -> Vec<(usize, Activator)> {
     let l = &map.linedefs[line_idx];
     // A dangling side or sector reference cannot fire anything: the engine
@@ -544,10 +592,13 @@ fn activator_sides(
     let Some(front) = side_sector(map, l.sidefront) else {
         return Vec::new();
     };
+    let (plat, plat_floor) = (target, target_floor);
     let back = l.sideback.and_then(|b| side_sector(map, b));
     let mut out = Vec::new();
-    if USE_LIFT.contains(&l.special) {
-        // `P_UseSpecialLine`: front side only.
+    if front_only {
+        // `P_UseSpecialLine`: front side only (`p_switch.c:288`); a gun line
+        // (`P_ShootSpecialLine`) is reached from the side its face is drawn
+        // on, so it takes the same path.
         out.push((
             front,
             classify_activator(scene, plat, plat_floor, front, step),
@@ -679,15 +730,7 @@ fn triggers_of(
             continue;
         };
         let back = l.sideback.and_then(|b| side_sector(map, b));
-        let placement = if front == plat {
-            Placement::OnPlatFront
-        } else if back == Some(plat) {
-            Placement::OnPlatBack
-        } else if neighbors.contains(&front) || back.is_some_and(|b| neighbors.contains(&b)) {
-            Placement::Adjacent
-        } else {
-            Placement::Remote
-        };
+        let placement = placement_of(plat, neighbors, Some(front), back);
         let mut switch_slots = Vec::new();
         if USE_LIFT.contains(&l.special)
             && let Some(sd) = sidedef(map, l.sidefront)
@@ -702,7 +745,15 @@ fn triggers_of(
                 }
             }
         }
-        let sides = activator_sides(map, scene, plat, plat_floor, i, step);
+        let sides = activator_sides(
+            map,
+            scene,
+            plat,
+            plat_floor,
+            i,
+            step,
+            USE_LIFT.contains(&l.special),
+        );
         // For a walkover the player fires from below, measure the far sector
         // the crossing would land in — once per `Low` side, since a line in a
         // flat low room can have two.
@@ -755,6 +806,29 @@ fn round(v: f64) -> i64 {
     v.round() as i64
 }
 
+/// The axis-aligned bounding box of a sector's boundary as `(min corner,
+/// width, height)`, or `None` when the scene resolved no boundary for it.
+pub(crate) fn sector_bbox(scene: &Scene, sec: usize) -> Option<((i64, i64), i32, i32)> {
+    let (mut west, mut south, mut east, mut north) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    let boundary = &scene.sectors[sec].boundary;
+    if boundary.is_empty() {
+        return None;
+    }
+    for b in boundary {
+        for (x, y) in [b.a, b.b] {
+            west = west.min(x);
+            south = south.min(y);
+            east = east.max(x);
+            north = north.max(y);
+        }
+    }
+    Some((
+        (round(west), round(south)),
+        i32::try_from(round(east - west)).expect("map extents fit i32"),
+        i32::try_from(round(north - south)).expect("map extents fit i32"),
+    ))
+}
+
 /// Analyzes the plat at sector `plat`. Returns `None` when no lift line names
 /// it (which cannot happen for a sector from [`MapIndex::plat_sectors`]).
 #[expect(
@@ -775,9 +849,9 @@ pub(crate) fn analyze_plat(
     // would run (`EV_DoPlat` over zero lines: `low == high`, a no-op) — it is
     // counted as Dead, but it has no geometry to measure.
     let has_geometry = !ss.boundary.is_empty();
+    let bbox = sector_bbox(scene, plat);
     let mut neighbors: BTreeSet<usize> = BTreeSet::new();
     let (mut two, mut one, mut with_special, mut blocking) = (0, 0, 0, 0);
-    let (mut west, mut south, mut east, mut north) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     let mut risers = Vec::new();
     let mut jambs = Vec::new();
     let mut two_sided_jambs = Vec::new();
@@ -786,12 +860,6 @@ pub(crate) fn analyze_plat(
     let mut light_eq_all = true;
     let mut ceiling_eq_all = true;
     for b in &ss.boundary {
-        for (x, y) in [b.a, b.b] {
-            west = west.min(x);
-            south = south.min(y);
-            east = east.max(x);
-            north = north.max(y);
-        }
         if !b.two_sided {
             one += 1;
             // `Scene::build` rejects a linedef whose `two_sided` flag and back
@@ -946,21 +1014,9 @@ pub(crate) fn analyze_plat(
         edges_with_special: with_special,
         blocking_two_sided: blocking,
         has_geometry,
-        bbox_min: if has_geometry {
-            (round(west), round(south))
-        } else {
-            (0, 0)
-        },
-        bbox_w: if has_geometry {
-            i32::try_from(round(east - west)).expect("map extents fit i32")
-        } else {
-            0
-        },
-        bbox_h: if has_geometry {
-            i32::try_from(round(north - south)).expect("map extents fit i32")
-        } else {
-            0
-        },
+        bbox_min: bbox.map_or((0, 0), |(min, _, _)| min),
+        bbox_w: bbox.map_or(0, |(_, w, _)| w),
+        bbox_h: bbox.map_or(0, |(_, _, h)| h),
         travel,
         max_nb_delta: max_nb - ss.floor,
         distinct_nb_floors,
@@ -1004,8 +1060,928 @@ pub(crate) fn analyze_plat(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Floor actions — the third pass (`floors`, Project G sub-project 4a).
+//
+// Every special number, destination formula and neighbor search below is
+// transcribed from the pinned `linuxdoom-1.10` checkout at
+// `a77dfb96cb91780ca334d0d4cfd86957558007e0`, and carries its `file:line`.
+// Nothing here is written from memory.
+// ---------------------------------------------------------------------------
+
+/// How the engine fires a linedef's special.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum TriggerKind {
+    /// Walked over — `P_CrossSpecialLine` (`p_spec.c:492`). No side gate: a
+    /// side fires it when the crossing from that side is possible.
+    Walk,
+    /// Used — `P_UseSpecialLine` (`p_switch.c:276`), front side only:
+    /// `p_switch.c:288` returns `false` from the back for every special but
+    /// 124.
+    Switch,
+    /// Shot — `P_ShootSpecialLine` (`p_spec.c:959`).
+    Gun,
+}
+
+impl TriggerKind {
+    /// The letter the report prints.
+    pub(crate) fn letter(self) -> &'static str {
+        match self {
+            Self::Walk => "W",
+            Self::Switch => "S",
+            Self::Gun => "G",
+        }
+    }
+}
+
+/// Where an "and change" family takes the flat it copies onto its target.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum FlatSource {
+    /// The line's front sector (`p_floor.c:368`; `p_plats.c:188` and `:202`
+    /// take `sides[line->sidenum[0]].sector`, the same sector).
+    LineFrontSector,
+    /// A neighbor whose floor equals the destination, taken on arrival
+    /// (`p_floor.c:413-437`, applied in `T_MoveFloor` `p_floor.c:241-244`).
+    DestinationNeighbor,
+}
+
+/// The `floor_e` (`EV_DoFloor`, `p_floor.c:259-444`) or `plattype_e`
+/// (`EV_DoPlat`, `p_plats.c:138-262`) an engine floor special dispatches to.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum FloorType {
+    /// `lowerFloor` — down to `P_FindHighestFloorSurrounding`
+    /// (`p_floor.c:291-297`).
+    LowerFloor,
+    /// `lowerFloorToLowest` — down to `P_FindLowestFloorSurrounding`
+    /// (`p_floor.c:299-305`).
+    LowerFloorToLowest,
+    /// `turboLower` — the highest neighboring floor, `+ 8` only when that
+    /// differs from the sector's own floor (`p_floor.c:307-315`).
+    TurboLower,
+    /// `raiseFloor` — up to `P_FindLowestCeilingSurrounding`, capped at the
+    /// sector's own ceiling (`p_floor.c:319-329`).
+    RaiseFloor,
+    /// `raiseFloorCrush` — `raiseFloor`'s destination minus 8, applied after
+    /// the cap (`p_floor.c:317-329`).
+    RaiseFloorCrush,
+    /// `raiseFloorToNearest` — `P_FindNextHighestFloor` (`p_floor.c:339-345`).
+    RaiseFloorToNearest,
+    /// `raiseFloorTurbo` — the same destination at `FLOORSPEED*4`
+    /// (`p_floor.c:331-337`).
+    RaiseFloorTurbo,
+    /// `raiseFloor24` — `floorheight + 24` (`p_floor.c:347-353`).
+    RaiseFloor24,
+    /// `raiseFloor24AndChange` — `+ 24`, and at start the line's front
+    /// sector's flat and special (`p_floor.c:362-370`).
+    RaiseFloor24AndChange,
+    /// `raiseFloor512` — `floorheight + 512` (`p_floor.c:354-360`).
+    RaiseFloor512,
+    /// `raiseToTexture` — `floorheight` plus the least bottom-texture height
+    /// over the sector's two-sided lines (`p_floor.c:372-401`). The probe
+    /// reads no texture heights, so this destination stays unresolved.
+    RaiseToTexture,
+    /// `lowerAndChange` — `P_FindLowestFloorSurrounding`, and on arrival the
+    /// flat and special of a neighbor at the destination height
+    /// (`p_floor.c:403-438`).
+    LowerAndChange,
+    /// Plat `raiseAndChange` with `amount = 24` (`p_plats.c:199-207`).
+    PlatRaiseAndChange24,
+    /// Plat `raiseAndChange` with `amount = 32` (`p_plats.c:199-207`).
+    PlatRaiseAndChange32,
+    /// Plat `raiseToNearestAndChange` — `P_FindNextHighestFloor`, and at
+    /// start the front sector's flat with `sec->special = 0`
+    /// (`p_plats.c:185-197`).
+    PlatRaiseToNearestAndChange,
+}
+
+impl FloorType {
+    /// The engine type's own name, as the report prints it.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::LowerFloor => "lowerFloor",
+            Self::LowerFloorToLowest => "lowerFloorToLowest",
+            Self::TurboLower => "turboLower",
+            Self::RaiseFloor => "raiseFloor",
+            Self::RaiseFloorCrush => "raiseFloorCrush",
+            Self::RaiseFloorToNearest => "raiseFloorToNearest",
+            Self::RaiseFloorTurbo => "raiseFloorTurbo",
+            Self::RaiseFloor24 => "raiseFloor24",
+            Self::RaiseFloor24AndChange => "raiseFloor24AndChange",
+            Self::RaiseFloor512 => "raiseFloor512",
+            Self::RaiseToTexture => "raiseToTexture",
+            Self::LowerAndChange => "lowerAndChange",
+            Self::PlatRaiseAndChange24 => "plat raiseAndChange +24",
+            Self::PlatRaiseAndChange32 => "plat raiseAndChange +32",
+            Self::PlatRaiseToNearestAndChange => "plat raiseToNearestAndChange",
+        }
+    }
+
+    /// Whether the thinker runs upward (`floor->direction = 1`). Every
+    /// `raise*` and every `raiseAndChange` plat does; the three `lower*`
+    /// families do not.
+    pub(crate) fn raises(self) -> bool {
+        !matches!(
+            self,
+            Self::LowerFloor | Self::LowerFloorToLowest | Self::TurboLower | Self::LowerAndChange
+        )
+    }
+
+    /// Where this family takes the flat it copies, if it copies one.
+    pub(crate) fn flat_source(self) -> Option<FlatSource> {
+        match self {
+            Self::RaiseFloor24AndChange
+            | Self::PlatRaiseAndChange24
+            | Self::PlatRaiseAndChange32
+            | Self::PlatRaiseToNearestAndChange => Some(FlatSource::LineFrontSector),
+            Self::LowerAndChange => Some(FlatSource::DestinationNeighbor),
+            _ => None,
+        }
+    }
+}
+
+/// One dispatchable form of a floor family: `(special, how it fires,
+/// whether it can fire again)`.
+pub(crate) type FloorSpecial = (i32, TriggerKind, bool);
+
+/// One family of the §1.1 dispatch table: its engine type and its forms.
+pub(crate) type FloorFamily = (FloorType, &'static [FloorSpecial]);
+
+/// `EV_DoFloor(lowerFloor)`: `p_spec.c:609-611` (19, W1) and `:837-839`
+/// (83, WR); `p_switch.c:449-451` (102, S1) and `:526-528` (45, SR).
+pub(crate) const LOWER_FLOOR: [FloorSpecial; 4] = [
+    (19, TriggerKind::Walk, false),
+    (83, TriggerKind::Walk, true),
+    (102, TriggerKind::Switch, false),
+    (45, TriggerKind::Switch, true),
+];
+
+/// `EV_DoFloor(lowerFloorToLowest)`: `p_spec.c:652-654` (38, W1),
+/// `:664-669` (40, W1 — `RaiseCeilingLowerFloor`, which also calls
+/// `EV_DoCeiling(line, raiseToHighest)`) and `:832-834` (82, WR);
+/// `p_switch.c:395-398` (23, S1) and `:532-535` (60, SR).
+pub(crate) const LOWER_FLOOR_TO_LOWEST: [FloorSpecial; 5] = [
+    (38, TriggerKind::Walk, false),
+    (40, TriggerKind::Walk, false),
+    (82, TriggerKind::Walk, true),
+    (23, TriggerKind::Switch, false),
+    (60, TriggerKind::Switch, true),
+];
+
+/// The one special in [`LOWER_FLOOR_TO_LOWEST`] that also raises the ceiling
+/// (`p_spec.c:664-669`: `EV_DoCeiling(line, raiseToHighest)` then
+/// `EV_DoFloor(line, lowerFloorToLowest)`).
+pub(crate) const RAISE_CEILING_LOWER_FLOOR: i32 = 40;
+
+/// `EV_DoFloor(turboLower)`: `p_spec.c:640-642` (36, W1) and `:909-911`
+/// (98, WR); `p_switch.c:413-415` (71, S1) and `:592-594` (70, SR).
+pub(crate) const TURBO_LOWER: [FloorSpecial; 4] = [
+    (36, TriggerKind::Walk, false),
+    (98, TriggerKind::Walk, true),
+    (71, TriggerKind::Switch, false),
+    (70, TriggerKind::Switch, true),
+];
+
+/// `EV_DoFloor(raiseFloor)`: `p_spec.c:561-563` (5, W1), `:872-874`
+/// (91, WR) and `:982-985` (24, G1, `P_ShootSpecialLine`);
+/// `p_switch.c:443-445` (101, S1) and `:556-558` (64, SR).
+pub(crate) const RAISE_FLOOR: [FloorSpecial; 5] = [
+    (5, TriggerKind::Walk, false),
+    (91, TriggerKind::Walk, true),
+    (101, TriggerKind::Switch, false),
+    (64, TriggerKind::Switch, true),
+    (24, TriggerKind::Gun, false),
+];
+
+/// `EV_DoFloor(raiseFloorCrush)`: `p_spec.c:694-696` (56, W1) and
+/// `:887-889` (94, WR); `p_switch.c:437-439` (55, S1) and `:574-577`
+/// (65, SR).
+pub(crate) const RAISE_FLOOR_CRUSH: [FloorSpecial; 4] = [
+    (56, TriggerKind::Walk, false),
+    (94, TriggerKind::Walk, true),
+    (55, TriggerKind::Switch, false),
+    (65, TriggerKind::Switch, true),
+];
+
+/// `EV_DoFloor(raiseFloorToNearest)`: `p_spec.c:748-750` (119, W1) and
+/// `:940-942` (128, WR); `p_switch.c:377-380` (18, S1) and `:586-589`
+/// (69, SR).
+pub(crate) const RAISE_FLOOR_TO_NEAREST: [FloorSpecial; 4] = [
+    (119, TriggerKind::Walk, false),
+    (128, TriggerKind::Walk, true),
+    (18, TriggerKind::Switch, false),
+    (69, TriggerKind::Switch, true),
+];
+
+/// `EV_DoFloor(raiseFloorTurbo)`: `p_spec.c:774-776` (130, W1) and
+/// `:945-947` (129, WR); `p_switch.c:491-493` (131, S1) and `:622-624`
+/// (132, SR).
+pub(crate) const RAISE_FLOOR_TURBO: [FloorSpecial; 4] = [
+    (130, TriggerKind::Walk, false),
+    (129, TriggerKind::Walk, true),
+    (131, TriggerKind::Switch, false),
+    (132, TriggerKind::Switch, true),
+];
+
+/// `EV_DoFloor(raiseFloor24)`: `p_spec.c:706-708` (58, W1) and `:877-879`
+/// (92, WR). No switch form exists.
+pub(crate) const RAISE_FLOOR_24: [FloorSpecial; 2] = [
+    (58, TriggerKind::Walk, false),
+    (92, TriggerKind::Walk, true),
+];
+
+/// `EV_DoFloor(raiseFloor24AndChange)`: `p_spec.c:712-714` (59, W1) and
+/// `:882-884` (93, WR). No switch form exists.
+pub(crate) const RAISE_FLOOR_24_AND_CHANGE: [FloorSpecial; 2] = [
+    (59, TriggerKind::Walk, false),
+    (93, TriggerKind::Walk, true),
+];
+
+/// `EV_DoFloor(raiseFloor512)`: `p_switch.c:507-510` (140, S1). The only
+/// form the engine dispatches.
+pub(crate) const RAISE_FLOOR_512: [FloorSpecial; 1] = [(140, TriggerKind::Switch, false)];
+
+/// `EV_DoFloor(raiseToTexture)`: `p_spec.c:627-630` (30, W1) and `:898-901`
+/// (96, WR).
+pub(crate) const RAISE_TO_TEXTURE: [FloorSpecial; 2] = [
+    (30, TriggerKind::Walk, false),
+    (96, TriggerKind::Walk, true),
+];
+
+/// `EV_DoFloor(lowerAndChange)`: `p_spec.c:646-648` (37, W1) and `:842-844`
+/// (84, WR).
+pub(crate) const LOWER_AND_CHANGE: [FloorSpecial; 2] = [
+    (37, TriggerKind::Walk, false),
+    (84, TriggerKind::Walk, true),
+];
+
+/// `EV_DoPlat(raiseAndChange, 24)`: `p_switch.c:371-374` (15, S1) and
+/// `:562-565` (66, SR).
+pub(crate) const PLAT_RAISE_AND_CHANGE_24: [FloorSpecial; 2] = [
+    (15, TriggerKind::Switch, false),
+    (66, TriggerKind::Switch, true),
+];
+
+/// `EV_DoPlat(raiseAndChange, 32)`: `p_switch.c:365-368` (14, S1) and
+/// `:568-571` (67, SR).
+pub(crate) const PLAT_RAISE_AND_CHANGE_32: [FloorSpecial; 2] = [
+    (14, TriggerKind::Switch, false),
+    (67, TriggerKind::Switch, true),
+];
+
+/// `EV_DoPlat(raiseToNearestAndChange, 0)`: `p_spec.c:615-617` (22, W1),
+/// `:892-895` (95, WR) and `:994-997` (47, G1, `P_ShootSpecialLine`);
+/// `p_switch.c:383-386` (20, S1) and `:580-583` (68, SR).
+pub(crate) const PLAT_RAISE_TO_NEAREST_AND_CHANGE: [FloorSpecial; 5] = [
+    (22, TriggerKind::Walk, false),
+    (95, TriggerKind::Walk, true),
+    (20, TriggerKind::Switch, false),
+    (68, TriggerKind::Switch, true),
+    (47, TriggerKind::Gun, false),
+];
+
+/// Every floor family, in the order the report prints them.
+pub(crate) const FLOOR_FAMILIES: [FloorFamily; 15] = [
+    (FloorType::LowerFloor, &LOWER_FLOOR),
+    (FloorType::LowerFloorToLowest, &LOWER_FLOOR_TO_LOWEST),
+    (FloorType::TurboLower, &TURBO_LOWER),
+    (FloorType::RaiseFloor, &RAISE_FLOOR),
+    (FloorType::RaiseFloorCrush, &RAISE_FLOOR_CRUSH),
+    (FloorType::RaiseFloorToNearest, &RAISE_FLOOR_TO_NEAREST),
+    (FloorType::RaiseFloorTurbo, &RAISE_FLOOR_TURBO),
+    (FloorType::RaiseFloor24, &RAISE_FLOOR_24),
+    (FloorType::RaiseFloor24AndChange, &RAISE_FLOOR_24_AND_CHANGE),
+    (FloorType::RaiseFloor512, &RAISE_FLOOR_512),
+    (FloorType::RaiseToTexture, &RAISE_TO_TEXTURE),
+    (FloorType::LowerAndChange, &LOWER_AND_CHANGE),
+    (FloorType::PlatRaiseAndChange24, &PLAT_RAISE_AND_CHANGE_24),
+    (FloorType::PlatRaiseAndChange32, &PLAT_RAISE_AND_CHANGE_32),
+    (
+        FloorType::PlatRaiseToNearestAndChange,
+        &PLAT_RAISE_TO_NEAREST_AND_CHANGE,
+    ),
+];
+
+/// The two floor specials `P_ShootSpecialLine` dispatches (`p_spec.c:982`
+/// and `:994`) — the gun forms, which the v1 gate refuses.
+pub(crate) const FLOOR_GUN: [i32; 2] = [24, 47];
+
+/// `EV_BuildStairs`: `p_spec.c:573-575` (8, W1 `build8`) and `:736-738`
+/// (100, W1 `turbo16`); `p_switch.c:347-350` (7, S1 `build8`) and
+/// `:485-488` (127, S1 `turbo16`). An adjacent family: counted, not modeled.
+pub(crate) const STAIRS: [i32; 4] = [8, 100, 7, 127];
+
+/// `EV_DoDonut`: `p_switch.c:353-356` (9, S1). An adjacent family: counted,
+/// not modeled.
+pub(crate) const DONUT: [i32; 1] = [9];
+
+/// Every special dispatching `EV_DoCeiling`, read off the two dispatch
+/// switches rather than recalled: `p_spec.c:567-569` (6, W1), `:621-623`
+/// (25, W1), `:664-667` (40, W1 — also a floor lower), `:671-673` (44, W1),
+/// `:780-782` (141, W1), `:787-789` (72, WR), `:792-794` (73, WR),
+/// `:812-814` (77, WR); `p_switch.c:407-410` (41, S1), `:419-422` (49, S1),
+/// `:520-522` (43, SR). The crusher-stop specials (57, 74) call
+/// `EV_CeilingCrushStop`, not `EV_DoCeiling`, and are not in this set.
+pub(crate) const CEILING: [i32; 11] = [6, 25, 40, 44, 141, 72, 73, 77, 41, 49, 43];
+
+/// Every special in the [`FLOOR_FAMILIES`] table, gun forms included. Derived
+/// from the table rather than restated, so the two can never disagree.
+pub(crate) fn floor_all() -> BTreeSet<i32> {
+    FLOOR_FAMILIES
+        .iter()
+        .flat_map(|(_, specials)| specials.iter().map(|&(special, _, _)| special))
+        .collect()
+}
+
+/// The engine type, trigger kind and repeatability `special` dispatches, or
+/// `None` when it is not a floor line.
+pub(crate) fn floor_type(special: i32) -> Option<(FloorType, TriggerKind, bool)> {
+    FLOOR_FAMILIES.iter().find_map(|&(ty, specials)| {
+        specials
+            .iter()
+            .find(|&&(s, _, _)| s == special)
+            .map(|&(_, kind, repeatable)| (ty, kind, repeatable))
+    })
+}
+
+/// The sector's line list as the engine builds it (`p_setup.c P_GroupLines`,
+/// 520-553): one entry per linedef bordering the sector, and **exactly one**
+/// for a self-referencing line — the engine's count guard is
+/// `if (li->backsector && li->backsector != li->frontsector)`, while
+/// [`Scene`] files two mirrored boundaries for such a line. Declaration order
+/// is preserved, which is what [`next_highest_floor`]'s 20-entry cap depends
+/// on.
+fn sector_lines(scene: &Scene, sec: usize) -> Vec<&Boundary> {
+    let mut seen: BTreeSet<usize> = BTreeSet::new();
+    scene.sectors[sec]
+        .boundary
+        .iter()
+        .filter(|b| seen.insert(b.linedef))
+        .collect()
+}
+
+/// `getNextSector` (`p_spec.c:250-262`): the sector across a **two-sided**
+/// line, `None` otherwise. A self-referencing line yields the sector itself,
+/// exactly as the engine's `frontsector == sec ? backsector : frontsector`
+/// does.
+fn next_sector(b: &Boundary) -> Option<usize> {
+    if b.two_sided { b.neighbor } else { None }
+}
+
+/// `P_FindLowestFloorSurrounding` (`p_spec.c:270-291`): starts at the
+/// sector's **own** floor, minimum over two-sided neighbors.
+pub(crate) fn lowest_floor_surrounding(scene: &Scene, sec: usize) -> i32 {
+    sector_lines(scene, sec)
+        .iter()
+        .filter_map(|b| next_sector(b))
+        .fold(scene.sectors[sec].floor, |lo, n| {
+            lo.min(scene.sectors[n].floor)
+        })
+}
+
+/// `P_FindHighestFloorSurrounding`'s starting value, `-500*FRACUNIT`
+/// (`p_spec.c:303`). A sector with no two-sided neighbor "lowers" to it.
+pub(crate) const NO_NEIGHBOR_FLOOR: i32 = -500;
+
+/// `P_FindHighestFloorSurrounding` (`p_spec.c:297-318`): starts at
+/// [`NO_NEIGHBOR_FLOOR`], maximum over two-sided neighbors.
+pub(crate) fn highest_floor_surrounding(scene: &Scene, sec: usize) -> i32 {
+    sector_lines(scene, sec)
+        .iter()
+        .filter_map(|b| next_sector(b))
+        .fold(NO_NEIGHBOR_FLOOR, |hi, n| hi.max(scene.sectors[n].floor))
+}
+
+/// `MAX_ADJOINING_SECTORS` (`p_spec.c:326`).
+pub(crate) const MAX_ADJOINING_SECTORS: usize = 20;
+
+/// What [`next_highest_floor`] found.
+pub(crate) struct NextHighest {
+    /// The least neighboring floor strictly above `currentheight`, or
+    /// `currentheight` when no neighbor is above it (`p_spec.c:361-362`).
+    pub(crate) height: i32,
+    /// Whether the search filled its 20-entry list and broke early
+    /// (`p_spec.c:349-355`) — the map is then reading a truncated
+    /// neighborhood, and the destination may not be the true next height.
+    pub(crate) capped: bool,
+}
+
+/// `P_FindNextHighestFloor(sec, currentheight)` (`p_spec.c:329-375`),
+/// including its 20-entry cap: candidates are collected in the sector's own
+/// line order and the loop breaks once the list is full.
+pub(crate) fn next_highest_floor(scene: &Scene, sec: usize, current: i32) -> NextHighest {
+    let mut candidates: Vec<i32> = Vec::new();
+    let mut capped = false;
+    for b in sector_lines(scene, sec) {
+        let Some(n) = next_sector(b) else { continue };
+        let floor = scene.sectors[n].floor;
+        if floor > current {
+            candidates.push(floor);
+        }
+        if candidates.len() >= MAX_ADJOINING_SECTORS {
+            capped = true;
+            break;
+        }
+    }
+    NextHighest {
+        height: candidates.iter().copied().min().unwrap_or(current),
+        capped,
+    }
+}
+
+/// `P_FindLowestCeilingSurrounding` (`p_spec.c:382-401`): starts at `MAXINT`
+/// — [`i32::MAX`] here — and takes the minimum neighboring ceiling.
+pub(crate) fn lowest_ceiling_surrounding(scene: &Scene, sec: usize) -> i32 {
+    sector_lines(scene, sec)
+        .iter()
+        .filter_map(|b| next_sector(b))
+        .fold(i32::MAX, |lo, n| lo.min(scene.sectors[n].ceiling))
+}
+
+/// Where a floor action sends its target, evaluated at load-time heights.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Destination {
+    /// A resolved height.
+    Height(i32),
+    /// `raiseToTexture` (`p_floor.c:372-401`): the destination is the least
+    /// bottom-texture height on the sector's two-sided lines, and the probe
+    /// reads no texture heights.
+    NeedsTexture,
+}
+
+/// `raiseFloor`'s destination: `P_FindLowestCeilingSurrounding` capped at the
+/// sector's own ceiling (`p_floor.c:322-326`).
+fn raise_floor_destination(scene: &Scene, target: usize) -> i32 {
+    lowest_ceiling_surrounding(scene, target).min(scene.sectors[target].ceiling)
+}
+
+/// The `floordestheight` / `plat->high` the engine would compute for
+/// `target` under `ty`, at the heights the map loads with.
+pub(crate) fn destination(scene: &Scene, target: usize, ty: FloorType) -> Destination {
+    let floor = scene.sectors[target].floor;
+    let height = match ty {
+        FloorType::LowerFloor => highest_floor_surrounding(scene, target),
+        FloorType::LowerFloorToLowest | FloorType::LowerAndChange => {
+            lowest_floor_surrounding(scene, target)
+        }
+        FloorType::TurboLower => {
+            // `p_floor.c:313-314`: `+ 8` only when the destination differs
+            // from the sector's current floor.
+            let high = highest_floor_surrounding(scene, target);
+            if high == floor { high } else { high + 8 }
+        }
+        FloorType::RaiseFloor => raise_floor_destination(scene, target),
+        // `p_floor.c:327-328`: the `- 8` is applied after the ceiling cap.
+        FloorType::RaiseFloorCrush => raise_floor_destination(scene, target) - 8,
+        FloorType::RaiseFloorToNearest
+        | FloorType::RaiseFloorTurbo
+        | FloorType::PlatRaiseToNearestAndChange => next_highest_floor(scene, target, floor).height,
+        FloorType::RaiseFloor24
+        | FloorType::RaiseFloor24AndChange
+        | FloorType::PlatRaiseAndChange24 => floor + 24,
+        FloorType::PlatRaiseAndChange32 => floor + 32,
+        FloorType::RaiseFloor512 => floor + 512,
+        FloorType::RaiseToTexture => return Destination::NeedsTexture,
+    };
+    Destination::Height(height)
+}
+
+/// The floor heights one evaluation runs at: the map's, except the target's,
+/// which is `target_floor` — its rest height before the action fires, its
+/// destination after. Ceilings never move here.
+#[derive(Clone, Copy)]
+pub(crate) struct Heights {
+    /// The moving sector.
+    pub(crate) target: usize,
+    /// The moving sector's floor in this evaluation.
+    pub(crate) target_floor: i32,
+}
+
+impl Heights {
+    /// Sector `s`'s floor under these heights.
+    pub(crate) fn floor(self, scene: &Scene, s: usize) -> i32 {
+        if s == self.target {
+            self.target_floor
+        } else {
+            scene.sectors[s].floor
+        }
+    }
+}
+
+/// `ceiling(S) − floor(S) ≥ H`: `P_TryMove` refuses a move into a sector the
+/// player does not fit in (`p_map.c:468`, `tmceilingz - tmfloorz <
+/// thing->height`).
+pub(crate) fn standable(scene: &Scene, h: Heights, s: usize, player_height: i32) -> bool {
+    scene.sectors[s].ceiling - h.floor(scene, s) >= player_height
+}
+
+/// Whether the player can walk from `a` into `b` across a two-sided
+/// boundary. `P_LineOpening` (`p_maputl.c:300-332`) sets `opentop = min(front
+/// ceiling, back ceiling)` and `openbottom = max(front floor, back floor)`;
+/// `P_TryMove` then refuses when the opening is shorter than the player
+/// (`p_map.c:468`) and when the step up exceeds 24 (`p_map.c:478`). Descent
+/// is free: the drop-off arm (`p_map.c:481`) is gated on
+/// `!(thing->flags & (MF_DROPOFF|MF_FLOAT))`, and `MT_PLAYER` carries
+/// `MF_DROPOFF` (`info.c:1130`).
+pub(crate) fn pass(
+    scene: &Scene,
+    h: Heights,
+    a: usize,
+    b: usize,
+    player_height: i32,
+    step: i32,
+) -> bool {
+    if !standable(scene, h, a, player_height) || !standable(scene, h, b, player_height) {
+        return false;
+    }
+    let (fa, fb) = (h.floor(scene, a), h.floor(scene, b));
+    let opening = scene.sectors[a].ceiling.min(scene.sectors[b].ceiling) - fa.max(fb);
+    opening >= player_height && fb - fa <= step
+}
+
+/// The two-sided adjacency among `members`, in both directions. A sector's
+/// self-referencing boundaries are dropped: a sector is not its own neighbor
+/// for the purpose of walking between rooms.
+pub(crate) fn local_adjacency(
+    scene: &Scene,
+    members: &BTreeSet<usize>,
+) -> BTreeMap<usize, BTreeSet<usize>> {
+    let mut adjacency: BTreeMap<usize, BTreeSet<usize>> = BTreeMap::new();
+    for &m in members {
+        for b in &scene.sectors[m].boundary {
+            let Some(n) = next_sector(b) else { continue };
+            if n != m && members.contains(&n) {
+                adjacency.entry(m).or_default().insert(n);
+                adjacency.entry(n).or_default().insert(m);
+            }
+        }
+    }
+    adjacency
+}
+
+/// `reach_X(A)` for every member of the local graph: the members reachable
+/// from `A` through directed [`pass`] edges inside the graph, excluding `A`
+/// itself and the target (which may be a *via*, never a destination). A
+/// member that is not [`standable`] reaches nothing.
+pub(crate) fn reach_sets(
+    scene: &Scene,
+    members: &BTreeSet<usize>,
+    adjacency: &BTreeMap<usize, BTreeSet<usize>>,
+    h: Heights,
+    player_height: i32,
+    step: i32,
+) -> BTreeMap<usize, BTreeSet<usize>> {
+    let empty = BTreeSet::new();
+    let mut out = BTreeMap::new();
+    for &start in members {
+        let mut visited: BTreeSet<usize> = BTreeSet::new();
+        if standable(scene, h, start, player_height) {
+            visited.insert(start);
+            let mut stack = vec![start];
+            while let Some(x) = stack.pop() {
+                for &y in adjacency.get(&x).unwrap_or(&empty) {
+                    if !visited.contains(&y) && pass(scene, h, x, y, player_height, step) {
+                        visited.insert(y);
+                        stack.push(y);
+                    }
+                }
+            }
+        }
+        visited.remove(&start);
+        visited.remove(&h.target);
+        out.insert(start, visited);
+    }
+    out
+}
+
+/// What a floor action does to everyone *other* than a rider standing on the
+/// target when it fires.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum Effect {
+    /// `d == f`: the thinker runs and changes nothing. Decided first.
+    Dead,
+    /// Every neighbor's reach set grows or holds, at least one grows.
+    Opening,
+    /// Every neighbor's reach set shrinks or holds, at least one shrinks.
+    Closing,
+    /// Some neighbor gains and some neighbor loses.
+    Mixed,
+    /// Every reach set is unchanged, and `d != f`.
+    Neutral,
+}
+
+/// What the action does to a player already standing on the target.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum Rider {
+    /// Nobody can be standing on the target when it fires.
+    NotApplicable,
+    /// The rider can still reach everything it could before.
+    Keeps,
+    /// The rider loses a destination — it may be stranded.
+    Loses,
+}
+
+/// Which opening a floor action carves, when it opens one.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum OpeningShape {
+    /// Lowers, and could not be entered before: a wall drops away.
+    DropWall,
+    /// Lowers from a height the player could already step onto.
+    LedgeLower,
+    /// Rises from a pit the player could already drop into: a walkway.
+    Bridge,
+    /// A sealed sector the player can step onto once it has moved, without
+    /// any neighbor gaining a new destination: the sunken pedestal that
+    /// exposes a pickup, or a panel between two areas already joined. The
+    /// effect is [`Effect::Neutral`] — nothing new is *reachable* — but the
+    /// target itself becomes standable, which the reach sets never see
+    /// because the target is never a destination of its own local graph.
+    Reveal,
+    /// An opening none of the others describes. Expected to be rare;
+    /// reported rather than hidden.
+    OtherOpening,
+}
+
+/// The classification of one `(family, target)` action.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent measured fact about the action (what the target is \
+              reachable from before and after, what the destination coincides with, whether the \
+              neighbors were joined anyway); they encode no joint state"
+)]
+pub(crate) struct EffectFacts {
+    /// The effect on everyone but a rider.
+    pub(crate) effect: Effect,
+    /// The effect on a rider.
+    pub(crate) rider: Rider,
+    /// The opening sub-shape: an [`Effect::Opening`] whose rider is not
+    /// stranded, or an [`Effect::Neutral`] that is an
+    /// [`OpeningShape::Reveal`].
+    pub(crate) opening: Option<OpeningShape>,
+    /// Whether some neighbor can walk onto the target at its rest floor.
+    pub(crate) enterable_before: bool,
+    /// Whether some neighbor can walk onto the target at its destination.
+    pub(crate) enterable_after: bool,
+    /// Whether two distinct neighbors could already reach each other, both
+    /// ways, inside the local graph before the action fired — so the target
+    /// was not the only route between them.
+    pub(crate) neighbors_already_connected: bool,
+    /// Whether the destination is exactly some neighbor's floor.
+    pub(crate) joins_neighbor_floor: bool,
+    /// `(A, B)` pairs `B` newly reachable from `A`.
+    pub(crate) new_pairs: usize,
+    /// Whether some new pair is matched by its reverse.
+    pub(crate) new_pair_bidirectional: bool,
+}
+
+/// Classifies the action that moves `target`'s floor from `rest` to `dest`,
+/// against the local graph `{target} ∪ neighbors` at load-time heights.
+pub(crate) fn classify_effect(
+    scene: &Scene,
+    target: usize,
+    neighbors: &BTreeSet<usize>,
+    rest: i32,
+    dest: i32,
+    player_height: i32,
+    step: i32,
+) -> EffectFacts {
+    let mut members: BTreeSet<usize> = neighbors.clone();
+    members.insert(target);
+    let adjacency = local_adjacency(scene, &members);
+    let before_h = Heights {
+        target,
+        target_floor: rest,
+    };
+    let after_h = Heights {
+        target,
+        target_floor: dest,
+    };
+    let before = reach_sets(scene, &members, &adjacency, before_h, player_height, step);
+    let after = reach_sets(scene, &members, &adjacency, after_h, player_height, step);
+
+    // `rider_before` is `standable(T) at f ∧ ∃A ∈ N(T): pass(A → T)`, and
+    // `pass` already requires `standable(T)` — so it is exactly
+    // "enterable before".
+    let enterable_before = neighbors
+        .iter()
+        .any(|&n| n != target && pass(scene, before_h, n, target, player_height, step));
+    let enterable_after = neighbors
+        .iter()
+        .any(|&n| n != target && pass(scene, after_h, n, target, player_height, step));
+
+    let empty = BTreeSet::new();
+    let mut new_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut any_loss = false;
+    for &a in &members {
+        if a == target {
+            continue;
+        }
+        let (was, now) = (
+            before.get(&a).unwrap_or(&empty),
+            after.get(&a).unwrap_or(&empty),
+        );
+        new_pairs.extend(now.difference(was).map(|&b| (a, b)));
+        any_loss |= was.difference(now).next().is_some();
+    }
+    let effect = if dest == rest {
+        Effect::Dead
+    } else {
+        match (!new_pairs.is_empty(), any_loss) {
+            (true, true) => Effect::Mixed,
+            (true, false) => Effect::Opening,
+            (false, true) => Effect::Closing,
+            (false, false) => Effect::Neutral,
+        }
+    };
+
+    let rider = if enterable_before {
+        let (was, now) = (
+            before.get(&target).unwrap_or(&empty),
+            after.get(&target).unwrap_or(&empty),
+        );
+        if now.is_superset(was) {
+            Rider::Keeps
+        } else {
+            Rider::Loses
+        }
+    } else {
+        Rider::NotApplicable
+    };
+
+    let opening = if effect == Effect::Opening && rider != Rider::Loses {
+        Some(match (dest < rest, enterable_before) {
+            (true, false) => OpeningShape::DropWall,
+            (true, true) => OpeningShape::LedgeLower,
+            (false, true) => OpeningShape::Bridge,
+            (false, false) => OpeningShape::OtherOpening,
+        })
+    } else if effect == Effect::Neutral && !enterable_before && enterable_after {
+        // The rider is `NotApplicable` by construction: nobody could be
+        // standing on a target no neighbor could walk onto.
+        Some(OpeningShape::Reveal)
+    } else {
+        None
+    };
+
+    // Read off the *before* sets: a pair of neighbors that could already
+    // reach each other both ways was not depending on the target.
+    let neighbors_already_connected = before.iter().any(|(&a, reach)| {
+        a != target
+            && reach
+                .iter()
+                .any(|&b| before.get(&b).is_some_and(|back| back.contains(&a)))
+    });
+
+    EffectFacts {
+        effect,
+        rider,
+        opening,
+        enterable_before,
+        enterable_after,
+        neighbors_already_connected,
+        joins_neighbor_floor: neighbors
+            .iter()
+            .any(|&n| n != target && scene.sectors[n].floor == dest),
+        new_pair_bidirectional: new_pairs.iter().any(|&(a, b)| new_pairs.contains(&(b, a))),
+        new_pairs: new_pairs.len(),
+    }
+}
+
+/// Hops from `from` to every sector reachable over two-sided adjacency,
+/// ignoring heights — the trigger-placement measure of §E.
+pub(crate) fn hop_distances(scene: &Scene, from: usize) -> BTreeMap<usize, usize> {
+    let mut dist: BTreeMap<usize, usize> = BTreeMap::from([(from, 0)]);
+    let mut frontier = vec![from];
+    let mut depth = 0;
+    while !frontier.is_empty() {
+        depth += 1;
+        let mut next = Vec::new();
+        for s in frontier {
+            for b in &scene.sectors[s].boundary {
+                let Some(n) = next_sector(b) else { continue };
+                if let btree_map::Entry::Vacant(slot) = dist.entry(n) {
+                    slot.insert(depth);
+                    next.push(n);
+                }
+            }
+        }
+        frontier = next;
+    }
+    dist
+}
+
+/// The sectors a trigger line can be fired from — [`activator_sides`]
+/// without the classification, for callers that only need the placement.
+pub(crate) fn trigger_sides(
+    map: &UdmfMap,
+    scene: &Scene,
+    target: usize,
+    line_idx: usize,
+    step: i32,
+    front_only: bool,
+) -> Vec<usize> {
+    let floor = scene.sectors[target].floor;
+    activator_sides(map, scene, target, floor, line_idx, step, front_only)
+        .into_iter()
+        .map(|(s, _)| s)
+        .collect()
+}
+
+/// One floor line naming a target's tag.
+pub(crate) struct FloorTrigger {
+    /// The linedef's special.
+    pub(crate) special: i32,
+    /// The engine type it dispatches.
+    pub(crate) ty: FloorType,
+    /// How it is fired.
+    pub(crate) kind: TriggerKind,
+    /// Whether it can fire more than once.
+    pub(crate) repeatable: bool,
+    /// Where it sits relative to the target.
+    pub(crate) placement: Placement,
+    /// The activator classes, deduplicated; `[Activator::None]` when no side
+    /// can fire it.
+    pub(crate) activators: Vec<Activator>,
+    /// The `SW1*`/`SW2*` textures on the front sidedef, by slot.
+    pub(crate) switch_slots: Vec<(&'static str, String)>,
+    /// A line whose two sides name the same sector — a trip line drawn inside
+    /// one room rather than a portal crossing.
+    pub(crate) same_sector: bool,
+    /// The line's front sector, which the "and change" families copy a flat
+    /// from. `None` when the front side or its sector reference dangles.
+    pub(crate) front_sector: Option<usize>,
+    /// Hops from the nearest activator sector to the target, `None` when no
+    /// activator sector reaches it over two-sided adjacency.
+    pub(crate) hops: Option<usize>,
+}
+
+/// Every floor line naming `target`'s tag, as one trigger each. A tag-0
+/// target has none: `P_FindSectorFromLineTag` matches tags by equality, and
+/// the probe never resolves a tag-0 line against untagged sectors.
+pub(crate) fn floor_triggers(
+    map: &UdmfMap,
+    scene: &Scene,
+    target: usize,
+    neighbors: &BTreeSet<usize>,
+    hops: &BTreeMap<usize, usize>,
+    step: i32,
+) -> Vec<FloorTrigger> {
+    let tag = map.sectors[target].id;
+    if tag == 0 {
+        return Vec::new();
+    }
+    let target_floor = scene.sectors[target].floor;
+    let mut triggers = Vec::new();
+    for (i, l) in map.linedefs.iter().enumerate() {
+        if l.args[0] != tag {
+            continue;
+        }
+        let Some((ty, kind, repeatable)) = floor_type(l.special) else {
+            continue;
+        };
+        let front = side_sector(map, l.sidefront);
+        let back = l.sideback.and_then(|b| side_sector(map, b));
+        // A gun line is fired by a hitscan that crosses the line, which
+        // reaches it from the side its face is drawn on — the front, as for a
+        // use line (`P_ShootSpecialLine`, `p_spec.c:959-1000`, has no side
+        // gate of its own).
+        let front_only = kind != TriggerKind::Walk;
+        let sides = activator_sides(map, scene, target, target_floor, i, step, front_only);
+        let mut switch_slots = Vec::new();
+        if front_only && let Some(sd) = sidedef(map, l.sidefront) {
+            for (slot, tex) in [
+                ("top", &sd.texturetop),
+                ("mid", &sd.texturemiddle),
+                ("bot", &sd.texturebottom),
+            ] {
+                if tex.starts_with("SW1") || tex.starts_with("SW2") {
+                    switch_slots.push((slot, tex.clone()));
+                }
+            }
+        }
+        triggers.push(FloorTrigger {
+            special: l.special,
+            ty,
+            kind,
+            repeatable,
+            placement: placement_of(target, neighbors, front, back),
+            activators: activators(&sides),
+            switch_slots,
+            same_sector: back.is_some() && back == front,
+            front_sector: front,
+            hops: sides
+                .iter()
+                .filter_map(|&(s, _)| hops.get(&s).copied())
+                .min(),
+        });
+    }
+    triggers
+}
+
+/// Synthetic-map builders and the fixture type the probe's test modules
+/// share: rows of rooms (`chain`, `chain_full`), a T (`tee`), an L whose two
+/// arms also touch each other (`panel`), and a lift shaft (`shaft`).
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::fmt::Write as _;
 
     use crustygen::tables::Tables;
@@ -1022,8 +1998,26 @@ mod tests {
     /// it so the east room is the front. Every link sidedef carries
     /// `SUPPORT3` as its lower; every one-sided wall is `STARTAN2`. `extra` is
     /// appended verbatim.
-    fn chain(floors: &[i32], tags: &[i32], links: &[(i32, i32, bool)], extra: &str) -> String {
+    pub(crate) fn chain(
+        floors: &[i32],
+        tags: &[i32],
+        links: &[(i32, i32, bool)],
+        extra: &str,
+    ) -> String {
+        chain_full(floors, &vec![256; floors.len()], tags, links, extra)
+    }
+
+    /// [`chain`] with a ceiling per room, for the fixtures whose question is
+    /// headroom rather than floor height.
+    pub(crate) fn chain_full(
+        floors: &[i32],
+        ceilings: &[i32],
+        tags: &[i32],
+        links: &[(i32, i32, bool)],
+        extra: &str,
+    ) -> String {
         let n = floors.len();
+        assert_eq!(ceilings.len(), n);
         assert_eq!(tags.len(), n);
         assert_eq!(links.len(), n - 1);
         let mut text = String::from("namespace = \"doom\";\n");
@@ -1077,23 +2071,160 @@ mod tests {
             wall(&mut text, br, bl);
         }
         text.push_str(&sidedefs);
-        for (floor, tag) in floors.iter().zip(tags) {
+        for ((floor, ceiling), tag) in floors.iter().zip(ceilings).zip(tags) {
             let _ = writeln!(
                 text,
-                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; heightfloor = {floor}; heightceiling = 256; lightlevel = 160; id = {tag}; }}"
+                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; heightfloor = {floor}; heightceiling = {ceiling}; lightlevel = 160; id = {tag}; }}"
             );
         }
         text.push_str(extra);
         text
     }
 
-    struct Fixture {
-        map: UdmfMap,
-        scene: Scene,
-        step: i32,
+    /// Four rooms: A (sector 0), T (sector 1) and B (sector 2) in a row of
+    /// 128×128 boxes at `y ∈ [0, 128]`, plus a pit P (sector 3) south of T at
+    /// `y ∈ [-128, 0]`. `links` gives `(special, tag)` for the three
+    /// two-sided boundaries A|T, T|B and T|P, whose front sectors are A, T
+    /// and T. Every two-sided sidedef carries `SUPPORT3` as its lower and
+    /// every one-sided wall `STARTAN2`; `extra` is appended verbatim.
+    pub(crate) fn tee(
+        floors: &[i32; 4],
+        ceilings: &[i32; 4],
+        tags: &[i32; 4],
+        links: &[(i32, i32); 3],
+        extra: &str,
+    ) -> String {
+        let mut text = String::from("namespace = \"doom\";\n");
+        for (x, y) in [
+            (0, 0),
+            (0, 128),
+            (128, 0),
+            (128, 128),
+            (256, 0),
+            (256, 128),
+            (384, 0),
+            (384, 128),
+            (128, -128),
+            (256, -128),
+        ] {
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = {y}.000; }}");
+        }
+        // The three shared boundaries, then the one-sided perimeter walls of
+        // each room, each wound so its front (right) side faces inward.
+        for (i, &(v1, v2)) in [(3, 2), (5, 4), (4, 2)].iter().enumerate() {
+            let (special, tag) = links[i];
+            let (sf, sb) = (2 * i, 2 * i + 1);
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {sf}; sideback = {sb}; twosided = true; special = {special}; arg0 = {tag}; }}"
+            );
+        }
+        for (i, &(v1, v2)) in [
+            (0, 1),
+            (1, 3),
+            (2, 0),
+            (3, 5),
+            (5, 7),
+            (7, 6),
+            (6, 4),
+            (8, 2),
+            (4, 9),
+            (9, 8),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let s = 6 + i;
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {s}; blocking = true; }}"
+            );
+        }
+        for sector in [0, 1, 1, 2, 1, 3, 0, 0, 0, 1, 2, 2, 2, 3, 3, 3] {
+            let _ = writeln!(text, "sidedef {{ sector = {sector}; }}");
+        }
+        for ((floor, ceiling), tag) in floors.iter().zip(ceilings).zip(tags) {
+            let _ = writeln!(
+                text,
+                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; heightfloor = {floor}; heightceiling = {ceiling}; lightlevel = 160; id = {tag}; }}"
+            );
+        }
+        text.push_str(extra);
+        text
     }
 
-    fn fixture(text: &str) -> Fixture {
+    /// Three rooms in an L: A (sector 0) at `x ∈ [0, 128]`, B (sector 1) at
+    /// `x ∈ [128, 256]`, both at `y ∈ [0, 128]` and sharing the wall at
+    /// `x = 128`; T (sector 2) spans `x ∈ [0, 256]` at `y ∈ [128, 256]`,
+    /// bordering both. Unlike [`chain`] and [`tee`], the target's two
+    /// neighbors are *also* neighbors of each other, which is what separates
+    /// a panel that reveals itself from a wall that joins two rooms.
+    /// `links` gives `(special, tag)` for A|T, B|T and A|B, whose front
+    /// sectors are A, B and A.
+    pub(crate) fn panel(
+        floors: &[i32; 3],
+        ceilings: &[i32; 3],
+        tags: &[i32; 3],
+        links: &[(i32, i32); 3],
+        extra: &str,
+    ) -> String {
+        let mut text = String::from("namespace = \"doom\";\n");
+        for (x, y) in [
+            (0, 0),
+            (128, 0),
+            (256, 0),
+            (0, 128),
+            (128, 128),
+            (256, 128),
+            (0, 256),
+            (256, 256),
+        ] {
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = {y}.000; }}");
+        }
+        for (i, &(v1, v2)) in [(4, 3), (5, 4), (4, 1)].iter().enumerate() {
+            let (special, tag) = links[i];
+            let (sf, sb) = (2 * i, 2 * i + 1);
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {sf}; sideback = {sb}; twosided = true; special = {special}; arg0 = {tag}; }}"
+            );
+        }
+        for (i, &(v1, v2)) in [(0, 3), (1, 0), (2, 1), (5, 2), (3, 6), (6, 7), (7, 5)]
+            .iter()
+            .enumerate()
+        {
+            let s = 6 + i;
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {s}; blocking = true; }}"
+            );
+        }
+        for sector in [0, 2, 1, 2, 0, 1, 0, 0, 1, 1, 2, 2, 2] {
+            let _ = writeln!(text, "sidedef {{ sector = {sector}; }}");
+        }
+        for ((floor, ceiling), tag) in floors.iter().zip(ceilings).zip(tags) {
+            let _ = writeln!(
+                text,
+                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; heightfloor = {floor}; heightceiling = {ceiling}; lightlevel = 160; id = {tag}; }}"
+            );
+        }
+        text.push_str(extra);
+        text
+    }
+
+    /// A parsed synthetic map and the scene built from it, shared by the
+    /// probe's test modules.
+    pub(crate) struct Fixture {
+        /// The map as parsed from the UDMF text.
+        pub(crate) map: UdmfMap,
+        /// The scene `Scene::build` resolved from [`Fixture::map`].
+        pub(crate) scene: Scene,
+        /// The tables' step height, so a test never spells `24` itself.
+        pub(crate) step: i32,
+    }
+
+    /// Parses `text` as UDMF and builds its scene under the shipped tables.
+    pub(crate) fn fixture(text: &str) -> Fixture {
         let tables = Tables::load().expect("tables");
         let map = parse_udmf(text, Limits::default()).expect("fixture parses");
         let scene = Scene::build(&map, &tables, &mut Vec::new());

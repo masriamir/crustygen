@@ -151,11 +151,12 @@ failure.
    which records the before/after for the teleport construct and says so at
    both its curve table and its caveats.
    The lift shape probe ([`docs/measurements/lift-shapes-2026-08-29.md`](measurements/lift-shapes-2026-08-29.md))
-   is the same kind of before-design measurement, and its tool is committed as
-   `examples/liftprobe` (`cargo run --release --example liftprobe -- census <label> <dir>...`)
+   and the floor-action shape probe ([`docs/measurements/floor-shapes-2026-09-02.md`](measurements/floor-shapes-2026-09-02.md))
+   are the same kind of before-design measurement, and their tool is committed as
+   `examples/liftprobe` (`cargo run --release --example liftprobe -- census|shapes|floors <label> <dir-or-file>...`)
    so the numbers can be re-derived when the sample or the loader changes.
 
-**The measurement of record is the newest dated document under `docs/measurements/`.** Today
+**The measurement of record is the newest dated before/after document under `docs/measurements/`.** Today
 that is [`docs/measurements/lifts-2026-08-30.md`](measurements/lifts-2026-08-30.md): the
 before/after for the lift construct (all axes 7.5 % → 8.9 %, line axis 9.0 % → 13.5 %, the new
 lift axis at 61.1 %), the reconciliation of `lift::plat::recognize` against the shape probe on
