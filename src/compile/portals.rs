@@ -824,6 +824,51 @@ pub(crate) fn emit_side_wall(
     data.linedefs.len() - 1
 }
 
+/// A one-sided use line on a room's wall carrying `special` and `tag` and
+/// the theme's switch texture, centered on the line: the construction a
+/// switch exit uses (see [`crate::compile::exits`]'s module documentation for
+/// why it needs no alcove) and a floor-action switch trigger reuses. Returns
+/// the line's index.
+///
+/// Doom maps texture column `(offsetx + distance along the line) % width`, so
+/// a line narrower than its texture shows the texture's left edge with no
+/// offset and the switch graphic sits off-center; the offset centers the
+/// *texture*, whose width is IWAD-independent (`vocabulary.toml`'s
+/// `switch_width_source`). Centering the texture rather than the graphic
+/// inside it is deliberate: the graphic's own position varies between IWADs,
+/// the texture's width does not.
+///
+/// `cut`'s wall must already have been split by [`split_wall_for_opening`],
+/// exactly as for [`emit_opening`] and [`emit_recess`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each parameter is one independent input the caller resolved; bundling them would \
+              just move the same count into a throwaway struct"
+)]
+pub(crate) fn emit_switch_line(
+    data: &mut MapData,
+    cut: &Cut,
+    room_idx: usize,
+    forward: bool,
+    special: u16,
+    tag: u16,
+    switch_tex: &str,
+    switch_width: i32,
+) -> usize {
+    let (p1, p2) = if forward {
+        (cut.pt(cut.open_lo), cut.pt(cut.open_hi))
+    } else {
+        (cut.pt(cut.open_hi), cut.pt(cut.open_lo))
+    };
+    let line = emit_side_wall(data, p1, p2, room_idx, switch_tex);
+    data.linedefs[line].special = special;
+    data.linedefs[line].tag = tag;
+    let width = cut.open_hi - cut.open_lo;
+    let front = data.linedefs[line].front;
+    data.sidedefs[front].x_offset = ((switch_width - width) / 2).rem_euclid(switch_width);
+    line
+}
+
 /// A recess carved outward from one host wall: its sector and the threshold
 /// line that joins it to the host.
 pub(crate) struct Recess {
