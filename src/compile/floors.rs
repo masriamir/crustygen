@@ -129,6 +129,11 @@ fn sector_like(room: &Room, floor: i32, ceiling: i32, wall_tex: &str, tag: u16) 
 /// happens before the first index is recorded, in the same
 /// "resolve everything, then emit" order [`crate::compile::portals`] and
 /// [`crate::compile::exits`] already follow.
+///
+/// The same rule holds one level up: this pass runs before
+/// [`crate::compile::lifts`] precisely because it splits walls and
+/// `emit_lifts` records linedef indices of its own — see the comment at
+/// `compile_reporting`'s call site.
 enum TriggerPlacement {
     /// A switch: its span is already split out of the room's wall, waiting
     /// for [`emit_switch_line`].
@@ -732,7 +737,7 @@ mod tests {
     use super::{FloorActionOut, FloorShape, TriggerOut, emit_floors};
     use crate::compile::tags::TagAllocator;
     use crate::compile::{
-        CompileError, LinedefOut, MapData, doors, exits, lifts, portals, sectors, teleports,
+        CompileError, LinedefOut, MapData, doors, exits, portals, sectors, teleports,
     };
     use crate::ir::Ir;
     use crate::tables::{FloorFamily, Tables};
@@ -785,8 +790,10 @@ mod tests {
         floors: Vec<FloorActionOut>,
     }
 
-    /// Runs the passes exactly as `compile_reporting` does, through
-    /// `emit_floors`, surfacing only that pass's own errors.
+    /// Runs the passes exactly as `compile_reporting` does, up to and
+    /// including `emit_floors` — which is the last of them to emit anything
+    /// but `emit_lifts`, the one pass that now runs after it — surfacing only
+    /// this pass's own errors.
     fn build(json: &str) -> Result<Built, CompileError> {
         let ir = Ir::from_json(json).expect("ir");
         let tables = Tables::load().expect("tables");
@@ -797,7 +804,6 @@ mod tests {
         doors::emit_doors(&ir, &tables, &mut data, &mut tags).expect("doors");
         exits::emit_exits(&ir, &tables, &mut data, &mut tags).expect("exits");
         teleports::emit_teleports(&ir, &tables, &mut data, &mut tags).expect("teleports");
-        lifts::emit_lifts(&ir, &tables, &mut data, &mut tags).expect("lifts");
         let (triggers, floors) = emit_floors(&ir, &tables, &mut data, &mut tags)?;
         Ok(Built {
             data,
@@ -1010,7 +1016,6 @@ mod tests {
         doors::emit_doors(&ir, &tables, &mut data, &mut tags).expect("doors");
         exits::emit_exits(&ir, &tables, &mut data, &mut tags).expect("exits");
         teleports::emit_teleports(&ir, &tables, &mut data, &mut tags).expect("teleports");
-        lifts::emit_lifts(&ir, &tables, &mut data, &mut tags).expect("lifts");
 
         ir.theme = "no_such_theme".to_owned();
         let err = emit_floors(&ir, &tables, &mut data, &mut tags)

@@ -851,7 +851,16 @@ pub struct Compiled {
 ///    exits so a wall pad and an exit compete for wall spans through
 ///    `portals::split_wall_for_opening` like any two openings, and before
 ///    the overlap check since it emits sectors.
-/// 7. [`lifts::emit_lifts`] fills every lift portal's gap with one
+/// 7. [`floors::emit_floors`] places every floor-action trigger and fills
+///    every drop-wall portal's gap with the sealed sector that trigger
+///    lowers, again from the same [`TagAllocator`]. Runs after `cut_portals`
+///    left that gap empty (step 3) and before the overlap check since it
+///    emits sectors — and, like every other pass that *splits* a wall (steps
+///    5 and 6), before step 8, whose recorded linedef indices a later split
+///    would silently shift; see the comment at its call site. Its two faces'
+///    textures must be written before step 10, for the reason step 8's
+///    risers must be.
+/// 8. [`lifts::emit_lifts`] fills every lift portal's gap with one
 ///    `downWaitUpStay` platform sector — again optionally flanked by
 ///    alcoves — and cuts every pedestal as a hosted island inside its room,
 ///    tagging each from the same [`TagAllocator`]. Runs after `cut_portals`
@@ -859,13 +868,6 @@ pub struct Compiled {
 ///    emits sectors. Its risers must be written before step 10: `heights`
 ///    fills only empty texture slots, and the platform's own top-face riser
 ///    is invisible at load-time heights, so `heights` would never write it.
-/// 8. [`floors::emit_floors`] places every floor-action trigger and fills
-///    every drop-wall portal's gap with the sealed sector that trigger
-///    lowers, again from the same [`TagAllocator`]. Runs after `cut_portals`
-///    left that gap empty (step 3), after lifts so the no-chain rule can see
-///    every platform, and before the overlap check since it emits sectors.
-///    Its two faces' textures must be written before step 10, for the reason
-///    step 7's risers must be.
 /// 9. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
 ///    that overlap in 2-D — a gap sector driven through a third room, or two
 ///    gap sectors from unrelated portals crossing each other. Must run after
@@ -935,8 +937,17 @@ pub fn compile_reporting(
     doors::emit_doors(ir, tables, &mut data, &mut tags)?;
     exits::emit_exits(ir, tables, &mut data, &mut tags)?;
     let markers = teleports::emit_teleports(ir, tables, &mut data, &mut tags)?;
-    let lifts = lifts::emit_lifts(ir, tables, &mut data, &mut tags)?;
+    // Every pass that *splits* a wall — `emit_exits`'s switch lines,
+    // `emit_teleports`'s wall pads, and now the floor triggers — runs before
+    // `emit_lifts`, because `portals::split_wall_for_opening` removes the wall
+    // it splits and so shifts every linedef index above it: the
+    // `LiftOut::{low_line, top_line}` indices `emit_lifts` records would
+    // otherwise be silently invalidated by a later split. `emit_lifts` only
+    // appends lines, so `TriggerOut::line` and `FloorActionOut::lines` survive
+    // it. Nothing else here wants the other order: the no-chain rule (P30) is
+    // judged in `rules.rs` over the finished `Compiled`, not inside a pass.
     let (triggers, floors) = floors::emit_floors(ir, tables, &mut data, &mut tags)?;
+    let lifts = lifts::emit_lifts(ir, tables, &mut data, &mut tags)?;
     sectors::check_no_sector_overlaps(ir, &data)?;
     heights::apply_height_textures(&mut data);
     let things = things::place_things(ir, tables, &data, &markers, &lifts)?;
