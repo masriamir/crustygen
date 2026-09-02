@@ -41,11 +41,14 @@ pub struct SectorOut {
     /// recess), which belong to no room and so have no
     /// [`crate::ir::Room::wall_tex`] of their own to read.
     pub wall_tex: String,
-    /// For an island — a teleport pad or a pedestal — the index of the room
-    /// sector it is carved inside. [`sectors::check_no_sector_overlaps`]
+    /// For an island — a teleport pad, a pedestal or a reveal — the index of
+    /// the room sector it is carved inside.
+    /// [`sectors::check_no_sector_overlaps`]
     /// exempts exactly that pair, since an island lies inside its host by
-    /// construction, and tests every other pair as usual. `None` for every
-    /// other sector.
+    /// construction, and tests every other pair as usual. That check reads
+    /// only the two sectors' polygons, never their heights, so a reveal's
+    /// floor == ceiling cell passes it exactly as a pedestal's raised one
+    /// does. `None` for every other sector.
     pub host: Option<usize>,
 }
 
@@ -380,6 +383,30 @@ pub enum CompileError {
     ThingOnPedestal {
         /// The pedestal it stands on.
         pedestal: String,
+        /// The vocabulary name.
+        kind: String,
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+    },
+    /// An authored room thing stands on a reveal's rectangle; it would spawn
+    /// in the reveal's own sector rather than on the room floor the author
+    /// placed it on.
+    ///
+    /// The reveal twin of [`ThingOnPedestal`](Self::ThingOnPedestal), refused
+    /// on the same grounds and against the same closed rectangle. The stakes
+    /// are higher here than on a pedestal: a
+    /// [`closet`](crate::ir::RevealKind::Closet) rests at its host's
+    /// *ceiling*, so a thing that strayed onto one would spawn sealed inside
+    /// the rock and never be seen until the trigger fired.
+    ///
+    /// A thing genuinely meant to be revealed goes in the reveal's own
+    /// [`things`](crate::ir::Reveal::things) list instead.
+    #[error("thing `{kind}` at ({x}, {y}) stands on reveal `{reveal}`")]
+    ThingOnReveal {
+        /// The reveal it stands on.
+        reveal: String,
         /// The vocabulary name.
         kind: String,
         /// X coordinate.
@@ -779,13 +806,94 @@ pub enum CompileError {
         /// The linedef already carrying a special.
         line: usize,
     },
+    /// A [`crate::ir::RevealKind::Pedestal`] reveal's
+    /// [`crate::ir::Reveal::rise`] is no more than the player's step height,
+    /// so they could walk onto the block rather than wait for it to drop.
+    ///
+    /// The reveal form of [`PedestalRiseTooLow`](Self::PedestalRiseTooLow),
+    /// and judged in the emitter rather than in `Ir::from_json` for the
+    /// reason [`DropWallFloorsDiffer`](Self::DropWallFloorsDiffer) is: the
+    /// step height is a table constant IR validation never loads. A pedestal
+    /// reveal is sealed by height alone — unlike a closet, which is sealed by
+    /// rock — so a rise within the step seals nothing, and the trigger that
+    /// was meant to hand the player their prize is scenery.
+    #[error(
+        "reveal `{reveal}` rises only {rise}, within the {step}-unit step: the player would walk onto it"
+    )]
+    RevealRiseTooLow {
+        /// The reveal.
+        reveal: String,
+        /// The declared rise.
+        rise: i32,
+        /// The player's step height.
+        step: i32,
+    },
+    /// A reveal's rectangle is narrower than the player's own diameter on at
+    /// least one side, so they could not stand in what it opens.
+    ///
+    /// The reveal form of [`PedestalTooSmall`](Self::PedestalTooSmall), held
+    /// to the same bound and for the same reason: measured against the
+    /// diameter rather than the radius, because the player is a cylinder that
+    /// must fit entirely between two opposite edges. Both sides are reported,
+    /// since either may be the offending one.
+    #[error("reveal `{reveal}` is {width}x{height}, but the player is {min} units across")]
+    RevealTooSmall {
+        /// The reveal.
+        reveal: String,
+        /// The rectangle's width.
+        width: i32,
+        /// The rectangle's height.
+        height: i32,
+        /// The player's diameter.
+        min: i32,
+    },
+    /// A reveal leaves less headroom than something that must fit in it
+    /// needs.
+    ///
+    /// Raised from two passes, for the two things that must fit and against
+    /// two different gaps. [`floors::emit_floors`] judges the *player*
+    /// against a [`pedestal`](crate::ir::RevealKind::Pedestal) reveal's
+    /// **resting** cell — the gap its rise leaves under the host's ceiling,
+    /// which is the nook the map has until the trigger fires; a closet has no
+    /// resting gap at all and is exempt.
+    /// [`things::place_things`] judges each thing the reveal carries against
+    /// the **lowered** cell instead, since that is the space it will stand in
+    /// once the floor drops. `kind` names which — `player` for the first.
+    #[error("reveal `{reveal}` has {have} units of headroom but `{kind}` needs {need}")]
+    RevealNoHeadroom {
+        /// The reveal.
+        reveal: String,
+        /// The vocabulary name of the thing that does not fit, or `player`
+        /// for the resting cell the map must still admit.
+        kind: String,
+        /// The gap measured, resting or lowered.
+        have: i32,
+        /// Required height.
+        need: i32,
+    },
+    /// A reveal's own things list holds a player start.
+    ///
+    /// A start on a [`crate::ir::Pedestal`] is legal — the level begins with
+    /// the player standing on the block — but a reveal is *sealed* at rest:
+    /// a closet start begins the level inside solid rock, and a pedestal
+    /// reveal's start begins it on a block nothing can lower from the inside.
+    /// Neither is a level that can be played, so both are refused rather than
+    /// emitted.
+    #[error(
+        "reveal `{reveal}` holds a player start, which cannot begin the level in a sealed cell"
+    )]
+    StartOnReveal {
+        /// The reveal.
+        reveal: String,
+    },
     /// The map carries a floor construct whose emitter has not landed yet: a
-    /// [`crate::ir::PortalKind::Bridge`] portal or a [`crate::ir::Reveal`].
+    /// [`crate::ir::PortalKind::Bridge`] portal.
     ///
     /// A placeholder, and deliberately an error rather than a silent skip:
-    /// until `emit_reveal` and `emit_bridge` exist, a map naming either would
-    /// otherwise compile into geometry the construct is simply missing from.
-    /// Both emitters delete this variant when they land.
+    /// until `emit_bridge` exists, a map naming a bridge would otherwise
+    /// compile into geometry the construct is simply missing from. That
+    /// emitter deletes this variant when it lands; the reveal, which shared
+    /// this placeholder until `emit_reveal` landed, no longer reaches it.
     #[error("{construct} is a floor construct this compiler does not emit yet")]
     FloorConstructNotYetEmitted {
         /// The construct, named as the author wrote it.
@@ -967,7 +1075,7 @@ pub fn compile_reporting(
     let lifts = lifts::emit_lifts(ir, tables, &mut data, &mut tags)?;
     sectors::check_no_sector_overlaps(ir, &data)?;
     heights::apply_height_textures(&mut data);
-    let things = things::place_things(ir, tables, &data, &markers, &lifts)?;
+    let things = things::place_things(ir, tables, &data, &markers, &lifts, &floors)?;
     tags::check_no_action_at_tag_zero(&data)?;
     let textmap = textmap::emit_textmap(&data, &things);
     let compiled = Compiled {

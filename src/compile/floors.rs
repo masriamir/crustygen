@@ -1,5 +1,5 @@
 //! The floor-action pass: placed triggers and the opening constructs they
-//! fire — the drop wall today, the reveal and the bridge next — lowered to
+//! fire — the drop wall and the reveal today, the bridge next — lowered to
 //! one [`FloorActionOut`] per target.
 //!
 //! Every action this pass emits is one-way. `EV_DoFloor` (`p_floor.c`) hangs
@@ -26,9 +26,10 @@ use crate::compile::portals::{
     find_opening_line, mark_secret_thresholds, resolve_portal, sector_like, split_wall_for_opening,
 };
 use crate::compile::tags::TagAllocator;
+use crate::compile::teleports::emit_island_edges;
 use crate::compile::{CompileError, MapData};
 use crate::geom::wall_edges;
-use crate::ir::{FloorFamilyIr, Ir, PortalKind, Trigger, TriggerKind};
+use crate::ir::{FloorFamilyIr, Ir, PortalKind, Reveal, RevealKind, Trigger, TriggerKind};
 use crate::tables::{FloorFamily, Tables};
 
 /// What an emitted action is.
@@ -170,11 +171,14 @@ fn trigger_index(triggers: &[TriggerOut], id: &str) -> usize {
 /// # Errors
 /// Returns [`CompileError::UnknownTheme`] when `ir.theme` resolves to no
 /// texture set, [`CompileError::FloorConstructNotYetEmitted`] for a bridge
-/// portal or a reveal (see that variant), [`CompileError::TriggerWallNotFound`]
+/// portal (see that variant), [`CompileError::TriggerWallNotFound`]
 /// when a switch trigger's `at` matches no wall segment of its room,
 /// [`CompileError::DropWallTooThick`] and
 /// [`CompileError::DropWallFloorsDiffer`] for a drop wall the player could
-/// not pass once it has fired, [`CompileError::TriggerLineAlreadyClaimed`]
+/// not pass once it has fired, [`CompileError::RevealTooSmall`],
+/// [`CompileError::RevealRiseTooLow`] and [`CompileError::RevealNoHeadroom`]
+/// for a reveal that would open onto nothing the player fits in,
+/// [`CompileError::TriggerLineAlreadyClaimed`]
 /// when two walkovers would write onto one line, and whatever
 /// `resolve_portal` (`NotAdjacent`,
 /// `PortalOffWall`, `PortalOnDiagonalWall`, `PortalTooWide`) or
@@ -256,30 +260,7 @@ pub fn emit_floors(
         .map(|t| resolve_trigger(ir, data, t, switch_width))
         .collect::<Result<Vec<_>, CompileError>>()?;
 
-    let mut out = Vec::new();
-    for (pi, portal) in ir.portals.iter().enumerate() {
-        match portal.kind {
-            PortalKind::DropWall => {
-                let id = portal
-                    .fires_on
-                    .as_deref()
-                    .expect("Ir::from_json requires a trigger on a drop wall");
-                let ti = trigger_index(&triggers, id);
-                out.push(emit_drop_wall(ir, tables, data, pi, ti, triggers[ti].tag)?);
-            }
-            PortalKind::Bridge => {
-                return Err(CompileError::FloorConstructNotYetEmitted {
-                    construct: format!("bridge `{}` <-> `{}`", portal.a, portal.b),
-                });
-            }
-            PortalKind::Plain | PortalKind::Door | PortalKind::Locked | PortalKind::Lift => {}
-        }
-    }
-    if let Some(reveal) = ir.reveals.first() {
-        return Err(CompileError::FloorConstructNotYetEmitted {
-            construct: format!("reveal `{}`", reveal.id),
-        });
-    }
+    let out = emit_constructs(ir, tables, data, &triggers)?;
 
     for (i, placement) in placements.iter().enumerate() {
         let (line, activator) = emit_trigger_line(
@@ -303,6 +284,62 @@ pub fn emit_floors(
         }
     }
     Ok((triggers, out))
+}
+
+/// Step 3 of [`emit_floors`]: every construct a trigger fires, in the order
+/// `ir.portals` then `ir.reveals`.
+///
+/// A function of its own rather than two loops inline: it runs to completion
+/// before step 4 begins, since a walkover naming a bridge writes its special
+/// onto that bridge's own thresholds and so needs every construct already
+/// emitted, and pulling it out keeps that boundary visible instead of
+/// implied by where one loop ends and the next begins.
+///
+/// # Errors
+/// Returns [`CompileError::FloorConstructNotYetEmitted`] for a bridge portal,
+/// and whatever [`emit_drop_wall`] or [`emit_reveal`] raise.
+///
+/// # Panics
+/// Panics if a drop wall names no trigger, or a construct names a trigger
+/// [`Ir::from_json`] did not validate.
+fn emit_constructs(
+    ir: &Ir,
+    tables: &Tables,
+    data: &mut MapData,
+    triggers: &[TriggerOut],
+) -> Result<Vec<FloorActionOut>, CompileError> {
+    let mut out = Vec::new();
+    for (pi, portal) in ir.portals.iter().enumerate() {
+        match portal.kind {
+            PortalKind::DropWall => {
+                let id = portal
+                    .fires_on
+                    .as_deref()
+                    .expect("Ir::from_json requires a trigger on a drop wall");
+                let ti = trigger_index(triggers, id);
+                out.push(emit_drop_wall(ir, tables, data, pi, ti, triggers[ti].tag)?);
+            }
+            PortalKind::Bridge => {
+                return Err(CompileError::FloorConstructNotYetEmitted {
+                    construct: format!("bridge `{}` <-> `{}`", portal.a, portal.b),
+                });
+            }
+            PortalKind::Plain | PortalKind::Door | PortalKind::Locked | PortalKind::Lift => {}
+        }
+    }
+    for (ri, reveal) in ir.reveals.iter().enumerate() {
+        let ti = trigger_index(triggers, &reveal.trigger);
+        out.push(emit_reveal(
+            ir,
+            tables,
+            data,
+            ri,
+            reveal,
+            ti,
+            triggers[ti].tag,
+        )?);
+    }
+    Ok(out)
 }
 
 /// Resolves where one trigger's line goes, splitting a switch's span out of
@@ -731,12 +768,162 @@ fn emit_drop_wall(
     })
 }
 
+/// Emits one reveal: a sealed island inside its host room, lowered once to
+/// the host's floor.
+///
+/// A [`closet`](RevealKind::Closet) rests at floor == ceiling == the host's
+/// ceiling — solid rock, sealed by the rock itself. A
+/// [`pedestal`](RevealKind::Pedestal) reveal rests
+/// [`Reveal::rise`](crate::ir::Reveal::rise) above the host's floor under the
+/// host's ceiling, sealed by height instead, which is why only that form is
+/// held to the step and to the player's resting headroom. Both lower to the
+/// host's floor, and that destination is what the engine computes rather than
+/// what this pass asserts: the island's only two-sided neighbors are its four
+/// own edges, every one of them onto the host, so
+/// `P_FindLowestFloorSurrounding` is the host's floor by construction.
+///
+/// Nothing here is a portal, so unlike [`emit_drop_wall`] this emits no
+/// passages, no jambs and no thresholds: an island is four two-sided edges
+/// and one sector, exactly as `lifts::emit_lifts` cuts a pedestal.
+/// [`FloorActionOut::lines`] is therefore empty — there is no gap segment for
+/// a walkover to write onto, and a walkover naming a reveal fires from its
+/// own portal's threshold as usual.
+///
+/// **The overlap exemption (spec §10.2) needs no change.** The island is a
+/// hole in its host ([`crate::compile::SectorOut::host`]), the one pair
+/// [`crate::compile::sectors::check_no_sector_overlaps`] skips. That function
+/// compares only the two sectors' polygons — `sector_polygon` reads a room's
+/// footprint or the bounding box of the sector's own linedef vertices, and
+/// the loop reads nothing but `host` and those polygons — so no floor or
+/// ceiling is ever consulted and a floor == ceiling cell passes it exactly as
+/// a pedestal's raised one does (read at the pinned working tree,
+/// 2026-09-02; no code change was needed there).
+///
+/// # Errors
+/// Returns [`CompileError::RevealTooSmall`] when the rectangle is narrower
+/// than the player on either side, [`CompileError::RevealRiseTooLow`] when a
+/// pedestal reveal rises no more than a step, and
+/// [`CompileError::RevealNoHeadroom`] when a pedestal reveal's risen floor
+/// leaves the player less than their own height under the host's ceiling.
+///
+/// # Panics
+/// Panics if the reveal names a room that does not exist, or is a pedestal
+/// with no `rise` — both refused by
+/// [`Ir::from_json`](crate::ir::Ir::from_json) before this pass runs.
+fn emit_reveal(
+    ir: &Ir,
+    tables: &Tables,
+    data: &mut MapData,
+    ri: usize,
+    reveal: &Reveal,
+    ti: usize,
+    tag: u16,
+) -> Result<FloorActionOut, CompileError> {
+    let host = ir
+        .rooms
+        .iter()
+        .position(|r| r.id == reveal.room)
+        .expect("validated by Ir::from_json");
+    let room = &ir.rooms[host];
+
+    // A cell the player cannot stand in is not a reveal: whatever it opens
+    // onto, they have to be able to walk in and take it. Both sides are
+    // checked, as `emit_lifts` checks a pedestal's — the player is a
+    // cylinder, so the narrower side decides. Deliberately stricter than the
+    // corpus, which builds 16x16 sunken pedestals the player straddles
+    // rather than enters (`docs/measurements/floor-shapes-2026-09-02.md` §D
+    // has 16x16 as retail DOOM's modal reveal): this compiler emits only the
+    // shape it can prove walkable, and the small form is a later widening,
+    // not a silent acceptance.
+    let (lo, hi) = reveal.rect();
+    let (w, h) = (hi.x - lo.x, hi.y - lo.y);
+    let player = tables.player();
+    let min = player.radius * 2;
+    if w < min || h < min {
+        return Err(CompileError::RevealTooSmall {
+            reveal: reveal.id.clone(),
+            width: w,
+            height: h,
+            min,
+        });
+    }
+
+    let (floor, shape) = match reveal.kind {
+        RevealKind::Closet => (room.ceiling, FloorShape::Closet),
+        RevealKind::Pedestal => {
+            let rise = reveal
+                .rise
+                .expect("Ir::from_json requires rise on a pedestal reveal");
+            // Rock seals a closet whatever its height; a pedestal reveal is
+            // sealed only by being too tall to step onto. Judged here rather
+            // than in the IR because the step height is a table constant IR
+            // validation never loads.
+            let step = tables.step_height();
+            if rise <= step {
+                return Err(CompileError::RevealRiseTooLow {
+                    reveal: reveal.id.clone(),
+                    rise,
+                    step,
+                });
+            }
+            // The block keeps its host's ceiling, so rising eats the room's
+            // headroom. Checked for the player against the *resting* cell:
+            // that nook is the map until the trigger fires, and a rise that
+            // leaves less than the player's height has built a crawlspace
+            // rather than a pedestal. `things::place_things` judges the
+            // reveal's own cargo against the lowered cell instead — see
+            // `place_reveal_things`.
+            let floor = room.floor + rise;
+            let have = room.ceiling - floor;
+            if have < player.height {
+                return Err(CompileError::RevealNoHeadroom {
+                    reveal: reveal.id.clone(),
+                    kind: "player".to_owned(),
+                    have,
+                    need: player.height,
+                });
+            }
+            (floor, FloorShape::Pedestal)
+        }
+    };
+
+    let sector = data.sectors.len();
+    let mut s = sector_like(room, floor, room.ceiling, &room.wall_tex, tag);
+    s.host = Some(host);
+    data.sectors.push(s);
+
+    // Four two-sided edges, the host on the front — `emit_island_edges`
+    // winds them so. The host-side lower is the face that shows, since the
+    // island's floor is the higher one whichever form this is
+    // (`heights::visible_lower_side`), and it rides down with the floor:
+    // both pegging flags stay clear, as on a drop wall's faces. No upper is
+    // ever needed — the island keeps its host's ceiling.
+    for line in emit_island_edges(data, lo, hi, host, sector) {
+        let front = data.linedefs[line].front;
+        room.wall_tex.clone_into(&mut data.sidedefs[front].lower);
+    }
+
+    Ok(FloorActionOut {
+        sector,
+        family: FloorFamily::LowerToLowest,
+        rest: floor,
+        dest: room.floor,
+        tag,
+        trigger: ti,
+        shape,
+        portal: None,
+        reveal: Some(ri),
+        lines: Vec::new(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{FloorActionOut, FloorShape, TriggerOut, emit_floors};
     use crate::compile::tags::TagAllocator;
     use crate::compile::{
-        CompileError, LinedefOut, MapData, doors, exits, portals, sectors, teleports,
+        CompileError, LinedefOut, MapData, compile, compile_reporting, doors, exits, portals,
+        sectors, teleports,
     };
     use crate::ir::Ir;
     use crate::tables::{FloorFamily, Tables};
@@ -796,6 +983,24 @@ mod tests {
       "portals":[ { "a":"a", "b":"b", "kind":"drop_wall", "width":64, "at":[128,320], "thickness":16, "fires_on":"t" } ],
       "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[128,576] } ],
       "exits":[ { "room":"b", "trigger":"switch", "at":[128,0], "width":64 } ] }"#;
+
+    /// One room holding one 64x64 closet, lowered by a switch on the room's
+    /// west wall, with an imp sealed inside the rock.
+    ///
+    /// Deliberately portal-free: a reveal is an island in a single room, so
+    /// nothing about it needs a second room, and the four island edges are
+    /// then the map's only two-sided lines.
+    const CLOSET: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] }
+      ],
+      "portals":[],
+      "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[0,128] } ],
+      "reveals":[ { "id":"pen", "room":"a", "at":[128,128], "kind":"closet",
+                    "things":[ { "kind":"imp", "at":[160,160], "angle":180 } ], "trigger":"t" } ],
+      "exits":[ { "room":"a", "trigger":"switch", "at":[256,64], "width":64 } ] }"#;
 
     /// Everything the passes up to and including `emit_floors` produced.
     #[derive(Debug)]
@@ -1223,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bridge_and_a_reveal_are_refused_until_their_emitters_land() {
+    fn a_bridge_is_refused_until_its_emitter_lands() {
         let bridge = WALL.replace(
             r#""kind":"drop_wall", "width":64, "at":[256,128], "thickness":16"#,
             r#""kind":"bridge", "width":64, "at":[256,128], "depth":16"#,
@@ -1233,15 +1438,163 @@ mod tests {
             matches!(&err, CompileError::FloorConstructNotYetEmitted { construct } if construct == "bridge `a` <-> `b`"),
             "expected FloorConstructNotYetEmitted naming the bridge, got {err}"
         );
+    }
 
-        let reveal = WALL.replace(
-            r#""exits":["#,
-            r#""reveals":[ { "id":"pen", "room":"b", "at":[384,64], "kind":"closet", "trigger":"t" } ], "exits":["#,
+    #[test]
+    fn a_closet_rests_solid_at_the_hosts_ceiling_and_lowers_to_its_floor() {
+        let Built {
+            data,
+            triggers,
+            floors,
+            ..
+        } = compile_data(CLOSET);
+        let f = &floors[0];
+        let s = &data.sectors[f.sector];
+        assert_eq!(
+            (s.floor, s.ceiling, s.tag, s.host),
+            (192, 192, triggers[0].tag, Some(0)),
+            "solid rock at the host's ceiling, carrying the trigger's tag, hosted by room `a`"
         );
-        let err = build(&reveal).expect_err("no reveal emitter yet");
+        assert_eq!(
+            (f.rest, f.dest, f.shape, f.reveal, f.portal),
+            (192, 0, FloorShape::Closet, Some(0), None)
+        );
         assert!(
-            matches!(&err, CompileError::FloorConstructNotYetEmitted { construct } if construct == "reveal `pen`"),
-            "expected FloorConstructNotYetEmitted naming the reveal, got {err}"
+            f.lines.is_empty(),
+            "a reveal has no gap segment, so it hands back no thresholds"
+        );
+        let edges: Vec<&LinedefOut> = data
+            .linedefs
+            .iter()
+            .filter(|l| l.back.is_some_and(|b| data.sidedefs[b].sector == f.sector))
+            .collect();
+        assert_eq!(edges.len(), 4, "an island's four edges, host on the front");
+        for l in edges {
+            assert_eq!(
+                data.sidedefs[l.front].sector, 0,
+                "the host fronts every edge"
+            );
+            assert_eq!(data.sidedefs[l.front].lower, "STARTAN3");
+            assert_eq!(
+                l.special, 0,
+                "a reveal's own edges carry no special; the trigger is elsewhere"
+            );
+            assert!(!l.lower_unpegged);
+        }
+    }
+
+    #[test]
+    fn a_pedestal_reveal_rests_its_rise_above_the_host_under_the_hosts_ceiling() {
+        let json = CLOSET.replace(r#""kind":"closet","#, r#""kind":"pedestal", "rise":64,"#);
+        let Built { data, floors, .. } = compile_data(&json);
+        let s = &data.sectors[floors[0].sector];
+        assert_eq!((s.floor, s.ceiling), (64, 192));
+        assert_eq!(
+            (floors[0].rest, floors[0].dest, floors[0].shape),
+            (64, 0, FloorShape::Pedestal)
+        );
+    }
+
+    /// The accept path runs through [`compile_reporting`] rather than
+    /// [`compile`] because a sealed cell is P7-unreachable at rest and
+    /// `reach` has no floor-action edge yet — the drop wall this branch
+    /// already shipped fails `compile` the same way (probed 2026-09-02).
+    /// Asserting that *every* violation is P7 keeps the test honest without
+    /// pinning a count that the reachability task will legitimately change.
+    #[test]
+    fn a_closets_things_are_placed_against_the_lowered_cell() {
+        let ir = Ir::from_json(CLOSET).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (out, violations) =
+            compile_reporting(&ir, &tables).expect("an imp inside solid rock is the corpus idiom");
+        assert!(
+            violations.iter().all(|v| v.rule == "P7"),
+            "only the not-yet-modeled reachability of a sealed cell may be flagged, got \
+             {violations:?}"
+        );
+        let imp = tables.thing_id("imp").expect("the vocabulary names an imp");
+        let placed = out
+            .things
+            .iter()
+            .find(|t| t.kind == imp)
+            .expect("the imp is emitted");
+        assert_eq!((placed.x, placed.y), (160, 160));
+
+        // Too close to the cell's edge: 8 from the west edge on a 20-radius
+        // imp. Measured against the cell's own four edges, not the room's.
+        let tight = CLOSET.replace(r#""at":[160,160]"#, r#""at":[136,160]"#);
+        let ir = Ir::from_json(&tight).expect("ir");
+        let err = compile_reporting(&ir, &tables).expect_err("no clearance");
+        assert!(
+            matches!(err, CompileError::ThingTooClose { .. }),
+            "expected ThingTooClose against the cell's own edges, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_room_thing_standing_on_a_reveal_is_refused() {
+        let json = CLOSET.replace(
+            r#""things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ]"#,
+            r#""things":[ { "kind":"player1_start", "at":[64,64], "angle":0 }, { "kind":"medikit", "at":[150,150], "angle":0 } ]"#,
+        );
+        let ir = Ir::from_json(&json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let err = compile(&ir, &tables).expect_err("on the closet");
+        assert!(
+            matches!(err, CompileError::ThingOnReveal { ref reveal, .. } if reveal == "pen"),
+            "expected ThingOnReveal naming the reveal, got {err}"
+        );
+    }
+
+    #[test]
+    fn reveal_rejections() {
+        // Narrower than the player's 32-unit diameter on one side. The imp
+        // moves with the shrunken rectangle so the IR's own "strictly
+        // inside" rule is still satisfied and this is the only thing wrong.
+        let small = CLOSET
+            .replace(
+                r#""at":[128,128], "kind":"closet""#,
+                r#""at":[128,128], "size":[24,64], "kind":"closet""#,
+            )
+            .replace(r#""at":[160,160]"#, r#""at":[136,160]"#);
+        let err = build(&small).expect_err("24 units is under the player's diameter");
+        assert!(
+            matches!(
+                &err,
+                CompileError::RevealTooSmall { reveal, width, height, min }
+                    if reveal == "pen" && *width == 24 && *height == 64 && *min == 32
+            ),
+            "expected RevealTooSmall reporting both sides and the diameter, got {err}"
+        );
+
+        // A 160-unit rise under a 192 ceiling leaves a 32-unit nook: the map
+        // has that nook until the trigger fires, and the player does not fit
+        // in it. A closet is exempt — it has no resting gap at all.
+        let squat = CLOSET.replace(r#""kind":"closet","#, r#""kind":"pedestal", "rise":160,"#);
+        let err = build(&squat).expect_err("32 units is under the player's height");
+        assert!(
+            matches!(
+                &err,
+                CompileError::RevealNoHeadroom { reveal, kind, have, need }
+                    if reveal == "pen" && kind == "player" && *have == 32 && *need == 56
+            ),
+            "expected RevealNoHeadroom naming the player and the resting gap, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_pedestal_reveal_within_a_step_of_its_host_is_rejected() {
+        // 24 is exactly the step: the player would walk onto the block
+        // rather than wait for the trigger to drop it.
+        let json = CLOSET.replace(r#""kind":"closet","#, r#""kind":"pedestal", "rise":24,"#);
+        let err = build(&json).expect_err("a 24-unit rise is within the 24-unit step");
+        assert!(
+            matches!(
+                &err,
+                CompileError::RevealRiseTooLow { reveal, rise, step }
+                    if reveal == "pen" && *rise == 24 && *step == 24
+            ),
+            "expected RevealRiseTooLow naming the reveal, the rise and the step, got {err}"
         );
     }
 
