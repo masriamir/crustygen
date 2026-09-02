@@ -175,9 +175,8 @@ fn trigger_index(triggers: &[TriggerOut], id: &str) -> usize {
 /// when a switch trigger's `at` matches no wall segment of its room,
 /// [`CompileError::DropWallTooThick`] and
 /// [`CompileError::DropWallFloorsDiffer`] for a drop wall the player could
-/// not pass once it has fired, [`CompileError::RevealTooSmall`],
-/// [`CompileError::RevealRiseTooLow`] and [`CompileError::RevealNoHeadroom`]
-/// for a reveal that would open onto nothing the player fits in,
+/// not pass once it has fired, [`CompileError::RevealRiseTooLow`] for a
+/// pedestal reveal the player could climb rather than wait for,
 /// [`CompileError::TriggerLineAlreadyClaimed`]
 /// when two walkovers would write onto one line, and whatever
 /// `resolve_portal` (`NotAdjacent`,
@@ -776,7 +775,7 @@ fn emit_drop_wall(
 /// [`pedestal`](RevealKind::Pedestal) reveal rests
 /// [`Reveal::rise`](crate::ir::Reveal::rise) above the host's floor under the
 /// host's ceiling, sealed by height instead, which is why only that form is
-/// held to the step and to the player's resting headroom. Both lower to the
+/// held to the step. Both lower to the
 /// host's floor, and that destination is what the engine computes rather than
 /// what this pass asserts: the island's only two-sided neighbors are its four
 /// own edges, every one of them onto the host, so
@@ -799,12 +798,22 @@ fn emit_drop_wall(
 /// a pedestal's raised one does (read at the pinned working tree,
 /// 2026-09-02; no code change was needed there).
 ///
+/// **No size floor, and no resting-headroom rule.** The pedestal *lift* has
+/// both, because the player stands on that platform and rides it; neither
+/// premise holds here. A reveal comes to rest flush with its host, so the
+/// player never stands inside the sealed cell — they walk over where it was
+/// — and nobody rides a block that is unclimbable by construction (the step
+/// rule below is what makes it so). Holding a reveal to the pedestal's
+/// bounds would refuse the corpus's most common one: the 16x16 sunken
+/// pedestal, retail DOOM's modal reveal and 351 of the sampled targets
+/// (`docs/measurements/floor-shapes-2026-09-02.md` §D), a pillar the player
+/// straddles rather than enters. What the cell's cargo *is* held to lives in
+/// [`crate::compile::things`]'s `place_reveal_things`, against the host.
+///
 /// # Errors
-/// Returns [`CompileError::RevealTooSmall`] when the rectangle is narrower
-/// than the player on either side, [`CompileError::RevealRiseTooLow`] when a
-/// pedestal reveal rises no more than a step, and
-/// [`CompileError::RevealNoHeadroom`] when a pedestal reveal's risen floor
-/// leaves the player less than their own height under the host's ceiling.
+/// Returns [`CompileError::RevealRiseTooLow`] when a pedestal reveal rises
+/// no more than a step, which would leave it climbable and so not sealed at
+/// all.
 ///
 /// # Panics
 /// Panics if the reveal names a room that does not exist, or is a pedestal
@@ -826,27 +835,9 @@ fn emit_reveal(
         .expect("validated by Ir::from_json");
     let room = &ir.rooms[host];
 
-    // A cell the player cannot stand in is not a reveal: whatever it opens
-    // onto, they have to be able to walk in and take it. Both sides are
-    // checked, as `emit_lifts` checks a pedestal's — the player is a
-    // cylinder, so the narrower side decides. Deliberately stricter than the
-    // corpus, which builds 16x16 sunken pedestals the player straddles
-    // rather than enters (`docs/measurements/floor-shapes-2026-09-02.md` §D
-    // has 16x16 as retail DOOM's modal reveal): this compiler emits only the
-    // shape it can prove walkable, and the small form is a later widening,
-    // not a silent acceptance.
+    // No size bound: see the doc comment. A 16x16 cell is the corpus's own
+    // sunken pedestal, not a mistake.
     let (lo, hi) = reveal.rect();
-    let (w, h) = (hi.x - lo.x, hi.y - lo.y);
-    let player = tables.player();
-    let min = player.radius * 2;
-    if w < min || h < min {
-        return Err(CompileError::RevealTooSmall {
-            reveal: reveal.id.clone(),
-            width: w,
-            height: h,
-            min,
-        });
-    }
 
     let (floor, shape) = match reveal.kind {
         RevealKind::Closet => (room.ceiling, FloorShape::Closet),
@@ -866,24 +857,7 @@ fn emit_reveal(
                     step,
                 });
             }
-            // The block keeps its host's ceiling, so rising eats the room's
-            // headroom. Checked for the player against the *resting* cell:
-            // that nook is the map until the trigger fires, and a rise that
-            // leaves less than the player's height has built a crawlspace
-            // rather than a pedestal. `things::place_things` judges the
-            // reveal's own cargo against the lowered cell instead — see
-            // `place_reveal_things`.
-            let floor = room.floor + rise;
-            let have = room.ceiling - floor;
-            if have < player.height {
-                return Err(CompileError::RevealNoHeadroom {
-                    reveal: reveal.id.clone(),
-                    kind: "player".to_owned(),
-                    have,
-                    need: player.height,
-                });
-            }
-            (floor, FloorShape::Pedestal)
+            (room.floor + rise, FloorShape::Pedestal)
         }
     };
 
@@ -1496,11 +1470,10 @@ mod tests {
     }
 
     /// The accept path runs through [`compile_reporting`] rather than
-    /// [`compile`] because a sealed cell is P7-unreachable at rest and
-    /// `reach` has no floor-action edge yet — the drop wall this branch
-    /// already shipped fails `compile` the same way (probed 2026-09-02).
-    /// Asserting that *every* violation is P7 keeps the test honest without
-    /// pinning a count that the reachability task will legitimately change.
+    /// [`compile`]: P7 cannot see a floor action until the reachability
+    /// task, which flips this to `compile`. Asserting that *every* violation
+    /// is P7 keeps the test honest without pinning a count that task will
+    /// legitimately change.
     #[test]
     fn a_closets_things_are_placed_against_the_lowered_cell() {
         let ir = Ir::from_json(CLOSET).expect("ir");
@@ -1520,14 +1493,27 @@ mod tests {
             .expect("the imp is emitted");
         assert_eq!((placed.x, placed.y), (160, 160));
 
-        // Too close to the cell's edge: 8 from the west edge on a 20-radius
-        // imp. Measured against the cell's own four edges, not the room's.
-        let tight = CLOSET.replace(r#""at":[160,160]"#, r#""at":[136,160]"#);
-        let ir = Ir::from_json(&tight).expect("ir");
-        let err = compile_reporting(&ir, &tables).expect_err("no clearance");
+        // What a reveal's cargo *is* held to is the host's boundary, not the
+        // cell's: the cell hugs the room's north wall (8 units clear of it,
+        // which the IR allows) and the imp inside it stands 12 units from
+        // that wall, under its own 20-unit radius. The cell's own edges are
+        // nearer still and are deliberately not what is measured — the
+        // refusal names the room, which is what the author has to move.
+        let hugging = CLOSET
+            .replace(
+                r#""at":[128,128], "kind":"closet""#,
+                r#""at":[96,184], "kind":"closet""#,
+            )
+            .replace(r#""at":[160,160]"#, r#""at":[120,244]"#);
+        let ir = Ir::from_json(&hugging).expect("ir");
+        let err = compile_reporting(&ir, &tables).expect_err("no clearance from the host's wall");
         assert!(
-            matches!(err, CompileError::ThingTooClose { .. }),
-            "expected ThingTooClose against the cell's own edges, got {err}"
+            matches!(
+                &err,
+                CompileError::ThingTooClose { room, kind, x: 120, y: 244, need: 20, .. }
+                    if room == "a" && kind == "imp"
+            ),
+            "expected ThingTooClose naming the host room, got {err}"
         );
     }
 
@@ -1543,42 +1529,6 @@ mod tests {
         assert!(
             matches!(err, CompileError::ThingOnReveal { ref reveal, .. } if reveal == "pen"),
             "expected ThingOnReveal naming the reveal, got {err}"
-        );
-    }
-
-    #[test]
-    fn reveal_rejections() {
-        // Narrower than the player's 32-unit diameter on one side. The imp
-        // moves with the shrunken rectangle so the IR's own "strictly
-        // inside" rule is still satisfied and this is the only thing wrong.
-        let small = CLOSET
-            .replace(
-                r#""at":[128,128], "kind":"closet""#,
-                r#""at":[128,128], "size":[24,64], "kind":"closet""#,
-            )
-            .replace(r#""at":[160,160]"#, r#""at":[136,160]"#);
-        let err = build(&small).expect_err("24 units is under the player's diameter");
-        assert!(
-            matches!(
-                &err,
-                CompileError::RevealTooSmall { reveal, width, height, min }
-                    if reveal == "pen" && *width == 24 && *height == 64 && *min == 32
-            ),
-            "expected RevealTooSmall reporting both sides and the diameter, got {err}"
-        );
-
-        // A 160-unit rise under a 192 ceiling leaves a 32-unit nook: the map
-        // has that nook until the trigger fires, and the player does not fit
-        // in it. A closet is exempt — it has no resting gap at all.
-        let squat = CLOSET.replace(r#""kind":"closet","#, r#""kind":"pedestal", "rise":160,"#);
-        let err = build(&squat).expect_err("32 units is under the player's height");
-        assert!(
-            matches!(
-                &err,
-                CompileError::RevealNoHeadroom { reveal, kind, have, need }
-                    if reveal == "pen" && kind == "player" && *have == 32 && *need == 56
-            ),
-            "expected RevealNoHeadroom naming the player and the resting gap, got {err}"
         );
     }
 

@@ -433,6 +433,11 @@ pub enum CompileError {
         need: i32,
     },
     /// A room is shorter than something that must stand in it.
+    ///
+    /// Raised for the room's own things and for the player, and also for a
+    /// [`crate::ir::Reveal`]'s cargo: a reveal lowers flush with its host, so
+    /// the gap its things must fit under *is* the host room's own headroom,
+    /// and naming the room is naming the thing that has to change.
     #[error("room `{room}` has {have} units of headroom but `{kind}` needs {need}")]
     NoHeadroom {
         /// The room.
@@ -827,49 +832,6 @@ pub enum CompileError {
         rise: i32,
         /// The player's step height.
         step: i32,
-    },
-    /// A reveal's rectangle is narrower than the player's own diameter on at
-    /// least one side, so they could not stand in what it opens.
-    ///
-    /// The reveal form of [`PedestalTooSmall`](Self::PedestalTooSmall), held
-    /// to the same bound and for the same reason: measured against the
-    /// diameter rather than the radius, because the player is a cylinder that
-    /// must fit entirely between two opposite edges. Both sides are reported,
-    /// since either may be the offending one.
-    #[error("reveal `{reveal}` is {width}x{height}, but the player is {min} units across")]
-    RevealTooSmall {
-        /// The reveal.
-        reveal: String,
-        /// The rectangle's width.
-        width: i32,
-        /// The rectangle's height.
-        height: i32,
-        /// The player's diameter.
-        min: i32,
-    },
-    /// A reveal leaves less headroom than something that must fit in it
-    /// needs.
-    ///
-    /// Raised from two passes, for the two things that must fit and against
-    /// two different gaps. [`floors::emit_floors`] judges the *player*
-    /// against a [`pedestal`](crate::ir::RevealKind::Pedestal) reveal's
-    /// **resting** cell — the gap its rise leaves under the host's ceiling,
-    /// which is the nook the map has until the trigger fires; a closet has no
-    /// resting gap at all and is exempt.
-    /// [`things::place_things`] judges each thing the reveal carries against
-    /// the **lowered** cell instead, since that is the space it will stand in
-    /// once the floor drops. `kind` names which — `player` for the first.
-    #[error("reveal `{reveal}` has {have} units of headroom but `{kind}` needs {need}")]
-    RevealNoHeadroom {
-        /// The reveal.
-        reveal: String,
-        /// The vocabulary name of the thing that does not fit, or `player`
-        /// for the resting cell the map must still admit.
-        kind: String,
-        /// The gap measured, resting or lowered.
-        have: i32,
-        /// Required height.
-        need: i32,
     },
     /// A reveal's own things list holds a player start.
     ///
