@@ -1,6 +1,8 @@
-//! `liftprobe` — the corpus measurement behind Project G sub-project 3
-//! (lifts). Not a shipped tool: a reproducible probe, kept so the numbers in
-//! `docs/measurements/lift-shapes-2026-08-29.md` can be re-derived when the
+//! `liftprobe` — the corpus measurements behind Project G sub-project 3
+//! (lifts) and sub-project 4a (floor actions). Not a shipped tool: a
+//! reproducible probe, kept so the numbers in
+//! `docs/measurements/lift-shapes-2026-08-29.md` and
+//! `docs/measurements/floor-shapes-2026-09-02.md` can be re-derived when the
 //! sample or the loader changes.
 //!
 //! ```text
