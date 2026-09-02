@@ -15,10 +15,10 @@
 //! rendering, conflicts, arbiter); `shapes` the second (per-shape facts and
 //! multi-sector tag groups); `floors` the third (sub-project 4a: what a
 //! tagged floor action is — destination, effect on the local graph, opening
-//! sub-shape, triggers, rendering, chains and its own arbiter). Each `<dir>`
+//! sub-shape, triggers, rendering, chains and its own arbiter). Each `<dir-or-file>`
 //! is swept non-recursively for `.zip` and `.wad` files exactly as
 //! `crustygen-corpus` sweeps a sample; several directories form one
-//! population, and a `<dir>` that names a file instead is that one archive or
+//! population, and one that names a file instead is that one archive or
 //! WAD. Every pass prints Markdown to stdout; load failures go to stderr.
 
 mod census;

@@ -574,13 +574,14 @@ closer to a Reveal than to a lift.
 
 ## Re-running
 
+With `$RETAIL` the directory holding the retail IWADs and `$SAMPLE` the sample of record
+(`crustywad/xtask/data/samples/20260828-400/` in a crustywad checkout):
+
 ```bash
 cargo build --release --example liftprobe
-R=/Users/amir/workspace/crustywad/RETAIL
-./target/release/examples/liftprobe floors "DOOM+DOOM2" $R/DOOM.WAD $R/DOOM2.WAD
-./target/release/examples/liftprobe floors "Final Doom" $R/TNT.WAD $R/PLUTONIA.WAD
-./target/release/examples/liftprobe floors "idgames sample 20260828-400" \
-  /Users/amir/workspace/crustywad/xtask/data/samples/20260828-400
+./target/release/examples/liftprobe floors "DOOM+DOOM2" "$RETAIL/DOOM.WAD" "$RETAIL/DOOM2.WAD"
+./target/release/examples/liftprobe floors "Final Doom" "$RETAIL/TNT.WAD" "$RETAIL/PLUTONIA.WAD"
+./target/release/examples/liftprobe floors "idgames sample 20260828-400" "$SAMPLE"
 ```
 
 Markdown to stdout, load failures to stderr. A path may name a directory (swept non-recursively for
