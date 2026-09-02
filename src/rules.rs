@@ -448,9 +448,9 @@ fn check_sealed_monster_rooms(
 
 /// P5: every platform travels more than a step, lowers to the floor of the
 /// sector(s) it serves, and can be called from that floor. Re-derived from
-/// the emitted geometry the way `EV_DoPlat` reads it: `low` is the minimum
-/// floor over the platform's two-sided neighbors (`P_FindLowestFloorSurrounding`,
-/// starting at its own floor), and a use special fires from its front
+/// the emitted geometry the way `EV_DoPlat` reads it: `low` is
+/// [`lowest_floor_surrounding`], the same `P_FindLowestFloorSurrounding` walk
+/// P28 runs over a floor target, and a use special fires from its front
 /// sector only (`P_UseSpecialLine`) while a walkover fires from whichever
 /// side can cross at rest (`P_TryMove`'s step rule).
 fn check_lift_return(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>) {
@@ -460,26 +460,17 @@ fn check_lift_return(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>
     let floor = |s: usize| out.data.sectors[s].floor;
     for lift in &out.lifts {
         let subject = format!("sector {} ({:?} tag {})", lift.sector, lift.shape, lift.tag);
-        let mut low = floor(lift.sector);
-        let mut lowest_neighbor = None;
-        for line in &out.data.linedefs {
-            let Some(back) = line.back else { continue };
-            let (f, b) = (
-                out.data.sidedefs[line.front].sector,
-                out.data.sidedefs[back].sector,
-            );
-            let other = if f == lift.sector {
-                b
-            } else if b == lift.sector {
-                f
-            } else {
-                continue;
-            };
-            if floor(other) < low {
-                low = floor(other);
-                lowest_neighbor = Some(other);
-            }
-        }
+        let low = lowest_floor_surrounding(&out.data, lift.sector);
+        // Which neighbor `low` came from, for the message below. Only read
+        // past the `travel <= step` guard, and past it some neighbor is
+        // strictly below the platform's own floor — otherwise `low` would be
+        // that floor and `travel` zero — so this is `Some`, and the sector it
+        // names stands at `low`. Ties go to the lowest sector index
+        // (`min_by_key` keeps the first minimum) rather than to whichever
+        // linedef the emitter happened to write first.
+        let lowest_neighbor = emitted_neighbors(&out.data, lift.sector)
+            .into_iter()
+            .min_by_key(|&n| floor(n));
         let travel = floor(lift.sector) - low;
         if travel <= step {
             v.push(RuleViolation {
@@ -540,6 +531,25 @@ fn check_lift_return(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>
 /// later pass added or moved is caught rather than assumed away.
 fn check_floor_destinations(out: &Compiled, v: &mut Vec<RuleViolation>) {
     for f in &out.floors {
+        // Both searches start from the target's *own* emitted floor, and P29
+        // reads the recorded `rest` instead, so a record that disagrees with
+        // the geometry would let each rule judge a different map. Checked
+        // first and reported alone: every number the destination check would
+        // then print is derived from a floor that should not be there, so
+        // stopping here is the same call P5 makes at a platform that cannot
+        // travel.
+        let emitted = out.data.sectors[f.sector].floor;
+        if emitted != f.rest {
+            v.push(RuleViolation {
+                rule: "P28",
+                subject: format!("sector {}", f.sector),
+                detail: format!(
+                    "the {:?} is recorded at rest {} but its emitted sector floor is {emitted}",
+                    f.shape, f.rest
+                ),
+            });
+            continue;
+        }
         let (engine, search) = match f.family {
             FloorFamily::LowerToLowest => (
                 lowest_floor_surrounding(&out.data, f.sector),
@@ -580,44 +590,88 @@ fn check_floor_openings(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolati
     let step = tables.step_height();
     let h = tables.player().height;
     // Whether the player can walk from `a` at `a_floor` onto `b` at
-    // `b_floor`. Each sector must hold them standing in it, the window
-    // between the two must hold them crossing it, and the climb must be
-    // within the step. The first two conjuncts are the standing room the
-    // third's window subsumes, stated on their own because a target at rest
-    // is routinely a sector with no standing room at all — a closet's floor
-    // sits on its ceiling — and that is the fact a reveal's seal turns on.
+    // `b_floor`. `P_LineOpening`'s window — the lower of the two ceilings
+    // over the higher of the two floors — already subsumes each sector's own
+    // standing room, so the height test is stated once rather than three
+    // times, and this reads as exactly what `reach::passable`'s `Open` arm
+    // does over flood nodes.
     let pass = |data: &MapData, a: usize, a_floor: i32, b: usize, b_floor: i32| -> bool {
-        let (ca, cb) = (data.sectors[a].ceiling, data.sectors[b].ceiling);
-        ca - a_floor >= h
-            && cb - b_floor >= h
-            && ca.min(cb) - a_floor.max(b_floor) >= h
-            && b_floor - a_floor <= step
+        b_floor - a_floor <= step
+            && data.sectors[a].ceiling.min(data.sectors[b].ceiling) - a_floor.max(b_floor) >= h
     };
     for f in &out.floors {
         let n: Vec<usize> = emitted_neighbors(&out.data, f.sector).into_iter().collect();
         let floor = |s: usize| out.data.sectors[s].floor;
-        let ok = match f.shape {
+        // A neighbor as the message needs it: which sector, and the two
+        // heights the window above was computed from.
+        let named = |x: usize| {
+            format!(
+                "sector {x} (floor {}, ceiling {})",
+                out.data.sectors[x].floor, out.data.sectors[x].ceiling
+            )
+        };
+        let reason = match f.shape {
             FloorShape::DropWall | FloorShape::Bridge => {
-                n.len() == 2
-                    && n.iter().all(|&x| {
-                        pass(&out.data, x, floor(x), f.sector, f.dest)
-                            && pass(&out.data, f.sector, f.dest, x, floor(x))
+                if n.len() == 2 {
+                    n.iter().find_map(|&x| {
+                        if !pass(&out.data, x, floor(x), f.sector, f.dest) {
+                            Some(format!(
+                                "at destination {}, {} cannot cross onto it",
+                                f.dest,
+                                named(x)
+                            ))
+                        } else if !pass(&out.data, f.sector, f.dest, x, floor(x)) {
+                            Some(format!(
+                                "at destination {}, it cannot cross onto {}",
+                                f.dest,
+                                named(x)
+                            ))
+                        } else {
+                            None
+                        }
                     })
+                } else {
+                    Some(format!(
+                        "it has {} two-sided neighbors ({n:?}), not the two passages it joins",
+                        n.len()
+                    ))
+                }
             }
             FloorShape::Closet | FloorShape::Pedestal => {
-                n.len() == 1
-                    && !pass(&out.data, n[0], floor(n[0]), f.sector, f.rest)
-                    && pass(&out.data, n[0], floor(n[0]), f.sector, f.dest)
+                if let [host] = *n.as_slice() {
+                    if pass(&out.data, host, floor(host), f.sector, f.rest) {
+                        Some(format!(
+                            "at rest {}, its host {} can already cross onto it, so it is not \
+                             sealed",
+                            f.rest,
+                            named(host)
+                        ))
+                    } else if !pass(&out.data, host, floor(host), f.sector, f.dest) {
+                        Some(format!(
+                            "at destination {}, its host {} still cannot cross onto it",
+                            f.dest,
+                            named(host)
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(format!(
+                        "it has {} two-sided neighbors ({n:?}), not the one host it is carved \
+                         into",
+                        n.len()
+                    ))
+                }
             }
         };
-        if !ok {
+        if let Some(reason) = reason {
             v.push(RuleViolation {
                 rule: "P29",
                 subject: format!("sector {}", f.sector),
                 detail: format!(
-                    "the {:?} does not open as intended: neighbors {n:?}, rest {}, destination \
-                     {}, against the {h}-unit player height and the {step}-unit step",
-                    f.shape, f.rest, f.dest
+                    "the {:?} (ceiling {}, rest {}, destination {}) does not open as intended: \
+                     {reason}, against the {h}-unit player height and the {step}-unit step",
+                    f.shape, out.data.sectors[f.sector].ceiling, f.rest, f.dest
                 ),
             });
         }
@@ -725,10 +779,13 @@ fn next_highest_floor(data: &MapData, sector: usize) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use crate::compile::{CompileError, compile, compile_reporting};
+    use crate::compile::{
+        CompileError, LinedefOut, MapData, SectorOut, SidedefOut, compile, compile_reporting,
+    };
     use crate::ir::Ir;
     use crate::rules::{
         RuleViolation, check_all, check_lift_return, check_teleport_pairing, emitted_neighbors,
+        lowest_floor_surrounding, next_highest_floor,
     };
     use crate::tables::Tables;
 
@@ -1917,14 +1974,60 @@ mod tests {
         let (tables, mut out) = wall_compiled();
         let wall = out.floors[0].sector;
         // Drop the wall's ceiling so that, lowered, the crossing window is
-        // under the player's height on the way through.
+        // under the player's height on the way through. The floor and the
+        // recorded `rest` come down with it — the floor because a sector
+        // whose floor stood above its ceiling is not a map the engine could
+        // load, and `rest` because P28 now cross-checks it against the
+        // emitted floor: moving both keeps the damage under test the opening
+        // alone rather than the bookkeeping.
         out.data.sectors[wall].ceiling = 40;
         out.data.sectors[wall].floor = 40;
+        out.floors[0].rest = 40;
+        let ir = Ir::from_json(WALL_MAP).expect("ir");
+        let v = check_all(&ir, &tables, &out);
+        let hit = v
+            .iter()
+            .find(|x| x.rule == "P29")
+            .unwrap_or_else(|| panic!("expected a P29, got {v:?}"));
+        // The destination and the condition that failed, not just the id: at
+        // destination 0 the 40-tall window is 16 under the 56-unit player, so
+        // the first of the wall's two passages cannot cross onto it.
+        let before = emitted_neighbors(&out.data, wall)
+            .into_iter()
+            .min()
+            .expect("the wall has two passage neighbors");
+        assert!(
+            hit.detail
+                .contains("the DropWall (ceiling 40, rest 40, destination 0)"),
+            "{hit}"
+        );
+        assert!(
+            hit.detail.contains(&format!(
+                "at destination 0, sector {before} (floor 0, ceiling 192) cannot cross onto it"
+            )),
+            "{hit}"
+        );
+        assert!(
+            v.iter().all(|x| x.rule != "P28"),
+            "the rest cross-check stays satisfied: {v:?}"
+        );
+    }
+
+    #[test]
+    fn p28_fails_when_the_emitted_floor_is_not_the_recorded_rest() {
+        let (tables, mut out) = wall_compiled();
+        // The record still says the wall is up; the emitted sector says it is
+        // already down. Both searches read the sector, P29 reads the record,
+        // so without this check each rule would judge a different map — and
+        // the destination search still lands on 0, so nothing else catches it.
+        let wall = out.floors[0].sector;
+        out.data.sectors[wall].floor = 0;
         let ir = Ir::from_json(WALL_MAP).expect("ir");
         let v = check_all(&ir, &tables, &out);
         assert!(
-            v.iter()
-                .any(|x| x.rule == "P29" && x.detail.contains("DropWall")),
+            v.iter().any(|x| x.rule == "P28"
+                && x.detail
+                    .contains("recorded at rest 192 but its emitted sector floor is 0")),
             "{v:?}"
         );
     }
@@ -1957,6 +2060,93 @@ mod tests {
             v.iter()
                 .any(|x| x.rule == "P30" && x.detail.contains(&format!("sector {after}"))),
             "{v:?}"
+        );
+    }
+    /// A bare [`MapData`] of one sector per entry in `floors`, joined by one
+    /// two-sided linedef per pair in `joins`.
+    ///
+    /// Enough for the two destination searches, which read nothing but sector
+    /// floors and the sector each sidedef belongs to — no vertices, no
+    /// textures, no geometry. Hand-built rather than compiled because the
+    /// cases below are ones the emitters cannot produce: the compiler never
+    /// leaves a bridge with no neighbor above it.
+    fn neighbor_graph(floors: &[i32], joins: &[(usize, usize)]) -> MapData {
+        let mut data = MapData {
+            sectors: floors
+                .iter()
+                .map(|&floor| SectorOut {
+                    floor,
+                    ceiling: 128,
+                    light: 160,
+                    floor_tex: "F".to_owned(),
+                    ceil_tex: "C".to_owned(),
+                    special: 0,
+                    tag: 0,
+                    wall_tex: "W".to_owned(),
+                    host: None,
+                })
+                .collect(),
+            ..MapData::default()
+        };
+        for &(a, b) in joins {
+            let front = data.sidedefs.len();
+            for sector in [a, b] {
+                data.sidedefs.push(SidedefOut {
+                    sector,
+                    upper: String::new(),
+                    middle: String::new(),
+                    lower: String::new(),
+                    x_offset: 0,
+                });
+            }
+            data.linedefs.push(LinedefOut {
+                v1: 0,
+                v2: 0,
+                front,
+                back: Some(front + 1),
+                blocking: false,
+                special: 0,
+                tag: 0,
+                lower_unpegged: false,
+                upper_unpegged: false,
+                secret: false,
+            });
+        }
+        data
+    }
+
+    /// `P_FindNextHighestFloor`'s two edges, neither of which an emitted map
+    /// exercises: a neighbor *level* with the current floor is not above it,
+    /// and with nothing above the search returns the current floor rather
+    /// than the least neighbor.
+    #[test]
+    fn the_next_highest_search_is_strict_and_falls_back_to_the_current_floor() {
+        // Sector 0 at 0, joined to one neighbor level with it and one above.
+        let data = neighbor_graph(&[0, 0, 64], &[(0, 1), (0, 2)]);
+        assert_eq!(
+            next_highest_floor(&data, 0),
+            64,
+            "sector 1 is level with the current floor, so `other->floorheight > height` skips it \
+             and the answer is sector 2's 64, not 0"
+        );
+
+        // Now nothing stands above: `if (!h) return currentheight` returns
+        // the floor the sector already has, so the action is a no-op rather
+        // than a drop to the least neighbor.
+        let flat = neighbor_graph(&[32, 0, 32], &[(0, 1), (0, 2)]);
+        assert_eq!(
+            next_highest_floor(&flat, 0),
+            32,
+            "no neighbor is above 32, so the search returns 32 — not sector 1's 0"
+        );
+
+        // The same graph read the other way, for contrast: the lowest search
+        // does take that lower neighbor, and starts at the sector's own floor.
+        assert_eq!(lowest_floor_surrounding(&flat, 0), 0);
+        assert_eq!(
+            lowest_floor_surrounding(&data, 0),
+            0,
+            "nothing is below 0, so `P_FindLowestFloorSurrounding` returns the sector's own floor"
         );
     }
 }
