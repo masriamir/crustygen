@@ -1687,22 +1687,42 @@ pub(crate) enum OpeningShape {
     LedgeLower,
     /// Rises from a pit the player could already drop into: a walkway.
     Bridge,
-    /// An opening none of the three describes. Expected to be rare; reported
-    /// rather than hidden.
+    /// A sealed sector the player can step onto once it has moved, without
+    /// any neighbor gaining a new destination: the sunken pedestal that
+    /// exposes a pickup, or a panel between two areas already joined. The
+    /// effect is [`Effect::Neutral`] — nothing new is *reachable* — but the
+    /// target itself becomes standable, which the reach sets never see
+    /// because the target is never a destination of its own local graph.
+    Reveal,
+    /// An opening none of the others describes. Expected to be rare;
+    /// reported rather than hidden.
     OtherOpening,
 }
 
 /// The classification of one `(family, target)` action.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent measured fact about the action (what the target is \
+              reachable from before and after, what the destination coincides with, whether the \
+              neighbors were joined anyway); they encode no joint state"
+)]
 pub(crate) struct EffectFacts {
     /// The effect on everyone but a rider.
     pub(crate) effect: Effect,
     /// The effect on a rider.
     pub(crate) rider: Rider,
-    /// The opening sub-shape, when [`EffectFacts::effect`] is
-    /// [`Effect::Opening`] and the rider is not stranded.
+    /// The opening sub-shape: an [`Effect::Opening`] whose rider is not
+    /// stranded, or an [`Effect::Neutral`] that is an
+    /// [`OpeningShape::Reveal`].
     pub(crate) opening: Option<OpeningShape>,
     /// Whether some neighbor can walk onto the target at its rest floor.
     pub(crate) enterable_before: bool,
+    /// Whether some neighbor can walk onto the target at its destination.
+    pub(crate) enterable_after: bool,
+    /// Whether two distinct neighbors could already reach each other, both
+    /// ways, inside the local graph before the action fired — so the target
+    /// was not the only route between them.
+    pub(crate) neighbors_already_connected: bool,
     /// Whether the destination is exactly some neighbor's floor.
     pub(crate) joins_neighbor_floor: bool,
     /// `(A, B)` pairs `B` newly reachable from `A`.
@@ -1742,6 +1762,9 @@ pub(crate) fn classify_effect(
     let enterable_before = neighbors
         .iter()
         .any(|&n| n != target && pass(scene, before_h, n, target, player_height, step));
+    let enterable_after = neighbors
+        .iter()
+        .any(|&n| n != target && pass(scene, after_h, n, target, player_height, step));
 
     let empty = BTreeSet::new();
     let mut new_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
@@ -1782,20 +1805,37 @@ pub(crate) fn classify_effect(
         Rider::NotApplicable
     };
 
-    let opening = (effect == Effect::Opening && rider != Rider::Loses).then_some(
-        match (dest < rest, enterable_before) {
+    let opening = if effect == Effect::Opening && rider != Rider::Loses {
+        Some(match (dest < rest, enterable_before) {
             (true, false) => OpeningShape::DropWall,
             (true, true) => OpeningShape::LedgeLower,
             (false, true) => OpeningShape::Bridge,
             (false, false) => OpeningShape::OtherOpening,
-        },
-    );
+        })
+    } else if effect == Effect::Neutral && !enterable_before && enterable_after {
+        // The rider is `NotApplicable` by construction: nobody could be
+        // standing on a target no neighbor could walk onto.
+        Some(OpeningShape::Reveal)
+    } else {
+        None
+    };
+
+    // Read off the *before* sets: a pair of neighbors that could already
+    // reach each other both ways was not depending on the target.
+    let neighbors_already_connected = before.iter().any(|(&a, reach)| {
+        a != target
+            && reach
+                .iter()
+                .any(|&b| before.get(&b).is_some_and(|back| back.contains(&a)))
+    });
 
     EffectFacts {
         effect,
         rider,
         opening,
         enterable_before,
+        enterable_after,
+        neighbors_already_connected,
         joins_neighbor_floor: neighbors
             .iter()
             .any(|&n| n != target && scene.sectors[n].floor == dest),
@@ -2096,6 +2136,65 @@ pub(crate) mod tests {
             );
         }
         for sector in [0, 1, 1, 2, 1, 3, 0, 0, 0, 1, 2, 2, 2, 3, 3, 3] {
+            let _ = writeln!(text, "sidedef {{ sector = {sector}; }}");
+        }
+        for ((floor, ceiling), tag) in floors.iter().zip(ceilings).zip(tags) {
+            let _ = writeln!(
+                text,
+                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; heightfloor = {floor}; heightceiling = {ceiling}; lightlevel = 160; id = {tag}; }}"
+            );
+        }
+        text.push_str(extra);
+        text
+    }
+
+    /// Three rooms in an L: A (sector 0) at `x ∈ [0, 128]`, B (sector 1) at
+    /// `x ∈ [128, 256]`, both at `y ∈ [0, 128]` and sharing the wall at
+    /// `x = 128`; T (sector 2) spans `x ∈ [0, 256]` at `y ∈ [128, 256]`,
+    /// bordering both. Unlike [`chain`] and [`tee`], the target's two
+    /// neighbors are *also* neighbors of each other, which is what separates
+    /// a panel that reveals itself from a wall that joins two rooms.
+    /// `links` gives `(special, tag)` for A|T, B|T and A|B, whose front
+    /// sectors are A, B and A.
+    pub(crate) fn panel(
+        floors: &[i32; 3],
+        ceilings: &[i32; 3],
+        tags: &[i32; 3],
+        links: &[(i32, i32); 3],
+        extra: &str,
+    ) -> String {
+        let mut text = String::from("namespace = \"doom\";\n");
+        for (x, y) in [
+            (0, 0),
+            (128, 0),
+            (256, 0),
+            (0, 128),
+            (128, 128),
+            (256, 128),
+            (0, 256),
+            (256, 256),
+        ] {
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = {y}.000; }}");
+        }
+        for (i, &(v1, v2)) in [(4, 3), (5, 4), (4, 1)].iter().enumerate() {
+            let (special, tag) = links[i];
+            let (sf, sb) = (2 * i, 2 * i + 1);
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {sf}; sideback = {sb}; twosided = true; special = {special}; arg0 = {tag}; }}"
+            );
+        }
+        for (i, &(v1, v2)) in [(0, 3), (1, 0), (2, 1), (5, 2), (3, 6), (6, 7), (7, 5)]
+            .iter()
+            .enumerate()
+        {
+            let s = 6 + i;
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {s}; blocking = true; }}"
+            );
+        }
+        for sector in [0, 2, 1, 2, 0, 1, 0, 0, 1, 1, 2, 2, 2] {
             let _ = writeln!(text, "sidedef {{ sector = {sector}; }}");
         }
         for ((floor, ceiling), tag) in floors.iter().zip(ceilings).zip(tags) {
