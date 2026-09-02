@@ -181,7 +181,8 @@
 //! name, so a card and skull of one color share a class (`EV_VerticalDoor`,
 //! pinned `p_doors.c:371-403`, accepts either). [`run_flood`] reports a hard
 //! finding rather than panicking when the vocabulary ever lists more classes
-//! than a [`reach::KeyMask`] can hold — this module runs on arbitrary input,
+//! than the key half of a [`reach::KeyMask`] can hold — the bits below
+//! [`reach::ACTION_BIT_BASE`] — this module runs on arbitrary input,
 //! unlike `graph_from_compiled`'s `assert!` over a vocabulary this crate
 //! itself controls.
 //!

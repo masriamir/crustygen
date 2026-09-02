@@ -30,7 +30,7 @@ use crate::compile::tags::TagAllocator;
 use crate::compile::teleports::emit_island_edges;
 use crate::compile::{CompileError, MapData};
 use crate::geom::wall_edges;
-use crate::ir::{FloorFamilyIr, Ir, PortalKind, Reveal, RevealKind, Trigger, TriggerKind};
+use crate::ir::{FloorFamilyIr, Ir, Portal, PortalKind, Reveal, RevealKind, Trigger, TriggerKind};
 use crate::tables::{FloorFamily, Tables};
 
 /// What an emitted action is.
@@ -44,6 +44,39 @@ pub enum FloorShape {
     Pedestal,
     /// A pit strip between two rooms that rises once.
     Bridge,
+}
+
+/// A floor construct as the two places that name one to an author see it:
+/// the authored portal or reveal behind an emitted action.
+#[derive(Debug, Clone, Copy)]
+pub enum NamedConstruct<'a> {
+    /// A drop-wall or bridge portal.
+    Portal(&'a Portal),
+    /// A closet or pedestal reveal.
+    Reveal(&'a Reveal),
+}
+
+/// What a floor construct is called wherever one is named to an author:
+/// `"drop wall a <-> b"`, `"bridge a <-> b"` or `"reveal pen"`.
+///
+/// One function because two places quote it and an author reading a tag
+/// manifest beside a P7 violation must see the same words in both — the tag
+/// manifest [`emit_floors`] writes, and
+/// [`BuiltGraph::action_names`](crate::reach::BuiltGraph::action_names),
+/// which words the reachability rule's violations.
+#[must_use]
+pub fn construct_name(construct: NamedConstruct<'_>) -> String {
+    match construct {
+        NamedConstruct::Portal(p) => {
+            let kind = if p.kind == PortalKind::Bridge {
+                "bridge"
+            } else {
+                "drop wall"
+            };
+            format!("{kind} {} <-> {}", p.a, p.b)
+        }
+        NamedConstruct::Reveal(r) => format!("reveal {}", r.id),
+    }
 }
 
 /// One emitted trigger line.
@@ -230,19 +263,12 @@ pub fn emit_floors(
                 .portals
                 .iter()
                 .filter(|p| p.fires_on.as_deref() == Some(t.id.as_str()))
-                .map(|p| {
-                    let kind = if p.kind == PortalKind::Bridge {
-                        "bridge"
-                    } else {
-                        "drop wall"
-                    };
-                    format!("{kind} {} <-> {}", p.a, p.b)
-                })
+                .map(|p| construct_name(NamedConstruct::Portal(p)))
                 .chain(
                     ir.reveals
                         .iter()
                         .filter(|r| r.trigger == t.id)
-                        .map(|r| format!("reveal {}", r.id)),
+                        .map(|r| construct_name(NamedConstruct::Reveal(r))),
                 )
                 .collect();
             // `usize::MAX` is a placeholder: the trigger's tag is allocated

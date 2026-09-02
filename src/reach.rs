@@ -100,7 +100,7 @@
 use std::collections::HashSet;
 
 use crate::compile::Compiled;
-use crate::compile::floors::FloorShape;
+use crate::compile::floors::{FloorShape, NamedConstruct, construct_name};
 use crate::ir::Ir;
 use crate::tables::Tables;
 
@@ -132,6 +132,16 @@ pub type KeyMask = u16;
 /// up are floor actions.
 pub const ACTION_BIT_BASE: u32 = 8;
 
+// The two halves must fit one mask. Raising either constant without widening
+// `KeyMask` would shift a floor action's bit off the end — a debug panic in
+// `Node::effective_floor`, but in release a silent alias onto key class 0,
+// which is a locked door that opens because a wall dropped. A compile error
+// is the only place that can be caught for certain.
+const _: () = assert!(
+    ACTION_BIT_BASE as usize + Ir::MAX_FLOOR_ACTIONS <= KeyMask::BITS as usize,
+    "the key classes and the floor actions must fit one KeyMask"
+);
+
 /// One sector, reduced to what traversal needs.
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -149,6 +159,14 @@ pub struct Node {
     /// floor)`. Until `bit` is set the node stands at [`Node::floor`];
     /// afterwards it stands at the destination. See
     /// [`Node::effective_floor`].
+    ///
+    /// **Invariant: `bit` is below `KeyMask::BITS - ACTION_BIT_BASE` (8).**
+    /// The bit is shifted up by [`ACTION_BIT_BASE`], so one at or past that
+    /// count shifts off the end of the mask — a debug panic in
+    /// [`Node::effective_floor`], but in release `1 << 16` masks to
+    /// `1 << 0` and aliases the action onto key class 0.
+    /// [`graph_from_compiled`] is the enforcement point, capping the action
+    /// list at [`Ir::MAX_FLOOR_ACTIONS`].
     pub action: Option<(u8, i32)>,
 }
 
@@ -165,9 +183,21 @@ impl Node {
     /// passability rules, in either state.
     #[must_use]
     pub fn effective_floor(&self, mask: KeyMask) -> i32 {
-        match self.action {
-            Some((bit, dest)) if mask & (1 << (ACTION_BIT_BASE + u32::from(bit))) != 0 => dest,
-            _ => self.floor,
+        let Some((bit, dest)) = self.action else {
+            return self.floor;
+        };
+        // The mirror of `passable`'s assert on a key class: an action bit at
+        // or past the action half's width shifts off the end of the mask.
+        // See [`Node::action`]'s invariant for what that costs in release.
+        debug_assert!(
+            u32::from(bit) < KeyMask::BITS - ACTION_BIT_BASE,
+            "floor action {bit} does not fit {} action bits",
+            KeyMask::BITS - ACTION_BIT_BASE
+        );
+        if mask & (1 << (ACTION_BIT_BASE + u32::from(bit))) != 0 {
+            dest
+        } else {
+            self.floor
         }
     }
 }
@@ -704,6 +734,16 @@ fn wire_floor_actions(
     );
     for (a, f) in out.floors.iter().enumerate() {
         let bit = u8::try_from(a).expect("at most Ir::MAX_FLOOR_ACTIONS actions");
+        // A node carries one action, so two of them on one sector would
+        // leave only the last with no diagnostic. The compiler cannot emit
+        // that — one construct per sector, and P30 refuses an action chained
+        // onto another moving sector — so this states the precondition
+        // rather than handling it.
+        debug_assert!(
+            nodes[f.sector].action.is_none(),
+            "sector {} is the target of two floor actions; a node carries one",
+            f.sector
+        );
         nodes[f.sector].action = Some((bit, f.dest));
     }
     for (i, t) in out.triggers.iter().enumerate() {
@@ -736,6 +776,10 @@ fn wire_floor_actions(
 /// One name per emitted floor action, in [`Compiled::floors`] order — the
 /// wording [`BuiltGraph::action_names`] carries into violations.
 ///
+/// The words themselves come from [`construct_name`], which the tag manifest
+/// also uses, so a violation and the manifest row for the same construct
+/// cannot drift apart.
+///
 /// # Panics
 /// Panics if a drop wall or bridge names no portal, or a closet or pedestal
 /// no reveal, which [`crate::compile::floors`] sets on every action it
@@ -744,19 +788,12 @@ fn floor_action_names(ir: &Ir, out: &Compiled) -> Vec<String> {
     out.floors
         .iter()
         .map(|f| match f.shape {
-            FloorShape::DropWall | FloorShape::Bridge => {
-                let p = &ir.portals[f.portal.expect("a drop wall or bridge names its portal")];
-                let kind = if f.shape == FloorShape::Bridge {
-                    "bridge"
-                } else {
-                    "drop wall"
-                };
-                format!("{kind} {} <-> {}", p.a, p.b)
-            }
-            FloorShape::Closet | FloorShape::Pedestal => {
-                let r = &ir.reveals[f.reveal.expect("a closet or pedestal names its reveal")];
-                format!("reveal {}", r.id)
-            }
+            FloorShape::DropWall | FloorShape::Bridge => construct_name(NamedConstruct::Portal(
+                &ir.portals[f.portal.expect("a drop wall or bridge names its portal")],
+            )),
+            FloorShape::Closet | FloorShape::Pedestal => construct_name(NamedConstruct::Reveal(
+                &ir.reveals[f.reveal.expect("a closet or pedestal names its reveal")],
+            )),
         })
         .collect()
 }
@@ -1104,6 +1141,65 @@ mod tests {
         let f = check(&g, &LIMITS);
         assert!(!f.unfinishable);
         assert!(f.stranded.is_empty());
+
+        // The same edge crossed the other way, and *only* the other way.
+        // `check` expands an undirected edge as `a -> b` and `b -> a`
+        // separately, so pinning the second expansion needs a fixture that
+        // cannot fall back on the first: node 0 sits 100 below node 1, so
+        // the crossing is a free descent one way and an impossible climb
+        // back, and the only firing traversal is 1 -> 0. (A fixture whose
+        // edge is crossable both ways proves nothing here — the walk simply
+        // re-crosses it in the working direction.)
+        //
+        // This is the direction real geometry takes: a bridge walkover's
+        // far threshold has the pit as its front sector, so entering from
+        // the far room is a b -> a crossing.
+        //
+        // nodes: 0 landing, 100 below the start; 1 start; 2 a sealed wall
+        // that lowers to the landing's own floor; 3 the exit beyond it.
+        let nodes = vec![
+            node(-100, 200, 0),
+            node(0, 200, 0),
+            action_node(92, 92, 0, -100),
+            node(-100, 200, 0),
+        ];
+        let mut back = open(0, 1);
+        back.fires = 1 << ACTION_BIT_BASE;
+        let g = graph(nodes, vec![back, open(0, 2), open(2, 3)], 1, vec![3]);
+        let f = check(&g, &LIMITS);
+        assert!(
+            !f.unfinishable,
+            "the drop from 1 into 0 is a b -> a crossing, and it fires: {f:?}"
+        );
+        assert!(f.stranded.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn a_door_onto_a_dropped_wall_is_judged_at_the_floor_the_action_left() {
+        // A door edge skips the crossing window but keeps the step rule, so
+        // it has to read the effective floor too. Here the door's far side
+        // is a wall sector resting 192 up that lowers to 0: a 192 step
+        // before the action fires, level after. Nothing else in this file
+        // puts an action behind a `Door` edge, so the Door arm's own call
+        // is otherwise unexercised.
+        let nodes = vec![
+            firing_node(0, 192, 0),
+            action_node(192, 192, 0, 0),
+            node(0, 192, 0),
+        ];
+        let edges = vec![door(0, 1, None), door(1, 2, None)];
+        let g = graph(nodes.clone(), edges.clone(), 0, vec![2]);
+        assert!(
+            !check(&g, &LIMITS).unfinishable,
+            "the wall came down, so the step through the door is 0"
+        );
+        let mut sealed = nodes;
+        sealed[0].fires = 0;
+        let g = graph(sealed, edges, 0, vec![2]);
+        assert!(
+            check(&g, &LIMITS).unfinishable,
+            "192 is not a step, door or no door"
+        );
     }
 
     #[test]
@@ -1688,6 +1784,139 @@ mod tests {
             (teleports[0].a, teleports[0].b),
             (0, 1),
             "from the host room to room b"
+        );
+    }
+
+    /// A bridge whose walkover names its own two rooms: the special lands
+    /// on *both* of the pit's thresholds, so stepping down into it from
+    /// either side raises it under the player. A verbatim copy of
+    /// `compile::floors`'s own `BRIDGE_WALKOVER`, which lives in that
+    /// module's private test module and so cannot be shared — the same
+    /// arrangement `rules.rs`'s `WALL_MAP` already has.
+    const BRIDGE_WALKOVER: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[ { "a":"a", "b":"b", "kind":"bridge", "width":64, "at":[256,128], "depth":96, "fires_on":"t" } ],
+      "triggers":[ { "id":"t", "kind":"walkover", "portal":["a","b"] } ],
+      "exits":[ { "room":"b", "trigger":"switch", "at":[576,128], "width":64 } ] }"#;
+
+    /// [`BRIDGE_WALKOVER`] with the start and the exit swapped: the player
+    /// begins in room `b` and must cross the pit's *far* threshold — the
+    /// one `TriggerOut::line` does not name — to reach the exit in `a`.
+    const BRIDGE_WALKOVER_FROM_FAR: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[512,64], "angle":0 } ] }
+      ],
+      "portals":[ { "a":"a", "b":"b", "kind":"bridge", "width":64, "at":[256,128], "depth":96, "fires_on":"t" } ],
+      "triggers":[ { "id":"t", "kind":"walkover", "portal":["a","b"] } ],
+      "exits":[ { "room":"a", "trigger":"switch", "at":[0,128], "width":64 } ] }"#;
+
+    /// The `(a, b)` sector pair of each linedef in `lines`, sorted — the
+    /// shape an edge built from that linedef carries.
+    fn sector_pairs(out: &Compiled, lines: &[usize]) -> Vec<(NodeIdx, NodeIdx)> {
+        let mut pairs: Vec<(NodeIdx, NodeIdx)> = lines
+            .iter()
+            .map(|&l| {
+                let line = &out.data.linedefs[l];
+                let back = line.back.expect("a gap threshold is two-sided");
+                (
+                    out.data.sidedefs[line.front].sector,
+                    out.data.sidedefs[back].sector,
+                )
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    #[test]
+    fn a_walkover_bridge_fires_from_both_of_its_thresholds() {
+        // `emit_trigger_line` writes the walkover special onto BOTH of a
+        // bridge's thresholds, and `TriggerOut::line` records only the
+        // first. Reading the emitted lines back — rather than that one
+        // index — is what makes stepping in from the far side raise the
+        // pit; taking only `line` leaves the far threshold inert.
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(BRIDGE_WALKOVER).expect("ir");
+        let out = crate::compile::compile(&ir, &tables).expect("compiles");
+        let b = graph_from_compiled(&ir, &tables, &out).expect("graph");
+        assert_eq!(out.floors.len(), 1, "one bridge, one action");
+        assert_eq!(out.floors[0].lines.len(), 2, "a bridge has two thresholds");
+
+        let mut firing: Vec<(NodeIdx, NodeIdx)> = b
+            .graph
+            .edges
+            .iter()
+            .filter(|e| e.fires != 0)
+            .map(|e| (e.a, e.b))
+            .collect();
+        firing.sort_unstable();
+        assert_eq!(
+            firing,
+            sector_pairs(&out, &out.floors[0].lines),
+            "both thresholds fire, and nothing else does"
+        );
+        assert!(
+            b.graph
+                .edges
+                .iter()
+                .filter(|e| e.fires != 0)
+                .all(|e| e.fires == 1 << ACTION_BIT_BASE),
+            "the map's one action is bit 0 of the action half"
+        );
+    }
+
+    #[test]
+    fn a_walkover_bridge_entered_from_the_far_room_still_raises() {
+        // The same pit approached from the side `TriggerOut::line` does not
+        // name. Dropping in is free either way; walking back out of a
+        // 96-deep pit is not, so a far threshold that failed to fire would
+        // leave the player stranded in it and the map unfinishable.
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(BRIDGE_WALKOVER_FROM_FAR).expect("ir");
+        let out = crate::compile::compile(&ir, &tables).expect("compiles");
+        let b = graph_from_compiled(&ir, &tables, &out).expect("graph");
+        let f = check(
+            &b.graph,
+            &Limits {
+                player_height: tables.player().height,
+                max_step: tables.step_height(),
+            },
+        );
+        assert!(!f.unfinishable, "{f:?}");
+        assert!(f.stranded.is_empty(), "{f:?}");
+        assert!(f.unreachable.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn an_actions_name_is_the_one_its_tag_manifest_row_carries() {
+        // `action_names` words P7's violations and the manifest row is what
+        // an author reads beside them; both come from
+        // `floors::construct_name`, and this is what holds them to it.
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(BRIDGE_WALKOVER).expect("ir");
+        let out = crate::compile::compile(&ir, &tables).expect("compiles");
+        let b = graph_from_compiled(&ir, &tables, &out).expect("graph");
+        assert_eq!(b.action_names, ["bridge a <-> b"]);
+        let row = out
+            .tags
+            .manifest()
+            .iter()
+            .find(|e| e.tag == out.floors[0].tag)
+            .expect("the trigger's tag is in the manifest");
+        assert!(
+            row.purpose.contains(&b.action_names[0]),
+            "the manifest row `{}` must quote the action the same way",
+            row.purpose
         );
     }
 
