@@ -438,7 +438,7 @@ the risen bridge the walkway's flat: three quarters copy exactly it.
 | — a neighbor that is a lift plat | 1.3 % | 1.7 % | 1.9 % |
 | — a neighbor tagged by an emittable door special | 0 | 0 | 0.0 % |
 | targets driven by ≥ 2 families | 4.9 % | 5.1 % | 4.7 % |
-| targets whose destination-defining neighbor is movable | 4.0 % | 3.2 % | 4.4 % |
+| targets whose destination-defining neighbor is movable | 4.0 % | 3.2 % | 4.3 % |
 
 **Read:** one target in five borders another; only one in twenty-three has its *destination* defined
 by a movable neighbor. Load-time evaluation is right for the rest.
@@ -556,7 +556,7 @@ closer to a Reveal than to a lift.
 8. **P7 is already the right shape.** A fired action is a state bit: a switch fires it on entering
    the activator sector, a walkover on crossing its threshold, and the target's floor becomes a
    function of the state — the same per-state flood that catches a stranded key holder. Load-time
-   destinations are exact for 95.6 % of targets (a movable destination-defining neighbor is 4.4 %);
+   destinations are exact for 95.7 % of targets (a movable destination-defining neighbor is 4.3 %);
    the compiler can forbid chains by construction and the verifier can re-derive destinations the
    same way.
 9. **Rendering.** The face that moves is the neighbor's lower texture, pegged so it rides with the

@@ -6,9 +6,9 @@
 //! sample or the loader changes.
 //!
 //! ```text
-//! cargo run --release --example liftprobe -- census <label> <dir>...
-//! cargo run --release --example liftprobe -- shapes <label> <dir>...
-//! cargo run --release --example liftprobe -- floors <label> <dir>...
+//! cargo run --release --example liftprobe -- census <label> <dir-or-file>...
+//! cargo run --release --example liftprobe -- shapes <label> <dir-or-file>...
+//! cargo run --release --example liftprobe -- floors <label> <dir-or-file>...
 //! ```
 //!
 //! `census` is the first pass (usage, rest, travel, topology, triggers,
@@ -39,7 +39,7 @@ fn main() {
             floors::run(label, dirs);
         }
         _ => {
-            eprintln!("usage: liftprobe <census|shapes|floors> <label> <dir>...");
+            eprintln!("usage: liftprobe <census|shapes|floors> <label> <dir-or-file>...");
             std::process::exit(2);
         }
     }

@@ -201,7 +201,13 @@ fn destination_neighbors(
             }
         }
         FloorType::RaiseFloor | FloorType::RaiseFloorCrush => {
+            // `p_floor.c:322-326` caps the lowest neighboring ceiling at the
+            // sector's own: when the cap applies the destination is the
+            // target's ceiling and no neighbor defines it.
             let low = lowest_ceiling_surrounding(scene, target);
+            if low > scene.sectors[target].ceiling {
+                return BTreeSet::new();
+            }
             neighbors
                 .iter()
                 .copied()
@@ -1877,6 +1883,43 @@ mod tests {
             text,
             "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {sd}; blocking = true; special = {special}; arg0 = {tag}; }}\n\
              sidedef {{ sector = {last}; texturemiddle = \"STARTAN2\"; }}"
+        );
+    }
+
+    #[test]
+    fn a_raise_capped_at_the_targets_own_ceiling_has_no_defining_neighbor() {
+        // T's ceiling (128) is below every neighbor's (256): `raiseFloor`
+        // stops at 128, the cap, and no neighbor's height is the reason.
+        let mut text = chain_full(
+            &[0, 0, 0],
+            &[256, 128, 256],
+            &[0, 7, 0],
+            &[(0, 0, false), (0, 0, false)],
+            "",
+        );
+        far_wall(&mut text, 3, 101, 7);
+        let f = fixture(&text);
+        let t = target(&f, 1);
+        assert_eq!(t.actions[0].destination, Destination::Height(128));
+        assert!(t.actions[0].dest_neighbors.is_empty(), "the cap defined it");
+
+        // Lift T's ceiling above both neighbors' (192): the lowest neighboring
+        // ceiling is the destination, and both neighbors define it.
+        let mut text = chain_full(
+            &[0, 0, 0],
+            &[192, 256, 192],
+            &[0, 7, 0],
+            &[(0, 0, false), (0, 0, false)],
+            "",
+        );
+        far_wall(&mut text, 3, 101, 7);
+        let f = fixture(&text);
+        let t = target(&f, 1);
+        assert_eq!(t.actions[0].destination, Destination::Height(192));
+        assert_eq!(
+            t.actions[0].dest_neighbors,
+            BTreeSet::from([0, 2]),
+            "both neighbors sit at the defining ceiling"
         );
     }
 
