@@ -800,17 +800,17 @@ fn emit_drop_wall(
 /// is the rooms' own floor, because [`emit_gap_sector`] gives the strip no
 /// two-sided neighbors but those two rooms and
 /// [`Ir::from_json`](crate::ir::Ir::from_json) has already refused a bridge
-/// whose rooms' floors differ ([`crate::ir::IrError::BridgeFloorsDiffer`]).
-/// Rule P28 re-runs that search over the emitted sectors.
+/// whose rooms' floors differ ([`crate::ir::IrError::BridgeFloorsDiffer`]),
+/// so the search lands on that floor by construction.
 ///
 /// **The pit is a drop the player may take before the bridge rises, and
 /// nothing here forbids it** — the corpus builds pits both escapable and
 /// not. Rule P7's flood arbitrates: a pit whose trigger cannot be fired from
 /// inside it, and which has no other way out, strands whoever drops in, and
-/// the flood is what decides that rather than this emitter (design §3.4).
-/// The one bridge trigger that cannot strand anyone is a walkover naming the
-/// bridge itself, whose special `emit_trigger_line` writes onto *both* of the
-/// thresholds handed back in [`FloorActionOut::lines`].
+/// the flood is what decides that rather than this emitter. The one bridge
+/// trigger that cannot strand anyone is a walkover naming the bridge itself,
+/// whose special `emit_trigger_line` writes onto *both* of the thresholds
+/// handed back in [`FloorActionOut::lines`].
 ///
 /// # Errors
 /// Returns [`CompileError::BridgeDepthTooLow`] when the pit is no deeper than
@@ -820,9 +820,18 @@ fn emit_drop_wall(
 /// bridge, and whatever `resolve_portal` raises.
 ///
 /// # Panics
-/// Panics if the portal carries no `depth`, which
-/// [`Ir::from_json`](crate::ir::Ir::from_json) requires of every bridge
-/// ([`crate::ir::IrError::MissingBridgeDepth`]) before this pass runs.
+/// Panics on any of three things it takes as given, each unreachable by
+/// construction:
+/// - the portal's `depth`, which
+///   [`Ir::from_json`](crate::ir::Ir::from_json) requires of every bridge
+///   ([`crate::ir::IrError::MissingBridgeDepth`]) before this pass runs;
+/// - both of the gap segment's thresholds being two-sided, which is what
+///   [`emit_gap_sector`] emits there — a threshold is a room/pit boundary,
+///   never a wall; and
+/// - one of those two sides being the lower-floored one, since the pit rests
+///   `depth` below a floor both rooms share and `depth` has just been held
+///   above the step, so it is strictly below both and
+///   [`visible_lower_side`] cannot return `None`.
 fn emit_bridge(
     ir: &Ir,
     tables: &Tables,
@@ -890,6 +899,13 @@ fn emit_bridge(
         geometry.ia,
         geometry.ib,
         sector_like(room_a, rest, room_a.ceiling.min(room_b.ceiling), riser, tag),
+        // The jambs — the pit's own two long side walls — take room `a`'s
+        // wall texture rather than the riser. They are the chasm's sides:
+        // one-sided rock from the pit floor to the ceiling, standing whether
+        // the bridge is up or down, so they are wall rather than the moving
+        // face a riser marks, and a plain portal's passage takes the same
+        // texture for its own jambs (`portals::cut_one`). Only the two
+        // thresholds below get the riser.
         &room_a.wall_tex,
     );
 
@@ -897,11 +913,21 @@ fn emit_bridge(
     // `r_segs.c`'s `R_StoreWallRange` draws a lower on the sidedef whose own
     // sector has the lower floor — at rest that is the pit's, on both
     // thresholds — and `heights::visible_lower_side` is exactly that
-    // comparison, called rather than re-derived here. Pegged
-    // (`lower_unpegged` clear) so the riser stays anchored to the pit floor
-    // and shortens as it rises, the way a lift's riser rides with its
-    // platform. The room-side lowers are left bare: the engine never draws
-    // them, and `heights::apply_height_textures` fills only the visible side.
+    // comparison, called rather than re-derived here.
+    //
+    // Left pegged (`ML_DONTPEGBOTTOM` clear), which anchors a lower texture
+    // to the *back* sector's floor — the sector on the far side of the face
+    // being drawn. Here that face is the pit's own and the sector behind it
+    // is the room, whose floor never moves, so the riser hangs from a fixed
+    // top at the room's floor and is covered from below as the pit rises. It
+    // is a lift's *top* face, not its low one (`lifts`' module doc works
+    // through both). Clear is also what the corpus does: a bridge-walkway
+    // boundary carries `ML_DONTPEGBOTTOM` on 5.6 % of the idgames sample's
+    // lines, 42 % and 34 % of the two retail ones
+    // (`docs/measurements/floor-shapes-2026-09-02.md` §F), which also finds
+    // the walkway side's own lower blank 90 % of the time — as it is here.
+    // The room-side lowers are left bare: the engine never draws them,
+    // and `heights::apply_height_textures` fills only the visible side.
     for line in [seg.near_line, seg.far_line] {
         let l = &data.linedefs[line];
         let back = l.back.expect("emit_segment emits two-sided thresholds");
@@ -1694,8 +1720,21 @@ mod tests {
         );
 
         // The pit fills the whole gap — a bridge portal declares no alcoves
-        // and no thickness — so its jambs run the gap's full 64 units.
+        // and no thickness — so its jambs run the gap's full 64 units, and
+        // they are the chasm's rock rather than a riser: the room's wall
+        // texture, as a plain portal's passage takes.
         assert_eq!(jamb_extent(&data, f.sector, true), (256, 320));
+        let jambs: Vec<&str> = data
+            .linedefs
+            .iter()
+            .filter(|l| l.back.is_none() && data.sidedefs[l.front].sector == f.sector)
+            .map(|l| data.sidedefs[l.front].middle.as_str())
+            .collect();
+        assert_eq!(
+            jambs,
+            ["STARTAN3", "STARTAN3"],
+            "the pit's two side walls are wall, not the riser its faces carry"
+        );
 
         // Its only two-sided neighbors are the two rooms, which is what makes
         // `P_FindNextHighestFloor` from the pit exactly their shared floor.
