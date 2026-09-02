@@ -762,6 +762,23 @@ pub enum CompileError {
         /// The player's step height.
         step: i32,
     },
+    /// Two floor-action triggers would write their special onto one line.
+    ///
+    /// The compiler-side half of
+    /// [`crate::ir::IrError::WalkoverPortalClaimedTwice`], which refuses two
+    /// walkover triggers naming one room pair before this pass ever runs — so
+    /// nothing an author can write reaches this. It is here because the cost
+    /// of the write going through unchecked is invisible: the second trigger's
+    /// tag replaces the first's on the line, and every construct the first
+    /// trigger drives is left with nothing that fires it, on a map that loads
+    /// and renders correctly.
+    #[error("trigger `{id}` would overwrite the special already on line {line}")]
+    TriggerLineAlreadyClaimed {
+        /// The trigger that arrived second.
+        id: String,
+        /// The linedef already carrying a special.
+        line: usize,
+    },
     /// The map carries a floor construct whose emitter has not landed yet: a
     /// [`crate::ir::PortalKind::Bridge`] portal or a [`crate::ir::Reveal`].
     ///

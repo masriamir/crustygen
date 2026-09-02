@@ -27,6 +27,7 @@
 
 use crate::compile::portals::{
     Cut, emit_jambs, emit_opening, emit_segment, mark_secret_thresholds, resolve_portal,
+    sector_like,
 };
 use crate::compile::tags::TagAllocator;
 use crate::compile::{CompileError, MapData, SectorOut};
@@ -210,17 +211,11 @@ pub fn emit_doors(
             "Ir::from_json guarantees the alcoves and door thickness sum to the gap"
         );
 
-        let alcove_sector_out = |room: &Room| SectorOut {
-            floor: room.floor,
-            ceiling: room.ceiling,
-            light: room.light,
-            floor_tex: room.floor_tex.clone(),
-            ceil_tex: room.ceil_tex.clone(),
-            special: 0,
-            tag: 0,
-            wall_tex: room.wall_tex.clone(),
-            host: None,
-        };
+        // An alcove is a piece of the room it opens off, at that room's own
+        // floor, ceiling and appearance — `portals::sector_like`, the one
+        // place every compiler-made sector borrows a room's look from.
+        let alcove_sector_out =
+            |room: &Room| sector_like(room, room.floor, room.ceiling, &room.wall_tex, 0);
 
         let near_alcove = (alcove_near > 0).then(|| {
             let idx = data.sectors.len();

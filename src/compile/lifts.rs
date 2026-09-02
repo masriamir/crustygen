@@ -70,11 +70,12 @@
 
 use crate::compile::portals::{
     Cut, emit_jambs, emit_opening, emit_segment, mark_secret_thresholds, resolve_portal,
+    sector_like,
 };
 use crate::compile::tags::TagAllocator;
 use crate::compile::teleports::emit_island_edges;
-use crate::compile::{CompileError, MapData, SectorOut};
-use crate::ir::{Ir, LiftSpeed, LiftTrigger, Portal, PortalKind, Room};
+use crate::compile::{CompileError, MapData};
+use crate::ir::{Ir, LiftSpeed, LiftTrigger, Portal, PortalKind};
 use crate::tables::{Tables, ThingDims};
 
 /// What a platform joins.
@@ -152,26 +153,6 @@ fn unpeg_landing_upper(data: &mut MapData, line: usize, plat: usize) {
     };
     if data.sectors[neighbor].ceiling > data.sectors[plat].ceiling {
         data.linedefs[line].upper_unpegged = true;
-    }
-}
-
-/// A sector borrowing `room`'s light and flats, at explicit heights and with
-/// an explicit wall texture and tag.
-///
-/// The same shape [`crate::compile::doors::emit_doors`] builds its alcoves
-/// from: a compiler-made sector belongs to no room, so it takes its
-/// appearance from the room it adjoins rather than inventing one.
-fn sector_like(room: &Room, floor: i32, ceiling: i32, wall_tex: &str, tag: u16) -> SectorOut {
-    SectorOut {
-        floor,
-        ceiling,
-        light: room.light,
-        floor_tex: room.floor_tex.clone(),
-        ceil_tex: room.ceil_tex.clone(),
-        special: 0,
-        tag,
-        wall_tex: wall_tex.to_owned(),
-        host: None,
     }
 }
 

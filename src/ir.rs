@@ -1273,6 +1273,33 @@ pub enum IrError {
         /// How many portals join the two rooms.
         count: usize,
     },
+    /// Two walkover triggers name the same room pair, so both would write
+    /// their special and tag onto the one opening line that pair has.
+    ///
+    /// The second write wins, silently: the line ends up carrying the second
+    /// trigger's tag, and every construct naming the *first* trigger is left
+    /// with no way to fire — a map that loads, looks right, and cannot be
+    /// finished. One line is one special and one tag, so a portal's opening
+    /// can carry exactly one walkover.
+    ///
+    /// The sibling of [`AmbiguousWalkoverPortal`](Self::AmbiguousWalkoverPortal)
+    /// from the other side: that one is many portals for one trigger, this
+    /// one is many triggers for one portal. Rejected here rather than
+    /// resolved, for the same reason — the author has to be the one who says
+    /// which trigger owns the line.
+    #[error(
+        "triggers `{first}` and `{second}` both walk over portal `{a}` <-> `{b}`; its opening line can carry only one"
+    )]
+    WalkoverPortalClaimedTwice {
+        /// The trigger that claimed the portal first.
+        first: String,
+        /// The trigger that would overwrite it.
+        second: String,
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+    },
     /// A drop wall or bridge that names no [`Portal::fires_on`], leaving
     /// nothing to fire it.
     #[error("portal `{a}` <-> `{b}` is a {kind} but names no trigger in `fires_on`")]
@@ -1720,7 +1747,9 @@ impl Ir {
     /// a room that does not exist, [`IrError::RevealRiseNotPositive`] and
     /// [`IrError::RiseOnCloset`] for a reveal's `rise`,
     /// [`IrError::AmbiguousWalkoverPortal`] for a walkover naming a room pair
-    /// that more than one portal joins, [`IrError::RevealGeometry`] for a
+    /// that more than one portal joins,
+    /// [`IrError::WalkoverPortalClaimedTwice`] for two walkovers naming one
+    /// room pair, [`IrError::RevealGeometry`] for a
     /// reveal's rectangle (including one overlapping a pedestal, another
     /// reveal or a teleport pad), [`IrError::TeleportDestinationOnReveal`]
     /// for a teleport delivering inside a reveal, and
@@ -2525,11 +2554,31 @@ impl Ir {
     /// and that no trigger is declared which nothing names.
     fn validate_triggers(ir: &Self, seen: &HashSet<&str>) -> Result<(), IrError> {
         let mut ids: HashSet<&str> = HashSet::new();
+        // Which walkover already owns each room pair. Keyed on the pair in
+        // sorted order, since `portal: [a, b]` names the same opening either
+        // way round; `validate_one_trigger` has already established that the
+        // pair resolves to exactly one portal, so the pair names one line.
+        let mut walkovers: HashMap<(&str, &str), &str> = HashMap::new();
         for t in &ir.triggers {
             if !ids.insert(t.id.as_str()) {
                 return Err(IrError::DuplicateTrigger { id: t.id.clone() });
             }
             Self::validate_one_trigger(ir, seen, t)?;
+            if let (TriggerKind::Walkover, Some([a, b])) = (t.kind, t.portal.as_ref()) {
+                let key = if a <= b {
+                    (a.as_str(), b.as_str())
+                } else {
+                    (b.as_str(), a.as_str())
+                };
+                if let Some(first) = walkovers.insert(key, t.id.as_str()) {
+                    return Err(IrError::WalkoverPortalClaimedTwice {
+                        first: first.to_owned(),
+                        second: t.id.clone(),
+                        a: a.clone(),
+                        b: b.clone(),
+                    });
+                }
+            }
         }
         Self::validate_trigger_families(ir, &ids)
     }
@@ -4903,5 +4952,39 @@ mod tests {
             matches!(err, IrError::AmbiguousWalkoverPortal { ref id, count: 2, .. } if id == "w"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn two_walkovers_claiming_one_portal_are_rejected() {
+        // The other side of the same coin: one portal, two triggers. Both
+        // would write onto the one opening line `a` <-> `b` has, and the
+        // second write would take the first's tag off it — leaving `w`'s drop
+        // wall with nothing that opens it, on a map that loads and looks
+        // right. Named `[b, a]` here to prove the pair is matched either way
+        // round.
+        let wall = WALL_BC.replace(r#""fires_on":"t""#, r#""fires_on":"w""#);
+        let extra = r#"{ "id":"w2", "kind":"walkover", "portal":["b","a"] }"#;
+        let closet = CLOSET_C.replace(r#""trigger":"t""#, r#""trigger":"w2""#);
+        let err = floors(
+            &format!("{PLAIN_AB}, {wall}"),
+            &format!("{WALK_AB}, {extra}"),
+            &closet,
+        )
+        .expect_err("both walkovers claim the `a` <-> `b` opening");
+        assert!(
+            matches!(err, IrError::WalkoverPortalClaimedTwice { ref first, ref second, ref a, ref b }
+                if first == "w" && second == "w2" && a == "b" && b == "a"),
+            "{err}"
+        );
+
+        // The same map with the second trigger on its own switch is fine:
+        // what is refused is sharing the line, not sharing the portal's rooms.
+        let switch_c = r#"{ "id":"w2", "kind":"switch", "room":"c", "at":[896,128] }"#;
+        floors(
+            &format!("{PLAIN_AB}, {wall}"),
+            &format!("{WALK_AB}, {switch_c}"),
+            &closet,
+        )
+        .expect("one walkover and one switch claim different lines");
     }
 }

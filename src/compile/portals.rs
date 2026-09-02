@@ -17,7 +17,7 @@ use crate::compile::{CompileError, LinedefOut, MapData, SectorOut, SidedefOut};
 use crate::geom::{
     Axis, FacingSpan, Pt, facing_spans, find_facing_span, on_diagonal_wall, outward_sign,
 };
-use crate::ir::{Ir, Portal, PortalKind};
+use crate::ir::{Ir, Portal, PortalKind, Room};
 use crate::tables::Tables;
 
 /// The inclusive coordinate range every Doom map format stores in a signed
@@ -822,6 +822,41 @@ pub(crate) fn emit_side_wall(
         secret: false,
     });
     data.linedefs.len() - 1
+}
+
+/// A sector borrowing `room`'s light and flats, at explicit heights and with
+/// an explicit wall texture and tag.
+///
+/// Every sector this compiler makes for itself — a door's alcove, a lift's
+/// alcove, the platform between them, a drop wall and the passages leading up
+/// to it — belongs to no [`Room`] and so has no appearance of its own. Each
+/// takes the appearance of the room it adjoins rather than inventing one, and
+/// each does it the same way, from here: [`crate::compile::doors`],
+/// [`crate::compile::lifts`] and [`crate::compile::floors`] all built this
+/// same record independently before it was hoisted, which is three chances
+/// for one of them to drift on what "a piece of that room" means.
+///
+/// `host` is always `None`: an island (a teleport pad, a pedestal, a reveal)
+/// is carved *inside* one room rather than adjoining it, and its caller sets
+/// that field itself.
+pub(crate) fn sector_like(
+    room: &Room,
+    floor: i32,
+    ceiling: i32,
+    wall_tex: &str,
+    tag: u16,
+) -> SectorOut {
+    SectorOut {
+        floor,
+        ceiling,
+        light: room.light,
+        floor_tex: room.floor_tex.clone(),
+        ceil_tex: room.ceil_tex.clone(),
+        special: 0,
+        tag,
+        wall_tex: wall_tex.to_owned(),
+        host: None,
+    }
 }
 
 /// Finds the two-sided line lying exactly on `cut` whose **front** sidedef
