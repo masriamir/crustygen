@@ -1,0 +1,1023 @@
+//! The floor-action pass: placed triggers and the opening constructs they
+//! fire — the drop wall today, the reveal and the bridge next — lowered to
+//! one [`FloorActionOut`] per target.
+//!
+//! Every action this pass emits is one-way. `EV_DoFloor` (`p_floor.c`) hangs
+//! a `T_MoveFloor` thinker on the target sector and `T_MoveFloor` removes it
+//! once the floor reaches `floordestheight`, and the four specials written
+//! here are the one-shot forms — 23/38 (`lowerFloorToLowest`, S1/W1) and
+//! 18/119 (`raiseFloorToNearest`, S1/W1); see `data/vocabulary.toml`'s
+//! `[specials.floor]` citation for each. One-shot is also how the corpus
+//! authors them: W1 + S1 are 77 % of sample floor lines
+//! (`docs/measurements/floor-shapes-2026-09-02.md` §E).
+//!
+//! One trigger is one tag is one special, so every construct naming a trigger
+//! moves the same way — [`crate::ir::Ir::from_json`] has already refused a
+//! trigger whose constructs disagree, and this pass allocates exactly one tag
+//! per trigger and stamps it on every target.
+//!
+//! The gap a drop wall fills is already open when this pass runs:
+//! [`crate::compile::portals::cut_portals`] cuts both rooms' own walls for a
+//! drop-wall portal but leaves the void between them empty, exactly as it
+//! does for a door or a lift — the wall is a sector, not a line.
+
+use crate::compile::portals::{
+    Cut, PortalGeometry, emit_jambs, emit_opening, emit_segment, emit_switch_line,
+    find_opening_line, mark_secret_thresholds, resolve_portal, split_wall_for_opening,
+};
+use crate::compile::tags::TagAllocator;
+use crate::compile::{CompileError, MapData, SectorOut};
+use crate::geom::wall_edges;
+use crate::ir::{FloorFamilyIr, Ir, PortalKind, Room, Trigger, TriggerKind};
+use crate::tables::{FloorFamily, Tables};
+
+/// What an emitted action is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloorShape {
+    /// A sealed wall between two rooms that lowers once.
+    DropWall,
+    /// A solid cell inside a room that lowers once, its things inside.
+    Closet,
+    /// A raised block inside a room that lowers once, its things on top.
+    Pedestal,
+    /// A pit strip between two rooms that rises once.
+    Bridge,
+}
+
+/// One emitted trigger line.
+#[derive(Debug, Clone)]
+pub struct TriggerOut {
+    /// The IR id.
+    pub id: String,
+    /// The tag every target it drives carries.
+    pub tag: u16,
+    /// The family its targets share.
+    pub family: FloorFamily,
+    /// The linedef carrying the special — the *first* one written, since a
+    /// walkover naming a bridge writes both of the bridge's thresholds.
+    pub line: usize,
+    /// The sector the player fires it from: a switch's room, or the front
+    /// room of the walkover's portal (a walkover fires from either side;
+    /// the flood adds the back side itself).
+    pub activator: usize,
+    /// Walkover (W1) rather than switch (S1).
+    pub walkover: bool,
+}
+
+/// One emitted floor action, for `reach`, the rules, `place_things` and the
+/// conformance report.
+#[derive(Debug, Clone)]
+pub struct FloorActionOut {
+    /// The target sector.
+    pub sector: usize,
+    /// Which engine type moves it.
+    pub family: FloorFamily,
+    /// Its floor at load.
+    pub rest: i32,
+    /// The floor the engine's search must land on.
+    pub dest: i32,
+    /// The trigger's tag.
+    pub tag: u16,
+    /// Index into [`crate::compile::Compiled::triggers`].
+    pub trigger: usize,
+    /// What it is.
+    pub shape: FloorShape,
+    /// Index into [`Ir::portals`] for a drop wall or bridge.
+    pub portal: Option<usize>,
+    /// Index into [`Ir::reveals`] for a closet or pedestal.
+    pub reveal: Option<usize>,
+    /// The two thresholds of a drop wall's or bridge's gap segment (near,
+    /// far), where a walkover naming a bridge writes its special; empty for
+    /// a reveal.
+    pub lines: Vec<usize>,
+}
+
+/// The engine family the IR's own word for a direction maps to.
+fn family_of(f: FloorFamilyIr) -> FloorFamily {
+    match f {
+        FloorFamilyIr::Lower => FloorFamily::LowerToLowest,
+        FloorFamilyIr::Raise => FloorFamily::RaiseToNearest,
+    }
+}
+
+/// A sector borrowing `room`'s light and flats, at explicit heights and with
+/// an explicit wall texture and tag — the same shape
+/// [`crate::compile::lifts`]'s own `sector_like` builds, and for the same
+/// reason: a compiler-made sector belongs to no room, so it takes its
+/// appearance from the room it adjoins rather than inventing one.
+fn sector_like(room: &Room, floor: i32, ceiling: i32, wall_tex: &str, tag: u16) -> SectorOut {
+    SectorOut {
+        floor,
+        ceiling,
+        light: room.light,
+        floor_tex: room.floor_tex.clone(),
+        ceil_tex: room.ceil_tex.clone(),
+        special: 0,
+        tag,
+        wall_tex: wall_tex.to_owned(),
+        host: None,
+    }
+}
+
+/// Where one trigger's line goes, resolved — and, for a switch, carved out
+/// of its room's wall — before this pass records a single linedef index.
+///
+/// The split is why this is a separate step rather than part of emitting the
+/// line: [`split_wall_for_opening`] *removes* the wall it splits, which
+/// shifts every linedef index above it, and the constructs emitted in between
+/// hand back thresholds by index. Every removal this pass makes therefore
+/// happens before the first index is recorded, in the same
+/// "resolve everything, then emit" order [`crate::compile::portals`] and
+/// [`crate::compile::exits`] already follow.
+enum TriggerPlacement {
+    /// A switch: its span is already split out of the room's wall, waiting
+    /// for [`emit_switch_line`].
+    Switch {
+        /// The room whose wall carries it, which is also its sector.
+        room_idx: usize,
+        /// The span split out of that wall.
+        cut: Cut,
+        /// Whether the wall's own edge runs in the increasing-along
+        /// direction ([`crate::geom::FacingSpan::a_forward`]'s single-room
+        /// analogue).
+        forward: bool,
+    },
+    /// A walkover: the portal whose opening line carries it.
+    Walkover {
+        /// Index into [`Ir::portals`].
+        portal: usize,
+        /// That portal's resolved placement.
+        geometry: PortalGeometry,
+    },
+}
+
+/// The index in `triggers` of the trigger `id` names.
+///
+/// # Panics
+/// Panics if nothing carries that id, which [`Ir::from_json`] rejects
+/// ([`crate::ir::IrError::UnknownTrigger`]) before this pass runs.
+fn trigger_index(triggers: &[TriggerOut], id: &str) -> usize {
+    triggers
+        .iter()
+        .position(|t| t.id == id)
+        .expect("validated by Ir::from_json")
+}
+
+/// Emits every trigger and every construct one fires.
+///
+/// Four steps, and each one's position is load-bearing:
+///
+/// 1. **A tag per trigger**, so every construct can be stamped with its
+///    trigger's tag as it is emitted rather than in a second pass over the
+///    map. The target sector does not exist yet, so the manifest entry is
+///    pointed at it in step 4 ([`TagAllocator::rename_sector`]).
+/// 2. **Every switch's wall split** (`resolve_trigger`), which is the only
+///    thing this pass does that *removes* a linedef — and so the last thing
+///    it may do before any index is written down. See `TriggerPlacement`'s
+///    own doc comment for why that matters.
+/// 3. **The constructs**, each handing back the thresholds of its own gap
+///    segment.
+/// 4. **The trigger lines**, last because a walkover that names a bridge
+///    writes its special onto that bridge's own two thresholds, which exist
+///    only once step 3 has run.
+///
+/// # Errors
+/// Returns [`CompileError::UnknownTheme`] when `ir.theme` resolves to no
+/// texture set, [`CompileError::FloorConstructNotYetEmitted`] for a bridge
+/// portal or a reveal (see that variant), [`CompileError::TriggerWallNotFound`]
+/// when a switch trigger's `at` matches no wall segment of its room,
+/// [`CompileError::DropWallTooThick`] and
+/// [`CompileError::DropWallFloorsDiffer`] for a drop wall the player could
+/// not pass once it has fired, and whatever `resolve_portal` (`NotAdjacent`,
+/// `PortalOffWall`, `PortalOnDiagonalWall`, `PortalTooWide`) or
+/// `split_wall_for_opening` ([`CompileError::OpeningNotInAWall`], for a
+/// switch overlapping an opening already cut into the same wall) raise.
+///
+/// # Panics
+/// Panics if a construct names a trigger, or a trigger names a room or a
+/// portal, that [`Ir::from_json`] did not validate.
+pub fn emit_floors(
+    ir: &Ir,
+    tables: &Tables,
+    data: &mut MapData,
+    tags: &mut TagAllocator,
+) -> Result<(Vec<TriggerOut>, Vec<FloorActionOut>), CompileError> {
+    // Resolved unconditionally, mirroring `exits::emit_exits`: an
+    // unresolvable theme is an authoring error that should surface the same
+    // way regardless of which triggers (if any) are switches. Both halves of
+    // the switch's appearance come out of one lookup, so one bad theme is one
+    // error rather than two paths to the same one.
+    let (switch_tex, switch_width) = tables
+        .texture("switch", &ir.theme)
+        .zip(tables.switch_width(&ir.theme))
+        .ok_or_else(|| CompileError::UnknownTheme {
+            theme: ir.theme.clone(),
+        })?;
+    let switch_tex = switch_tex.to_owned();
+
+    let mut triggers: Vec<TriggerOut> = ir
+        .triggers
+        .iter()
+        .map(|t| {
+            let family = family_of(
+                ir.trigger_family(&t.id)
+                    .expect("Ir::from_json: every trigger is named"),
+            );
+            let named: Vec<String> = ir
+                .portals
+                .iter()
+                .filter(|p| p.fires_on.as_deref() == Some(t.id.as_str()))
+                .map(|p| {
+                    let kind = if p.kind == PortalKind::Bridge {
+                        "bridge"
+                    } else {
+                        "drop wall"
+                    };
+                    format!("{kind} {} <-> {}", p.a, p.b)
+                })
+                .chain(
+                    ir.reveals
+                        .iter()
+                        .filter(|r| r.trigger == t.id)
+                        .map(|r| format!("reveal {}", r.id)),
+                )
+                .collect();
+            // `usize::MAX` is a placeholder: the trigger's tag is allocated
+            // before its first target sector exists, and the loop at the end
+            // of this function points the manifest entry at that sector.
+            let tag = tags.allocate(
+                usize::MAX,
+                &format!("trigger {}: {}", t.id, named.join(", ")),
+            );
+            TriggerOut {
+                id: t.id.clone(),
+                tag,
+                family,
+                line: usize::MAX,
+                activator: usize::MAX,
+                walkover: t.kind == TriggerKind::Walkover,
+            }
+        })
+        .collect();
+
+    // Every wall a switch trigger carves, before anything records a linedef
+    // index — see [`TriggerPlacement`] for why that ordering is load-bearing.
+    let placements = ir
+        .triggers
+        .iter()
+        .map(|t| resolve_trigger(ir, data, t, switch_width))
+        .collect::<Result<Vec<_>, CompileError>>()?;
+
+    let mut out = Vec::new();
+    for (pi, portal) in ir.portals.iter().enumerate() {
+        match portal.kind {
+            PortalKind::DropWall => {
+                let id = portal
+                    .fires_on
+                    .as_deref()
+                    .expect("Ir::from_json requires a trigger on a drop wall");
+                let ti = trigger_index(&triggers, id);
+                out.push(emit_drop_wall(ir, tables, data, pi, ti, triggers[ti].tag)?);
+            }
+            PortalKind::Bridge => {
+                return Err(CompileError::FloorConstructNotYetEmitted {
+                    construct: format!("bridge `{}` <-> `{}`", portal.a, portal.b),
+                });
+            }
+            PortalKind::Plain | PortalKind::Door | PortalKind::Locked | PortalKind::Lift => {}
+        }
+    }
+    if let Some(reveal) = ir.reveals.first() {
+        return Err(CompileError::FloorConstructNotYetEmitted {
+            construct: format!("reveal `{}`", reveal.id),
+        });
+    }
+
+    for (i, placement) in placements.iter().enumerate() {
+        let (line, activator) = emit_trigger_line(
+            tables,
+            data,
+            placement,
+            triggers[i].family,
+            triggers[i].tag,
+            &out,
+            &switch_tex,
+            switch_width,
+        );
+        triggers[i].line = line;
+        triggers[i].activator = activator;
+        // The manifest names one sector per tag, and a trigger's tag is on
+        // every target it drives: the first is the representative one, the
+        // way a door's or a platform's own sector is.
+        if let Some(action) = out.iter().find(|f| f.trigger == i) {
+            tags.rename_sector(triggers[i].tag, action.sector);
+        }
+    }
+    Ok((triggers, out))
+}
+
+/// Resolves where one trigger's line goes, splitting a switch's span out of
+/// its room's wall on the way.
+///
+/// # Errors
+/// Returns [`CompileError::TriggerWallNotFound`] when a switch's `at` matches
+/// no wall segment its room emitted, whatever [`split_wall_for_opening`]
+/// raises when that span is not free (an opening already cut into the same
+/// wall), and whatever [`resolve_portal`] raises for a walkover's portal.
+///
+/// # Panics
+/// Panics if the trigger names a room or a portal [`Ir::from_json`] did not
+/// validate, or leaves out a field its own kind requires.
+fn resolve_trigger(
+    ir: &Ir,
+    data: &mut MapData,
+    t: &Trigger,
+    switch_width: i32,
+) -> Result<TriggerPlacement, CompileError> {
+    match t.kind {
+        TriggerKind::Switch => {
+            let room_id = t
+                .room
+                .as_deref()
+                .expect("Ir::from_json requires a room on a switch trigger");
+            let at =
+                t.at.expect("Ir::from_json requires a point on a switch trigger");
+            let room_idx = ir
+                .rooms
+                .iter()
+                .position(|r| r.id == room_id)
+                .expect("validated by Ir::from_json");
+            let (axis, fixed, lo, hi, forward) = wall_edges(&ir.rooms[room_idx].footprint)
+                .find(|&(axis, fixed, lo, hi, _)| {
+                    let (along, across) = axis.split(at);
+                    across == fixed && along > lo && along < hi
+                })
+                .ok_or_else(|| CompileError::TriggerWallNotFound {
+                    id: t.id.clone(),
+                    x: at.x,
+                    y: at.y,
+                })?;
+            // One switch texture wide, centered on `at` and clipped to the
+            // wall's own ends. Clipped rather than refused (as
+            // `exits::resolve_exit` refuses an exit too wide for its wall):
+            // a switch is pressed, not walked through, so a segment a corner
+            // has shortened is still a switch, and `emit_switch_line` centers
+            // the texture on whatever span it is given.
+            let (along, _) = axis.split(at);
+            let half = switch_width / 2;
+            let cut = Cut {
+                axis,
+                fixed,
+                open_lo: (along - half).max(lo),
+                open_hi: (along + half).min(hi),
+            };
+            split_wall_for_opening(data, &cut, room_idx, room_id)?;
+            Ok(TriggerPlacement::Switch {
+                room_idx,
+                cut,
+                forward,
+            })
+        }
+        TriggerKind::Walkover => {
+            let [a, b] = t
+                .portal
+                .as_ref()
+                .expect("Ir::from_json requires a portal on a walkover trigger");
+            let portal = ir
+                .portals
+                .iter()
+                .position(|p| (p.a == *a && p.b == *b) || (p.a == *b && p.b == *a))
+                .expect("Ir::from_json validated that exactly one portal joins the pair");
+            let geometry = resolve_portal(ir, &ir.portals[portal])?;
+            Ok(TriggerPlacement::Walkover { portal, geometry })
+        }
+    }
+}
+
+/// Emits one trigger's line: a switch line on the span already split out of
+/// its room's wall, or the walkover special on the named plain portal's
+/// opening line — or, when the walkover names a bridge, on both of that
+/// bridge's own pit thresholds.
+///
+/// Returns `(the first line written, the activator sector)`. The activator is
+/// the room whose side the player fires it from: a switch's own room, or the
+/// front room of the walkover's portal — a walkover fires from either side,
+/// and the flood adds the back side from the line itself.
+///
+/// # Panics
+/// Panics if a plain portal's own opening line is not where `cut_portals` put
+/// it, which nothing between the two passes can move.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each parameter is one resolved input — the tables, the accumulating map, the \
+              trigger's own resolved placement and the two values its tag allocation fixed, the \
+              constructs a bridge walkover writes onto, and the two hoisted out of the per-map \
+              theme lookup"
+)]
+fn emit_trigger_line(
+    tables: &Tables,
+    data: &mut MapData,
+    placement: &TriggerPlacement,
+    family: FloorFamily,
+    tag: u16,
+    actions: &[FloorActionOut],
+    switch_tex: &str,
+    switch_width: i32,
+) -> (usize, usize) {
+    match placement {
+        TriggerPlacement::Switch {
+            room_idx,
+            cut,
+            forward,
+        } => {
+            let special = tables.floor_special(family, true);
+            let line = emit_switch_line(
+                data,
+                cut,
+                *room_idx,
+                *forward,
+                special,
+                tag,
+                switch_tex,
+                switch_width,
+            );
+            (line, *room_idx)
+        }
+        TriggerPlacement::Walkover { portal, geometry } => {
+            let special = tables.floor_special(family, false);
+            let set = |data: &mut MapData, line: usize| {
+                data.linedefs[line].special = special;
+                data.linedefs[line].tag = tag;
+            };
+
+            // A bridge names itself: stepping down into the pit is the
+            // crossing that raises it, so the special goes on both of the
+            // pit's thresholds, whichever side the player steps off.
+            if let Some(bridge) = actions
+                .iter()
+                .find(|f| f.shape == FloorShape::Bridge && f.portal == Some(*portal))
+            {
+                for &line in &bridge.lines {
+                    set(data, line);
+                }
+                return (bridge.lines[0], geometry.ia);
+            }
+
+            // Otherwise the portal is a plain one, and the line is the
+            // threshold `cut_portals` emitted between room `a` and the
+            // passage filling the gap. Either of that passage's two
+            // thresholds would fire — `P_CrossSpecialLine` runs from both
+            // sides of a walkover — so room `a`'s is taken, the side
+            // `PortalGeometry` itself calls near.
+            let cut = Cut {
+                axis: geometry.span.axis,
+                fixed: geometry.span.near,
+                open_lo: geometry.open_lo,
+                open_hi: geometry.open_hi,
+            };
+            let line = find_opening_line(data, &cut, geometry.ia)
+                .expect("cut_portals emitted the plain portal's threshold on room a");
+            set(data, line);
+            (line, geometry.ia)
+        }
+    }
+}
+
+/// Emits one drop wall: a sealed sector filling the middle of the portal's
+/// gap, with a piece of each room's own floor leading up to it.
+///
+/// The wall rests with its floor at its ceiling — the lower of the two rooms'
+/// ceilings, so neither room's opening is taller than the rock in it — and
+/// lowers once to the lower of the two floors. That destination is what the
+/// engine will compute rather than what this pass asserts: the wall's only
+/// two-sided neighbors are the two passages, each at its own room's floor, so
+/// `P_FindLowestFloorSurrounding` is exactly `min(room floors)` by
+/// construction.
+///
+/// The passages are the reason for the three-position construction rather
+/// than one gap-spanning sector: a wall centered in its gap leaves the player
+/// standing room on both sides of it, and gives each room's opening a floor
+/// at that room's own height. Where the wall fills its free gap exactly there
+/// is no room for them, and the wall borders the two rooms directly — the
+/// same "`unwrap_or` the room" an absent lift alcove takes.
+///
+/// # Errors
+/// Returns [`CompileError::DropWallTooThick`] when the wall is deeper than
+/// the gap its alcoves leave, [`CompileError::DropWallFloorsDiffer`] when the
+/// dropped wall would be a one-way drop, and whatever `resolve_portal`
+/// raises.
+#[expect(
+    clippy::too_many_lines,
+    reason = "the wall construction (up to three sectors, its own two faces and jambs, each \
+              passage's outer threshold and jambs, and the two faces' textures) is one coherent \
+              unit of work per drop wall, exactly as `lifts::emit_portal_lift` is per lift \
+              portal; splitting it would scatter the sequential dependency between pos0..pos3 \
+              across call boundaries"
+)]
+fn emit_drop_wall(
+    ir: &Ir,
+    tables: &Tables,
+    data: &mut MapData,
+    pi: usize,
+    ti: usize,
+    tag: u16,
+) -> Result<FloorActionOut, CompileError> {
+    let portal = &ir.portals[pi];
+    let geometry = resolve_portal(ir, portal)?;
+    let (room_a, room_b) = (&ir.rooms[geometry.ia], &ir.rooms[geometry.ib]);
+
+    // A wall between rooms at different floors drops into a one-way passage:
+    // it comes to rest at the lower floor, and `P_TryMove` refuses the climb
+    // back up out of it. Judged here rather than in the IR because the step
+    // height is a table constant IR validation never loads.
+    let step = tables.step_height();
+    if (room_a.floor - room_b.floor).abs() > step {
+        return Err(CompileError::DropWallFloorsDiffer {
+            a: portal.a.clone(),
+            b: portal.b.clone(),
+            floor_a: room_a.floor,
+            floor_b: room_b.floor,
+            step,
+        });
+    }
+
+    let low_room = if room_b.floor < room_a.floor {
+        room_b
+    } else {
+        room_a
+    };
+    let rest = room_a.ceiling.min(room_b.ceiling);
+    let dest = low_room.floor;
+    let thickness = portal
+        .thickness
+        .expect("Ir::from_json requires thickness on a drop wall");
+
+    // The wall sits centered in what the alcoves leave of the gap, so what is
+    // left over is split evenly on both sides: a 16-deep wall in a 64 gap has
+    // 24 units of room-floor passage before and after it. Positions run from
+    // room `a`'s own wall (`pos0`) to room `b`'s (`pos3`), as in
+    // `lifts::emit_portal_lift`.
+    let dir = (geometry.span.far - geometry.span.near).signum();
+    let gap = (geometry.span.far - geometry.span.near) * dir;
+    let alcove_near = portal.alcove_near.unwrap_or(0);
+    let alcove_far = portal.alcove_far.unwrap_or(0);
+    let free = gap - alcove_near - alcove_far;
+    if free < thickness {
+        return Err(CompileError::DropWallTooThick {
+            a: portal.a.clone(),
+            b: portal.b.clone(),
+            thickness,
+            gap: free,
+        });
+    }
+    let lead = (free - thickness) / 2;
+    let pos0 = geometry.span.near;
+    let pos1 = pos0 + dir * (alcove_near + lead);
+    let pos2 = pos1 + dir * thickness;
+    let pos3 = geometry.span.far;
+
+    // A passage before and after the wall, each a piece of its own room
+    // (floor, ceiling, flat, light), exactly as a lift's alcoves are. A
+    // declared alcove is absorbed into the passage on its side rather than
+    // emitted separately: both would be the same sector of the same room, so
+    // splitting them would only add a seam. What an alcove still does is
+    // reserve its depth, which is why it is taken out of `free` above.
+    let before = (pos1 != pos0).then(|| {
+        let idx = data.sectors.len();
+        data.sectors.push(sector_like(
+            room_a,
+            room_a.floor,
+            room_a.ceiling,
+            &room_a.wall_tex,
+            0,
+        ));
+        idx
+    });
+    let after = (pos3 != pos2).then(|| {
+        let idx = data.sectors.len();
+        data.sectors.push(sector_like(
+            room_b,
+            room_b.floor,
+            room_b.ceiling,
+            &room_b.wall_tex,
+            0,
+        ));
+        idx
+    });
+    let wall = data.sectors.len();
+    data.sectors
+        .push(sector_like(low_room, rest, rest, &low_room.wall_tex, tag));
+
+    let axis = geometry.span.axis;
+    let a_forward = geometry.span.a_forward;
+    let (open_lo, open_hi) = (geometry.open_lo, geometry.open_hi);
+
+    // The wall's own two faces and jambs, in one call — neither face is
+    // shared with a third segment, so `emit_segment`'s once-per-boundary rule
+    // is satisfied. Each passage's *outer* threshold and jambs are built
+    // directly below, exactly as `doors::emit_doors` and
+    // `lifts::emit_portal_lift` build an alcove's.
+    let near_neighbor = before.unwrap_or(geometry.ia);
+    let far_neighbor = after.unwrap_or(geometry.ib);
+    let seg = emit_segment(
+        data,
+        axis,
+        open_lo,
+        open_hi,
+        a_forward,
+        pos1,
+        pos2,
+        near_neighbor,
+        wall,
+        far_neighbor,
+        &low_room.wall_tex,
+    );
+    debug_assert_eq!(
+        seg.sector, wall,
+        "the wall segment was pushed at the predicted index"
+    );
+
+    let mut thresholds = vec![seg.near_line, seg.far_line];
+    if let Some(passage) = before {
+        let line = emit_opening(
+            data,
+            &Cut {
+                axis,
+                fixed: pos0,
+                open_lo,
+                open_hi,
+            },
+            geometry.ia,
+            passage,
+            a_forward,
+        );
+        emit_jambs(
+            data,
+            axis,
+            open_lo,
+            open_hi,
+            a_forward,
+            pos0,
+            pos1,
+            passage,
+            &room_a.wall_tex,
+        );
+        thresholds.push(line);
+    }
+    if let Some(passage) = after {
+        let line = emit_opening(
+            data,
+            &Cut {
+                axis,
+                fixed: pos3,
+                open_lo,
+                open_hi,
+            },
+            geometry.ib,
+            passage,
+            !a_forward,
+        );
+        emit_jambs(
+            data,
+            axis,
+            open_lo,
+            open_hi,
+            a_forward,
+            pos2,
+            pos3,
+            passage,
+            &room_b.wall_tex,
+        );
+        thresholds.push(line);
+    }
+
+    // The faces. On each of the wall's two thresholds the room side is the
+    // front sidedef (`emit_segment` binds `sector_near`/`sector_far` there),
+    // and it is the side the engine draws: its own sector has the lower floor
+    // and, where it is taller, the higher ceiling. The lower carries that
+    // side's wall texture as the full-height face at rest, and both pegging
+    // flags stay clear so the face rides down with the floor — the corpus
+    // does that on 95 % of drop-wall boundaries
+    // (`docs/measurements/floor-shapes-2026-09-02.md` §F).
+    // `heights::apply_height_textures` fills only empty slots, so these are
+    // written here.
+    for (line, room_side_sector) in [(seg.near_line, near_neighbor), (seg.far_line, far_neighbor)] {
+        let side = data.linedefs[line].front;
+        debug_assert_eq!(data.sidedefs[side].sector, room_side_sector);
+        let tex = data.sectors[room_side_sector].wall_tex.clone();
+        if data.sectors[room_side_sector].ceiling > rest {
+            data.sidedefs[side].upper.clone_from(&tex);
+        }
+        data.sidedefs[side].lower = tex;
+    }
+
+    mark_secret_thresholds(data, room_a.secret != room_b.secret, thresholds);
+
+    Ok(FloorActionOut {
+        sector: wall,
+        family: FloorFamily::LowerToLowest,
+        rest,
+        dest,
+        tag,
+        trigger: ti,
+        shape: FloorShape::DropWall,
+        portal: Some(pi),
+        reveal: None,
+        lines: vec![seg.near_line, seg.far_line],
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FloorActionOut, FloorShape, TriggerOut, emit_floors};
+    use crate::compile::tags::TagAllocator;
+    use crate::compile::{
+        CompileError, LinedefOut, MapData, doors, exits, lifts, portals, sectors, teleports,
+    };
+    use crate::ir::Ir;
+    use crate::tables::{FloorFamily, Tables};
+
+    /// Two rooms 64 units apart, sealed by a 16-deep drop wall that one
+    /// switch on room `a`'s far wall lowers.
+    ///
+    /// Room `b`'s ceiling is the taller of the two deliberately: the wall
+    /// rests at the *lower* ceiling, so room `b`'s face is the one that also
+    /// needs an upper.
+    const WALL: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[128,128], "angle":0 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":256, "light":144,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"imp", "at":[448,128], "angle":180 } ] }
+      ],
+      "portals":[ { "a":"a", "b":"b", "kind":"drop_wall", "width":64, "at":[256,128], "thickness":16, "fires_on":"t" } ],
+      "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[0,128] } ],
+      "exits":[ { "room":"b", "trigger":"switch", "at":[576,128], "width":64 } ] }"#;
+
+    /// Rooms `a`, `b` and `c` in a row: a plain portal joins `a` and `b`, and
+    /// its opening line is the walkover that drops the wall between `b` and
+    /// `c`.
+    const WALKOVER: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[128,128], "angle":0 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":144,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"c", "footprint":[[640,0],[640,256],[896,256],[896,0]], "floor":0, "ceiling":192, "light":144,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"a", "b":"b", "kind":"plain", "width":64, "at":[256,128] },
+        { "a":"b", "b":"c", "kind":"drop_wall", "width":64, "at":[576,128], "thickness":16, "fires_on":"t" }
+      ],
+      "triggers":[ { "id":"t", "kind":"walkover", "portal":["a","b"] } ],
+      "exits":[ { "room":"c", "trigger":"switch", "at":[896,128], "width":64 } ] }"#;
+
+    /// Everything the passes up to and including `emit_floors` produced.
+    #[derive(Debug)]
+    struct Built {
+        data: MapData,
+        tags: TagAllocator,
+        triggers: Vec<TriggerOut>,
+        floors: Vec<FloorActionOut>,
+    }
+
+    /// Runs the passes exactly as `compile_reporting` does, through
+    /// `emit_floors`, surfacing only that pass's own errors.
+    fn build(json: &str) -> Result<Built, CompileError> {
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = sectors::emit_sectors(&ir).expect("sectors");
+        sectors::resolve_secret_specials(&ir, &tables, &mut data);
+        portals::cut_portals(&ir, &tables, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        doors::emit_doors(&ir, &tables, &mut data, &mut tags).expect("doors");
+        exits::emit_exits(&ir, &tables, &mut data, &mut tags).expect("exits");
+        teleports::emit_teleports(&ir, &tables, &mut data, &mut tags).expect("teleports");
+        lifts::emit_lifts(&ir, &tables, &mut data, &mut tags).expect("lifts");
+        let (triggers, floors) = emit_floors(&ir, &tables, &mut data, &mut tags)?;
+        Ok(Built {
+            data,
+            tags,
+            triggers,
+            floors,
+        })
+    }
+
+    /// [`build`] for a map the pass is expected to accept.
+    fn compile_data(json: &str) -> Built {
+        build(json).expect("floors")
+    }
+
+    #[test]
+    fn a_drop_wall_rests_solid_at_the_lower_ceiling_and_lowers_to_the_floor_on_its_switch() {
+        let Built {
+            data,
+            tags,
+            triggers,
+            floors,
+        } = compile_data(WALL);
+
+        assert_eq!(triggers.len(), 1);
+        let t = &triggers[0];
+        assert_eq!(
+            (t.id.as_str(), t.family, t.walkover, t.activator),
+            ("t", FloorFamily::LowerToLowest, false, 0)
+        );
+        let line = &data.linedefs[t.line];
+        assert_eq!(
+            (line.special, line.tag, line.back),
+            (23, t.tag, None),
+            "an S1 lowerFloorToLowest on a one-sided use line"
+        );
+        assert_eq!(data.sidedefs[line.front].middle, "SW1STARG");
+
+        assert_eq!(floors.len(), 1);
+        let f = &floors[0];
+        let s = &data.sectors[f.sector];
+        assert_eq!(
+            (s.floor, s.ceiling, s.tag),
+            (192, 192, t.tag),
+            "solid at the lower of the two ceilings"
+        );
+        assert_eq!(
+            (f.rest, f.dest, f.shape, f.family),
+            (192, 0, FloorShape::DropWall, FloorFamily::LowerToLowest)
+        );
+        assert_eq!(f.portal, Some(0));
+        assert_eq!(f.trigger, 0);
+
+        // Both faces: the room-side lower is the wall texture, pegged.
+        let faces: Vec<&LinedefOut> = data
+            .linedefs
+            .iter()
+            .filter(|l| {
+                l.back.is_some_and(|b| data.sidedefs[b].sector == f.sector)
+                    || (data.sidedefs[l.front].sector == f.sector && l.back.is_some())
+            })
+            .collect();
+        assert_eq!(faces.len(), 2, "the wall's only two-sided lines");
+        assert_eq!(f.lines.len(), 2);
+        for l in faces {
+            let room_side = if data.sidedefs[l.front].sector == f.sector {
+                l.back.expect("two-sided")
+            } else {
+                l.front
+            };
+            assert_eq!(data.sidedefs[room_side].lower, "STARTAN3");
+            assert!(!l.lower_unpegged, "the face rides down with the floor");
+        }
+        // Room `b` stands 64 units taller than the wall, so its face also
+        // needs an upper; room `a`'s ceiling is the wall's own, so it does not.
+        let uppers: Vec<&str> = f
+            .lines
+            .iter()
+            .map(|&i| {
+                let l = &data.linedefs[i];
+                data.sidedefs[l.front].upper.as_str()
+            })
+            .collect();
+        assert_eq!(uppers, ["", "STARTAN3"]);
+
+        // The thickness is the gap depth.
+        let xs: Vec<i32> = data
+            .linedefs
+            .iter()
+            .filter(|l| data.sidedefs[l.front].sector == f.sector)
+            .flat_map(|l| [data.vertices[l.v1].x, data.vertices[l.v2].x])
+            .collect();
+        assert_eq!(
+            (xs.iter().min(), xs.iter().max()),
+            (Some(&280), Some(&296)),
+            "16 units centered in the 64-unit gap"
+        );
+
+        // The manifest names the sector the tag ended up on, not the
+        // placeholder it was allocated with.
+        let entry = tags
+            .manifest()
+            .iter()
+            .find(|e| e.tag == t.tag)
+            .expect("the trigger's tag is in the manifest");
+        assert_eq!(entry.sector, f.sector);
+        assert_eq!(entry.purpose, "trigger t: drop wall a <-> b");
+    }
+
+    #[test]
+    fn a_walkover_trigger_goes_on_the_named_plain_portals_opening_line() {
+        let Built {
+            data,
+            triggers,
+            floors,
+            ..
+        } = compile_data(WALKOVER);
+
+        let t = &triggers[0];
+        assert!(t.walkover);
+        assert_eq!(t.activator, 0, "the plain portal's own room `a`");
+        let line = &data.linedefs[t.line];
+        assert_eq!(line.special, 38, "a W1 lowerFloorToLowest");
+        assert_eq!(line.tag, t.tag);
+        let back = line
+            .back
+            .expect("the plain portal's opening line is two-sided");
+        assert_eq!(
+            (data.sidedefs[line.front].sector, data.sidedefs[back].sector),
+            (0, 3),
+            "room `a` in front, the plain portal's passage behind"
+        );
+
+        assert_eq!(floors.len(), 1);
+        let f = &floors[0];
+        assert_eq!(f.tag, t.tag, "the wall carries its trigger's tag");
+        assert_eq!(data.sectors[f.sector].tag, t.tag);
+        assert_eq!(
+            (data.sectors[f.sector].floor, data.sectors[f.sector].ceiling),
+            (192, 192),
+            "the drop wall between `b` and `c` is sealed at rest"
+        );
+    }
+
+    #[test]
+    fn a_drop_wall_whose_rooms_floors_differ_by_more_than_a_step_is_rejected() {
+        let json = WALL.replace(
+            r#""id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0"#,
+            r#""id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":32"#,
+        );
+        let err = build(&json).expect_err("a 32-unit difference clears the 24-unit step");
+        assert!(
+            matches!(
+                &err,
+                CompileError::DropWallFloorsDiffer { a, b, floor_a, floor_b, step }
+                    if a == "a" && b == "b" && *floor_a == 0 && *floor_b == 32 && *step == 24
+            ),
+            "expected DropWallFloorsDiffer naming both floors, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_drop_wall_deeper_than_its_gap_is_rejected() {
+        // A 32-unit alcove leaves half of the 64-unit gap for a 64-deep wall.
+        let json = WALL.replace(r#""thickness":16"#, r#""thickness":64, "alcove_near":32"#);
+        let err = build(&json).expect_err("a 64-deep wall does not fit a 32-unit gap");
+        assert!(
+            matches!(
+                &err,
+                CompileError::DropWallTooThick { thickness, gap, .. } if *thickness == 64 && *gap == 32
+            ),
+            "expected DropWallTooThick naming the thickness and the free gap, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_bridge_and_a_reveal_are_refused_until_their_emitters_land() {
+        let bridge = WALL.replace(
+            r#""kind":"drop_wall", "width":64, "at":[256,128], "thickness":16"#,
+            r#""kind":"bridge", "width":64, "at":[256,128], "depth":16"#,
+        );
+        let err = build(&bridge).expect_err("no bridge emitter yet");
+        assert!(
+            matches!(&err, CompileError::FloorConstructNotYetEmitted { construct } if construct == "bridge `a` <-> `b`"),
+            "expected FloorConstructNotYetEmitted naming the bridge, got {err}"
+        );
+
+        let reveal = WALL.replace(
+            r#""exits":["#,
+            r#""reveals":[ { "id":"pen", "room":"b", "at":[384,64], "kind":"closet", "trigger":"t" } ], "exits":["#,
+        );
+        let err = build(&reveal).expect_err("no reveal emitter yet");
+        assert!(
+            matches!(&err, CompileError::FloorConstructNotYetEmitted { construct } if construct == "reveal `pen`"),
+            "expected FloorConstructNotYetEmitted naming the reveal, got {err}"
+        );
+    }
+
+    #[test]
+    fn emit_floors_refuses_a_theme_the_texture_table_does_not_name() {
+        // `compile` never reaches this pass with an unresolvable theme —
+        // `emit_sectors` refuses it first — so the switch lookups are
+        // reachable only by driving the pass directly. Every earlier pass
+        // gets the real theme; only `emit_floors` sees the bad one.
+        let mut ir = Ir::from_json(WALL).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let mut data = sectors::emit_sectors(&ir).expect("sectors");
+        sectors::resolve_secret_specials(&ir, &tables, &mut data);
+        portals::cut_portals(&ir, &tables, &mut data).expect("portals");
+        let mut tags = TagAllocator::new();
+        doors::emit_doors(&ir, &tables, &mut data, &mut tags).expect("doors");
+        exits::emit_exits(&ir, &tables, &mut data, &mut tags).expect("exits");
+        teleports::emit_teleports(&ir, &tables, &mut data, &mut tags).expect("teleports");
+        lifts::emit_lifts(&ir, &tables, &mut data, &mut tags).expect("lifts");
+
+        ir.theme = "no_such_theme".to_owned();
+        let err = emit_floors(&ir, &tables, &mut data, &mut tags)
+            .expect_err("the theme resolves to no texture set");
+        assert!(
+            matches!(&err, CompileError::UnknownTheme { theme } if theme == "no_such_theme"),
+            "expected UnknownTheme naming the theme asked for, got {err}"
+        );
+    }
+}

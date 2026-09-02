@@ -2,6 +2,7 @@
 
 pub mod doors;
 pub mod exits;
+pub mod floors;
 pub mod heights;
 pub mod lifts;
 pub mod portals;
@@ -698,6 +699,81 @@ pub enum CompileError {
         /// `MAXPLATS`.
         max: usize,
     },
+    /// A floor-action switch trigger names a point that lies on no wall
+    /// segment of its room.
+    ///
+    /// The trigger form of [`ExitOffWall`](Self::ExitOffWall), raised by
+    /// [`floors::emit_floors`] rather than by `Ir::from_json`, which validates
+    /// a switch trigger's `room` and `at` fields but knows nothing about the
+    /// room's real edges. Defense in depth: `Ir::from_json` already refuses a
+    /// trigger whose `at` is not on one of its room's walls, so nothing an
+    /// author can write reaches this today.
+    #[error("trigger `{id}`: ({x}, {y}) is not on any wall of its room")]
+    TriggerWallNotFound {
+        /// The trigger's identifier.
+        id: String,
+        /// The requested X.
+        x: i32,
+        /// The requested Y.
+        y: i32,
+    },
+    /// A drop wall is deeper than the free part of the gap it fills, so
+    /// there is no room for it between its two rooms.
+    ///
+    /// The gap is measured after the portal's alcoves are taken out of it,
+    /// exactly as [`LiftTooShallow`](Self::LiftTooShallow) measures a
+    /// platform's remaining depth — a drop wall declares its own thickness,
+    /// so unlike a platform it does not simply fill whatever is left.
+    #[error(
+        "portal `{a}` <-> `{b}` is a drop wall {thickness} units deep, but only {gap} units of its gap are free"
+    )]
+    DropWallTooThick {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The declared thickness.
+        thickness: i32,
+        /// The gap left once the alcoves are taken out of it.
+        gap: i32,
+    },
+    /// A drop wall's two rooms' floors differ by more than the player's step
+    /// height, so the dropped wall would be a one-way drop rather than an
+    /// opening.
+    ///
+    /// The wall lowers to `P_FindLowestFloorSurrounding`, which is the lower
+    /// of the two rooms' floors, so a player who steps down onto it from the
+    /// higher room can never climb back: `P_TryMove` refuses a move that
+    /// raises `tmfloorz` more than `max_step_height`. Judged here rather than
+    /// in `Ir::from_json` for the reason [`PedestalRiseTooLow`](Self::PedestalRiseTooLow)
+    /// is: the step height is a table constant IR validation never loads.
+    #[error(
+        "portal `{a}` <-> `{b}` is a drop wall but its rooms' floors ({floor_a} and {floor_b}) differ by more than the {step}-unit step: the dropped wall would be a one-way drop"
+    )]
+    DropWallFloorsDiffer {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The first room's floor.
+        floor_a: i32,
+        /// The second room's floor.
+        floor_b: i32,
+        /// The player's step height.
+        step: i32,
+    },
+    /// The map carries a floor construct whose emitter has not landed yet: a
+    /// [`crate::ir::PortalKind::Bridge`] portal or a [`crate::ir::Reveal`].
+    ///
+    /// A placeholder, and deliberately an error rather than a silent skip:
+    /// until `emit_reveal` and `emit_bridge` exist, a map naming either would
+    /// otherwise compile into geometry the construct is simply missing from.
+    /// Both emitters delete this variant when they land.
+    #[error("{construct} is a floor construct this compiler does not emit yet")]
+    FloorConstructNotYetEmitted {
+        /// The construct, named as the author wrote it.
+        construct: String,
+    },
     /// The compiled map breaks one or more playability rules.
     #[error(
         "map breaks {} playability rule(s): {}",
@@ -732,6 +808,10 @@ pub struct Compiled {
     pub markers: Vec<teleports::Marker>,
     /// The emitted platforms — lifts, barriers and pedestals.
     pub lifts: Vec<lifts::LiftOut>,
+    /// The emitted floor-action triggers.
+    pub triggers: Vec<floors::TriggerOut>,
+    /// The emitted floor actions — drop walls, reveals and bridges.
+    pub floors: Vec<floors::FloorActionOut>,
 }
 
 /// Compiles a room graph into UDMF `TEXTMAP` text.
@@ -751,10 +831,10 @@ pub struct Compiled {
 ///    (rooms are authored apart — see [`crate::ir::Portal`] — so a portal
 ///    never shares a single coincident wall between its two rooms). For a
 ///    [`crate::ir::PortalKind::Plain`] portal this also fills the gap
-///    between the two openings with an open passage sector; for a door or
-///    lift portal it leaves both flanking walls cut but the gap itself still
-///    empty, because that gap is a sector of its own rather than a single
-///    line.
+///    between the two openings with an open passage sector; for a door, lift
+///    or drop-wall portal it leaves both flanking walls cut but the gap
+///    itself still empty, because that gap is a sector of its own rather than
+///    a single line.
 /// 4. [`doors::emit_doors`] fills that gap with a dedicated closed sector for
 ///    every door portal — optionally flanked by up to two trim alcove
 ///    sectors ([`crate::ir::Portal::alcove_near`]/
@@ -776,34 +856,41 @@ pub struct Compiled {
 ///    alcoves — and cuts every pedestal as a hosted island inside its room,
 ///    tagging each from the same [`TagAllocator`]. Runs after `cut_portals`
 ///    left that gap empty (step 3) and before the overlap check since it
-///    emits sectors. Its risers must be written before step 9: `heights`
+///    emits sectors. Its risers must be written before step 10: `heights`
 ///    fills only empty texture slots, and the platform's own top-face riser
 ///    is invisible at load-time heights, so `heights` would never write it.
-/// 8. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
+/// 8. [`floors::emit_floors`] places every floor-action trigger and fills
+///    every drop-wall portal's gap with the sealed sector that trigger
+///    lowers, again from the same [`TagAllocator`]. Runs after `cut_portals`
+///    left that gap empty (step 3), after lifts so the no-chain rule can see
+///    every platform, and before the overlap check since it emits sectors.
+///    Its two faces' textures must be written before step 10, for the reason
+///    step 7's risers must be.
+/// 9. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
 ///    that overlap in 2-D — a gap sector driven through a third room, or two
 ///    gap sectors from unrelated portals crossing each other. Must run after
-///    every sector-emitting pass (steps 1, 3, 4, 5, 6, 7) and before
+///    every sector-emitting pass (steps 1, 3, 4, 5, 6, 7, 8) and before
 ///    anything that trusts the geometry is sound, which is everything from
 ///    here on.
-/// 9. [`heights::apply_height_textures`] writes the upper and lower textures
-///    every height difference exposes, on the one side `r_segs.c` draws.
-///    Runs after every sector-emitting pass because it reads final floor and
-///    ceiling heights, and after the overlap check because it trusts the
-///    geometry it walks.
-/// 10. [`things::place_things`] places every thing, measuring clearance and
-///     headroom against the geometry emitted by steps 1–7 — not the IR's
+/// 10. [`heights::apply_height_textures`] writes the upper and lower textures
+///     every height difference exposes, on the one side `r_segs.c` draws.
+///     Runs after every sector-emitting pass because it reads final floor and
+///     ceiling heights, and after the overlap check because it trusts the
+///     geometry it walks.
+/// 11. [`things::place_things`] places every thing, measuring clearance and
+///     headroom against the geometry emitted by steps 1–8 — not the IR's
 ///     declared footprints, which an exit alcove can still make stale even
 ///     though a door no longer does — so it must run after doors, exits,
-///     teleport pads, and platforms are carved, not before. It also places
-///     step 6's markers, holding each to the clearance its arriving thing
-///     needs.
-/// 11. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
+///     teleport pads, platforms and floor actions are carved, not before. It
+///     also places step 6's markers, holding each to the clearance its
+///     arriving thing needs.
+/// 12. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
 ///     at tag 0, which would match every untagged sector in-engine.
-/// 12. [`textmap::emit_textmap`] renders the final, validated geometry.
-/// 13. [`crate::rules::check_all`] runs the playability catalog over the
+/// 13. [`textmap::emit_textmap`] renders the final, validated geometry.
+/// 14. [`crate::rules::check_all`] runs the playability catalog over the
 ///     result and fails the compile if anything is violated.
 ///
-/// Step 13 is part of `compile` rather than a separate call the caller may
+/// Step 14 is part of `compile` rather than a separate call the caller may
 /// forget, because the design makes playability violations hard errors: "a
 /// door the player cannot fit through is a broken map, not a missed target".
 /// Leaving `check_all` optional meant every rule in `rules` was inert unless
@@ -849,6 +936,7 @@ pub fn compile_reporting(
     exits::emit_exits(ir, tables, &mut data, &mut tags)?;
     let markers = teleports::emit_teleports(ir, tables, &mut data, &mut tags)?;
     let lifts = lifts::emit_lifts(ir, tables, &mut data, &mut tags)?;
+    let (triggers, floors) = floors::emit_floors(ir, tables, &mut data, &mut tags)?;
     sectors::check_no_sector_overlaps(ir, &data)?;
     heights::apply_height_textures(&mut data);
     let things = things::place_things(ir, tables, &data, &markers, &lifts)?;
@@ -861,6 +949,8 @@ pub fn compile_reporting(
         tags,
         markers,
         lifts,
+        triggers,
+        floors,
     };
     let violations = check_all(ir, tables, &compiled);
     Ok((compiled, violations))

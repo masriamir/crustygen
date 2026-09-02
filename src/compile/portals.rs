@@ -824,6 +824,31 @@ pub(crate) fn emit_side_wall(
     data.linedefs.len() - 1
 }
 
+/// Finds the two-sided line lying exactly on `cut` whose **front** sidedef
+/// belongs to `sector` — the threshold [`emit_opening`] wrote there — or
+/// `None` when no such line exists.
+///
+/// The inverse of [`emit_opening`], for a pass that needs a threshold an
+/// earlier pass emitted and did not hand back: `floors::emit_floors` writes a
+/// walkover trigger's special onto the opening line of a plain portal that
+/// `cut_portals` cut long before any trigger was resolved. Matching on the
+/// cut's own coordinates rather than on a sector's properties is what makes
+/// it exact — a room may border several compiler-made sectors, and only one
+/// of them lies on this span.
+pub(crate) fn find_opening_line(data: &MapData, cut: &Cut, sector: usize) -> Option<usize> {
+    data.linedefs.iter().position(|line| {
+        if line.back.is_none() || data.sidedefs[line.front].sector != sector {
+            return false;
+        }
+        let (along_1, across_1) = cut.axis.split(data.vertices[line.v1]);
+        let (along_2, across_2) = cut.axis.split(data.vertices[line.v2]);
+        across_1 == cut.fixed
+            && across_2 == cut.fixed
+            && along_1.min(along_2) == cut.open_lo
+            && along_1.max(along_2) == cut.open_hi
+    })
+}
+
 /// A one-sided use line on a room's wall carrying `special` and `tag` and
 /// the theme's switch texture, centered on the line: the construction a
 /// switch exit uses (see [`crate::compile::exits`]'s module documentation for

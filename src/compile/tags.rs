@@ -45,6 +45,20 @@ impl TagAllocator {
         self.next
     }
 
+    /// Points an already-allocated tag at the sector it ended up on.
+    ///
+    /// For a caller that must allocate before its sector exists:
+    /// [`crate::compile::floors::emit_floors`] takes one tag per trigger up
+    /// front, so that every construct the trigger fires can be stamped with
+    /// it as it is emitted, and only then knows which sector to record. A
+    /// no-op for a tag never allocated; the manifest is an audit record, and
+    /// inventing a row for a tag nobody handed out would make it a worse one.
+    pub fn rename_sector(&mut self, tag: u16, sector: usize) {
+        if let Some(entry) = self.manifest.iter_mut().find(|e| e.tag == tag) {
+            entry.sector = sector;
+        }
+    }
+
     /// Every allocation made so far, in order.
     #[must_use]
     pub fn manifest(&self) -> &[TagEntry] {
@@ -83,6 +97,31 @@ mod tests {
         assert!(a != b && b != c && a != c, "tags never repeat");
         assert_eq!(alloc.manifest().len(), 3, "every allocation is recorded");
         assert_eq!(alloc.manifest()[2].purpose, "lift on the same sector");
+    }
+
+    #[test]
+    fn renaming_points_a_tag_at_the_sector_it_ended_up_on() {
+        let mut alloc = TagAllocator::new();
+        let first = alloc.allocate(usize::MAX, "trigger t: drop wall a <-> b");
+        let second = alloc.allocate(4, "door a");
+        alloc.rename_sector(first, 7);
+        alloc.rename_sector(second + 1, 9);
+        assert_eq!(
+            alloc.manifest()[0].sector,
+            7,
+            "the placeholder is replaced by the real sector"
+        );
+        assert_eq!(
+            alloc.manifest()[0].purpose,
+            "trigger t: drop wall a <-> b",
+            "nothing else about the entry changes"
+        );
+        assert_eq!(alloc.manifest()[1].sector, 4, "no other entry moves");
+        assert_eq!(
+            alloc.manifest().len(),
+            2,
+            "renaming a tag nobody allocated adds no row"
+        );
     }
 
     fn map_with_line(special: u16, tag: u16) -> MapData {
