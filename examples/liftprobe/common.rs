@@ -1975,6 +1975,9 @@ pub(crate) fn floor_triggers(
     triggers
 }
 
+/// Synthetic-map builders and the fixture type the probe's test modules
+/// share: rows of rooms (`chain`, `chain_full`), a T (`tee`), an L whose two
+/// arms also touch each other (`panel`), and a lift shaft (`shaft`).
 #[cfg(test)]
 pub(crate) mod tests {
     use std::fmt::Write as _;
@@ -2207,12 +2210,18 @@ pub(crate) mod tests {
         text
     }
 
+    /// A parsed synthetic map and the scene built from it, shared by the
+    /// probe's test modules.
     pub(crate) struct Fixture {
+        /// The map as parsed from the UDMF text.
         pub(crate) map: UdmfMap,
+        /// The scene `Scene::build` resolved from [`Fixture::map`].
         pub(crate) scene: Scene,
+        /// The tables' step height, so a test never spells `24` itself.
         pub(crate) step: i32,
     }
 
+    /// Parses `text` as UDMF and builds its scene under the shipped tables.
     pub(crate) fn fixture(text: &str) -> Fixture {
         let tables = Tables::load().expect("tables");
         let map = parse_udmf(text, Limits::default()).expect("fixture parses");
