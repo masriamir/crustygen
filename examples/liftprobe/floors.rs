@@ -1042,18 +1042,18 @@ fn record_target(ctx: &MapCtx<'_>, t: &TargetFacts, agg: &mut Agg) {
                 } else {
                     "level"
                 };
-                let sealed = |yes: bool| if yes { "enterable" } else { "sealed" };
+                let enterable_word = |yes: bool| if yes { "enterable" } else { "sealed" };
                 agg.effect_table.add(format!(
                     "{:?}/{direction}/{}/{:?}",
                     f.effect,
-                    sealed(f.enterable_before),
+                    enterable_word(f.enterable_before),
                     f.rider
                 ));
                 if f.effect == Effect::Neutral {
                     agg.neutral_table.add(format!(
                         "{direction}/{}→{}/travel{}step",
-                        sealed(f.enterable_before),
-                        sealed(f.enterable_after),
+                        enterable_word(f.enterable_before),
+                        enterable_word(f.enterable_after),
                         if a.travel <= ctx.step { "≤" } else { ">" }
                     ));
                     if down && !f.enterable_before {
