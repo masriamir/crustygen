@@ -83,9 +83,9 @@ pub fn check_all(ir: &Ir, tables: &Tables, out: &Compiled) -> Vec<RuleViolation>
 /// is a dead end they cannot finish from, and every sector is visitable.
 ///
 /// Delegates to [`crate::reach`]: a breadth-first search over
-/// `(sector, keys-held)` states built from the *emitted* geometry. Vacuously
-/// satisfied when the map has no player 1 start or no exit — see
-/// [`crate::reach::graph_from_compiled`].
+/// `(sector, keys held, floor actions fired)` states built from the
+/// *emitted* geometry. Vacuously satisfied when the map has no player 1
+/// start or no exit — see [`crate::reach::graph_from_compiled`].
 fn check_reachability(ir: &Ir, tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>) {
     let Some(built) = reach::graph_from_compiled(ir, tables, out) else {
         return;
@@ -111,6 +111,38 @@ fn check_reachability(ir: &Ir, tables: &Tables, out: &Compiled, v: &mut Vec<Rule
         }
     };
 
+    // Which floor actions had NOT fired in the state being reported. A room
+    // the player is stranded in is often one whose way out is a wall still
+    // standing or a pit still sunk, so naming the actions at rest says which
+    // switch or walkover the author has to make reachable first.
+    // `action_names` and `Compiled::floors` are one list indexed two ways —
+    // `graph_from_compiled` builds each name from the entry at that same
+    // position — so zipping them pairs a name with its own action.
+    let pending = |mask: reach::KeyMask| -> String {
+        let parts: Vec<String> = built
+            .action_names
+            .iter()
+            .zip(&out.floors)
+            .enumerate()
+            .filter(|&(i, _)| {
+                let bit = reach::ACTION_BIT_BASE + u32::try_from(i).expect("at most 8 actions");
+                mask & (1 << bit) == 0
+            })
+            .map(|(_, (name, action))| {
+                let verb = match action.family {
+                    FloorFamily::LowerToLowest => "lowered",
+                    FloorFamily::RaiseToNearest => "raised",
+                };
+                format!("{name} not {verb}")
+            })
+            .collect();
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", parts.join(", "))
+        }
+    };
+
     if findings.unfinishable {
         v.push(RuleViolation {
             rule: "P7",
@@ -130,8 +162,9 @@ fn check_reachability(ir: &Ir, tables: &Tables, out: &Compiled, v: &mut Vec<Rule
             rule: "P7",
             subject: reach::node_label(node, ir, &built.graph),
             detail: format!(
-                "the player can reach this sector{} but can no longer reach an exit from it",
-                held(mask)
+                "the player can reach this sector{} but can no longer reach an exit from it{}",
+                held(mask),
+                pending(mask)
             ),
         });
     }
@@ -1926,25 +1959,71 @@ mod tests {
       "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[0,128] } ],
       "exits":[ { "room":"b", "trigger":"switch", "at":[576,128], "width":64 } ] }"#;
 
-    /// Compiles [`WALL_MAP`] through [`compile_reporting`] rather than
-    /// [`compile`]: P7 cannot see a floor action until the reachability
-    /// task, so a floor map still reports one. Every assertion below is on
-    /// the three floor rule ids alone.
+    /// Compiles [`WALL_MAP`] through [`compile`], which raises
+    /// `CompileError::Playability` on any violation: a drop wall is a clean
+    /// map under the whole catalog now that P7's flood carries a fired
+    /// floor action in its state. Each mutation below then re-runs
+    /// `check_all` over the damaged output.
     fn wall_compiled() -> (Tables, crate::compile::Compiled) {
         let tables = Tables::load().expect("tables");
         let ir = Ir::from_json(WALL_MAP).expect("ir");
-        let (out, _) = compile_reporting(&ir, &tables).expect("a drop wall is a legal map");
+        let out = compile(&ir, &tables).expect("a drop wall is a legal map");
         (tables, out)
+    }
+
+    /// `hub` (start) has a dead-end pit 100 below it and a plain portal on
+    /// to `b`, whose switch drops the wall sealing `c` and its exit. The map
+    /// is finishable — go to `b` first — but the player who takes the pit
+    /// branch is stranded, and takes it before ever reaching the switch. So
+    /// the reported state is the one where the wall is still standing,
+    /// which is what the violation has to say.
+    const PIT_AND_WALL: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[128,128], "angle":0 } ] },
+        { "id":"pit", "footprint":[[0,320],[0,576],[256,576],[256,320]], "floor":-100, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"c", "footprint":[[640,0],[640,256],[896,256],[896,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"hub", "b":"pit", "kind":"plain", "width":64, "at":[128,256] },
+        { "a":"hub", "b":"b", "kind":"plain", "width":64, "at":[256,128] },
+        { "a":"b", "b":"c", "kind":"drop_wall", "width":64, "at":[576,128], "thickness":16, "fires_on":"t" }
+      ],
+      "triggers":[ { "id":"t", "kind":"switch", "room":"b", "at":[448,0] } ],
+      "exits":[ { "room":"c", "trigger":"switch", "at":[896,128], "width":64 } ] }"#;
+
+    #[test]
+    fn p7_names_the_floor_actions_still_at_rest_in_a_stranded_state() {
+        let v = p7_violations(PIT_AND_WALL);
+        assert!(
+            !v.iter().any(|x| x.detail.contains("no feasible walk")),
+            "the switch route finishes the map: {v:?}"
+        );
+        let pit = v
+            .iter()
+            .find(|x| x.subject.contains("pit"))
+            .unwrap_or_else(|| panic!("the pit strands: {v:?}"));
+        assert_eq!(
+            pit.detail,
+            "the player can reach this sector but can no longer reach an exit from it; \
+             drop wall b <-> c not lowered",
+            "the state names the action still at rest, with the direction it moves: {v:?}"
+        );
     }
 
     #[test]
     fn p28_p29_p30_pass_on_a_compiled_drop_wall() {
         let tables = Tables::load().expect("tables");
         let ir = Ir::from_json(WALL_MAP).expect("ir");
-        let (out, v) = compile_reporting(&ir, &tables).expect("a drop wall is a legal map");
+        let out = compile(&ir, &tables).expect("a drop wall is a legal map");
         assert!(
-            v.iter().all(|x| !matches!(x.rule, "P28" | "P29" | "P30")),
-            "{v:?}"
+            check_all(&ir, &tables, &out).is_empty(),
+            "a drop wall breaks no rule at all, the three floor rules included"
         );
         assert_eq!(out.floors.len(), 1);
     }

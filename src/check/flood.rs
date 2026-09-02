@@ -196,7 +196,9 @@
 use crate::check::plats;
 use crate::check::scene::Scene;
 use crate::check::{Finding, Severity, Subject};
-use crate::reach::{self, Edge, EdgeKind, KeyClass, KeyMask, Limits, Node, ReachGraph};
+use crate::reach::{
+    self, ACTION_BIT_BASE, Edge, EdgeKind, KeyClass, KeyMask, Limits, Node, ReachGraph,
+};
 use crate::tables::Tables;
 use std::collections::BTreeSet;
 
@@ -207,8 +209,10 @@ use std::collections::BTreeSet;
 /// sharing class `c`'s special, e.g. `["blue_card", "blue_skull"]`.
 ///
 /// Returns `None` — pushing no finding itself, since callers react
-/// differently to it — when the vocabulary lists more classes than a
-/// [`KeyMask`] can represent.
+/// differently to it — when the vocabulary lists more classes than the key
+/// half of a [`KeyMask`] can represent: the bits below [`ACTION_BIT_BASE`].
+/// The bits from there up are floor actions, which this builder does not yet
+/// set.
 fn intern_lock_classes(tables: &Tables) -> Option<(Vec<u16>, Vec<Vec<String>>)> {
     let kinds = tables.locked_door_kinds();
     let mut specials: Vec<u16> = kinds.iter().map(|&(_, s)| s).collect();
@@ -218,10 +222,10 @@ fn intern_lock_classes(tables: &Tables) -> Option<(Vec<u16>, Vec<Vec<String>>)> 
     // only ever parses the two `include_str!`-embedded tables compiled into
     // this crate, and the pinned `data/vocabulary.toml` lists exactly three
     // distinct locked-door specials (26/27/28 — blue/yellow/red, card and
-    // skull of a color sharing one special), far under `KeyMask::BITS`
+    // skull of a color sharing one special), far under `ACTION_BIT_BASE`
     // (8). Exercising this branch would need a `Tables` built from a
     // vocabulary this crate does not ship, which no constructor offers.
-    if specials.len() > KeyMask::BITS as usize {
+    if specials.len() > ACTION_BIT_BASE as usize {
         return None;
     }
     let class_names: Vec<Vec<String>> = specials
@@ -250,6 +254,10 @@ fn class_of(specials: &[u16], special: u16) -> Option<KeyClass> {
 /// color class with more than one kind joins those with `/`, matching
 /// `rules.rs`'s own `check_reachability` wording), or `"no keys"` for an
 /// empty mask.
+///
+/// Only the key half of the mask is read: `class_names` has one entry per
+/// interned lock class and [`intern_lock_classes`] caps that at
+/// [`ACTION_BIT_BASE`], so the enumeration never reaches a floor-action bit.
 fn keys_in_words(mask: KeyMask, class_names: &[Vec<String>]) -> String {
     let names: Vec<String> = class_names
         .iter()
@@ -370,6 +378,10 @@ fn build_nodes(scene: &Scene, specials: &[u16], kinds: &[(String, u16)]) -> Vec<
             floor: s.floor,
             ceiling: s.ceiling,
             keys: 0,
+            // Floor actions reach this builder in its own task; until then
+            // the verifier's flood sees every sector at its emitted floor.
+            fires: 0,
+            action: None,
         })
         .collect();
     for thing in &scene.things {
@@ -481,6 +493,7 @@ fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool
                     a: i,
                     b: dest,
                     kind: EdgeKind::Teleport,
+                    fires: 0,
                 });
             }
             // The line itself is still an ordinary boundary below.
@@ -504,6 +517,7 @@ fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool
                 a: i,
                 b: neighbor,
                 kind,
+                fires: 0,
             });
         }
     }
@@ -553,6 +567,7 @@ fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool
                     a: c,
                     b: plat.sector,
                     kind: EdgeKind::Lift,
+                    fires: 0,
                 });
             }
         }
@@ -610,8 +625,8 @@ fn push_flood_findings(
 /// (V-P20) to consume. Returns `None`, the reason already pushed as a
 /// [`Finding`] by `resolve_start` or `resolve_goals`, when it could not
 /// run: no `player1_start` thing, the first start resolved to no sector, no
-/// exit line, or (below) more locked-door classes than a [`KeyMask`] can
-/// represent.
+/// exit line, or (below) more locked-door classes than the key half of a
+/// [`KeyMask`] can represent.
 #[must_use]
 pub fn run_flood(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) -> Option<Vec<bool>> {
     let start = resolve_start(scene, findings)?;
@@ -624,9 +639,8 @@ pub fn run_flood(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) ->
             severity: Severity::Error,
             subject: Subject::Map,
             message: format!(
-                "the vocabulary lists more than {} distinct lock classes, which a KeyMask \
-                 cannot represent — the flood cannot run",
-                KeyMask::BITS
+                "the vocabulary lists more than {ACTION_BIT_BASE} distinct lock classes, \
+                 which a KeyMask cannot represent — the flood cannot run"
             ),
         });
         return None;
@@ -717,9 +731,9 @@ pub fn teleport_only_sectors(scene: &Scene, tables: &Tables) -> Option<Vec<bool>
 ///
 /// Independent of [`run_flood`]: runs (and can find defects) even on a map
 /// with no start or exit. Silently reports nothing for a vocabulary with
-/// more lock classes than a [`KeyMask`] can hold — [`run_flood`] is the one
-/// that reports that as its own hard finding, and it always runs first in
-/// [`crate::check::run`]'s wiring.
+/// more lock classes than the key half of a [`KeyMask`] can hold —
+/// [`run_flood`] is the one that reports that as its own hard finding, and
+/// it always runs first in [`crate::check::run`]'s wiring.
 ///
 /// A key thing with `thing.sector == None` — outside every closed sector —
 /// counts toward neither half: it cannot satisfy a lock's keyless-lock check

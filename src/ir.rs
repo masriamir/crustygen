@@ -1595,10 +1595,11 @@ impl Ir {
     /// A reachability limit rather than an engine one: the flood has to carry
     /// which actions have already fired as part of the state it floods over,
     /// one bit each beside the eight key classes [`crate::reach::KeyMask`]
-    /// already holds, and eight is the budget set aside for them (the mask
-    /// widens to carry them when the flood learns floor actions). The IR
-    /// refuses a ninth here, where the author can still see which action to
-    /// drop, rather than leaving two of them to alias onto one bit.
+    /// already holds, and eight is the budget set aside for them: they are
+    /// the mask's bits from [`crate::reach::ACTION_BIT_BASE`] up, which is
+    /// exactly eight of them in a 16-bit mask. The IR refuses a ninth here,
+    /// where the author can still see which action to drop, rather than
+    /// leaving two of them to alias onto one bit.
     pub const MAX_FLOOR_ACTIONS: usize = 8;
 
     /// The trigger with this id.

@@ -1345,18 +1345,18 @@ mod tests {
                     "things":[ { "kind":"imp", "at":[192,192], "angle":0 } ], "trigger":"t" } ],
       "exits":[ { "room":"a", "trigger":"switch", "at":[512,64], "width":64 } ] }"#;
 
-    /// The reveal accept paths go through [`compile_reporting`] rather than
-    /// [`compile`]: P7 cannot see a floor action until the reachability
-    /// task, which flips them to `compile`. The refusals below are hard
-    /// errors raised long before the rule catalog runs, so which entry point
-    /// they use is immaterial.
+    /// The reveal accept paths go through [`compile`], which raises
+    /// `CompileError::Playability` on any violation: with the flood
+    /// carrying fired floor actions, a switch-opened reveal is clean under
+    /// the whole catalog. The refusals below are hard errors raised long
+    /// before the rule catalog runs, so which entry point they use is
+    /// immaterial.
     #[test]
     fn a_thing_in_a_reveal_is_placed_against_the_lowered_cell() {
         let tables = Tables::load().expect("tables");
         let imp = tables.thing_id("imp").expect("imp");
-        let (out, violations) = compile_reporting(&Ir::from_json(REVEAL).expect("ir"), &tables)
+        let out = compile(&Ir::from_json(REVEAL).expect("ir"), &tables)
             .expect("an imp sealed in rock is the corpus idiom");
-        assert!(violations.iter().all(|v| v.rule == "P7"), "{violations:?}");
         let placed = out
             .things
             .iter()
@@ -1408,9 +1408,8 @@ mod tests {
                 r#"{ "kind":"soulsphere", "at":[136,136], "angle":0 }"#,
                 1,
             );
-        let (out, violations) = compile_reporting(&Ir::from_json(&json).expect("ir"), &tables)
+        let out = compile(&Ir::from_json(&json).expect("ir"), &tables)
             .expect("a 16x16 sunken pedestal is the corpus's commonest reveal");
-        assert!(violations.iter().all(|v| v.rule == "P7"), "{violations:?}");
         let soulsphere = tables.thing_id("soulsphere").expect("soulsphere");
         assert!(
             out.things

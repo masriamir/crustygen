@@ -1869,21 +1869,15 @@ mod tests {
         }
     }
 
-    /// The accept path runs through [`compile_reporting`] rather than
-    /// [`compile`]: P7 cannot see a floor action until the reachability
-    /// task, which flips this to `compile`. Asserting that *every* violation
-    /// is P7 keeps the test honest without pinning a count that task will
-    /// legitimately change.
+    /// The accept path runs through [`compile`], which raises
+    /// [`CompileError::Playability`] on any violation: a walkover-raised
+    /// bridge is a clean map end to end, P7 included, now that the flood
+    /// carries a fired floor action in its state.
     #[test]
     fn a_bridges_riser_survives_the_passes_that_run_after_it() {
         let ir = Ir::from_json(BRIDGE_WALKOVER).expect("ir");
         let tables = Tables::load().expect("tables");
-        let (out, violations) =
-            compile_reporting(&ir, &tables).expect("a pit the walkover raises is a legal map");
-        assert!(
-            violations.iter().all(|v| v.rule == "P7"),
-            "only the not-yet-modeled reachability of a pit may be flagged, got {violations:?}"
-        );
+        let out = compile(&ir, &tables).expect("a pit the walkover raises is a legal map");
 
         // `heights::apply_height_textures` fills only empty slots, so the
         // riser this pass wrote onto the pit side is still there afterward —
@@ -2018,22 +2012,15 @@ mod tests {
         );
     }
 
-    /// The accept path runs through [`compile_reporting`] rather than
-    /// [`compile`]: P7 cannot see a floor action until the reachability
-    /// task, which flips this to `compile`. Asserting that *every* violation
-    /// is P7 keeps the test honest without pinning a count that task will
-    /// legitimately change.
+    /// The accept path runs through [`compile`], which raises
+    /// [`CompileError::Playability`] on any violation: a sealed closet the
+    /// switch opens is a clean map end to end, P7 included, now that the
+    /// flood carries a fired floor action in its state.
     #[test]
     fn a_closets_things_are_placed_against_the_lowered_cell() {
         let ir = Ir::from_json(CLOSET).expect("ir");
         let tables = Tables::load().expect("tables");
-        let (out, violations) =
-            compile_reporting(&ir, &tables).expect("an imp inside solid rock is the corpus idiom");
-        assert!(
-            violations.iter().all(|v| v.rule == "P7"),
-            "only the not-yet-modeled reachability of a sealed cell may be flagged, got \
-             {violations:?}"
-        );
+        let out = compile(&ir, &tables).expect("an imp inside solid rock is the corpus idiom");
         let imp = tables.thing_id("imp").expect("the vocabulary names an imp");
         let placed = out
             .things
