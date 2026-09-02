@@ -17,6 +17,7 @@ use crustywad::map::udmf::UdmfMap;
 
 pub mod conform;
 pub mod flood;
+pub mod floors;
 pub mod invariants;
 pub mod plats;
 pub mod scene;
@@ -509,9 +510,26 @@ thing { x = 320.0; y = 64.0; angle = 0; type = 14; single = true; }
         links: &[(i32, i32, bool)],
         extra: &str,
     ) -> String {
+        chain_full(floors, &vec![256; floors.len()], tags, links, extra)
+    }
+
+    /// [`chain`] with a ceiling per room, for the fixtures whose question is
+    /// headroom rather than floor height — a slab with no standing room, a
+    /// target whose own ceiling caps a raise.
+    ///
+    /// Ported from `examples/liftprobe/common.rs`'s test module beside
+    /// [`chain`], for the same reason.
+    pub(crate) fn chain_full(
+        floors: &[i32],
+        ceilings: &[i32],
+        tags: &[i32],
+        links: &[(i32, i32, bool)],
+        extra: &str,
+    ) -> String {
         use std::fmt::Write as _;
 
         let n = floors.len();
+        assert_eq!(ceilings.len(), n);
         assert_eq!(tags.len(), n);
         assert_eq!(links.len(), n - 1);
         let mut text = String::from("namespace = \"doom\";\n");
@@ -566,15 +584,43 @@ thing { x = 320.0; y = 64.0; angle = 0; type = 14; single = true; }
             wall(&mut text, br, bl);
         }
         text.push_str(&sidedefs);
-        for (floor, tag) in floors.iter().zip(tags) {
+        for ((floor, ceiling), tag) in floors.iter().zip(ceilings).zip(tags) {
             let _ = writeln!(
                 text,
                 "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; \
-                 heightfloor = {floor}; heightceiling = 256; lightlevel = 160; id = {tag}; }}"
+                 heightfloor = {floor}; heightceiling = {ceiling}; lightlevel = 160; \
+                 id = {tag}; }}"
             );
         }
         text.push_str(extra);
         text
+    }
+
+    /// Appends a one-sided line carrying `special` and `tag` to a `rooms`-long
+    /// [`chain`] or [`chain_full`], on the last room's east wall and fronted
+    /// by that room — the "switch on B's far wall" of the floor-shape worked
+    /// examples (`docs/measurements/floor-shapes-2026-09-02.md`), which puts
+    /// the trigger somewhere that is neither the target nor a side the action
+    /// moves.
+    ///
+    /// UDMF indices follow declaration order per type, so appending the two
+    /// records gives them the next linedef and sidedef index. The wall itself
+    /// is already drawn by the builder; this line doubles it, which leaves
+    /// every vertex's degree even and so the sector still closes.
+    ///
+    /// Ported from `examples/liftprobe/floors.rs`'s test module.
+    pub(crate) fn far_wall(text: &mut String, rooms: usize, special: i32, tag: i32) {
+        use std::fmt::Write as _;
+
+        let sd = text.matches("sidedef {").count();
+        let (v1, v2) = (2 * rooms + 1, 2 * rooms);
+        let last = rooms - 1;
+        let _ = writeln!(
+            text,
+            "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {sd}; blocking = true; \
+             special = {special}; arg0 = {tag}; }}\n\
+             sidedef {{ sector = {last}; texturemiddle = \"STARTAN2\"; }}"
+        );
     }
 }
 

@@ -282,6 +282,52 @@ fn dead_end_pocket(scene: &Scene, linedef: usize, sector: usize, step: i32, radi
     deepest <= f64::from(radius)
 }
 
+/// The sides of a trigger line that can fire it, in the engine's own terms.
+///
+/// `b` is the line's **front** mirror and `front` the sector it is filed
+/// under; `front_only` selects `P_UseSpecialLine`'s rule (`p_switch.c:288`
+/// returns `false` from the back for every special but 124) — and
+/// `P_ShootSpecialLine`'s, a gun line being reached from the side its face is
+/// drawn on — over `P_CrossSpecialLine`'s, which has no side gate and so
+/// fires from whichever side the player can actually cross at rest under
+/// `P_TryMove`'s step rule. `(step, radius)` are [`Tables::step_height`] and
+/// [`Tables::player`]`().radius`.
+///
+/// Shared with [`crate::check::floors`], whose lines fire by the same three
+/// dispatchers, so the two resolutions cannot drift on who can press what.
+/// The walkover arm carries the two deliberate divergences from the probe
+/// this module's doc comment argues for: an impassable boundary
+/// ([`Boundary::passable`]) fires from neither side, and neither does one
+/// with a [`dead_end_pocket`] behind it.
+pub(crate) fn activator_sides(
+    scene: &Scene,
+    b: &Boundary,
+    front: usize,
+    front_only: bool,
+    (step, radius): (i32, i32),
+) -> Vec<usize> {
+    let mut sides = Vec::new();
+    if front_only {
+        sides.push(front);
+    } else if let Some(back) = b.neighbor.filter(|_| b.passable()) {
+        // A walkover with a dead-end pocket on either side fires from
+        // neither: nobody can cross *into* the pocket, and nobody can
+        // stand in it to cross *out*. The same shape as the
+        // `passable()` gate above, one layer further out.
+        let pocket = [front, back]
+            .iter()
+            .any(|&s| dead_end_pocket(scene, b.linedef, s, step, radius));
+        let (ff, bf) = (scene.sectors[front].floor, scene.sectors[back].floor);
+        if !pocket && bf - ff <= step {
+            sides.push(front);
+        }
+        if !pocket && ff - bf <= step {
+            sides.push(back);
+        }
+    }
+    sides
+}
+
 /// Every lift line naming `tag`, as the trigger it is for the plat at
 /// sector `plat`: which sectors fire it, and each one's [`Activator`] class.
 ///
@@ -300,29 +346,10 @@ fn triggers_for(
         .filter(|(_, b)| b.tag == tag)
         .map(|&(front, b)| {
             let is_use = specials.use_line.contains(&b.special);
-            let mut activators = Vec::new();
-            if is_use {
-                // `P_UseSpecialLine`: the front side alone.
-                activators.push((front, classify(scene, plat, front, step)));
-            } else if let Some(back) = b.neighbor.filter(|_| b.passable()) {
-                // A walkover with a dead-end pocket on either side fires from
-                // neither: nobody can cross *into* the pocket, and nobody can
-                // stand in it to cross *out*. The same shape as the
-                // `passable()` gate above, one layer further out.
-                let pocket = [front, back]
-                    .iter()
-                    .any(|&s| dead_end_pocket(scene, b.linedef, s, step, radius));
-                // `P_CrossSpecialLine` has no side gate, so either side fires
-                // it — from whichever the player can actually cross at rest
-                // (`P_TryMove`'s step rule).
-                let (ff, bf) = (scene.sectors[front].floor, scene.sectors[back].floor);
-                if !pocket && bf - ff <= step {
-                    activators.push((front, classify(scene, plat, front, step)));
-                }
-                if !pocket && ff - bf <= step {
-                    activators.push((back, classify(scene, plat, back, step)));
-                }
-            }
+            let activators = activator_sides(scene, b, front, is_use, (step, radius))
+                .into_iter()
+                .map(|s| (s, classify(scene, plat, s, step)))
+                .collect();
             SceneTrigger {
                 linedef: b.linedef,
                 special: b.special,
