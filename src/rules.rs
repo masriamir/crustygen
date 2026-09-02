@@ -4,9 +4,11 @@
 //! width), **P4** (door opening clearance), **P5** (lift travel and return),
 //! **P7** (no softlock), **P8** (no missing textures), **P9** (no texture
 //! scaling), **P15** (teleport pairing), **P19** (light bounds), **P24** (key
-//! and lock coherence), **P26** (teleport-only exit rooms), and **P27** (no
-//! sealed monster rooms). **P7** floods `(sector, keys-held)` states over the
-//! emitted geometry — see [`crate::reach`].
+//! and lock coherence), **P26** (teleport-only exit rooms), **P27** (no
+//! sealed monster rooms), **P28** (a floor action's destination), **P29** (a
+//! floor action opens what it is meant to) and **P30** (no floor action
+//! chained to another moving sector). **P7** floods `(sector, keys-held)`
+//! states over the emitted geometry — see [`crate::reach`].
 //!
 //! **P1** (step height between connected rooms) has been **retired**: it
 //! capped the floor delta between connected rooms in either direction, but
@@ -23,11 +25,14 @@
 //! a spec-conformance question this stage-one structural pass does not yet
 //! answer. Do not read the presence of this module as covering it.
 
-use crate::compile::Compiled;
+use std::collections::BTreeSet;
+
+use crate::compile::floors::FloorShape;
 use crate::compile::heights::{visible_lower_side, visible_upper_side};
+use crate::compile::{Compiled, MapData};
 use crate::ir::{ExitTrigger, Ir, PortalKind};
 use crate::reach;
-use crate::tables::Tables;
+use crate::tables::{FloorFamily, Tables};
 
 /// One failed playability check.
 #[derive(Debug, Clone)]
@@ -67,6 +72,9 @@ pub fn check_all(ir: &Ir, tables: &Tables, out: &Compiled) -> Vec<RuleViolation>
     check_teleport_exit_rooms(ir, out, &mut v);
     check_sealed_monster_rooms(ir, tables, out, &mut v);
     check_lift_return(tables, out, &mut v);
+    check_floor_destinations(out, &mut v);
+    check_floor_openings(tables, out, &mut v);
+    check_floor_chains(tables, out, &mut v);
     check_reachability(ir, tables, out, &mut v);
     v
 }
@@ -522,11 +530,206 @@ fn check_lift_return(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>
     }
 }
 
+/// P28: every floor action's destination, re-derived over the emitted
+/// geometry the way `EV_DoFloor` (`p_floor.c`) reads it, is the floor the
+/// construct intends — [`lowest_floor_surrounding`] for a lowering action,
+/// [`next_highest_floor`] for a rising one.
+///
+/// The compiler asserts a destination while it builds each construct; this
+/// re-derives it from the records that actually shipped, so a neighbor some
+/// later pass added or moved is caught rather than assumed away.
+fn check_floor_destinations(out: &Compiled, v: &mut Vec<RuleViolation>) {
+    for f in &out.floors {
+        let (engine, search) = match f.family {
+            FloorFamily::LowerToLowest => (
+                lowest_floor_surrounding(&out.data, f.sector),
+                "P_FindLowestFloorSurrounding",
+            ),
+            FloorFamily::RaiseToNearest => (
+                next_highest_floor(&out.data, f.sector),
+                "P_FindNextHighestFloor",
+            ),
+        };
+        if engine != f.dest {
+            v.push(RuleViolation {
+                rule: "P28",
+                subject: format!("sector {}", f.sector),
+                detail: format!(
+                    "the {:?} resting at {} intends floor {}, but {search} over its emitted \
+                     neighbors lands on {engine}",
+                    f.shape, f.rest, f.dest
+                ),
+            });
+        }
+    }
+}
+
+/// P29: a floor action changes where the player can walk, in the direction
+/// its shape promises — a drop wall or a bridge passes both ways between its
+/// two neighbors once it has moved, and a reveal is sealed against its host
+/// at rest and enterable from it afterward.
+///
+/// Both halves read the same two refusals [`crate::reach`] does: the player
+/// crosses only where `P_LineOpening`'s window (`p_maputl.c:300-329`) — the
+/// lower of the two ceilings over the higher of the two floors — holds their
+/// full height (`p_map.c:468-469`), and only where the climb is no greater
+/// than the step (`p_map.c:477-479`). The heights fed in are the *effective*
+/// ones: a target's `rest` before it fires and its `dest` after, its
+/// neighbors' own floors throughout.
+fn check_floor_openings(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>) {
+    let step = tables.step_height();
+    let h = tables.player().height;
+    // Whether the player can walk from `a` at `a_floor` onto `b` at
+    // `b_floor`. Each sector must hold them standing in it, the window
+    // between the two must hold them crossing it, and the climb must be
+    // within the step. The first two conjuncts are the standing room the
+    // third's window subsumes, stated on their own because a target at rest
+    // is routinely a sector with no standing room at all — a closet's floor
+    // sits on its ceiling — and that is the fact a reveal's seal turns on.
+    let pass = |data: &MapData, a: usize, a_floor: i32, b: usize, b_floor: i32| -> bool {
+        let (ca, cb) = (data.sectors[a].ceiling, data.sectors[b].ceiling);
+        ca - a_floor >= h
+            && cb - b_floor >= h
+            && ca.min(cb) - a_floor.max(b_floor) >= h
+            && b_floor - a_floor <= step
+    };
+    for f in &out.floors {
+        let n: Vec<usize> = emitted_neighbors(&out.data, f.sector).into_iter().collect();
+        let floor = |s: usize| out.data.sectors[s].floor;
+        let ok = match f.shape {
+            FloorShape::DropWall | FloorShape::Bridge => {
+                n.len() == 2
+                    && n.iter().all(|&x| {
+                        pass(&out.data, x, floor(x), f.sector, f.dest)
+                            && pass(&out.data, f.sector, f.dest, x, floor(x))
+                    })
+            }
+            FloorShape::Closet | FloorShape::Pedestal => {
+                n.len() == 1
+                    && !pass(&out.data, n[0], floor(n[0]), f.sector, f.rest)
+                    && pass(&out.data, n[0], floor(n[0]), f.sector, f.dest)
+            }
+        };
+        if !ok {
+            v.push(RuleViolation {
+                rule: "P29",
+                subject: format!("sector {}", f.sector),
+                detail: format!(
+                    "the {:?} does not open as intended: neighbors {n:?}, rest {}, destination \
+                     {}, against the {h}-unit player height and the {step}-unit step",
+                    f.shape, f.rest, f.dest
+                ),
+            });
+        }
+    }
+}
+
+/// P30: no floor action's target borders another action's target, a lift
+/// platform, or a door sector.
+///
+/// Both destination searches read the *current* floors of the target's
+/// neighbors, so a neighbor that moves makes the destination a function of
+/// when the trigger is pulled; a load-time destination is exact only without
+/// such a chain (`docs/measurements/floor-shapes-2026-09-02.md` §G).
+///
+/// A door sector is read off the **back** side of a door line rather than off
+/// a tag, because every door special this vocabulary names
+/// ([`Tables::door_special`] and [`Tables::locked_door_kinds`]) is a manual
+/// `DR` form: `EV_VerticalDoor` (`p_doors.c`) takes
+/// `sides[line->sidenum[1]].sector`, the back side, and such a line carries
+/// no tag at all. [`crate::check::floors`]'s `mover_sectors` reads the
+/// verifier's own `Scene` the same way.
+fn check_floor_chains(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>) {
+    let mut door_specials = vec![tables.door_special()];
+    door_specials.extend(tables.locked_door_kinds().into_iter().map(|(_, s)| s));
+    let movers: BTreeSet<usize> = out
+        .floors
+        .iter()
+        .map(|f| f.sector)
+        .chain(out.lifts.iter().map(|l| l.sector))
+        .chain(
+            out.data
+                .linedefs
+                .iter()
+                .filter(|l| door_specials.contains(&l.special))
+                .filter_map(|l| l.back)
+                .map(|b| out.data.sidedefs[b].sector),
+        )
+        .collect();
+    for f in &out.floors {
+        for n in emitted_neighbors(&out.data, f.sector) {
+            if movers.contains(&n) {
+                v.push(RuleViolation {
+                    rule: "P30",
+                    subject: format!("sector {}", f.sector),
+                    detail: format!(
+                        "the {:?} bound for floor {} borders moving sector {n}, whose own floor \
+                         at {} is what the engine's search would read",
+                        f.shape, f.dest, out.data.sectors[n].floor
+                    ),
+                });
+            }
+        }
+    }
+}
+
+/// The two-sided neighbors of an emitted sector — `getNextSector`
+/// (`p_spec.c`) read over [`MapData`]: every linedef with a back side, in
+/// both directions.
+///
+/// The rule layer's own reading, rather than [`crate::check::floors`]'s: that
+/// one walks a `Scene` recovered from a built WAD, and this one walks the
+/// records the compiler is about to emit.
+fn emitted_neighbors(data: &MapData, sector: usize) -> BTreeSet<usize> {
+    let mut n = BTreeSet::new();
+    for l in &data.linedefs {
+        let Some(back) = l.back else { continue };
+        let (f, b) = (data.sidedefs[l.front].sector, data.sidedefs[back].sector);
+        if f == sector && b != sector {
+            n.insert(b);
+        }
+        if b == sector && f != sector {
+            n.insert(f);
+        }
+    }
+    n
+}
+
+/// `P_FindLowestFloorSurrounding` (`p_spec.c:270-291`): the least floor over
+/// a sector's two-sided neighbors, starting at the sector's own floor — so a
+/// sector already lower than every neighbor stays where it is.
+fn lowest_floor_surrounding(data: &MapData, sector: usize) -> i32 {
+    emitted_neighbors(data, sector)
+        .into_iter()
+        .fold(data.sectors[sector].floor, |lo, n| {
+            lo.min(data.sectors[n].floor)
+        })
+}
+
+/// `P_FindNextHighestFloor` (`p_spec.c:329-375`): the least neighboring floor
+/// strictly above the sector's current one, or that current floor when no
+/// neighbor stands above it.
+///
+/// The engine's `MAX_ADJOINING_SECTORS` cap of 20 (`p_spec.c:326`) cannot
+/// bite anything this compiler emits — a bridge has exactly two two-sided
+/// neighbors, its two rooms.
+fn next_highest_floor(data: &MapData, sector: usize) -> i32 {
+    let cur = data.sectors[sector].floor;
+    emitted_neighbors(data, sector)
+        .into_iter()
+        .map(|n| data.sectors[n].floor)
+        .filter(|&f| f > cur)
+        .min()
+        .unwrap_or(cur)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::compile::{CompileError, compile, compile_reporting};
     use crate::ir::Ir;
-    use crate::rules::{RuleViolation, check_all, check_lift_return, check_teleport_pairing};
+    use crate::rules::{
+        RuleViolation, check_all, check_lift_return, check_teleport_pairing, emitted_neighbors,
+    };
     use crate::tables::Tables;
 
     /// Two rooms joined by a plain portal, with tunable floors, width, and
@@ -1646,6 +1849,113 @@ mod tests {
         assert!(
             v.iter()
                 .any(|x| x.rule == "P5" && x.detail.contains("only from above")),
+            "{v:?}"
+        );
+    }
+    /// Two rooms 64 units apart, sealed by a 16-deep drop wall that one
+    /// switch on room `a`'s far wall lowers — a verbatim copy of
+    /// `compile::floors`'s own `WALL` fixture, which lives in that module's
+    /// private test module and so cannot be shared.
+    const WALL_MAP: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[128,128], "angle":0 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":256, "light":144,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"imp", "at":[448,128], "angle":180 } ] }
+      ],
+      "portals":[ { "a":"a", "b":"b", "kind":"drop_wall", "width":64, "at":[256,128], "thickness":16, "fires_on":"t" } ],
+      "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[0,128] } ],
+      "exits":[ { "room":"b", "trigger":"switch", "at":[576,128], "width":64 } ] }"#;
+
+    /// Compiles [`WALL_MAP`] through [`compile_reporting`] rather than
+    /// [`compile`]: P7 cannot see a floor action until the reachability
+    /// task, so a floor map still reports one. Every assertion below is on
+    /// the three floor rule ids alone.
+    fn wall_compiled() -> (Tables, crate::compile::Compiled) {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(WALL_MAP).expect("ir");
+        let (out, _) = compile_reporting(&ir, &tables).expect("a drop wall is a legal map");
+        (tables, out)
+    }
+
+    #[test]
+    fn p28_p29_p30_pass_on_a_compiled_drop_wall() {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(WALL_MAP).expect("ir");
+        let (out, v) = compile_reporting(&ir, &tables).expect("a drop wall is a legal map");
+        assert!(
+            v.iter().all(|x| !matches!(x.rule, "P28" | "P29" | "P30")),
+            "{v:?}"
+        );
+        assert_eq!(out.floors.len(), 1);
+    }
+
+    #[test]
+    fn p28_fails_when_the_emitted_destination_is_not_the_intended_floor() {
+        let (tables, mut out) = wall_compiled();
+        // Sink the "after" passage below the room: the engine's own search
+        // now lands 64 under the floor the wall was meant to come to rest on.
+        let wall = out.floors[0].sector;
+        let after = emitted_neighbors(&out.data, wall)
+            .into_iter()
+            .max()
+            .expect("the wall has two passage neighbors");
+        out.data.sectors[after].floor = -64;
+        let ir = Ir::from_json(WALL_MAP).expect("ir");
+        let v = check_all(&ir, &tables, &out);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == "P28" && x.detail.contains("lands on -64")),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn p29_fails_when_a_lowered_wall_still_blocks_one_side() {
+        let (tables, mut out) = wall_compiled();
+        let wall = out.floors[0].sector;
+        // Drop the wall's ceiling so that, lowered, the crossing window is
+        // under the player's height on the way through.
+        out.data.sectors[wall].ceiling = 40;
+        out.data.sectors[wall].floor = 40;
+        let ir = Ir::from_json(WALL_MAP).expect("ir");
+        let v = check_all(&ir, &tables, &out);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == "P29" && x.detail.contains("DropWall")),
+            "{v:?}"
+        );
+    }
+
+    #[test]
+    fn p30_fails_when_a_target_borders_a_platform() {
+        let (tables, mut out) = wall_compiled();
+        let wall = out.floors[0].sector;
+        // The wall's own two neighbors are its passages, so the chain is
+        // built by giving one of them a mover of its own: claim the "after"
+        // passage as a platform, which is what P30 refuses next to a target.
+        let after = emitted_neighbors(&out.data, wall)
+            .into_iter()
+            .max()
+            .expect("the wall has two passage neighbors");
+        out.lifts.push(crate::compile::lifts::LiftOut {
+            sector: after,
+            shape: crate::compile::lifts::LiftShape::Lift,
+            travel: 64,
+            callable_from: Vec::new(),
+            tag: 99,
+            portal: None,
+            pedestal: None,
+            low_line: None,
+            top_line: None,
+        });
+        let ir = Ir::from_json(WALL_MAP).expect("ir");
+        let v = check_all(&ir, &tables, &out);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == "P30" && x.detail.contains(&format!("sector {after}"))),
             "{v:?}"
         );
     }
