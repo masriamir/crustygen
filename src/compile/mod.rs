@@ -794,6 +794,59 @@ pub enum CompileError {
         /// The player's step height.
         step: i32,
     },
+    /// A bridge's [`crate::ir::Portal::depth`] is no more than the player's
+    /// step height, so they could step out of the pit instead of waiting for
+    /// it to rise.
+    ///
+    /// The bridge form of
+    /// [`LiftTravelTooShort`](Self::LiftTravelTooShort): a bridge's two rooms
+    /// are level by definition ([`crate::ir::IrError::BridgeFloorsDiffer`]),
+    /// so its depth *is* its travel and is what must clear the step.
+    /// `P_TryMove` lets the player climb any difference up to
+    /// `max_step_height` unaided, so a pit under that is a dip the rising
+    /// strip crosses for nobody. Judged here rather than in `Ir::from_json`,
+    /// which requires only a positive multiple of 8
+    /// ([`crate::ir::IrError::InvalidBridgeDepth`]), for the reason
+    /// [`DropWallFloorsDiffer`](Self::DropWallFloorsDiffer) is: the step
+    /// height is a table constant IR validation never loads.
+    #[error(
+        "portal `{a}` <-> `{b}` is a bridge but its pit is only {depth} deep, within the {step}-unit step: the player would step out of it"
+    )]
+    BridgeDepthTooLow {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The declared depth, which is also the pit's travel.
+        depth: i32,
+        /// The player's step height.
+        step: i32,
+    },
+    /// A bridge's gap is narrower than the player's own diameter, so they
+    /// could not stand on the risen strip.
+    ///
+    /// The bridge form of [`LiftTooShallow`](Self::LiftTooShallow), and
+    /// measured the same way: the player is a cylinder that must fit
+    /// entirely between the two rooms' walls. `depth` here is the gap along
+    /// the direction of travel — how far the player walks across the
+    /// bridge — not the bridge's own vertical
+    /// [`depth`](crate::ir::Portal::depth), which
+    /// [`BridgeDepthTooLow`](Self::BridgeDepthTooLow) judges. A bridge fills
+    /// its whole gap: it declares neither alcoves nor a thickness, so unlike
+    /// a drop wall there is nothing between the rooms to squeeze it.
+    #[error(
+        "portal `{a}` <-> `{b}` leaves {depth} units for the bridge, but the player is {need} units across"
+    )]
+    BridgeTooShallow {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The gap between the two rooms' walls.
+        depth: i32,
+        /// The player's diameter.
+        need: i32,
+    },
     /// Two floor-action triggers would write their special onto one line.
     ///
     /// The compiler-side half of
@@ -873,19 +926,6 @@ pub enum CompileError {
         /// The reveal.
         reveal: String,
     },
-    /// The map carries a floor construct whose emitter has not landed yet: a
-    /// [`crate::ir::PortalKind::Bridge`] portal.
-    ///
-    /// A placeholder, and deliberately an error rather than a silent skip:
-    /// until `emit_bridge` exists, a map naming a bridge would otherwise
-    /// compile into geometry the construct is simply missing from. That
-    /// emitter deletes this variant when it lands; the reveal, which shared
-    /// this placeholder until `emit_reveal` landed, no longer reaches it.
-    #[error("{construct} is a floor construct this compiler does not emit yet")]
-    FloorConstructNotYetEmitted {
-        /// The construct, named as the author wrote it.
-        construct: String,
-    },
     /// The compiled map breaks one or more playability rules.
     #[error(
         "map breaks {} playability rule(s): {}",
@@ -943,10 +983,10 @@ pub struct Compiled {
 ///    (rooms are authored apart — see [`crate::ir::Portal`] — so a portal
 ///    never shares a single coincident wall between its two rooms). For a
 ///    [`crate::ir::PortalKind::Plain`] portal this also fills the gap
-///    between the two openings with an open passage sector; for a door, lift
-///    or drop-wall portal it leaves both flanking walls cut but the gap
-///    itself still empty, because that gap is a sector of its own rather than
-///    a single line.
+///    between the two openings with an open passage sector; for a door, lift,
+///    drop-wall or bridge portal it leaves both flanking walls cut but the
+///    gap itself still empty, because that gap is a sector of its own rather
+///    than a single line.
 /// 4. [`doors::emit_doors`] fills that gap with a dedicated closed sector for
 ///    every door portal — optionally flanked by up to two trim alcove
 ///    sectors ([`crate::ir::Portal::alcove_near`]/
@@ -963,9 +1003,10 @@ pub struct Compiled {
 ///    exits so a wall pad and an exit compete for wall spans through
 ///    `portals::split_wall_for_opening` like any two openings, and before
 ///    the overlap check since it emits sectors.
-/// 7. [`floors::emit_floors`] places every floor-action trigger and fills
-///    every drop-wall portal's gap with the sealed sector that trigger
-///    lowers, again from the same [`TagAllocator`]. Runs after `cut_portals`
+/// 7. [`floors::emit_floors`] places every floor-action trigger, cuts every
+///    reveal's island, and fills every drop-wall portal's gap with the sealed
+///    sector that trigger lowers and every bridge portal's with the pit it
+///    raises, again from the same [`TagAllocator`]. Runs after `cut_portals`
 ///    left that gap empty (step 3) and before the overlap check since it
 ///    emits sectors — and, like every other pass that *splits* a wall (steps
 ///    5 and 6), before step 8, whose recorded linedef indices a later split

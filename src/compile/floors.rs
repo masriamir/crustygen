@@ -1,6 +1,6 @@
 //! The floor-action pass: placed triggers and the opening constructs they
-//! fire — the drop wall and the reveal today, the bridge next — lowered to
-//! one [`FloorActionOut`] per target.
+//! fire — the drop wall, the reveal and the bridge — lowered to one
+//! [`FloorActionOut`] per target.
 //!
 //! Every action this pass emits is one-way. `EV_DoFloor` (`p_floor.c`) hangs
 //! a `T_MoveFloor` thinker on the target sector and `T_MoveFloor` removes it
@@ -16,13 +16,14 @@
 //! trigger whose constructs disagree, and this pass allocates exactly one tag
 //! per trigger and stamps it on every target.
 //!
-//! The gap a drop wall fills is already open when this pass runs:
-//! [`crate::compile::portals::cut_portals`] cuts both rooms' own walls for a
-//! drop-wall portal but leaves the void between them empty, exactly as it
-//! does for a door or a lift — the wall is a sector, not a line.
+//! The gap a drop wall or a bridge fills is already open when this pass
+//! runs: [`crate::compile::portals::cut_portals`] cuts both rooms' own walls
+//! for either kind but leaves the void between them empty, exactly as it does
+//! for a door or a lift — the wall and the pit are sectors, not lines.
 
+use crate::compile::heights::visible_lower_side;
 use crate::compile::portals::{
-    Cut, PortalGeometry, emit_jambs, emit_opening, emit_segment, emit_switch_line,
+    Cut, PortalGeometry, emit_gap_sector, emit_jambs, emit_opening, emit_segment, emit_switch_line,
     find_opening_line, mark_secret_thresholds, resolve_portal, sector_like, split_wall_for_opening,
 };
 use crate::compile::tags::TagAllocator;
@@ -170,12 +171,13 @@ fn trigger_index(triggers: &[TriggerOut], id: &str) -> usize {
 ///
 /// # Errors
 /// Returns [`CompileError::UnknownTheme`] when `ir.theme` resolves to no
-/// texture set, [`CompileError::FloorConstructNotYetEmitted`] for a bridge
-/// portal (see that variant), [`CompileError::TriggerWallNotFound`]
+/// texture set, [`CompileError::TriggerWallNotFound`]
 /// when a switch trigger's `at` matches no wall segment of its room,
 /// [`CompileError::DropWallTooThick`] and
 /// [`CompileError::DropWallFloorsDiffer`] for a drop wall the player could
-/// not pass once it has fired, [`CompileError::RevealRiseTooLow`] for a
+/// not pass once it has fired, [`CompileError::BridgeDepthTooLow`] for a pit
+/// the player could step out of and [`CompileError::BridgeTooShallow`] for a
+/// bridge they could not stand on, [`CompileError::RevealRiseTooLow`] for a
 /// pedestal reveal the player could climb rather than wait for and
 /// [`CompileError::RevealRiseTooHigh`] for one that would rest at or above
 /// its host's ceiling, [`CompileError::TriggerLineAlreadyClaimed`]
@@ -196,16 +198,25 @@ pub fn emit_floors(
 ) -> Result<(Vec<TriggerOut>, Vec<FloorActionOut>), CompileError> {
     // Resolved unconditionally, mirroring `exits::emit_exits`: an
     // unresolvable theme is an authoring error that should surface the same
-    // way regardless of which triggers (if any) are switches. Both halves of
-    // the switch's appearance come out of one lookup, so one bad theme is one
-    // error rather than two paths to the same one.
+    // way regardless of which triggers (if any) are switches, or which
+    // constructs (if any) are bridges. Both halves of the switch's appearance
+    // come out of one lookup, so one bad theme is one error rather than two
+    // paths to the same one.
+    let unknown_theme = || CompileError::UnknownTheme {
+        theme: ir.theme.clone(),
+    };
     let (switch_tex, switch_width) = tables
         .texture("switch", &ir.theme)
         .zip(tables.switch_width(&ir.theme))
-        .ok_or_else(|| CompileError::UnknownTheme {
-            theme: ir.theme.clone(),
-        })?;
+        .ok_or_else(unknown_theme)?;
     let switch_tex = switch_tex.to_owned();
+    // A bridge's pit shows the same riser a lift's platform does: both are a
+    // floor the player watches rise past a wall, and the corpus draws them
+    // from one texture family (`vocabulary.toml`'s `lift_riser_source`).
+    let riser = tables
+        .texture("lift_riser", &ir.theme)
+        .ok_or_else(unknown_theme)?
+        .to_owned();
 
     let mut triggers: Vec<TriggerOut> = ir
         .triggers
@@ -260,7 +271,7 @@ pub fn emit_floors(
         .map(|t| resolve_trigger(ir, data, t, switch_width))
         .collect::<Result<Vec<_>, CompileError>>()?;
 
-    let out = emit_constructs(ir, tables, data, &triggers)?;
+    let out = emit_constructs(ir, tables, data, &triggers, &riser)?;
 
     for (i, placement) in placements.iter().enumerate() {
         let (line, activator) = emit_trigger_line(
@@ -296,17 +307,18 @@ pub fn emit_floors(
 /// implied by where one loop ends and the next begins.
 ///
 /// # Errors
-/// Returns [`CompileError::FloorConstructNotYetEmitted`] for a bridge portal,
-/// and whatever [`emit_drop_wall`] or [`emit_reveal`] raise.
+/// Returns whatever [`emit_drop_wall`], [`emit_bridge`] or [`emit_reveal`]
+/// raise.
 ///
 /// # Panics
-/// Panics if a drop wall names no trigger, or a construct names a trigger
-/// [`Ir::from_json`] did not validate.
+/// Panics if a drop wall or a bridge names no trigger, or a construct names a
+/// trigger [`Ir::from_json`] did not validate.
 fn emit_constructs(
     ir: &Ir,
     tables: &Tables,
     data: &mut MapData,
     triggers: &[TriggerOut],
+    riser: &str,
 ) -> Result<Vec<FloorActionOut>, CompileError> {
     let mut out = Vec::new();
     for (pi, portal) in ir.portals.iter().enumerate() {
@@ -320,9 +332,20 @@ fn emit_constructs(
                 out.push(emit_drop_wall(ir, tables, data, pi, ti, triggers[ti].tag)?);
             }
             PortalKind::Bridge => {
-                return Err(CompileError::FloorConstructNotYetEmitted {
-                    construct: format!("bridge `{}` <-> `{}`", portal.a, portal.b),
-                });
+                let id = portal
+                    .fires_on
+                    .as_deref()
+                    .expect("Ir::from_json requires a trigger on a bridge");
+                let ti = trigger_index(triggers, id);
+                out.push(emit_bridge(
+                    ir,
+                    tables,
+                    data,
+                    pi,
+                    ti,
+                    triggers[ti].tag,
+                    riser,
+                )?);
             }
             PortalKind::Plain | PortalKind::Door | PortalKind::Locked | PortalKind::Lift => {}
         }
@@ -768,6 +791,146 @@ fn emit_drop_wall(
     })
 }
 
+/// Emits one bridge: a pit strip filling the portal's gap, resting
+/// [`depth`](crate::ir::Portal::depth) below the two rooms' shared floor and
+/// raised once to meet it.
+///
+/// Like the drop wall's, the destination is what the engine will compute
+/// rather than what this pass asserts: `P_FindNextHighestFloor` from the pit
+/// is the rooms' own floor, because [`emit_gap_sector`] gives the strip no
+/// two-sided neighbors but those two rooms and
+/// [`Ir::from_json`](crate::ir::Ir::from_json) has already refused a bridge
+/// whose rooms' floors differ ([`crate::ir::IrError::BridgeFloorsDiffer`]).
+/// Rule P28 re-runs that search over the emitted sectors.
+///
+/// **The pit is a drop the player may take before the bridge rises, and
+/// nothing here forbids it** — the corpus builds pits both escapable and
+/// not. Rule P7's flood arbitrates: a pit whose trigger cannot be fired from
+/// inside it, and which has no other way out, strands whoever drops in, and
+/// the flood is what decides that rather than this emitter (design §3.4).
+/// The one bridge trigger that cannot strand anyone is a walkover naming the
+/// bridge itself, whose special `emit_trigger_line` writes onto *both* of the
+/// thresholds handed back in [`FloorActionOut::lines`].
+///
+/// # Errors
+/// Returns [`CompileError::BridgeDepthTooLow`] when the pit is no deeper than
+/// the player's step, so they would step out of it rather than wait,
+/// [`CompileError::BridgeTooShallow`] when the gap leaves the strip narrower
+/// than the player's own diameter, so they could not stand on the risen
+/// bridge, and whatever `resolve_portal` raises.
+///
+/// # Panics
+/// Panics if the portal carries no `depth`, which
+/// [`Ir::from_json`](crate::ir::Ir::from_json) requires of every bridge
+/// ([`crate::ir::IrError::MissingBridgeDepth`]) before this pass runs.
+fn emit_bridge(
+    ir: &Ir,
+    tables: &Tables,
+    data: &mut MapData,
+    pi: usize,
+    ti: usize,
+    tag: u16,
+    riser: &str,
+) -> Result<FloorActionOut, CompileError> {
+    let portal = &ir.portals[pi];
+    let geometry = resolve_portal(ir, portal)?;
+    let (room_a, room_b) = (&ir.rooms[geometry.ia], &ir.rooms[geometry.ib]);
+    let depth = portal
+        .depth
+        .expect("Ir::from_json requires depth on a bridge");
+
+    // A pit the player can simply step out of is a dip, not a bridge:
+    // `P_TryMove` lets them climb any difference up to `max_step_height`
+    // unaided, so the rising strip would be scenery carrying a
+    // `raiseFloorToNearest` special. Judged here rather than in the IR — which
+    // requires only a positive multiple of 8 — because the step height is a
+    // table constant IR validation never loads, the same split
+    // `DropWallFloorsDiffer` and `RevealRiseTooLow` are on.
+    let step = tables.step_height();
+    if depth <= step {
+        return Err(CompileError::BridgeDepthTooLow {
+            a: portal.a.clone(),
+            b: portal.b.clone(),
+            depth,
+            step,
+        });
+    }
+
+    // And a strip the player cannot stand on is not a bridge either. The pit
+    // fills the whole gap — a bridge declares neither alcoves
+    // (`IrError::DoorFieldsOnPlainPortal`) nor a thickness
+    // (`IrError::FloorFieldOnOtherPortal`), so unlike a drop wall there is
+    // nothing between the rooms to squeeze it — which makes the gap itself
+    // what must hold the player. Measured against their diameter, as
+    // `LiftTooShallow` measures a platform: they are a cylinder that must fit
+    // entirely between the two rooms' walls.
+    let player = tables.player();
+    let gap = (geometry.span.far - geometry.span.near).abs();
+    let need = player.radius * 2;
+    if gap < need {
+        return Err(CompileError::BridgeTooShallow {
+            a: portal.a.clone(),
+            b: portal.b.clone(),
+            depth: gap,
+            need,
+        });
+    }
+
+    // The two rooms share a floor, so room `a`'s is the pair's. The ceiling
+    // is the lower of the two, as every gap sector's is, and the strip takes
+    // room `a`'s light and flats, as a plain passage does — but the riser as
+    // its wall texture, since every face it shows is a face of the pit.
+    let dest = room_a.floor;
+    let rest = dest - depth;
+    let seg = emit_gap_sector(
+        data,
+        &geometry.span,
+        geometry.open_lo,
+        geometry.open_hi,
+        geometry.ia,
+        geometry.ib,
+        sector_like(room_a, rest, room_a.ceiling.min(room_b.ceiling), riser, tag),
+        &room_a.wall_tex,
+    );
+
+    // The riser is the pit's own wall, seen by the player standing in it.
+    // `r_segs.c`'s `R_StoreWallRange` draws a lower on the sidedef whose own
+    // sector has the lower floor — at rest that is the pit's, on both
+    // thresholds — and `heights::visible_lower_side` is exactly that
+    // comparison, called rather than re-derived here. Pegged
+    // (`lower_unpegged` clear) so the riser stays anchored to the pit floor
+    // and shortens as it rises, the way a lift's riser rides with its
+    // platform. The room-side lowers are left bare: the engine never draws
+    // them, and `heights::apply_height_textures` fills only the visible side.
+    for line in [seg.near_line, seg.far_line] {
+        let l = &data.linedefs[line];
+        let back = l.back.expect("emit_segment emits two-sided thresholds");
+        let floor_of = |side: usize| data.sectors[data.sidedefs[side].sector].floor;
+        let gap_side = visible_lower_side(floor_of(l.front), floor_of(back), l.front, back)
+            .expect("the pit rests a positive depth below both rooms");
+        riser.clone_into(&mut data.sidedefs[gap_side].lower);
+    }
+
+    mark_secret_thresholds(
+        data,
+        room_a.secret != room_b.secret,
+        [seg.near_line, seg.far_line],
+    );
+
+    Ok(FloorActionOut {
+        sector: seg.sector,
+        family: FloorFamily::RaiseToNearest,
+        rest,
+        dest,
+        tag,
+        trigger: ti,
+        shape: FloorShape::Bridge,
+        portal: Some(pi),
+        reveal: None,
+        lines: vec![seg.near_line, seg.far_line],
+    })
+}
+
 /// Emits one reveal: a sealed island inside its host room, lowered once to
 /// the host's floor.
 ///
@@ -979,6 +1142,62 @@ mod tests {
       "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[128,576] } ],
       "exits":[ { "room":"b", "trigger":"switch", "at":[128,0], "width":64 } ] }"#;
 
+    /// Two rooms 64 units apart with a bridge between them: a pit resting 96
+    /// below their shared floor that one switch on room `a`'s far wall
+    /// raises to meet it.
+    ///
+    /// Its two rooms are alike, so which room the pit borrows from is not
+    /// tested here — [`BRIDGE_SOUTHWARD`] varies every borrowed property, and
+    /// [`BRIDGE_WALKOVER`] is this same map on the other trigger form.
+    const BRIDGE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[ { "a":"a", "b":"b", "kind":"bridge", "width":64, "at":[256,128], "depth":96, "fires_on":"t" } ],
+      "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[0,128] } ],
+      "exits":[ { "room":"b", "trigger":"switch", "at":[576,128], "width":64 } ] }"#;
+
+    /// The same bridge on the trigger form that cannot strand anyone: a
+    /// walkover naming the bridge's *own* two rooms, whose special lands on
+    /// both of the pit's thresholds, so whoever steps down into the pit —
+    /// from either side — raises it under themselves.
+    const BRIDGE_WALKOVER: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[ { "a":"a", "b":"b", "kind":"bridge", "width":64, "at":[256,128], "depth":96, "fires_on":"t" } ],
+      "triggers":[ { "id":"t", "kind":"walkover", "portal":["a","b"] } ],
+      "exits":[ { "room":"b", "trigger":"switch", "at":[576,128], "width":64 } ] }"#;
+
+    /// The same bridge on the other axis and the other direction: room `a` is
+    /// *north* of room `b`, so the portal's span runs along Y with
+    /// `span.far < span.near`.
+    ///
+    /// The two rooms also differ in every property the pit could borrow —
+    /// light, both flats, the wall texture and the ceiling — which
+    /// [`BRIDGE`]'s matched pair cannot test: the pit must take room `a`'s
+    /// look and the *lower* of the two ceilings. Only the floors match, as
+    /// [`crate::ir::IrError::BridgeFloorsDiffer`] requires of every bridge.
+    const BRIDGE_SOUTHWARD: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,320],[0,576],[256,576],[256,320]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[128,448], "angle":0 } ] },
+        { "id":"b", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":256, "light":144,
+          "floor_tex":"FLAT1", "ceil_tex":"FLAT20", "wall_tex":"BROWN1" }
+      ],
+      "portals":[ { "a":"a", "b":"b", "kind":"bridge", "width":64, "at":[128,320], "depth":96, "fires_on":"t" } ],
+      "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[128,576] } ],
+      "exits":[ { "room":"b", "trigger":"switch", "at":[128,0], "width":64 } ] }"#;
+
     /// One room holding one 64x64 closet, lowered by a switch on the room's
     /// west wall, with an imp sealed inside the rock.
     ///
@@ -1059,6 +1278,22 @@ mod tests {
             .collect();
         lines.sort_unstable();
         lines
+    }
+
+    /// One two-sided line's `(gap-side, room-side)` sidedefs, given which of
+    /// the two sectors is the gap's own.
+    ///
+    /// Which of `front`/`back` is which is [`emit_opening`]'s business, not a
+    /// caller's, so the tests read it off the emitted sidedefs rather than
+    /// assuming an order.
+    fn gap_and_room_sides(data: &MapData, line: usize, gap: usize) -> (usize, usize) {
+        let l = &data.linedefs[line];
+        let back = l.back.expect("a threshold is two-sided");
+        if data.sidedefs[l.front].sector == gap {
+            (l.front, back)
+        } else {
+            (back, l.front)
+        }
     }
 
     /// The extent of `sector`'s own one-sided lines (its jambs) along the
@@ -1423,15 +1658,252 @@ mod tests {
     }
 
     #[test]
-    fn a_bridge_is_refused_until_its_emitter_lands() {
-        let bridge = WALL.replace(
-            r#""kind":"drop_wall", "width":64, "at":[256,128], "thickness":16"#,
-            r#""kind":"bridge", "width":64, "at":[256,128], "depth":16"#,
+    fn a_bridge_rests_depth_below_its_rooms_and_rises_to_their_floor() {
+        let Built {
+            data,
+            triggers,
+            floors,
+            ..
+        } = compile_data(BRIDGE);
+
+        let t = &triggers[0];
+        let switch = &data.linedefs[t.line];
+        assert_eq!(
+            (t.family, switch.special, switch.tag, switch.back),
+            (FloorFamily::RaiseToNearest, 18, t.tag, None),
+            "an S1 raiseFloorToNearest on a one-sided use line"
         );
-        let err = build(&bridge).expect_err("no bridge emitter yet");
+
+        assert_eq!(floors.len(), 1);
+        let f = &floors[0];
+        let s = &data.sectors[f.sector];
+        assert_eq!(
+            (s.floor, s.ceiling, s.tag),
+            (-96, 192, t.tag),
+            "a pit 96 below the rooms' shared floor, under their ceiling"
+        );
+        assert_eq!(
+            (f.rest, f.dest, f.shape, f.family),
+            (-96, 0, FloorShape::Bridge, FloorFamily::RaiseToNearest)
+        );
+        assert_eq!((f.portal, f.reveal, f.trigger), (Some(0), None, 0));
+        assert_eq!(
+            (s.floor_tex.as_str(), s.wall_tex.as_str(), s.light),
+            ("FLOOR4_8", "SUPPORT3", 160),
+            "room `a`'s look, with the riser as the pit's own wall texture"
+        );
+
+        // The pit fills the whole gap — a bridge portal declares no alcoves
+        // and no thickness — so its jambs run the gap's full 64 units.
+        assert_eq!(jamb_extent(&data, f.sector, true), (256, 320));
+
+        // Its only two-sided neighbors are the two rooms, which is what makes
+        // `P_FindNextHighestFloor` from the pit exactly their shared floor.
+        assert_eq!(
+            chain(&data),
+            [(256, 0, f.sector), (320, 1, f.sector)],
+            "room `a` | the pit | room `b`, and nothing else"
+        );
+        assert_eq!(f.lines.len(), 2);
+        for &line in &f.lines {
+            let l = &data.linedefs[line];
+            assert_eq!(
+                (l.special, l.tag),
+                (0, 0),
+                "a switch-triggered bridge carries its special on the switch, not on the pit"
+            );
+        }
+
+        // The gap-side lowers toward each room carry the riser, pegged; the
+        // room-side lowers are left blank for `heights` (nothing shows at
+        // rest, since the pit is the lower floor on both thresholds).
+        // Re-derived from the emitted lines rather than read off `f.lines`,
+        // so a construct that recorded the wrong indices cannot pass.
+        let faces: Vec<usize> = data
+            .linedefs
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| {
+                l.back.is_some_and(|b| data.sidedefs[b].sector == f.sector)
+                    || (data.sidedefs[l.front].sector == f.sector && l.back.is_some())
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(faces, f.lines, "the pit's only two-sided lines");
+        for line in faces {
+            let (gap_side, room_side) = gap_and_room_sides(&data, line, f.sector);
+            assert_eq!(data.sidedefs[gap_side].lower, "SUPPORT3");
+            assert!(
+                data.sidedefs[room_side].lower.is_empty(),
+                "the side the engine never draws is left bare"
+            );
+            assert!(
+                !data.linedefs[line].lower_unpegged,
+                "the riser rides up with the pit floor"
+            );
+        }
+    }
+
+    #[test]
+    fn a_walkover_naming_a_bridge_writes_its_special_on_both_pit_thresholds() {
+        let Built {
+            data,
+            triggers,
+            floors,
+            ..
+        } = compile_data(BRIDGE_WALKOVER);
+
+        let t = &triggers[0];
+        assert_eq!(
+            (t.family, t.walkover, t.activator),
+            (FloorFamily::RaiseToNearest, true, 0),
+            "the bridge portal's own room `a` fronts the near threshold"
+        );
+
+        let f = &floors[0];
+        assert_eq!((f.shape, f.rest, f.dest), (FloorShape::Bridge, -96, 0));
+        assert_eq!(f.lines.len(), 2);
+        for &line in &f.lines {
+            let l = &data.linedefs[line];
+            assert_eq!(
+                (l.special, l.tag),
+                (119, t.tag),
+                "a W1 raiseFloorToNearest on both of the pit's thresholds"
+            );
+            let back = l.back.expect("a pit threshold is two-sided");
+            assert!(
+                data.sidedefs[l.front].sector == f.sector || data.sidedefs[back].sector == f.sector,
+                "both written lines border the pit"
+            );
+        }
         assert!(
-            matches!(&err, CompileError::FloorConstructNotYetEmitted { construct } if construct == "bridge `a` <-> `b`"),
-            "expected FloorConstructNotYetEmitted naming the bridge, got {err}"
+            f.lines.contains(&t.line),
+            "the recorded trigger line is one of the two written"
+        );
+    }
+
+    #[test]
+    fn a_bridge_on_the_other_axis_takes_room_as_look_and_the_lower_ceiling() {
+        // The rotation-blind failure this repo has already paid for once
+        // (KNOWN-GAPS: 65 green tests over one rectangle hid four Critical
+        // geometry defects). Here the gap runs along Y with room `a` at the
+        // *far* end of it, and the two rooms share nothing but their floor.
+        let Built { data, floors, .. } = compile_data(BRIDGE_SOUTHWARD);
+        let f = &floors[0];
+        let s = &data.sectors[f.sector];
+        assert_eq!(
+            (s.floor, s.ceiling, s.light),
+            (-96, 192, 160),
+            "96 below the shared floor, under the lower of the two ceilings, in room `a`'s light"
+        );
+        assert_eq!(
+            (
+                s.floor_tex.as_str(),
+                s.ceil_tex.as_str(),
+                s.wall_tex.as_str()
+            ),
+            ("FLOOR4_8", "CEIL3_5", "SUPPORT3"),
+            "room `a`'s flats, and the riser as the pit's own wall texture"
+        );
+        assert_eq!((f.rest, f.dest, f.shape), (-96, 0, FloorShape::Bridge));
+
+        // The chain, read in increasing Y — which here runs from room `b` up
+        // to room `a`, the reverse of the fixture's own near-to-far order.
+        assert_eq!(
+            chain(&data),
+            [(256, 1, f.sector), (320, 0, f.sector)],
+            "room `b` | the pit | room `a`, and nothing else"
+        );
+        assert_eq!(
+            jamb_extent(&data, f.sector, false),
+            (256, 320),
+            "the gap's full 64 units, measured on Y this time"
+        );
+        for &line in &f.lines {
+            let (gap_side, room_side) = gap_and_room_sides(&data, line, f.sector);
+            assert_eq!(data.sidedefs[gap_side].lower, "SUPPORT3");
+            assert!(
+                data.sidedefs[room_side].lower.is_empty(),
+                "the side the engine never draws is left bare, on either room"
+            );
+            assert!(!data.linedefs[line].lower_unpegged);
+        }
+    }
+
+    /// The accept path runs through [`compile_reporting`] rather than
+    /// [`compile`]: P7 cannot see a floor action until the reachability
+    /// task, which flips this to `compile`. Asserting that *every* violation
+    /// is P7 keeps the test honest without pinning a count that task will
+    /// legitimately change.
+    #[test]
+    fn a_bridges_riser_survives_the_passes_that_run_after_it() {
+        let ir = Ir::from_json(BRIDGE_WALKOVER).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let (out, violations) =
+            compile_reporting(&ir, &tables).expect("a pit the walkover raises is a legal map");
+        assert!(
+            violations.iter().all(|v| v.rule == "P7"),
+            "only the not-yet-modeled reachability of a pit may be flagged, got {violations:?}"
+        );
+
+        // `heights::apply_height_textures` fills only empty slots, so the
+        // riser this pass wrote onto the pit side is still there afterward —
+        // and the room side, which the engine never draws, is still bare.
+        let f = &out.floors[0];
+        for &line in &f.lines {
+            let (gap_side, room_side) = gap_and_room_sides(&out.data, line, f.sector);
+            assert_eq!(out.data.sidedefs[gap_side].lower, "SUPPORT3");
+            assert!(out.data.sidedefs[room_side].lower.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_bridge_no_deeper_than_a_step_is_rejected() {
+        // 24 is exactly the step: the player would climb straight out of the
+        // pit, so the rising strip is scenery rather than a bridge.
+        let shallow_pit = BRIDGE.replace(r#""depth":96"#, r#""depth":24"#);
+        let err = build(&shallow_pit).expect_err("a 24-unit pit is within the 24-unit step");
+        assert!(
+            matches!(
+                &err,
+                CompileError::BridgeDepthTooLow { a, b, depth, step }
+                    if a == "a" && b == "b" && *depth == 24 && *step == 24
+            ),
+            "expected BridgeDepthTooLow naming both rooms, the depth and the step, got {err}"
+        );
+
+        // 32 — the next multiple of 8 above the step, which is all the IR
+        // requires of a depth — is the first accepted one, and it emits.
+        let one_step_over = BRIDGE.replace(r#""depth":96"#, r#""depth":32"#);
+        let Built { data, floors, .. } = compile_data(&one_step_over);
+        assert_eq!(
+            (data.sectors[floors[0].sector].floor, floors[0].rest),
+            (-32, -32),
+            "a pit one tile deeper than the step still rests below it"
+        );
+    }
+
+    #[test]
+    fn a_bridge_whose_gap_is_narrower_than_the_player_is_rejected() {
+        // Room `b` pulled in to 24 units from room `a`, on an 8-unit grid
+        // since the fixture's own 64 cannot express it. The pit fills the
+        // whole gap, so a 24-unit gap is a 24-unit strip — and the player is
+        // 32 units across, so they could never stand on the risen bridge.
+        let narrow = BRIDGE
+            .replace(r#""grid":64"#, r#""grid":8"#)
+            .replace(
+                r"[[320,0],[320,256],[576,256],[576,0]]",
+                r"[[280,0],[280,256],[536,256],[536,0]]",
+            )
+            .replace(r#""at":[576,128]"#, r#""at":[536,128]"#);
+        let err = build(&narrow).expect_err("a 24-unit gap is narrower than the player");
+        assert!(
+            matches!(
+                &err,
+                CompileError::BridgeTooShallow { a, b, depth, need }
+                    if a == "a" && b == "b" && *depth == 24 && *need == 32
+            ),
+            "expected BridgeTooShallow naming the gap and the player's diameter, got {err}"
         );
     }
 
