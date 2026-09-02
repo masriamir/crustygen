@@ -1178,6 +1178,24 @@ pub enum IrError {
         /// The pedestal it lands on.
         pedestal: String,
     },
+    /// A teleport's destination point lies inside, or on the boundary of, a
+    /// reveal's rectangle in the destination's own room — the reveal's twin
+    /// of [`Self::TeleportDestinationOnPedestal`], and rejected for the same
+    /// reason.
+    ///
+    /// A reveal's rectangle is its own sector, and a sealed one: a closet
+    /// rests solid, so the traveler would arrive inside the rock, and a
+    /// pedestal reveal rests raised, so the traveler would arrive on top of
+    /// the block rather than on the floor the author aimed at.
+    #[error(
+        "teleport `{teleport}` delivers onto reveal `{reveal}`: a destination inside a reveal rectangle would arrive in the sealed cell"
+    )]
+    TeleportDestinationOnReveal {
+        /// The teleport whose destination lands on the reveal.
+        teleport: String,
+        /// The reveal it lands on.
+        reveal: String,
+    },
     /// Two triggers share an id.
     #[error("trigger `{id}` is declared twice")]
     DuplicateTrigger {
@@ -1233,6 +1251,27 @@ pub enum IrError {
         a: String,
         /// The second room.
         b: String,
+    },
+    /// A walkover trigger's `portal: [a, b]` names more than one portal, so
+    /// which opening line would carry the special is undetermined.
+    ///
+    /// Two portals may legally join one room pair — a second opening in the
+    /// same wall is refused only when its span *overlaps* the first's — so
+    /// `[a, b]` is not by itself the name of one line. Rejected rather than
+    /// resolved to whichever portal comes first in the list: the special ends
+    /// up on one specific line, so the author has to be the one who picks it.
+    #[error(
+        "trigger `{id}` names portal `{a}` <-> `{b}`, which {count} portals join; a walkover needs exactly one"
+    )]
+    AmbiguousWalkoverPortal {
+        /// The trigger's identifier.
+        id: String,
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// How many portals join the two rooms.
+        count: usize,
     },
     /// A drop wall or bridge that names no [`Portal::fires_on`], leaving
     /// nothing to fire it.
@@ -1680,7 +1719,11 @@ impl Ir {
     /// repeated reveal id, [`IrError::RevealUnknownRoom`] for a reveal naming
     /// a room that does not exist, [`IrError::RevealRiseNotPositive`] and
     /// [`IrError::RiseOnCloset`] for a reveal's `rise`,
-    /// [`IrError::RevealGeometry`] for a reveal's rectangle, and
+    /// [`IrError::AmbiguousWalkoverPortal`] for a walkover naming a room pair
+    /// that more than one portal joins, [`IrError::RevealGeometry`] for a
+    /// reveal's rectangle (including one overlapping a pedestal, another
+    /// reveal or a teleport pad), [`IrError::TeleportDestinationOnReveal`]
+    /// for a teleport delivering inside a reveal, and
     /// [`IrError::TooManyFloorActions`] for a map carrying more than
     /// [`Self::MAX_FLOOR_ACTIONS`] of them.
     pub fn from_json(s: &str) -> Result<Self, IrError> {
@@ -1845,12 +1888,16 @@ impl Ir {
     /// Validates every portal's door/lift-only fields
     /// ([`Portal::door_thickness`]/[`Portal::alcove_near`]/[`Portal::alcove_far`]):
     /// `door_thickness` present and one of [`Self::DOOR_DIMENSIONS`] for
-    /// [`PortalKind::Door`]/[`PortalKind::Locked`], absent for
-    /// [`PortalKind::Plain`]/[`PortalKind::Lift`]; the alcoves, when
-    /// present, one of [`Self::DOOR_DIMENSIONS`] for
+    /// [`PortalKind::Door`]/[`PortalKind::Locked`], and absent for every
+    /// other kind — [`PortalKind::Lift`] and [`PortalKind::DropWall`] report
+    /// the more specific [`IrError::DoorThicknessOnLift`], since each already
+    /// fills its gap with a sector of its own. The alcoves, when present,
+    /// must be one of [`Self::DOOR_DIMENSIONS`] for
     /// [`PortalKind::Door`]/[`PortalKind::Locked`] and one of
-    /// [`Self::LIFT_ALCOVE_DIMENSIONS`] for [`PortalKind::Lift`], and
-    /// absent for [`PortalKind::Plain`].
+    /// [`Self::LIFT_ALCOVE_DIMENSIONS`] for [`PortalKind::Lift`] and
+    /// [`PortalKind::DropWall`], and are rejected outright on
+    /// [`PortalKind::Plain`] and [`PortalKind::Bridge`], neither of which has
+    /// a door construction or (in v1) an alcove.
     ///
     /// Runs unconditionally over every portal — unlike [`Self::validate_door_gap`],
     /// this does not depend on `at` resolving to a real facing span, since a
@@ -2488,8 +2535,8 @@ impl Ir {
     }
 
     /// Validates one trigger's own placement: a switch on a point of its
-    /// room's own wall, a walkover on a portal whose opening line can carry
-    /// it, and neither carrying the other's fields.
+    /// room's own wall, a walkover on exactly one portal whose opening line
+    /// can carry it, and neither carrying the other's fields.
     ///
     /// A switch's point is judged by exactly the test
     /// [`crate::compile::exits`] applies to an exit's — [`wall_edges`] and
@@ -2530,13 +2577,24 @@ impl Ir {
                 if t.room.is_some() || t.at.is_some() {
                     return Err(off_wall("a walkover takes no `room` or `at`".to_owned()));
                 }
-                let portal = ir
+                let mut joining = ir
                     .portals
                     .iter()
-                    .find(|p| (p.a == *a && p.b == *b) || (p.a == *b && p.b == *a));
-                let Some(portal) = portal else {
+                    .filter(|p| (p.a == *a && p.b == *b) || (p.a == *b && p.b == *a));
+                let Some(portal) = joining.next() else {
                     return Err(off_wall(format!("no portal joins `{a}` and `{b}`")));
                 };
+                // Before the kind test below, which would otherwise judge a
+                // portal that may not be the one the special lands on.
+                let count = 1 + joining.count();
+                if count > 1 {
+                    return Err(IrError::AmbiguousWalkoverPortal {
+                        id: t.id.clone(),
+                        a: a.clone(),
+                        b: b.clone(),
+                        count,
+                    });
+                }
                 // A plain portal's opening line, or a bridge's own two pit
                 // thresholds: stepping down into the pit is the crossing that
                 // raises it, the one bridge trigger that cannot strand the
@@ -2704,8 +2762,8 @@ impl Ir {
     }
 
     /// Validates every reveal: its id and room, the rest shape its `rise`
-    /// belongs to, its rectangle, and that no two islands in one room
-    /// overlap.
+    /// belongs to, its rectangle, that no two islands in one room overlap,
+    /// and that no teleport delivers into one.
     fn validate_reveals(ir: &Self, seen: &HashSet<&str>) -> Result<(), IrError> {
         let mut ids: HashSet<&str> = HashSet::new();
         for r in &ir.reveals {
@@ -2733,13 +2791,14 @@ impl Ir {
             let room = ir.room(&r.room).expect("checked above");
             Self::validate_island_rect(room, Island::Reveal, &r.id, r.at, r.size, &r.things)?;
         }
-        Self::validate_reveal_overlaps(ir)
+        Self::validate_reveal_overlaps(ir)?;
+        Self::validate_destinations_off_reveals(ir)
     }
 
-    /// Rejects a reveal that overlaps or touches a pedestal or another
-    /// reveal in the same room — the island rule
+    /// Rejects a reveal that overlaps or touches a pedestal, another reveal
+    /// or a teleport pad in the same room — the whole of the island rule
     /// [`IrError::PedestalsOverlap`] already keeps between pedestals and
-    /// teleport pads, extended to the third kind of island.
+    /// pads, extended to the third kind of island and in the same order.
     fn validate_reveal_overlaps(ir: &Self) -> Result<(), IrError> {
         for (i, r) in ir.reveals.iter().enumerate() {
             let others = ir
@@ -2758,6 +2817,38 @@ impl Ir {
                     return Err(IrError::RevealGeometry {
                         id: r.id.clone(),
                         detail: format!("overlaps `{id}`"),
+                    });
+                }
+            }
+            for t in ir.teleports.iter().filter(|t| t.room == r.room) {
+                let room = ir.room(&t.room).expect("validated by validate_teleports");
+                let pad = pad_square(room, t.pad).expect("validated by validate_teleports");
+                if squares_overlap_or_touch(r.rect(), pad) {
+                    return Err(IrError::RevealGeometry {
+                        id: r.id.clone(),
+                        detail: format!("overlaps teleport pad `{}`", t.id),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rejects a teleport whose destination point lands inside a reveal.
+    ///
+    /// The reveal's twin of [`Self::validate_destinations_off_pedestals`],
+    /// run in the same place in the order and by the same closed-on-both-axes
+    /// test: a destination is a *point*, so the island rule between two
+    /// rectangles never sees it, and a point on the rectangle's own edge is
+    /// one the arrival's radius straddles.
+    fn validate_destinations_off_reveals(ir: &Self) -> Result<(), IrError> {
+        for r in &ir.reveals {
+            let (lo, hi) = r.rect();
+            for t in ir.teleports.iter().filter(|t| t.to.room == r.room) {
+                if square_contains(lo, hi, t.to.at) {
+                    return Err(IrError::TeleportDestinationOnReveal {
+                        teleport: t.id.clone(),
+                        reveal: r.id.clone(),
                     });
                 }
             }
@@ -4725,5 +4816,92 @@ mod tests {
             let ir = Ir::from_json(text).expect("parses unchanged");
             assert!(ir.triggers.is_empty() && ir.reveals.is_empty());
         }
+    }
+
+    /// [`FLOORS_BASE`] with a `teleports` list spliced in beside the rest.
+    fn floors_with_teleports(
+        portals: &str,
+        triggers: &str,
+        reveals: &str,
+        teleports: &str,
+    ) -> Result<Ir, IrError> {
+        Ir::from_json(
+            &FLOORS_BASE
+                .replace("{PORTALS}", portals)
+                .replace("{TRIGGERS}", triggers)
+                .replace("{REVEALS}", reveals)
+                .replace(
+                    r#""triggers":["#,
+                    &format!(r#""teleports":[ {teleports} ], "triggers":["#),
+                ),
+        )
+    }
+
+    #[test]
+    fn a_reveal_may_not_overlap_a_teleport_pad() {
+        // The third pairing of the island rule, after reveal-vs-pedestal and
+        // reveal-vs-reveal: the pad's square meets the closet's exactly along
+        // x = 768, which would emit coincident one-sided linedefs.
+        let pad = r#"{ "id":"tp", "room":"c", "pad":{"island":[768,64]},
+            "to":{"room":"c","at":[850,200],"angle":0} }"#;
+        let err = floors_with_teleports(&format!("{PLAIN_AB}, {WALL_BC}"), SWITCH_A, CLOSET_C, pad)
+            .expect_err("the pad touches the closet");
+        assert!(
+            matches!(err, IrError::RevealGeometry { ref id, ref detail }
+                if id == "pen" && detail.contains("overlaps teleport pad `tp`")),
+            "{err}"
+        );
+        // The same pad in the room next door is no one's neighbor.
+        let elsewhere = pad.replace(
+            "\"room\":\"c\", \"pad\":{\"island\":[768,64]}",
+            "\"room\":\"b\", \"pad\":{\"island\":[384,64]}",
+        );
+        floors_with_teleports(
+            &format!("{PLAIN_AB}, {WALL_BC}"),
+            SWITCH_A,
+            CLOSET_C,
+            &elsewhere,
+        )
+        .expect("a pad clear of the reveal");
+    }
+
+    #[test]
+    fn a_teleport_may_not_deliver_onto_a_reveal() {
+        // The pedestal rule's companion for the *destination*: a point, which
+        // the rectangle-against-rectangle test above cannot see. The pad sits
+        // in room `b`, well clear of the closet, so only the destination is
+        // at issue in either case.
+        let pad = r#"{ "id":"tp", "room":"b", "pad":{"island":[384,64]},
+            "to":{"room":"c","at":[736,96],"angle":0} }"#;
+        let err = floors_with_teleports(&format!("{PLAIN_AB}, {WALL_BC}"), SWITCH_A, CLOSET_C, pad)
+            .expect_err("the destination is inside the closet");
+        assert!(
+            matches!(err, IrError::TeleportDestinationOnReveal { ref teleport, ref reveal }
+                if teleport == "tp" && reveal == "pen"),
+            "{err}"
+        );
+        let clear = pad.replace("\"at\":[736,96]", "\"at\":[850,200]");
+        floors_with_teleports(
+            &format!("{PLAIN_AB}, {WALL_BC}"),
+            SWITCH_A,
+            CLOSET_C,
+            &clear,
+        )
+        .expect("a destination clear of the reveal");
+    }
+
+    #[test]
+    fn a_walkover_naming_two_portals_between_one_room_pair_is_rejected() {
+        // Two openings in one wall pair are legal as long as their spans do
+        // not overlap (`compile::portals` has its own test for exactly that),
+        // so `[a, b]` names two lines here and the author has to say which
+        // one carries the special.
+        let second = r#"{ "a":"a", "b":"b", "kind":"plain", "width":32, "at":[256,32] }"#;
+        let err = floors(&format!("{PLAIN_AB}, {second}"), WALK_AB, "")
+            .expect_err("two portals join `a` and `b`");
+        assert!(
+            matches!(err, IrError::AmbiguousWalkoverPortal { ref id, count: 2, .. } if id == "w"),
+            "{err}"
+        );
     }
 }

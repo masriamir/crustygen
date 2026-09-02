@@ -54,8 +54,9 @@ pub(crate) const MAP_RANGE: std::ops::RangeInclusive<i32> = (i16::MIN as i32)..=
 /// [`CompileError::OverlappingPortals`] when two openings overlap on the same
 /// wall line, [`CompileError::OpeningNotInAWall`] when no single solid wall
 /// of a room spans the opening, and [`CompileError::PortalNoHeadroom`] when a
-/// plain portal's passage sector — or the platform of a lift portal, at its
-/// rest floor — would leave too little (or no) headroom for the player.
+/// plain portal's passage sector — or the platform of a lift portal at its
+/// rest floor, or a drop wall or a bridge in the state it comes to rest in
+/// after firing — would leave too little (or no) headroom for the player.
 pub fn cut_portals(ir: &Ir, tables: &Tables, data: &mut MapData) -> Result<(), CompileError> {
     let resolved = ir
         .portals
@@ -72,8 +73,8 @@ pub fn cut_portals(ir: &Ir, tables: &Tables, data: &mut MapData) -> Result<(), C
     Ok(())
 }
 
-/// Rejects a plain or lift portal whose two rooms leave too little headroom
-/// above the sector that fills the gap between them.
+/// Rejects a plain, lift, drop-wall or bridge portal whose two rooms leave
+/// too little headroom above the sector that fills the gap between them.
 ///
 /// Runs here, in the pre-emission pass alongside
 /// [`check_no_overlapping_openings`], over every resolved portal before any
@@ -81,10 +82,13 @@ pub fn cut_portals(ir: &Ir, tables: &Tables, data: &mut MapData) -> Result<(), C
 /// `split_wall_for_opening` has already mutated `data`. Checking it here is
 /// what makes this module's own doc comment ("every portal is resolved and
 /// cross-checked before anything is emitted") actually true: a rejected map
-/// leaves no partially-cut geometry behind. [`PortalKind::Plain`] and
-/// [`PortalKind::Lift`] portals are checked, each against the floor its own
-/// gap sector comes to rest at — see [`CompileError::PortalNoHeadroom`]'s
-/// doc comment for why a door portal is exempt.
+/// leaves no partially-cut geometry behind. [`PortalKind::Plain`],
+/// [`PortalKind::Lift`], [`PortalKind::DropWall`] and [`PortalKind::Bridge`]
+/// portals are checked, each against the floor its own gap sector comes to
+/// rest at — for the two floor kinds, the floor they reach *after* firing,
+/// the only state either is meant to be crossed in. See
+/// [`CompileError::PortalNoHeadroom`]'s doc comment for why a door portal is
+/// exempt.
 fn check_headroom(
     ir: &Ir,
     tables: &Tables,
@@ -94,21 +98,29 @@ fn check_headroom(
     for (portal, geometry) in resolved {
         let room_a = &ir.rooms[geometry.ia];
         let room_b = &ir.rooms[geometry.ib];
-        // What the player must fit above, once the sector filling the gap
-        // has come to rest: the higher floor for a plain passage, and for a
-        // lift the platform's own rest floor — the higher floor plus a
-        // barrier's `rise` (`p_plats.c`, `EV_DoPlat`, `case downWaitUpStay`:
-        // the platform's own floor is its high position). A door portal is
-        // exempt — see `CompileError::PortalNoHeadroom`'s doc comment.
+        // What the player must fit above, once the sector filling the gap has
+        // come to rest.
         let rest = match portal.kind {
-            PortalKind::Plain => room_a.floor.max(room_b.floor),
-            PortalKind::Lift => room_a.floor.max(room_b.floor) + portal.rise.unwrap_or(0),
-            // A door portal is exempt, and so, for now, are the two floor
-            // kinds: nothing here emits the sector that fills a drop wall's
-            // or a bridge's gap yet, so there is no rest floor to measure.
-            PortalKind::Door | PortalKind::Locked | PortalKind::DropWall | PortalKind::Bridge => {
-                continue;
+            // The higher of the two floors — one formula for all three kinds
+            // whose gap sector comes to rest there. A plain passage rests at
+            // it outright. A bridge's two rooms are at one floor
+            // (`IrError::BridgeFloorsDiffer`) and the risen pit comes to rest
+            // at that shared floor. A dropped wall keeps its ceiling at the
+            // lower of the two rooms' and takes its floor to the lower of the
+            // two floors, so the opening into the *higher* room — the tighter
+            // of its two — is again the lower ceiling over the higher floor.
+            // The two floor kinds are measured after firing, which is the only
+            // state either is meant to be crossed in.
+            PortalKind::Plain | PortalKind::DropWall | PortalKind::Bridge => {
+                room_a.floor.max(room_b.floor)
             }
+            // A lift is measured at its platform's own rest floor: the higher
+            // floor plus a barrier's `rise` (`p_plats.c`, `EV_DoPlat`, `case
+            // downWaitUpStay`: the platform's own floor is its high position).
+            PortalKind::Lift => room_a.floor.max(room_b.floor) + portal.rise.unwrap_or(0),
+            // A door portal is exempt — see `CompileError::PortalNoHeadroom`'s
+            // doc comment.
+            PortalKind::Door | PortalKind::Locked => continue,
         };
         let have = room_a.ceiling.min(room_b.ceiling) - rest;
         if have < need {
@@ -1853,5 +1865,48 @@ mod tests {
         let far_y = data.vertices.iter().map(|v| v.y).max().unwrap();
         assert_eq!(far_y, 256 + 64, "64 deep, outward from the north wall");
         assert_eq!(data.sectors[1].floor, 8);
+    }
+
+    /// Room `a` and room `b` at one floor, 64 units apart, joined by a drop
+    /// wall on a switch in room `a`. `b_ceiling` is the only thing that
+    /// varies: it decides whether the opening the wall leaves behind once it
+    /// has dropped clears the player's own height.
+    fn ir_with_drop_wall(b_ceiling: i32) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":64, "theme":"tech_base",
+              "rooms":[
+                {{ "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }},
+                {{ "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+                   "floor":0, "ceiling":{b_ceiling}, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
+              ],
+              "portals":[{{ "a":"a", "b":"b", "kind":"drop_wall", "width":64,
+                            "at":[256,128], "thickness":16, "fires_on":"t" }}],
+              "triggers":[{{ "id":"t", "kind":"switch", "room":"a", "at":[0,128] }}] }}"#
+        )
+    }
+
+    #[test]
+    fn a_drop_wall_under_too_low_a_ceiling_has_no_headroom() {
+        // The wall is not exempt from the headroom rule the way a door is:
+        // once it has dropped, the player walks through the opening it
+        // leaves, which is the lower of the two ceilings over the higher of
+        // the two floors — a plain passage's own measurement.
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(&ir_with_drop_wall(32)).expect("ir");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        assert!(matches!(
+            cut_portals(&ir, &tables, &mut data),
+            Err(CompileError::PortalNoHeadroom {
+                have: 32,
+                need: 56,
+                ..
+            })
+        ));
+        let ir = Ir::from_json(&ir_with_drop_wall(128)).expect("ir");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &tables, &mut data).expect("a ceiling the player fits under");
     }
 }
