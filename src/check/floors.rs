@@ -12,14 +12,21 @@
 //! example cannot be a crate dependency, and the probe is the measurement's
 //! frozen tool — the same reason `examples/liftprobe/common.rs` already
 //! carries its own copy of [`crate::check::plats`]'s searches. What is
-//! genuinely shared with `plats` is the activator rule — its
-//! `activator_sides` and [`crate::check::plats::classify`]: a floor line and
-//! a lift line are fired by the same three dispatchers, so who can press one
-//! must not be answered twice.
+//! genuinely shared with `plats` is everything a *tagged line* means, none of
+//! which is specific to what the tag drives: the activator rule (its
+//! `activator_sides` and [`crate::check::plats::classify`]), which sectors a
+//! tag names (`sectors_named_by`), which lines name nothing
+//! (`broken_tag_lines`), and which other specials share a tag
+//! (`other_specials_on_tag`). A floor line and a lift line are fired by the
+//! same three dispatchers and resolve their tag by the same engine rule, so
+//! neither question may be answered twice.
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::check::plats::{Activator, activator_sides, classify, resolve_plats};
+use crate::check::plats::{
+    Activator, activator_sides, broken_tag_lines, classify, other_specials_on_tag, resolve_plats,
+    sectors_named_by,
+};
 use crate::check::scene::{Boundary, Scene};
 use crate::tables::{FloorEngineType, FloorForm, Tables};
 
@@ -697,18 +704,7 @@ pub fn resolve_floors(scene: &Scene, tables: &Tables) -> Vec<SceneFloor> {
     let player = tables.player();
     let recognized = recognized_specials(tables);
     let lines = floor_lines(scene, &recognized);
-    let named: BTreeSet<usize> = lines
-        .iter()
-        .filter(|l| l.boundary.tag != 0)
-        .flat_map(|l| {
-            scene
-                .sectors
-                .iter()
-                .enumerate()
-                .filter(move |(_, s)| s.tag == l.boundary.tag)
-                .map(|(i, _)| i)
-        })
-        .collect();
+    let named = sectors_named_by(scene, |s| recognized.contains_key(&s));
     let movers = mover_sectors(scene, tables, &named);
     named
         .iter()
@@ -722,20 +718,6 @@ pub fn resolve_floors(scene: &Scene, tables: &Tables) -> Vec<SceneFloor> {
                 .collect();
             let triggers = triggers_for(scene, &lines, sector, &neighbors, (step, player.radius));
             let actions = actions_for(scene, sector, &neighbors, &triggers, (player.height, step));
-            let mut other_actions: Vec<i32> = scene
-                .sectors
-                .iter()
-                .flat_map(|s| s.boundary.iter())
-                .filter(|b| {
-                    b.fronts_this
-                        && b.tag == ss.tag
-                        && b.special != 0
-                        && !recognized.contains_key(&b.special)
-                })
-                .map(|b| b.special)
-                .collect();
-            other_actions.sort_unstable();
-            other_actions.dedup();
             SceneFloor {
                 sector,
                 tag: ss.tag,
@@ -745,7 +727,9 @@ pub fn resolve_floors(scene: &Scene, tables: &Tables) -> Vec<SceneFloor> {
                 neighbors,
                 triggers,
                 actions,
-                other_actions,
+                other_actions: other_specials_on_tag(scene, ss.tag, |s| {
+                    recognized.contains_key(&s)
+                }),
             }
         })
         .collect()
@@ -831,21 +815,11 @@ fn actions_for(
 
 /// Floor lines that can never move a floor: tag 0, or a tag naming no sector.
 ///
-/// Ascending by linedef declaration index, each named once. The walk is over
-/// sectors' boundaries, so the raw order would be sector-then-boundary and
-/// only coincidentally sorted; a `BTreeSet` makes it the caller-visible index
-/// order instead.
+/// `plats::broken_tag_lines` documents the ordering and the front-mirror rule.
 #[must_use]
 pub fn broken_floor_lines(scene: &Scene, tables: &Tables) -> Vec<usize> {
     let recognized = recognized_specials(tables);
-    floor_lines(scene, &recognized)
-        .into_iter()
-        .map(|l| l.boundary)
-        .filter(|b| b.tag == 0 || !scene.sectors.iter().any(|s| s.tag == b.tag))
-        .map(|b| b.linedef)
-        .collect::<BTreeSet<usize>>()
-        .into_iter()
-        .collect()
+    broken_tag_lines(scene, |s| recognized.contains_key(&s))
 }
 
 #[cfg(test)]

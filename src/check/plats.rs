@@ -328,6 +328,87 @@ pub(crate) fn activator_sides(
     sides
 }
 
+/// Every sector named by a nonzero tag on some line whose special satisfies
+/// `is_special` — the targets one resolution models.
+///
+/// `P_FindSectorFromLineTag` matches by tag equality, so a line's tag names
+/// every sector carrying it, and a tag-0 line names none: an untagged sector
+/// does not "have tag 0", it answers to nothing. Front mirrors only —
+/// `special` and `tag` are linedef-wide, so the back mirror of a two-sided
+/// line would otherwise contribute the same target a second time.
+///
+/// Shared with [`crate::check::floors`]: a lift line and a floor line resolve
+/// a tag by the same engine rule, so which sectors an action drives must not
+/// be answered twice.
+pub(crate) fn sectors_named_by(scene: &Scene, is_special: impl Fn(i32) -> bool) -> BTreeSet<usize> {
+    let tags: BTreeSet<i32> = scene
+        .sectors
+        .iter()
+        .flat_map(|s| s.boundary.iter())
+        .filter(|b| b.fronts_this && b.tag != 0 && is_special(b.special))
+        .map(|b| b.tag)
+        .collect();
+    scene
+        .sectors
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| tags.contains(&s.tag))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The lines of the family `is_special` selects that can never fire anything:
+/// tag 0, or a tag naming no sector.
+///
+/// Ascending by linedef declaration index, each named once. The walk is over
+/// sectors' boundaries, so the raw order would be sector-then-boundary and
+/// only coincidentally sorted; a `BTreeSet` makes it the caller-visible index
+/// order instead. Front mirrors only — `special` and `tag` are linedef-wide,
+/// so the back mirror of a two-sided line would otherwise report the same
+/// line twice.
+///
+/// Shared with [`crate::check::floors`], for the reason
+/// [`sectors_named_by`] gives: this is the complement of that set, read off
+/// the same rule.
+pub(crate) fn broken_tag_lines(scene: &Scene, is_special: impl Fn(i32) -> bool) -> Vec<usize> {
+    scene
+        .sectors
+        .iter()
+        .flat_map(|s| s.boundary.iter())
+        .filter(|b| b.fronts_this && is_special(b.special))
+        .filter(|b| b.tag == 0 || !scene.sectors.iter().any(|s| s.tag == b.tag))
+        .map(|b| b.linedef)
+        .collect::<BTreeSet<usize>>()
+        .into_iter()
+        .collect()
+}
+
+/// The nonzero specials naming `tag` that `is_own` does not claim, sorted and
+/// deduped — the other actions sharing a resolution's tag.
+///
+/// Another action on the same tag drives the same sector, which is what makes
+/// it a conflict to report rather than a trigger to model. Front mirrors
+/// only, for the reason [`sectors_named_by`] gives.
+///
+/// Shared with [`crate::check::floors`], whose "not a floor line" is the same
+/// question asked of a different vocabulary.
+pub(crate) fn other_specials_on_tag(
+    scene: &Scene,
+    tag: i32,
+    is_own: impl Fn(i32) -> bool,
+) -> Vec<i32> {
+    let mut others: Vec<i32> = scene
+        .sectors
+        .iter()
+        .flat_map(|s| s.boundary.iter())
+        .filter(|b| b.fronts_this && b.tag == tag && b.special != 0 && !is_own(b.special))
+        .map(|b| b.special)
+        .collect();
+    others.sort_unstable();
+    others.dedup();
+    others
+}
+
 /// Every lift line naming `tag`, as the trigger it is for the plat at
 /// sector `plat`: which sectors fire it, and each one's [`Activator`] class.
 ///
@@ -390,18 +471,7 @@ pub fn resolve_plats(scene: &Scene, tables: &Tables) -> Vec<ScenePlat> {
                 .map(move |b| (i, b))
         })
         .collect();
-    let named: BTreeSet<usize> = lines
-        .iter()
-        .filter(|(_, b)| b.tag != 0)
-        .flat_map(|(_, b)| {
-            scene
-                .sectors
-                .iter()
-                .enumerate()
-                .filter(move |(_, s)| s.tag == b.tag)
-                .map(|(i, _)| i)
-        })
-        .collect();
+    let named = sectors_named_by(scene, |s| specials.all.contains(&s));
     named
         .into_iter()
         .map(|sector| {
@@ -422,20 +492,6 @@ pub fn resolve_plats(scene: &Scene, tables: &Tables) -> Vec<ScenePlat> {
             } else {
                 Rest::AboveAll
             };
-            let mut other_actions: Vec<i32> = scene
-                .sectors
-                .iter()
-                .flat_map(|s| s.boundary.iter())
-                .filter(|b| {
-                    b.fronts_this
-                        && b.tag == ss.tag
-                        && b.special != 0
-                        && !specials.all.contains(&b.special)
-                })
-                .map(|b| b.special)
-                .collect();
-            other_actions.sort_unstable();
-            other_actions.dedup();
             ScenePlat {
                 sector,
                 tag: ss.tag,
@@ -445,7 +501,7 @@ pub fn resolve_plats(scene: &Scene, tables: &Tables) -> Vec<ScenePlat> {
                 distinct_neighbor_floors: floors.iter().copied().collect::<BTreeSet<i32>>().len(),
                 shared_tag: scene.sectors.iter().filter(|s| s.tag == ss.tag).count(),
                 triggers: triggers_for(scene, &lines, &specials, sector, ss.tag, (step, radius)),
-                other_actions,
+                other_actions: other_specials_on_tag(scene, ss.tag, |s| specials.all.contains(&s)),
                 neighbors,
             }
         })
@@ -454,25 +510,11 @@ pub fn resolve_plats(scene: &Scene, tables: &Tables) -> Vec<ScenePlat> {
 
 /// Lift lines that can never fire a plat: tag 0, or a tag naming no sector.
 ///
-/// Ascending by linedef declaration index, each named once. The walk is over
-/// sectors' boundaries, so the raw order would be sector-then-boundary and
-/// only coincidentally sorted; a `BTreeSet` makes it the caller-visible index
-/// order instead. Front mirrors only — `special` and `tag` are linedef-wide,
-/// so the back mirror of a two-sided lift line would otherwise report the
-/// same line twice.
+/// `plats::broken_tag_lines` documents the ordering and the front-mirror rule.
 #[must_use]
 pub fn broken_lift_lines(scene: &Scene, tables: &Tables) -> Vec<usize> {
     let lift = LiftSpecials::resolve(tables).all;
-    scene
-        .sectors
-        .iter()
-        .flat_map(|s| s.boundary.iter())
-        .filter(|b| b.fronts_this && lift.contains(&b.special))
-        .filter(|b| b.tag == 0 || !scene.sectors.iter().any(|s| s.tag == b.tag))
-        .map(|b| b.linedef)
-        .collect::<BTreeSet<usize>>()
-        .into_iter()
-        .collect()
+    broken_tag_lines(scene, |s| lift.contains(&s))
 }
 
 #[cfg(test)]
