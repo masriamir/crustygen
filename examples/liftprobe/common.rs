@@ -596,7 +596,9 @@ fn activator_sides(
     let back = l.sideback.and_then(|b| side_sector(map, b));
     let mut out = Vec::new();
     if front_only {
-        // `P_UseSpecialLine`: front side only.
+        // `P_UseSpecialLine`: front side only (`p_switch.c:288`); a gun line
+        // (`P_ShootSpecialLine`) is reached from the side its face is drawn
+        // on, so it takes the same path.
         out.push((
             front,
             classify_activator(scene, plat, plat_floor, front, step),
