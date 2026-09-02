@@ -379,16 +379,17 @@ impl Island<'_> {
 /// [`CompileError::ThingTooClose`] when the thing stands closer than its own
 /// radius to whatever it is measured against,
 /// [`CompileError::StartOnReveal`] for a
-/// start in a reveal, [`CompileError::PedestalNoHeadroom`] or
+/// start in a reveal, [`CompileError::UnboundedRoom`] when there is no
+/// boundary to measure against, [`CompileError::PedestalNoHeadroom`] or
 /// [`CompileError::NoHeadroom`] when the gap leaves the thing less
 /// than its own height, and [`CompileError::OverlappingStarts`] for a start
 /// sharing a point with one already placed.
 ///
-/// # Panics
-/// Panics if the clearance sector has no bordering linedef at all —
-/// impossible for a square cut as four two-sided edges, and impossible for a
-/// room, which [`crate::compile::sectors::emit_sectors`] emits as a closed
-/// footprint.
+/// [`CompileError::UnboundedRoom`] is raised when the clearance sector has no
+/// bordering linedef at all. That cannot happen for a pedestal — an island's
+/// four edges are cut together — but a reveal measures its **host room**,
+/// and a room a later pass stripped of walls has nothing to measure, exactly
+/// as in [`place_things`]'s own room loop.
 fn place_island_things(
     tables: &Tables,
     data: &MapData,
@@ -404,19 +405,37 @@ fn place_island_things(
                 kind: thing.kind.clone(),
             })?;
 
+        // A start in a sealed cell is refused before either fit check, for
+        // the reason `check_not_on_an_island` runs before clearance: the
+        // point is categorically wrong, and reporting a radius or a height
+        // would name a symptom the author would then "fix" without
+        // discovering that no start belongs here at all.
+        if thing.kind.ends_with("_start") && matches!(island.shape, IslandShape::Reveal) {
+            return Err(CompileError::StartOnReveal {
+                reveal: island.id.to_owned(),
+            });
+        }
+
         // The player's dimensions are the floor for anything not listed as a
         // monster species, exactly as in `place_things`.
         let dims: ThingDims = tables
             .species(&thing.kind)
             .unwrap_or_else(|| tables.player());
 
+        // An error rather than a panic: `clearance_sector` is a *room* for a
+        // reveal, and a room whose walls a later pass removed has no
+        // boundary to measure — the same case `place_things`'s own room loop
+        // reports, and reported the same way. (An island's four edges cannot
+        // vanish, so the pedestal path can never reach this.)
         let have = clearance_ignoring(
             data,
             island.clearance_sector,
             island.ignore_sector,
             thing.at,
         )
-        .expect("a room and an island are both emitted as closed polygons");
+        .ok_or_else(|| CompileError::UnboundedRoom {
+            room: island.room.to_owned(),
+        })?;
         if have < f64::from(dims.radius) {
             return Err(CompileError::ThingTooClose {
                 room: island.room.to_owned(),
@@ -433,11 +452,6 @@ fn place_island_things(
         }
 
         if thing.kind.ends_with("_start") {
-            if matches!(island.shape, IslandShape::Reveal) {
-                return Err(CompileError::StartOnReveal {
-                    reveal: island.id.to_owned(),
-                });
-            }
             if starts.contains(&(thing.at.x, thing.at.y)) {
                 return Err(CompileError::OverlappingStarts {
                     x: thing.at.x,
@@ -565,7 +579,9 @@ fn place_pedestal_things(
 /// # Errors
 /// Returns whatever [`place_island_things`] raises; the headroom failure is
 /// [`CompileError::NoHeadroom`] naming the host room, since a reveal's gap
-/// *is* that room's own headroom and the room is what would have to change.
+/// *is* that room's own headroom and the room is what would have to change,
+/// and [`CompileError::UnboundedRoom`] is reachable here (and only here)
+/// because the boundary measured is a room's rather than an island's.
 ///
 /// # Panics
 /// Panics if a reveal has no emitted floor action, or names a room that does
@@ -689,6 +705,7 @@ mod tests {
     use crate::compile::CompileError;
     use crate::compile::MapData;
     use crate::compile::doors::emit_doors;
+    use crate::compile::floors::{FloorActionOut, FloorShape};
     use crate::compile::portals::cut_portals;
     use crate::compile::sectors::emit_sectors;
     use crate::compile::tags::TagAllocator;
@@ -696,7 +713,7 @@ mod tests {
     use crate::compile::{compile, compile_reporting};
     use crate::geom::{Pt, clearance};
     use crate::ir::Ir;
-    use crate::tables::Tables;
+    use crate::tables::{FloorFamily, Tables};
 
     /// Runs the full geometry pipeline (sectors -> portals -> doors) so
     /// tests exercise `place_things` against real emitted geometry, matching
@@ -1419,6 +1436,49 @@ mod tests {
         );
     }
 
+    /// The reveal path is the only one that measures a **room's** boundary
+    /// rather than an island's, so it is the only one that can meet a sector
+    /// with no boundary at all — the case `place_things`'s own room loop
+    /// reports as [`CompileError::UnboundedRoom`], built here exactly as
+    /// `a_room_with_no_emitted_geometry_is_rejected_rather_than_passing`
+    /// builds it: by handing the pass an empty [`MapData`]. The room carries
+    /// no things of its own, so the room loop places nothing and the reveal
+    /// pass is reached; the floor action is built by hand because
+    /// `emit_floors` would need geometry this test is deliberately denying
+    /// it.
+    #[test]
+    fn a_reveal_in_a_room_with_no_emitted_geometry_is_rejected_rather_than_panicking() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[],
+          "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[0,256] } ],
+          "reveals":[ { "id":"pen", "room":"a", "at":[128,128], "kind":"closet",
+                        "things":[ { "kind":"imp", "at":[160,160], "angle":0 } ], "trigger":"t" } ] }"#;
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let action = FloorActionOut {
+            sector: 1,
+            family: FloorFamily::LowerToLowest,
+            rest: 256,
+            dest: 0,
+            tag: 1,
+            trigger: 0,
+            shape: FloorShape::Closet,
+            portal: None,
+            reveal: Some(0),
+            lines: Vec::new(),
+        };
+        let err = place_things(&ir, &tables, &MapData::default(), &[], &[], &[action])
+            .expect_err("a room with no walls cannot be measured");
+        assert!(
+            matches!(&err, CompileError::UnboundedRoom { room } if room == "a"),
+            "expected UnboundedRoom naming the reveal's host room, got {err}"
+        );
+    }
+
     #[test]
     fn a_start_inside_a_reveal_is_refused() {
         // A start on a *pedestal* is legal (`TWO_PEDESTALS` above), so this
@@ -1431,6 +1491,26 @@ mod tests {
         assert!(
             matches!(&err, CompileError::StartOnReveal { reveal } if reveal == "pen"),
             "expected StartOnReveal naming the reveal, got {err}"
+        );
+
+        // And it is refused *categorically*, ahead of the fit checks: this
+        // cell hugs the room's west wall and the start sits 12 units from
+        // it, under the player's own 16-unit radius, so `ThingTooClose`
+        // would also fire. Reporting the radius would send the author to
+        // nudge a start that does not belong here at all — the same reason
+        // `check_not_on_an_island` runs before clearance.
+        let cramped = start
+            .replacen(
+                r#""at":[128,128], "size":[128,128]"#,
+                r#""at":[8,8], "size":[128,128]"#,
+                1,
+            )
+            .replacen(r#""at":[192,192]"#, r#""at":[12,40]"#, 1);
+        let err = compile(&Ir::from_json(&cramped).expect("ir"), &tables)
+            .expect_err("a start sealed in rock is refused whatever else is wrong with it");
+        assert!(
+            matches!(&err, CompileError::StartOnReveal { reveal } if reveal == "pen"),
+            "the shape refusal must outrank the clearance one, got {err}"
         );
     }
 

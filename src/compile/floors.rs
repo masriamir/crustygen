@@ -176,8 +176,9 @@ fn trigger_index(triggers: &[TriggerOut], id: &str) -> usize {
 /// [`CompileError::DropWallTooThick`] and
 /// [`CompileError::DropWallFloorsDiffer`] for a drop wall the player could
 /// not pass once it has fired, [`CompileError::RevealRiseTooLow`] for a
-/// pedestal reveal the player could climb rather than wait for,
-/// [`CompileError::TriggerLineAlreadyClaimed`]
+/// pedestal reveal the player could climb rather than wait for and
+/// [`CompileError::RevealRiseTooHigh`] for one that would rest at or above
+/// its host's ceiling, [`CompileError::TriggerLineAlreadyClaimed`]
 /// when two walkovers would write onto one line, and whatever
 /// `resolve_portal` (`NotAdjacent`,
 /// `PortalOffWall`, `PortalOnDiagonalWall`, `PortalTooWide`) or
@@ -809,11 +810,15 @@ fn emit_drop_wall(
 /// (`docs/measurements/floor-shapes-2026-09-02.md` §D), a pillar the player
 /// straddles rather than enters. What the cell's cargo *is* held to lives in
 /// [`crate::compile::things`]'s `place_reveal_things`, against the host.
+/// What a pedestal reveal's `rise` is still held to is the host's own
+/// height, top and bottom — see the two `RevealRise*` errors; those bound
+/// the *sector*, not the player.
 ///
 /// # Errors
 /// Returns [`CompileError::RevealRiseTooLow`] when a pedestal reveal rises
 /// no more than a step, which would leave it climbable and so not sealed at
-/// all.
+/// all, and [`CompileError::RevealRiseTooHigh`] when it rises to its host's
+/// ceiling or beyond, which would emit an inverted sector.
 ///
 /// # Panics
 /// Panics if the reveal names a room that does not exist, or is a pedestal
@@ -855,6 +860,21 @@ fn emit_reveal(
                     reveal: reveal.id.clone(),
                     rise,
                     step,
+                });
+            }
+            // And bounded above by the host's own height, because nothing
+            // downstream would catch it: `check_no_sector_overlaps` compares
+            // polygons, `apply_height_textures` fills whichever side is
+            // lower, and the rules judge the emitted map, so a rise past the
+            // ceiling would ship a sector whose floor is above it. Rejected
+            // at the ceiling rather than one unit past: a block resting
+            // exactly at the ceiling is a closet, and is authored as one.
+            let max = room.ceiling - room.floor;
+            if rise >= max {
+                return Err(CompileError::RevealRiseTooHigh {
+                    reveal: reveal.id.clone(),
+                    rise,
+                    max,
                 });
             }
             (room.floor + rise, FloorShape::Pedestal)
@@ -899,6 +919,7 @@ mod tests {
         CompileError, LinedefOut, MapData, compile, compile_reporting, doors, exits, portals,
         sectors, teleports,
     };
+    use crate::geom::Pt;
     use crate::ir::Ir;
     use crate::tables::{FloorFamily, Tables};
 
@@ -1443,7 +1464,24 @@ mod tests {
             .filter(|l| l.back.is_some_and(|b| data.sidedefs[b].sector == f.sector))
             .collect();
         assert_eq!(edges.len(), 4, "an island's four edges, host on the front");
-        for l in edges {
+
+        // The rectangle `Reveal::rect` names, walked counter-clockwise from
+        // its low corner — east along the south edge first, which is the
+        // winding `emit_island_edges` documents and the one a hole in a Doom
+        // sector needs. Read off `data.vertices` rather than off the IR, so
+        // a `rect()` miswired into `emit_island_edges` cannot pass.
+        let corners = [
+            Pt { x: 128, y: 128 },
+            Pt { x: 192, y: 128 },
+            Pt { x: 192, y: 192 },
+            Pt { x: 128, y: 192 },
+        ];
+        for (k, l) in edges.iter().enumerate() {
+            assert_eq!(
+                (data.vertices[l.v1], data.vertices[l.v2]),
+                (corners[k], corners[(k + 1) % corners.len()]),
+                "edge {k} runs counter-clockwise between the rectangle's own corners"
+            );
             assert_eq!(
                 data.sidedefs[l.front].sector, 0,
                 "the host fronts every edge"
@@ -1494,11 +1532,13 @@ mod tests {
         assert_eq!((placed.x, placed.y), (160, 160));
 
         // What a reveal's cargo *is* held to is the host's boundary, not the
-        // cell's: the cell hugs the room's north wall (8 units clear of it,
-        // which the IR allows) and the imp inside it stands 12 units from
-        // that wall, under its own 20-unit radius. The cell's own edges are
-        // nearer still and are deliberately not what is measured — the
-        // refusal names the room, which is what the author has to move.
+        // cell's. The cell (96,184)-(160,248) hugs the room's north wall,
+        // 8 units clear of it, and the imp inside stands at (120,244): 12
+        // units from that wall and only 4 from the cell's own north edge,
+        // against its 20-unit radius. Both distances fail the radius, so the
+        // *reported* `have` is what separates the two rules — 12.0 is the
+        // wall, 4.0 would be the edge — and it is asserted below rather than
+        // elided.
         let hugging = CLOSET
             .replace(
                 r#""at":[128,128], "kind":"closet""#,
@@ -1507,13 +1547,25 @@ mod tests {
             .replace(r#""at":[160,160]"#, r#""at":[120,244]"#);
         let ir = Ir::from_json(&hugging).expect("ir");
         let err = compile_reporting(&ir, &tables).expect_err("no clearance from the host's wall");
+        let CompileError::ThingTooClose {
+            room,
+            kind,
+            x,
+            y,
+            have,
+            need,
+        } = &err
+        else {
+            panic!("expected ThingTooClose naming the host room, got {err}");
+        };
+        assert_eq!(
+            (room.as_str(), kind.as_str(), *x, *y, *need),
+            ("a", "imp", 120, 244, 20)
+        );
         assert!(
-            matches!(
-                &err,
-                CompileError::ThingTooClose { room, kind, x: 120, y: 244, need: 20, .. }
-                    if room == "a" && kind == "imp"
-            ),
-            "expected ThingTooClose naming the host room, got {err}"
+            (*have - 12.0).abs() < 1e-9,
+            "the 12 units to the room's north wall, not the 4 to the cell's own north edge: \
+             {have}"
         );
     }
 
@@ -1529,6 +1581,35 @@ mod tests {
         assert!(
             matches!(err, CompileError::ThingOnReveal { ref reveal, .. } if reveal == "pen"),
             "expected ThingOnReveal naming the reveal, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_pedestal_reveal_reaching_its_hosts_ceiling_is_rejected() {
+        // Room `a` is 192 tall, so 192 puts the cell's floor exactly on its
+        // ceiling — an inverted sector that would load and render as
+        // garbage, since nothing downstream reads an island's heights. A
+        // block resting at the ceiling is a closet, not a pedestal.
+        let at_ceiling = CLOSET.replace(r#""kind":"closet","#, r#""kind":"pedestal", "rise":192,"#);
+        let err = build(&at_ceiling).expect_err("a 192 rise reaches a 192 ceiling");
+        assert!(
+            matches!(
+                &err,
+                CompileError::RevealRiseTooHigh { reveal, rise, max }
+                    if reveal == "pen" && *rise == 192 && *max == 192
+            ),
+            "expected RevealRiseTooHigh naming the reveal, the rise and the host's height, got \
+             {err}"
+        );
+
+        // One tile under it is the last accepted rise, and it emits.
+        let under = CLOSET.replace(r#""kind":"closet","#, r#""kind":"pedestal", "rise":184,"#);
+        let Built { data, floors, .. } = compile_data(&under);
+        let s = &data.sectors[floors[0].sector];
+        assert_eq!(
+            (s.floor, s.ceiling),
+            (184, 192),
+            "a rise strictly under the host's height still rests below its ceiling"
         );
     }
 

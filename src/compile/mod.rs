@@ -833,6 +833,31 @@ pub enum CompileError {
         /// The player's step height.
         step: i32,
     },
+    /// A [`crate::ir::RevealKind::Pedestal`] reveal's
+    /// [`crate::ir::Reveal::rise`] reaches its host's ceiling or passes
+    /// through it, which would emit a sector whose floor is at or above its
+    /// own ceiling.
+    ///
+    /// The upper bound to [`RevealRiseTooLow`](Self::RevealRiseTooLow)'s
+    /// lower one, and the reason both are needed: nothing else in the
+    /// compiler reads an island's heights. `check_no_sector_overlaps`
+    /// compares polygons only, and the playability rules judge the emitted
+    /// map rather than the IR, so an inverted cell would load, render as
+    /// garbage and ship. A pedestal reveal rests **strictly below** its
+    /// host's ceiling; a block that reaches the ceiling is a
+    /// [`closet`](crate::ir::RevealKind::Closet), which is how that shape is
+    /// authored.
+    #[error(
+        "reveal `{reveal}` rises {rise}, at or through its host's ceiling ({max} above the floor): a pedestal reveal rests strictly below the ceiling, and a block that reaches it is authored as a closet"
+    )]
+    RevealRiseTooHigh {
+        /// The reveal.
+        reveal: String,
+        /// The declared rise.
+        rise: i32,
+        /// The host room's own height, which the rise must stay under.
+        max: i32,
+    },
     /// A reveal's own things list holds a player start.
     ///
     /// A start on a [`crate::ir::Pedestal`] is legal — the level begins with
