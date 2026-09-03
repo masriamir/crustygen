@@ -24,8 +24,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::check::plats::{
-    Activator, activator_sides, broken_tag_lines, classify, other_specials_on_tag, resolve_plats,
-    sectors_named_by,
+    Activator, Dispatch, activator_sides, broken_tag_lines, classify, other_specials_on_tag,
+    resolve_plats, sectors_named_by,
 };
 use crate::check::scene::{Boundary, Scene};
 use crate::tables::{FloorEngineType, FloorForm, Tables};
@@ -735,6 +735,19 @@ pub fn resolve_floors(scene: &Scene, tables: &Tables) -> Vec<SceneFloor> {
         .collect()
 }
 
+/// Which dispatcher fires a floor line of this form — the three-way split
+/// [`activator_sides`] needs, read off [`Tables`]'s own two predicates so
+/// this module states no engine fact of its own.
+fn dispatch_of(form: FloorForm) -> Dispatch {
+    if form.shot() {
+        Dispatch::Shot
+    } else if form.front_only() {
+        Dispatch::Use
+    } else {
+        Dispatch::Cross
+    }
+}
+
 /// Every floor line naming the sector at `target`'s tag, as the trigger it is
 /// for that target: which sectors fire it, and each one's [`Activator`] class
 /// relative to the target's rest floor.
@@ -763,7 +776,7 @@ fn triggers_for(
                 scene,
                 l.boundary,
                 l.front,
-                l.form.front_only(),
+                dispatch_of(l.form),
                 (step, radius),
             )
             .into_iter()
@@ -1151,6 +1164,37 @@ mod tests {
         let (scene, tables) = scene_of(&text);
         assert!(resolve_floors(&scene, &tables).is_empty());
         assert_eq!(broken_floor_lines(&scene, &tables), vec![0, 1]);
+    }
+
+    /// The third dispatcher, on the same geometry the walkover case below
+    /// uses: a `47` (G1 `platRaiseToNearestAndChange`) on the T|B link,
+    /// where T stands 128 above B. The `38` there fires from T's side only,
+    /// because B cannot climb 128 to cross; the gun line fires from both,
+    /// because `P_ShootSpecialLine` (pinned `p_spec.c:955-1000`) takes no
+    /// `side` argument, `PTR_ShootTraverse` passes none
+    /// (`p_map.c:919-920`), and a bullet does not answer to the step rule.
+    #[test]
+    fn a_gun_line_fires_from_either_side_it_faces() {
+        let text = chain(
+            &[0, 128, 0],
+            &[0, 7, 0],
+            &[(0, 0, false), (47, 7, false)],
+            "",
+        );
+        let (scene, tables) = scene_of(&text);
+        let f = &resolve_floors(&scene, &tables)[0];
+        let g = f
+            .triggers
+            .iter()
+            .find(|t| t.special == 47)
+            .expect("the 47 names tag 7");
+        assert_eq!(g.form, FloorForm::G1);
+        assert_eq!(
+            g.activators.iter().map(|&(x, _)| x).collect::<Vec<_>>(),
+            vec![1, 2],
+            "the front sector and the back one it faces"
+        );
+        assert_eq!(g.placement, Placement::OnTargetFront);
     }
 
     #[test]

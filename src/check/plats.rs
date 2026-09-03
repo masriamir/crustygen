@@ -282,15 +282,50 @@ fn dead_end_pocket(scene: &Scene, linedef: usize, sector: usize, step: i32, radi
     deepest <= f64::from(radius)
 }
 
+/// Which of the three dispatchers fires a trigger line, which is what
+/// decides the sides it can be fired from. The distinction is the engine's,
+/// not a convenience: each function gates on the side differently, and two
+/// of the three do not gate at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dispatch {
+    /// `P_CrossSpecialLine` — a walkover, fired by the crossing itself, so
+    /// no side gate and every side the player can actually cross from.
+    Cross,
+    /// `P_UseSpecialLine` — a switch, front side only
+    /// (`p_switch.c:284-297`).
+    Use,
+    /// `P_ShootSpecialLine` — a gun line, fired from either side it faces
+    /// (`p_spec.c:955-1000` takes no `side`; `p_map.c:919-920` passes
+    /// none). No lift special reaches this dispatcher — it carries only 24,
+    /// 46 and 47 — so this arm exists for [`crate::check::floors`]'s two
+    /// gun forms.
+    Shot,
+}
+
 /// The sides of a trigger line that can fire it, in the engine's own terms.
 ///
 /// `b` is the line's **front** mirror and `front` the sector it is filed
-/// under; `front_only` selects `P_UseSpecialLine`'s rule (`p_switch.c:288`
-/// returns `false` from the back for every special but 124) — and
-/// `P_ShootSpecialLine`'s, a gun line being reached from the side its face is
-/// drawn on — over `P_CrossSpecialLine`'s, which has no side gate and so
-/// fires from whichever side the player can actually cross at rest under
-/// `P_TryMove`'s step rule. `(step, radius)` are [`Tables::step_height`] and
+/// under; `dispatch` names the function that fires it, which is what selects
+/// the rule:
+///
+/// - [`Dispatch::Use`] — the front side alone. `P_UseSpecialLine`'s opening
+///   `if (side)` block (pinned `p_switch.c:284-297`) `return false`s for
+///   every special but 124.
+/// - [`Dispatch::Shot`] — the front side, plus the back when the line has
+///   one. `P_ShootSpecialLine` (pinned `p_spec.c:955-1000`) takes no `side`
+///   argument at all, and `PTR_ShootTraverse` passes none: `if
+///   (li->special) P_ShootSpecialLine (shootthing, li);`
+///   (`p_map.c:919-920`), two lines before `ML_TWOSIDED` is so much as read
+///   (`p_map.c:922`). A shot from either bordering sector fires it, and
+///   neither the step rule nor [`Boundary::passable`] applies — a bullet
+///   crosses what a player cannot. (What a hitscan from *further* away can
+///   reach is a line-of-sight question this checker does not model, so this
+///   stays the two sectors the line itself faces.)
+/// - [`Dispatch::Cross`] — no side gate either (`P_CrossSpecialLine`), but
+///   the crossing is the player's own, so it fires from whichever side they
+///   can actually cross from at rest under `P_TryMove`'s step rule.
+///
+/// `(step, radius)` are [`Tables::step_height`] and
 /// [`Tables::player`]`().radius`.
 ///
 /// Shared with [`crate::check::floors`], whose lines fire by the same three
@@ -303,26 +338,37 @@ pub(crate) fn activator_sides(
     scene: &Scene,
     b: &Boundary,
     front: usize,
-    front_only: bool,
+    dispatch: Dispatch,
     (step, radius): (i32, i32),
 ) -> Vec<usize> {
     let mut sides = Vec::new();
-    if front_only {
-        sides.push(front);
-    } else if let Some(back) = b.neighbor.filter(|_| b.passable()) {
-        // A walkover with a dead-end pocket on either side fires from
-        // neither: nobody can cross *into* the pocket, and nobody can
-        // stand in it to cross *out*. The same shape as the
-        // `passable()` gate above, one layer further out.
-        let pocket = [front, back]
-            .iter()
-            .any(|&s| dead_end_pocket(scene, b.linedef, s, step, radius));
-        let (ff, bf) = (scene.sectors[front].floor, scene.sectors[back].floor);
-        if !pocket && bf - ff <= step {
+    match dispatch {
+        Dispatch::Use => sides.push(front),
+        Dispatch::Shot => {
             sides.push(front);
+            // A self-referencing line's back sector is the front one; it is
+            // one sector to shoot from, not two.
+            if let Some(back) = b.neighbor.filter(|&back| back != front) {
+                sides.push(back);
+            }
         }
-        if !pocket && ff - bf <= step {
-            sides.push(back);
+        Dispatch::Cross => {
+            if let Some(back) = b.neighbor.filter(|_| b.passable()) {
+                // A walkover with a dead-end pocket on either side fires
+                // from neither: nobody can cross *into* the pocket, and
+                // nobody can stand in it to cross *out*. The same shape as
+                // the `passable()` gate above, one layer further out.
+                let pocket = [front, back]
+                    .iter()
+                    .any(|&s| dead_end_pocket(scene, b.linedef, s, step, radius));
+                let (ff, bf) = (scene.sectors[front].floor, scene.sectors[back].floor);
+                if !pocket && bf - ff <= step {
+                    sides.push(front);
+                }
+                if !pocket && ff - bf <= step {
+                    sides.push(back);
+                }
+            }
         }
     }
     sides
@@ -427,7 +473,15 @@ fn triggers_for(
         .filter(|(_, b)| b.tag == tag)
         .map(|&(front, b)| {
             let is_use = specials.use_line.contains(&b.special);
-            let activators = activator_sides(scene, b, front, is_use, (step, radius))
+            // Lift lines are only ever crossed or used: `EV_DoPlat`'s
+            // `downWaitUpStay` forms carry no gun line (`P_ShootSpecialLine`
+            // dispatches 24, 46 and 47 alone).
+            let dispatch = if is_use {
+                Dispatch::Use
+            } else {
+                Dispatch::Cross
+            };
+            let activators = activator_sides(scene, b, front, dispatch, (step, radius))
                 .into_iter()
                 .map(|s| (s, classify(scene, plat, s, step)))
                 .collect();

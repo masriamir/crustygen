@@ -1172,7 +1172,10 @@ pub fn check_floor_actions(scene: &Scene, tables: &Tables, findings: &mut Vec<Fi
             Severity::Warning
         };
         let problem = match f.single() {
-            None => Some("is driven by lines of two engine types".to_owned()),
+            None => Some(format!(
+                "is driven by lines of {} engine types",
+                f.actions.len()
+            )),
             Some(a) => match &a.facts {
                 None => Some("raises to a texture height this checker does not resolve".to_owned()),
                 Some(facts) => match (facts.effect, facts.opening) {
@@ -1183,12 +1186,22 @@ pub fn check_floor_actions(scene: &Scene, tables: &Tables, findings: &mut Vec<Fi
                     (_, Some(OpeningShape::LedgeLower)) => Some(
                         "is a ledge that lowers to join, a shape no construct states".to_owned(),
                     ),
-                    // An opening the classifier could not name as any of the
-                    // four: `classify_effect` reports it rather than hiding
-                    // it, and so does this. Not the `Effect::Opening` arm
-                    // below, whose wording ("strands whoever stands on it")
-                    // is true only of the opening whose rider *loses*, which
-                    // is the one case that carries no shape at all.
+                    // COVERAGE: unreachable, and kept anyway.
+                    // `OtherOpening` is `classify_effect`'s `(dest > rest,
+                    // enterable_before false)` corner, and no floor reaches
+                    // it. `pass(n -> target)` only ever tightens as the
+                    // target rises — the target's own headroom, the opening
+                    // over it and the step onto it all shrink with the
+                    // floor — so enterable-after implies enterable-before
+                    // for a rise; and `Effect::Opening` implies
+                    // enterable-after, since every path that is new to the
+                    // local graph runs through the target (no other edge's
+                    // passability moved). The arm stays because the
+                    // `Effect::Opening` arm below reads "strands whoever
+                    // stands on it", which is true only of the opening whose
+                    // rider *loses* — the one case carrying no shape at all
+                    // — so an `OtherOpening` falling through to it would say
+                    // something false about a target nobody can stand on.
                     (_, Some(OpeningShape::OtherOpening)) => Some(
                         "opens a way that is none of a drop wall, a reveal or a bridge".to_owned(),
                     ),
@@ -2284,6 +2297,27 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         );
     }
 
+    /// The floor specials are modeled now, so none of them is unclassifiable
+    /// input. Deleting `recognized_specials`'s floor arm turns each of these
+    /// into a `V-S` warning that the flood cannot vouch for the line.
+    #[test]
+    fn floor_specials_are_recognized() {
+        // One of the four crustygen emits (23), one it never writes but the
+        // flood still models (101), and a gun line (47).
+        let mut text = chain(
+            &[0, 128, 0],
+            &[0, 7, 0],
+            &[(23, 7, false), (101, 7, false)],
+            "",
+        );
+        fixtures::far_wall(&mut text, 3, 47, 7);
+        let findings = findings_of_check(&text, check_recognized_specials);
+        assert!(
+            findings.is_empty(),
+            "every floor special the engine dispatches is modeled: {findings:?}"
+        );
+    }
+
     #[test]
     fn a_recognized_special_raises_no_v_s_warning() {
         let findings = findings_of(&two_box(64.0, " special = 1; arg0 = 5;", " id = 5;"));
@@ -2798,7 +2832,7 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
     /// is ever the binding constraint.
     #[test]
     fn v_p28_names_a_three_neighbor_target_that_opens_one_way_and_closes_another() {
-        let f = findings_of_check(TEE_JUNCTION, check_floor_actions);
+        let f = findings_of_check(&tee_junction([0, 24, 60, 24], 58), check_floor_actions);
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(
             f[0].check == "V-P28"
@@ -2809,57 +2843,108 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         );
     }
 
-    /// A T-junction: sector 1 (`x ∈ [128, 256]`, `y ∈ [0, 128]`, floor 24,
-    /// `id = 7`) bordered west by sector 0 (floor 0), east by sector 2
-    /// (floor 60) and north by sector 3 (`y ∈ [128, 256]`, floor 24). The
-    /// east link carries `58` (W1 `raiseFloor24`) naming tag 7. Every
-    /// ceiling is 256; every linedef is wound so its own sector lies on the
-    /// right of `v1 -> v2`.
-    const TEE_JUNCTION: &str = r#"namespace = "doom";
-vertex { x = 0.000; y = 0.000; }
-vertex { x = 0.000; y = 128.000; }
-vertex { x = 128.000; y = 0.000; }
-vertex { x = 128.000; y = 128.000; }
-vertex { x = 256.000; y = 0.000; }
-vertex { x = 256.000; y = 128.000; }
-vertex { x = 384.000; y = 0.000; }
-vertex { x = 384.000; y = 128.000; }
-vertex { x = 128.000; y = 256.000; }
-vertex { x = 256.000; y = 256.000; }
-linedef { v1 = 3; v2 = 2; sidefront = 0; sideback = 1; twosided = true; }
-linedef { v1 = 5; v2 = 4; sidefront = 2; sideback = 3; twosided = true; special = 58; arg0 = 7; }
-linedef { v1 = 3; v2 = 5; sidefront = 4; sideback = 5; twosided = true; }
-linedef { v1 = 0; v2 = 1; sidefront = 6; blocking = true; }
-linedef { v1 = 1; v2 = 3; sidefront = 7; blocking = true; }
-linedef { v1 = 2; v2 = 0; sidefront = 8; blocking = true; }
-linedef { v1 = 4; v2 = 2; sidefront = 9; blocking = true; }
-linedef { v1 = 5; v2 = 7; sidefront = 10; blocking = true; }
-linedef { v1 = 7; v2 = 6; sidefront = 11; blocking = true; }
-linedef { v1 = 6; v2 = 4; sidefront = 12; blocking = true; }
-linedef { v1 = 3; v2 = 8; sidefront = 13; blocking = true; }
-linedef { v1 = 8; v2 = 9; sidefront = 14; blocking = true; }
-linedef { v1 = 9; v2 = 5; sidefront = 15; blocking = true; }
-sidedef { sector = 0; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
-sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
-sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
-sidedef { sector = 2; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
-sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
-sidedef { sector = 3; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
-sidedef { sector = 0; texturemiddle = "STARTAN2"; }
-sidedef { sector = 0; texturemiddle = "STARTAN2"; }
-sidedef { sector = 0; texturemiddle = "STARTAN2"; }
-sidedef { sector = 1; texturemiddle = "STARTAN2"; }
-sidedef { sector = 2; texturemiddle = "STARTAN2"; }
-sidedef { sector = 2; texturemiddle = "STARTAN2"; }
-sidedef { sector = 2; texturemiddle = "STARTAN2"; }
-sidedef { sector = 3; texturemiddle = "STARTAN2"; }
-sidedef { sector = 3; texturemiddle = "STARTAN2"; }
-sidedef { sector = 3; texturemiddle = "STARTAN2"; }
-sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; }
-sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 24; heightceiling = 256; lightlevel = 160; id = 7; }
-sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 60; heightceiling = 256; lightlevel = 160; }
-sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 24; heightceiling = 256; lightlevel = 160; }
-"#;
+    /// The opening that is no construct either: one that strands the player
+    /// standing on it. T rests at 20 with neighbors at 0, −30 and −50, and
+    /// a `23` drops it to the lowest of them (−50). Everyone else gains —
+    /// the two low neighbors can now walk to each other across it, which is
+    /// [`Effect::Opening`] — while whoever rode it down can no longer climb
+    /// the 50 back to the room they came from, so the rider *loses* and the
+    /// action carries no [`OpeningShape`] at all.
+    ///
+    /// `23` is one of the four crustygen emits, so this is an Error: a build
+    /// that shipped it got it wrong.
+    #[test]
+    fn v_p28_names_an_opening_that_strands_its_rider() {
+        let f = findings_of_check(&tee_junction([0, 20, -30, -50], 23), check_floor_actions);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(
+            f[0].check == "V-P28"
+                && f[0].severity == Severity::Error
+                && f[0].subject == Subject::Sector(1)
+                && f[0].message.contains("strands whoever stands on it"),
+            "{f:?}"
+        );
+    }
+
+    /// A T-junction, the shape a [`fixtures::chain`] cannot make: sector 1
+    /// (`x ∈ [128, 256]`, `y ∈ [0, 128]`, `id = 7`) bordered west by sector
+    /// 0, east by sector 2 and north by sector 3 (`y ∈ [128, 256]`), so the
+    /// target has **three** neighbors. `floors` are those four sectors in
+    /// declaration order, and the east link carries `special` naming tag 7.
+    /// Every ceiling is 256 — no window is ever the binding constraint —
+    /// and every linedef is wound so its own sector lies on the right of
+    /// `v1 -> v2`.
+    fn tee_junction(floors: [i32; 4], special: i32) -> String {
+        use std::fmt::Write as _;
+
+        let mut text = String::from("namespace = \"doom\";\n");
+        for (x, y) in [
+            (0, 0),
+            (0, 128),
+            (128, 0),
+            (128, 128),
+            (256, 0),
+            (256, 128),
+            (384, 0),
+            (384, 128),
+            (128, 256),
+            (256, 256),
+        ] {
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = {y}.000; }}");
+        }
+        // The three two-sided links: west (0|1), east (1|2, the trigger),
+        // north (1|3).
+        let _ = writeln!(
+            text,
+            "linedef {{ v1 = 3; v2 = 2; sidefront = 0; sideback = 1; twosided = true; }}\n\
+             linedef {{ v1 = 5; v2 = 4; sidefront = 2; sideback = 3; twosided = true; \
+             special = {special}; arg0 = 7; }}\n\
+             linedef {{ v1 = 3; v2 = 5; sidefront = 4; sideback = 5; twosided = true; }}"
+        );
+        for (n, (v1, v2)) in [
+            (0, 1),
+            (1, 3),
+            (2, 0),
+            (4, 2),
+            (5, 7),
+            (7, 6),
+            (6, 4),
+            (3, 8),
+            (8, 9),
+            (9, 5),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {}; blocking = true; }}",
+                n + 6
+            );
+        }
+        for sector in [0, 1, 1, 2, 1, 3] {
+            let _ = writeln!(
+                text,
+                "sidedef {{ sector = {sector}; texturemiddle = \"-\"; \
+                 texturebottom = \"SUPPORT3\"; }}"
+            );
+        }
+        for sector in [0, 0, 0, 1, 2, 2, 2, 3, 3, 3] {
+            let _ = writeln!(
+                text,
+                "sidedef {{ sector = {sector}; texturemiddle = \"STARTAN2\"; }}"
+            );
+        }
+        for (i, floor) in floors.into_iter().enumerate() {
+            let id = if i == 1 { 7 } else { 0 };
+            let _ = writeln!(
+                text,
+                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; \
+                 heightfloor = {floor}; heightceiling = 256; lightlevel = 160; id = {id}; }}"
+            );
+        }
+        text
+    }
 
     /// The two findings that are about the tag rather than the shape: a
     /// second engine type driving one target, and a non-floor special
@@ -2880,7 +2965,10 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 24
                 && x.subject == Subject::Sector(1)),
             "both 23 and 18 are emitted specials: {f:?}"
         );
-        assert!(f[0].message.contains("lines of two engine types"), "{f:?}");
+        assert!(
+            f[0].message.contains("lines of 2 engine types"),
+            "the count is read off the resolution, not hardcoded: {f:?}"
+        );
         assert!(
             f[1].message.contains("also driven by specials [62]"),
             "{f:?}"

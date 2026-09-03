@@ -479,11 +479,36 @@ pub enum FloorForm {
 }
 
 impl FloorForm {
-    /// Whether the line fires from `P_UseSpecialLine` or `P_ShootSpecialLine`
-    /// — front side only — rather than from a crossing.
+    /// Whether the line fires from `P_UseSpecialLine` — the front side
+    /// alone — rather than from a crossing or a gunshot.
+    ///
+    /// The gate is that function's own opening block (pinned
+    /// `p_switch.c:284-297`): `if (side)` switches on the special and
+    /// `return false`s in the `default` arm, so every special but 124 is
+    /// dead from the back side.
+    ///
+    /// **[`Self::G1`] is not one of these.** A gun line never reaches
+    /// `P_UseSpecialLine` at all — see [`Self::shot`].
     #[must_use]
     pub fn front_only(self) -> bool {
-        matches!(self, Self::S1 | Self::SR | Self::G1)
+        matches!(self, Self::S1 | Self::SR)
+    }
+
+    /// Whether the line fires from `P_ShootSpecialLine` — a gunshot from
+    /// either side the line faces — rather than from a crossing or a use.
+    ///
+    /// `P_ShootSpecialLine (mobj_t* thing, line_t* line)` (pinned
+    /// `p_spec.c:955-1000`) takes **no `side` argument** and gates on none;
+    /// its only caller passes none either, `PTR_ShootTraverse` running
+    /// `if (li->special) P_ShootSpecialLine (shootthing, li);`
+    /// (`p_map.c:919-920`) two lines before it has even read `ML_TWOSIDED`
+    /// (`p_map.c:922`). So a gun line fires from whichever sector the shot
+    /// was taken in, which for a two-sided line is either of the two it
+    /// borders. The dispatch carries exactly two floor specials, 24
+    /// (`raiseFloor`) and 47 (`raiseToNearestAndChange`), plus door 46.
+    #[must_use]
+    pub fn shot(self) -> bool {
+        matches!(self, Self::G1)
     }
 
     /// Whether the line survives its first use.
@@ -2445,6 +2470,29 @@ mod tests {
             FloorEngineType::PlatRaiseToNearestAndChange,
             FloorForm::G1
         )));
+    }
+
+    /// The three dispatchers, kept apart because they gate sides
+    /// differently: `P_UseSpecialLine` refuses the back side
+    /// (`p_switch.c:284-297`), `P_CrossSpecialLine` and
+    /// `P_ShootSpecialLine` have no side gate at all — the latter's
+    /// signature (`p_spec.c:955-1000`) has no `side` parameter, and
+    /// `PTR_ShootTraverse` (`p_map.c:919-920`) passes none.
+    #[test]
+    fn only_the_use_forms_are_front_only_and_only_the_gun_form_is_shot() {
+        for form in [FloorForm::S1, FloorForm::SR] {
+            assert!(form.front_only(), "{form:?} is a P_UseSpecialLine form");
+            assert!(!form.shot(), "{form:?}");
+        }
+        for form in [FloorForm::W1, FloorForm::WR] {
+            assert!(!form.front_only(), "{form:?} is a crossing");
+            assert!(!form.shot(), "{form:?}");
+        }
+        assert!(
+            !FloorForm::G1.front_only(),
+            "a gun line never reaches P_UseSpecialLine's side gate"
+        );
+        assert!(FloorForm::G1.shot());
     }
 
     #[test]

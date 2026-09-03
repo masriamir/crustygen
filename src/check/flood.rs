@@ -181,16 +181,24 @@
 //! the [`KeyMask`] above [`ACTION_BIT_BASE`]: the target sector's
 //! [`Node::action`] carries `(bit, destination)`, so [`Node::effective_floor`]
 //! stands that sector at its destination in every state whose bit is set, and
-//! each trigger driving it ORs the bit in where the player fires it. Bit `i`
-//! is `resolve_floors`'s `i`th target, ascending by sector — the numbering a
-//! warning below names.
+//! each trigger driving it ORs the bit in where the player fires it. Bits are
+//! handed out in target order (ascending by sector) to the targets the flood
+//! models, so one it declines below costs no bit.
 //!
-//! - A **front-only** form (S1/SR/G1 — [`crate::tables::FloorForm::front_only`],
-//!   gated to the side the line's face is drawn on by `P_UseSpecialLine`'s
-//!   "use the back sides of VERY SPECIAL lines" block, pinned
-//!   `p_switch.c:284-297`, which returns false from the back for every
-//!   special but 124) fires from the line's front sector, so its bit goes on
-//!   that sector's [`Node::fires`] and is unioned in on entering the room.
+//! - A **use** form (S1/SR — [`crate::tables::FloorForm::front_only`], gated
+//!   to the front by `P_UseSpecialLine`'s "use the back sides of VERY
+//!   SPECIAL lines" block, pinned `p_switch.c:284-297`, which returns false
+//!   from the back for every special but 124) fires from the line's front
+//!   sector, so its bit goes on that sector's [`Node::fires`] and is unioned
+//!   in on entering the room.
+//! - A **gun** form (G1 — [`crate::tables::FloorForm::shot`]) fires from
+//!   *either* sector the line faces, and its bit goes on [`Node::fires`] of
+//!   both: `P_ShootSpecialLine` (pinned `p_spec.c:955-1000`) takes no `side`
+//!   argument and its only caller passes none (`p_map.c:919-920`), so a shot
+//!   from the back side fires it exactly as one from the front does. Both
+//!   this form and the use form read their sectors off `check::plats`'s
+//!   `activator_sides` — the derivation `floors` and `plats` already share —
+//!   rather than restating the rule here.
 //! - A **crossing** form (W1/WR) fires from the line itself, so its bit goes
 //!   on the [`Edge`] this module builds for that linedef and is unioned in on
 //!   arrival from either side — `P_CrossSpecialLine` has no side gate (the
@@ -210,15 +218,17 @@
 //! moved once and never returned — the flood may then miss a way back that
 //! a second press would open.
 //!
-//! Three kinds of target get **no** bit, stand at their rest floor, and earn
+//! Four kinds of target get **no** bit, stand at their rest floor, and earn
 //! a `V-P7` [`Severity::Warning`] naming the sector and why: one driven by
-//! lines of two engine types (they give it no one destination), one whose
-//! destination is a texture height this checker does not resolve
-//! ([`floors::Destination::NeedsTexture`]), and every target past the eighth
-//! (`KeyMask::BITS - ACTION_BIT_BASE` action bits fit above the key
-//! classes). Leaving such a target at rest is the conservative reading —
-//! the flood then judges the map as if the action never fired — and the
-//! warning is what keeps that silence from passing for a verdict.
+//! lines of more than one engine type (they give it no one destination), one
+//! whose destination is a texture height this checker does not resolve
+//! ([`floors::Destination::NeedsTexture`]), one whose sector already carries
+//! an action (a node holds one), and — once the first three have taken their
+//! bits — every target past the eighth, `KeyMask::BITS - ACTION_BIT_BASE`
+//! being what fits above the key classes. Leaving such a target at rest is
+//! the conservative reading — the flood then judges the map as if the action
+//! never fired — and the warning is what keeps that silence from passing for
+//! a verdict.
 //!
 //! # Key classes
 //!
@@ -420,8 +430,8 @@ struct FloorBits {
     /// Per scene sector: the action that sector *is* the target of, as
     /// [`Node::action`]'s `(bit, destination floor)`.
     actions: Vec<Option<(u8, i32)>>,
-    /// Per scene sector: the bits entering it fires — a front-only
-    /// trigger's front sector, [`Node::fires`].
+    /// Per scene sector: the bits entering it fires — the activator
+    /// sectors of a use or gun trigger, [`Node::fires`].
     node_fires: Vec<KeyMask>,
     /// Per linedef index: the bits crossing it fires — a walkover trigger's
     /// own line, which [`build_edges`] ORs into that linedef's [`Edge`].
@@ -459,15 +469,10 @@ fn resolve_floor_bits(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding
         node_fires: vec![0; scene.sectors.len()],
         line_fires: BTreeMap::new(),
     };
-    for (i, f) in floors::resolve_floors(scene, tables).iter().enumerate() {
-        if i >= MAX_MODELED_FLOORS {
-            findings.push(unmodeled_floor(
-                f.sector,
-                f.rest,
-                &format!("is past the first {MAX_MODELED_FLOORS}, all the reachability mask holds"),
-            ));
-            continue;
-        }
+    // Bits are handed out only to the targets that get one, so a target
+    // declined below leaves the mask as wide as it found it.
+    let mut next_bit = 0usize;
+    for f in floors::resolve_floors(scene, tables) {
         let Some(action) = f.single() else {
             findings.push(unmodeled_floor(
                 f.sector,
@@ -501,17 +506,29 @@ fn resolve_floor_bits(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding
             ));
             continue;
         }
-        let bit = u8::try_from(i).expect("the cap above keeps i under MAX_MODELED_FLOORS");
+        // Last of the four, so a target declined for a reason of its own is
+        // reported for that reason rather than for the mask being full.
+        if next_bit >= MAX_MODELED_FLOORS {
+            findings.push(unmodeled_floor(
+                f.sector,
+                f.rest,
+                &format!("is past the first {MAX_MODELED_FLOORS}, all the reachability mask holds"),
+            ));
+            continue;
+        }
+        let bit = u8::try_from(next_bit).expect("the cap above keeps it under MAX_MODELED_FLOORS");
+        next_bit += 1;
         bits.actions[f.sector] = Some((bit, dest));
         let mask: KeyMask = 1 << (ACTION_BIT_BASE + u32::from(bit));
         for &t in &action.triggers {
             let trigger = &f.triggers[t];
-            if trigger.form.front_only() {
-                // `Some` for every trigger `resolve_floors` builds — a
-                // linedef whose front side dangles contributes no front
-                // mirror to read it from (`FloorTrigger::front`).
-                if let Some(front) = trigger.front {
-                    bits.node_fires[front] |= mask;
+            if trigger.form.front_only() || trigger.form.shot() {
+                // A use or a gun line fires from where the player stands
+                // rather than from a crossing, so the bit goes on the nodes
+                // `activator_sides` names: the front sector for a switch,
+                // either sector a gun line faces.
+                for &(sector, _) in &trigger.activators {
+                    bits.node_fires[sector] |= mask;
                 }
             } else {
                 *bits.line_fires.entry(trigger.linedef).or_default() |= mask;
@@ -791,7 +808,10 @@ fn push_flood_findings(
 
 /// Runs the V-P7 flood over `scene` and pushes its findings, including one
 /// [`Severity::Warning`] per floor target it declines to model (see "Floor
-/// actions" in the module doc).
+/// actions" in the module doc). Those warnings ride the flood rather than
+/// standing alone, so a map that returns `None` below — no start, no exit,
+/// too many lock classes — says nothing about its floor targets either: the
+/// flood they qualify never ran.
 ///
 /// Returns `Some(reached)` — one entry per scene sector, `reached[i]` true
 /// iff sector `i` is forward-reachable from the player 1 start — when the
@@ -2200,10 +2220,19 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
         );
     }
 
-    /// One `player1_start` in room 0 of a [`fixtures::chain`], as the
-    /// floor-action fixtures below spell it.
-    const START_IN_ROOM_0: &str =
-        "thing { x = 64.000; y = 64.000; angle = 90; type = 1; single = true; }\n";
+    /// One `player1_start` in room `i` of a [`fixtures::chain`], centered
+    /// in its 128-unit box. The floor-action fixtures below spell their
+    /// start this way.
+    fn start_in_room(i: usize) -> String {
+        let tables = Tables::load().expect("tables");
+        let start = tables.thing_id("player1_start").expect("player1_start id");
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "these fixtures are a handful of rooms wide, far under f64's mantissa"
+        )]
+        let x = i as f64 * 128.0 + 64.0;
+        thing_at(x, 64.0, start)
+    }
 
     #[test]
     fn a_drop_wall_a_remote_switch_lowers_is_crossed_once_the_switch_room_is_entered() {
@@ -2214,7 +2243,7 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             &[256, 128, 256],
             &[0, 7, 0],
             &[(0, 0, false), (0, 0, false)],
-            START_IN_ROOM_0,
+            &start_in_room(0),
         );
         fixtures::far_wall(&mut text, 3, 11, 0);
         // Room 0's west wall is the first `v1 = 0; v2 = 1;` line the builder
@@ -2245,7 +2274,7 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             &[0, -96, 0],
             &[0, 7, 0],
             &[(0, 0, false), (119, 7, false)],
-            START_IN_ROOM_0,
+            &start_in_room(0),
         );
         fixtures::far_wall(&mut text, 3, 11, 0);
         let (scene, tables) = fixtures::scene_of(&text);
@@ -2274,7 +2303,7 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             &[0, -96, 0],
             &[0, 7, 0],
             &[(119, 7, false), (0, 0, false)],
-            START_IN_ROOM_0,
+            &start_in_room(0),
         );
         fixtures::far_wall(&mut text, 3, 11, 0);
         let (scene, tables) = fixtures::scene_of(&text);
@@ -2326,30 +2355,90 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             "{findings:?}"
         );
 
-        // Nine targets, one per link of a ten-room chain: the mask holds
-        // eight, and the ninth (sector 9, the last tag) is named and left at
-        // rest.
-        let floors = [0; 10];
-        let tags: Vec<i32> = (0..10).collect();
-        let links: Vec<(i32, i32, bool)> = (1..10).map(|tag| (23, tag, false)).collect();
-        let (scene, tables) = fixtures::scene_of(&fixtures::chain(&floors, &tags, &links, ""));
+        // Eleven targets, one per link of a twelve-room chain, with an 18
+        // added on the tags of the *first* and the *tenth* so those two are
+        // two-type. The mask holds eight, and this pins three things at
+        // once: an early decline costs no bit (sectors 2..=9 are modeled,
+        // not 2..=8), a late decline is reported for its own reason rather
+        // than for the mask being full (sector 10 reads "engine types"), and
+        // the target after that is the one the cap actually stops.
+        let floors = [0; 12];
+        let tags: Vec<i32> = (0..12).collect();
+        let links: Vec<(i32, i32, bool)> = (1..12).map(|tag| (23, tag, false)).collect();
+        let mut text = fixtures::chain(&floors, &tags, &links, "");
+        fixtures::far_wall(&mut text, 12, 18, 1);
+        fixtures::far_wall(&mut text, 12, 18, 10);
+        let (scene, tables) = fixtures::scene_of(&text);
         let mut findings = Vec::new();
         let bits = resolve_floor_bits(&scene, &tables, &mut findings);
-        let modeled: Vec<usize> = (0..10).filter(|&i| bits.actions[i].is_some()).collect();
+        let modeled: Vec<usize> = (0..12).filter(|&i| bits.actions[i].is_some()).collect();
         assert_eq!(
             modeled,
-            (1..9).collect::<Vec<_>>(),
-            "the first eight targets, ascending by sector"
+            (2..10).collect::<Vec<_>>(),
+            "eight bits, and the declined sector 1 spent none of them"
         );
-        let warnings: Vec<&Finding> = findings
+        let warnings: Vec<(Subject, &str)> = findings
             .iter()
             .filter(|f| f.check == "V-P7" && f.severity == Severity::Warning)
+            .map(|f| (f.subject, f.message.as_str()))
             .collect();
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert!(
-            matches!(warnings[0].subject, Subject::Sector(9))
-                && warnings[0].message.contains("past the first 8"),
+        assert_eq!(warnings.len(), 3, "{warnings:?}");
+        assert_eq!(
+            warnings.iter().map(|&(s, _)| s).collect::<Vec<_>>(),
+            vec![Subject::Sector(1), Subject::Sector(10), Subject::Sector(11)],
             "{warnings:?}"
+        );
+        assert!(warnings[0].1.contains("engine types"), "{warnings:?}");
+        assert!(
+            warnings[1].1.contains("engine types"),
+            "declined for its own reason, not for the full mask: {warnings:?}"
+        );
+        assert!(warnings[2].1.contains("past the first 8"), "{warnings:?}");
+    }
+
+    /// A gun line fires from either sector it faces, so a target it names is
+    /// raised by a player standing on the line's **back** side —
+    /// `P_ShootSpecialLine` (pinned `p_spec.c:955-1000`) takes no `side`
+    /// argument, and `PTR_ShootTraverse` passes none (`p_map.c:919-920`).
+    ///
+    /// The fixture puts the shot's front sector out of reach so the two
+    /// readings differ: S (floor 128 under a 128 ceiling) is a sealed slab
+    /// no walk can enter, and the `47` on the S|A line names the pit P. Read
+    /// as front-only, the bit would wait on a room the player can never
+    /// stand in, the pit would stay at −96, and the map would be
+    /// unfinishable.
+    #[test]
+    fn a_gun_line_raises_its_target_for_a_player_on_the_lines_back_side() {
+        // S(128, sealed) | A(0, start) — P(-96, tag 7) — E(0, exit).
+        let mut text = fixtures::chain_full(
+            &[128, 0, -96, 0],
+            &[128, 256, 256, 256],
+            &[0, 0, 7, 0],
+            &[(47, 7, false), (0, 0, false), (0, 0, false)],
+            &start_in_room(1),
+        );
+        fixtures::far_wall(&mut text, 4, 11, 0);
+        let (scene, tables) = fixtures::scene_of(&text);
+        let mut findings = Vec::new();
+        let reached = run_flood(&scene, &tables, &mut findings).expect("start and exit exist");
+        assert_eq!(
+            reached,
+            vec![false, true, true, true],
+            "the shot crosses the sealed slab's face from the start room: {findings:?}"
+        );
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.message.contains("no feasible walk")),
+            "the pit rises, so the exit is a walk away: {findings:?}"
+        );
+        // The slab itself is the one sector no walk reaches: floor and
+        // ceiling both 128 leave no opening to cross.
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && matches!(f.subject, Subject::Sector(0))
+                && f.message.contains("never reached")),
+            "{findings:?}"
         );
     }
 }
