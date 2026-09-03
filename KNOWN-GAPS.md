@@ -10,10 +10,10 @@ platform recognizer, `lift::floor`'s floor-action recognizer and the
 `crustygen-corpus` corpus sweep (see
 `docs/corpus.md`), plus the `crustygen-build` CLI over the compiler
 (`src/bin/crustygen-build.rs` — see `docs/build.md`).
-925 tests (743 lib + 3 crustygen-build unit + 18 build_cli + 21 check_adversarial + 16 check_cli +
+927 tests (743 lib + 3 crustygen-build unit + 18 build_cli + 21 check_adversarial + 16 check_cli +
 9 check_conformance + 11 corpus_cli + 1 first_map + 1 floor_recognizer + 12 golden_textmap +
 20 lift_cli + 1 plat_recognizer + 3 spec_documents + 1 teleport_recognizer + 6 vanilla_wad + 4
-vocabulary_arbiter + 3 vocabulary_tables + 1 walking_skeleton + 51 in the `liftprobe` example),
+vocabulary_arbiter + 3 vocabulary_tables + 1 walking_skeleton + 53 in the `liftprobe` example),
 plus four separately-run `#[ignore]`d golden-regeneration generators not included in that
 count. This file records what is deliberately absent, what is known-fragile, and the decisions a
 future contributor would otherwise have to re-derive.
@@ -140,8 +140,13 @@ but a closet reveal holds nothing.** Retail's genuinely sealed pens — 8 of the
 97 closet sectors in DOOM + DOOM2 — are opened either by a monsters-only
 teleport (7 of the 8) or by a remote linedef special aimed at a zero-height
 strip beside the pen. Both shapes are now buildable: the first by a
-monsters-only teleport pad, the second by a **drop wall**, which is exactly
-that strip, and P27 accepts a pen released either way.
+monsters-only teleport pad, the second by a **drop wall**, which is that strip
+under one of our own specials, and P27 accepts a pen released either way.
+The *idiom* is what crustygen can now build, not retail's own instances of it:
+the corpus finds 62, 36, 109, 20, 2, 123, 103 and 102 on those strips and **not
+one of the eight is emittable**, so a lifted map carrying retail's release strip
+is still outside this vocabulary even though an authored equivalent is inside
+it.
 
 What is *not* buildable is the shape an author reaches for first: a
 `RevealKind::Closet` with a monster standing inside it. A closet rests with its

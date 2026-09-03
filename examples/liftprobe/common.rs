@@ -2812,6 +2812,57 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_gun_line_fires_from_either_sector_it_faces() {
+        // Room 1 sits 96 above room 0, so a *crossing* fires from the high
+        // side only and a *use* from the line's front side only. A gunshot is
+        // gated by neither: `P_ShootSpecialLine` (`p_spec.c:955-1000`) takes
+        // no `side` argument, and `PTR_ShootTraverse` passes none
+        // (`p_map.c:919-920`), two lines before `ML_TWOSIDED` is even read.
+        // The link's front is room 0 (`east_front` false).
+        let f = fixture(&chain(
+            &[0, 96, 0],
+            &[0, 7, 0],
+            &[(47, 7, false), (0, 0, false)],
+            "",
+        ));
+        assert_eq!(
+            trigger_sides(&f.map, &f.scene, 1, 0, f.step, Dispatch::Shot),
+            vec![0, 1],
+            "a shot from either bordering sector fires the line"
+        );
+        assert_eq!(
+            trigger_sides(&f.map, &f.scene, 1, 0, f.step, Dispatch::Use),
+            vec![0],
+            "`P_UseSpecialLine` is front-side only (`p_switch.c:284-297`)"
+        );
+        assert_eq!(
+            trigger_sides(&f.map, &f.scene, 1, 0, f.step, Dispatch::Cross),
+            vec![1],
+            "the 96-unit climb out of room 0 refuses the crossing"
+        );
+    }
+
+    #[test]
+    fn a_self_referencing_gun_line_is_one_sector_to_shoot_from() {
+        // Both mirrors name sidedef 0 — `chain` allocates the first link's
+        // front side there — so front and back resolve to one sector. That is
+        // one place to stand and shoot from, not two.
+        let extra = "linedef { v1 = 0; v2 = 1; sidefront = 0; sideback = 0; \
+                     twosided = true; special = 47; arg0 = 7; }\n";
+        let f = fixture(&chain(
+            &[0, 96, 0],
+            &[0, 7, 0],
+            &[(0, 0, false), (0, 0, false)],
+            extra,
+        ));
+        let line = f.map.linedefs.len() - 1;
+        assert_eq!(
+            trigger_sides(&f.map, &f.scene, 1, line, f.step, Dispatch::Shot),
+            vec![0]
+        );
+    }
+
+    #[test]
     fn helpers_format_shares_and_percentiles() {
         assert_eq!(pct(1, 4), "25.0 %");
         assert_eq!(pct(0, 0), "n/a");

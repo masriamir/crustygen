@@ -33,7 +33,7 @@ directly as JSON and built with `crustygen-build` (see
 [`docs/build.md`](docs/build.md)). See [Known gaps](#known-gaps).
 
 ```bash
-cargo test                                   # 925 tests
+cargo test                                   # 927 tests
 cargo run --bin crustygen-build -- tests/fixtures/entrada_base.json out.wad
 cargo run --bin crustygen-check -- maps/entrada.wad \
     --spec tests/fixtures/entrada.spec.md
@@ -83,11 +83,14 @@ sectors. See [`docs/geometry.md`](docs/geometry.md).
 Compilation runs a fixed pass order, each pass depending on the last: emit
 room sectors, resolve secret specials, cut portals, emit doors, carve exits,
 emit teleport pads and their destination markers (`emit_teleports`), emit the
-`downWaitUpStay` platforms behind lifts, barriers and pedestals
-(`emit_lifts`), emit the one-shot floor actions behind drop walls, reveals and
-bridges (`emit_floors`), check no two emitted sectors overlap, apply height textures,
+one-shot floor actions behind drop walls, reveals and bridges (`emit_floors`),
+emit the `downWaitUpStay` platforms behind lifts, barriers and pedestals
+(`emit_lifts`), check no two emitted sectors overlap, apply height textures,
 place things, check no action sits at tag 0, render `TEXTMAP`, then run the
-playability catalog. A
+playability catalog. **`emit_lifts` runs last of the emitters on purpose:**
+every pass that *splits* a wall shifts the linedef indices above it, so a
+later split would silently invalidate the `low_line`/`top_line` indices
+`emit_lifts` records — `emit_lifts` only appends. A
 violation is a hard error, not a warning — a door the player cannot fit
 through is a broken map, not a missed target.
 

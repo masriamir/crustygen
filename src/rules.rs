@@ -463,10 +463,21 @@ fn check_teleport_exit_rooms(ir: &Ir, out: &Compiled, v: &mut Vec<RuleViolation>
 }
 
 /// P27: no sealed monster room — a room holding a monster has a portal or is
-/// a teleport destination, so sight or sound can ever reach it. A sealed pen
-/// with no remote release strip has no release at all; retail seals a pen
-/// only where a monsters-only teleport or a tier-3 strip special empties it,
-/// and the strip specials are out of this vocabulary.
+/// a teleport destination, so sight or sound can ever reach it.
+///
+/// Both of retail's release shapes are now buildable, and either satisfies
+/// this rule. A monsters-only teleport pad makes the pen a teleport
+/// destination; a **drop wall** gives it a portal, since `has_portal` below
+/// counts every [`PortalKind`] and a drop wall is one — a sealed strip
+/// between the pen and the room in front of it, lowered by a trigger placed
+/// anywhere. What is still out of the vocabulary is retail's *other* release
+/// strip, a remote special aimed at a zero-height sliver beside the pen
+/// (62/36/109/20/2/123/103/102 in the corpus, none of them emittable), and
+/// so is a `RevealKind::Closet` with a monster inside it — a closet rests
+/// with its floor at its ceiling, so nothing fits in it
+/// ([`CompileError::RevealNoHeadroom`](crate::compile::CompileError::RevealNoHeadroom)).
+/// A pen with neither a portal nor a pad still has no release at all, which
+/// is what this refuses.
 fn check_sealed_monster_rooms(
     ir: &Ir,
     tables: &Tables,

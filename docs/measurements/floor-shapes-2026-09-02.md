@@ -12,9 +12,11 @@ pinned commit `a77dfb96`, read for this probe (`p_spec.h`, `p_spec.c`, `p_floor.
 > treated a G1 line (24, 47) as fireable from its front side alone; `P_ShootSpecialLine` has no
 > side gate, so either bordering sector fires it. Corrected and re-run in
 > [`floors-2026-09-03.md`](floors-2026-09-03.md) § "The probe's gun-line correction", which
-> records the delta: two §E rows move (20 triggers gain a nearer activator; 43 new activator
-> pairs appear) and **nothing else in this document changes** — every §H gate row, including the
-> 42 gun refusals, reproduces to the unit.
+> records the delta **for the idgames columns**: two §E rows move (20 triggers gain a nearer
+> activator; 43 new activator pairs appear) and nothing else in those columns changes — every §H
+> gate row, including the 42 gun refusals, reproduces to the unit. The **retail** columns
+> (DOOM+DOOM2, Final Doom) were not re-run and are still as taken here; their gun lines are 4 and
+> 6 respectively, so the same two rows are the ones to expect movement in.
 
 Sub-project 4a of Project G. The question: what *is* a tagged floor action in the maps we have —
 what it moves, where it sends it, what that does to where the player can walk, and how it is

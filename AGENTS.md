@@ -12,9 +12,10 @@ Doom PWAD, and emits a binary Doom-format twin. It removes coordinate bookkeepin
 design: you describe rooms, portals, doors, things and an exit; it produces watertight geometry,
 allocates tags, and rejects a map that fails its **wired** playability checks. The layer-4 verifier
 independently re-derives all but one of those wired rules from the built WAD and adds one
-verifier-only rule (P20); the one compiler-side gap is that its P7 reachability check is skipped when a map has no
-player start or no exit (the verifier still catches that as a hard `V-P7` finding — see
-`KNOWN-GAPS.md`). So "refuses every unwalkable map" is the compile-time goal, not yet a guarantee.
+verifier-only rule (P20); the one compiler-side gap is that its P7 reachability check is skipped
+when a map has no player start or no exit (the verifier still catches that as a hard `V-P7`
+finding — see `KNOWN-GAPS.md`). So "refuses every unwalkable map" is the compile-time goal, not
+yet a guarantee.
 Built on
 [crustywad](https://github.com/masriamir/crustywad) (pinned published dependency, `write` +
 `nodebuild` features) for WAD I/O and node building. Single crate, Rust 2024 edition, MSRV 1.94.0,

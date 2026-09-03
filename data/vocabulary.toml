@@ -452,11 +452,11 @@ curated = "NOT sourced from the engine or derivable from it — which texture na
 # DOORTRAK, and are not door panels.
 #
 # Card versus skull: across DOOM.WAD, DOOM2.WAD, TNT.WAD and PLUTONIA.WAD,
-# restricted to maps containing exactly ONE key of a given colour so the
+# restricted to maps containing exactly ONE key of a given color so the
 # attribution is unambiguous, the plain name accompanies a keycard 117 times
 # against 18 for the `2` variant, and the `2` variant accompanies a skull key
 # 92 times against 26 for the plain name. The split holds in the same
-# direction for all three colours (blue 45/6 vs 8/30, red 38/6 vs 10/34,
+# direction for all three colors (blue 45/6 vs 8/30, red 38/6 vs 10/34,
 # yellow 34/6 vs 8/28). Not absolute — mappers are not strict, and a map with
 # several doors can mix them — but overwhelmingly one-directional.
 [key_trim]
@@ -466,4 +466,4 @@ red_card = "DOORRED"
 red_skull = "DOORRED2"
 yellow_card = "DOORYEL"
 yellow_skull = "DOORYEL2"
-curated = "Asset-naming convention, not an engine constant — nothing in linuxdoom-1.10 associates a texture name with a key. The colour-to-name mapping is self-evident from the names; the card-versus-skull mapping is the measured convention described in the comment above, counted over the four id/Final Doom IWADs in RETAIL/ by correlating each map's key things (doomednums 5/6/13 card and 40/39/38 skull, per this file's [things] table) against the key-door textures its sidedefs carry. All six confirmed present in the TEXTURE1 lump of DOOM.WAD, DOOM2.WAD and freedoom2.wad, at 8x128 (plain) and 16x128 (`2`), via crustywad::Wad::texture_set()."
+curated = "Asset-naming convention, not an engine constant — nothing in linuxdoom-1.10 associates a texture name with a key. The color-to-name mapping is self-evident from the names; the card-versus-skull mapping is the measured convention described in the comment above, counted over the four id/Final Doom IWADs in RETAIL/ by correlating each map's key things (doomednums 5/6/13 card and 40/39/38 skull, per this file's [things] table) against the key-door textures its sidedefs carry. All six confirmed present in the TEXTURE1 lump of DOOM.WAD, DOOM2.WAD and freedoom2.wad, at 8x128 (plain) and 16x128 (`2`), via crustywad::Wad::texture_set()."

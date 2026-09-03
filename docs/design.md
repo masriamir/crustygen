@@ -443,8 +443,8 @@ interior, and the right-hand side of a directed edge only faces inward when the 
 clockwise. Verified empirically rather than assumed — measuring the signed area of every sector
 boundary in nine Freedoom maps across both IWADs, oriented so the sector sits on the front side,
 gives 2611 clockwise and 0 counter-clockwise. Portal `kind` is one of `plain`, `door`, `locked`,
-`lift`, `drop_wall`, `bridge`; `lock` names a key when `kind` is `locked`. Texture names in the IR are concrete, having
-already been resolved from the template's high-level vocabulary.
+`lift`, `drop_wall`, `bridge`; `lock` names a key when `kind` is `locked`. Texture names in the IR
+are concrete, having already been resolved from the template's high-level vocabulary.
 
 **Teleports are not portals.** A portal joins two rooms through their shared wall; a teleport
 relocates whatever crosses it, and the two rooms need not touch. They live in their own
@@ -552,12 +552,21 @@ builds:
   under the player's use. Its `kind` is `closet` (floor at the host's ceiling, solid at rest) or
   `pedestal` (resting `rise` above the host's floor, its things on top).
 
-Every construct names a `trigger` by id, and the `triggers` list places them:
+Every construct names a trigger by id — **a reveal in its own `trigger` field, a drop wall or a
+bridge in the portal's `fires_on`**. The two words are one concept under two names because
+`Portal::trigger` was already taken: on a lift portal that word names where the trigger line is
+*placed* (`switch`, `walkover`, `both_ends`), not which trigger fires the portal, so the floor
+construct's field had to be called something else (`Portal::fires_on`).
+
+The `triggers` list places them:
 `{ id, kind, room, at }` for a `switch` — a use line centered on that room's own wall, exactly as
 `Exit::at` is read — or `{ id, kind, portal: [a, b] }` for a `walkover`, which lands on the
-opening line of the portal joining those two rooms. A walkover may only name a plain or bridge
+opening line of the portal joining those two rooms. A walkover may only name a plain or a bridge
 portal (`IrError::WalkoverOnNonPlainPortal`): a door or lift portal's opening already carries a
-special. One trigger is one sector tag and one line special, so every construct naming it moves
+special. **A bridge names itself**, and that is the shape the construct is built around: the
+walkover special goes on both of the pit's own thresholds, so stepping down into the pit is the
+crossing that raises it, whichever side the player steps off. One trigger is one sector tag and
+one line special, so every construct naming it moves
 the same way — all lowering or all rising (`IrError::TriggerMixesFamilies`) — and a trigger no
 construct names is an error (`IrError::TriggerUnused`), as is a construct naming no trigger. A map
 carries at most `Ir::MAX_FLOOR_ACTIONS` (8) of them, the width the reachability mask's action half
