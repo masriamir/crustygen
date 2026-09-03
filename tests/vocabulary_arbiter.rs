@@ -168,10 +168,9 @@ fn teleport_exit(at_y: i32) -> String {
 /// [`specials_of`] fills [`BASE`]'s template; this takes a fixture that is
 /// already a complete map — [`LIFTS`], [`FLOORS`], [`FLOOR_SWITCH_BRIDGE`] —
 /// because the template has no room to author a lift or floor construct.
-fn specials_of_whole_map(json: &str) -> (BTreeSet<u16>, BTreeSet<u16>) {
+fn specials_of_whole_map(json: &str, tables: &Tables) -> (BTreeSet<u16>, BTreeSet<u16>) {
     let ir = Ir::from_json(json).expect("fixture parses");
-    let tables = Tables::load().expect("tables");
-    let out = compile(&ir, &tables).expect("fixture compiles");
+    let out = compile(&ir, tables).expect("fixture compiles");
     let lines = out
         .data
         .linedefs
@@ -293,9 +292,9 @@ fn every_construct_the_compiler_emits_is_in_the_curated_sets() {
     // - the switch bridge: 18, the one emitted floor special the golden
     //   never writes.
     for (l, s) in [
-        specials_of_whole_map(LIFTS),
-        specials_of_whole_map(FLOORS),
-        specials_of_whole_map(FLOOR_SWITCH_BRIDGE),
+        specials_of_whole_map(LIFTS, &tables),
+        specials_of_whole_map(FLOORS, &tables),
+        specials_of_whole_map(FLOOR_SWITCH_BRIDGE, &tables),
     ] {
         lines.extend(l);
         sectors.extend(s);
