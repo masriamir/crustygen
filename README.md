@@ -39,7 +39,7 @@ cargo run --bin crustygen-check -- maps/entrada.wad \
     --spec tests/fixtures/entrada.spec.md
 ```
 
-The sample maps live in `maps/` — three maps, each shipped in both formats:
+The sample maps live in `maps/` — four maps, each shipped in both formats:
 
 - `maps/entrada.wad` — the **UDMF** build of entrada, the eight-room map
   with a key, a locked door, a secret and a switch exit. Needs a
@@ -54,6 +54,12 @@ The sample maps live in `maps/` — three maps, each shipped in both formats:
 - `maps/ascensor.wad` — the **UDMF** build of ascensor, the six-room lift
   map: three lifts, a barrier and a pedestal. Same ZDoom-family requirement.
 - `maps/ascensor_doom.wad` — ascensor's binary **Doom-format** twin, same
+  guidance as entrada's.
+- `maps/muralla.wad` — the **UDMF** build of muralla, the five-room floor
+  map: a wall that drops on a switch with a monster closet behind it, a
+  pedestal that lowers to hand over the red card, and a bridge that rises
+  under the player who steps into its pit. Same ZDoom-family requirement.
+- `maps/muralla_doom.wad` — muralla's binary **Doom-format** twin, same
   guidance as entrada's.
 
 Loading the UDMF build in a vanilla port dies with

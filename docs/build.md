@@ -54,8 +54,9 @@ Emission order is fixed (`docs/design.md` §7.1), so the same IR yields the
 same bytes: `crustygen-build tests/fixtures/entrada_base.json out.wad` writes
 a file byte-identical to the committed `maps/entrada.wad`,
 `crustygen-build tests/fixtures/salto_base.json out.wad` to `maps/salto.wad`,
-and `crustygen-build tests/fixtures/ascensor_base.json out.wad` to
-`maps/ascensor.wad`. `tests/build_cli.rs` pins all three. The binary
+`crustygen-build tests/fixtures/ascensor_base.json out.wad` to
+`maps/ascensor.wad`, and `crustygen-build tests/fixtures/muralla_base.json
+out.wad` to `maps/muralla.wad`. `tests/build_cli.rs` pins all four. The binary
 Doom-format twins are not produced here — they are `cwad convert`
 downconverts. `maps/entrada_doom.wad` is the
 one described in `tests/first_map.rs` (`cwad convert --to doom --nodes` on the
@@ -65,7 +66,9 @@ running that downconvert against the committed UDMF build itself,
 which drops the `ZNODES` lump with a warning rather than refusing and rebuilds
 the node lumps for the Doom format regardless. `maps/ascensor_doom.wad` came
 the same way, `cwad convert maps/ascensor.wad --to doom --nodes --lenient -o
-maps/ascensor_doom.wad`. The two routes agree: the same command over
+maps/ascensor_doom.wad`, and `maps/muralla_doom.wad` likewise,
+`cwad convert maps/muralla.wad --to doom --nodes --lenient -o
+maps/muralla_doom.wad`. The two routes agree: the same command over
 `maps/entrada.wad` reproduces the committed `maps/entrada_doom.wad`
 byte-for-byte.
 

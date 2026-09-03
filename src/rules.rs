@@ -324,11 +324,26 @@ fn check_missing_textures(out: &Compiled, v: &mut Vec<RuleViolation>) {
 
 /// P24: every locked door's key is placed somewhere, and every placed key
 /// opens something.
+///
+/// "Placed" means placed *anywhere a player can pick it up*, which is every
+/// authored thing, not only a room's own: island cargo — a pedestal's
+/// [`crate::ir::Pedestal::things`] and a reveal's
+/// [`crate::ir::Reveal::things`] — is picked up by standing on the island,
+/// and the layer-4 verifier's own V-P24
+/// (`check::flood::check_key_lock_coherence`) already reads it that way,
+/// scanning every emitted thing that resolves to a sector. Scanning only
+/// `Room::things` here made the two layers disagree in the refusing
+/// direction: a map whose only red card sat on a pedestal was rejected as
+/// "locked by `red_card`, which is never placed" while the verifier passed
+/// the very same emitted geometry.
 fn check_key_lock_coherence(ir: &Ir, v: &mut Vec<RuleViolation>) {
     let placed: Vec<&str> = ir
         .rooms
         .iter()
-        .flat_map(|r| r.things.iter().map(|t| t.kind.as_str()))
+        .flat_map(|r| r.things.iter())
+        .chain(ir.pedestals.iter().flat_map(|p| p.things.iter()))
+        .chain(ir.reveals.iter().flat_map(|r| r.things.iter()))
+        .map(|t| t.kind.as_str())
         .collect();
 
     for p in &ir.portals {
@@ -1283,6 +1298,74 @@ mod tests {
         assert!(
             out.data.linedefs.iter().any(|l| l.special == keyed),
             "the locked door carries blue_card's keyed special"
+        );
+    }
+
+    /// A key can be island cargo rather than a room thing, and both key-aware
+    /// rules have to see it there: P24 (is it placed at all?) and P7 (can the
+    /// player hold it before the door?). The pedestal's card is picked up by
+    /// standing on the platform once it has been called down, so its node is
+    /// the *pedestal's* sector, not the host room's.
+    ///
+    /// Muralla — `tests/fixtures/muralla_base.json` — is the reveal half of
+    /// the same thing end to end; this is the pedestal half, and the smallest
+    /// map that has it: a start, a pedestal carrying the only blue card, the
+    /// door it opens, and an exit beyond so the P7 flood has a goal at all.
+    #[test]
+    fn a_key_placed_on_a_pedestal_is_placed_for_p24_and_held_for_p7() {
+        let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]],
+              "floor":0, "ceiling":192, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+            { "id":"b", "footprint":[[576,0],[576,512],[1088,512],[1088,0]],
+              "floor":0, "ceiling":192, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"locked", "lock":"blue_card", "width":64, "at":[512,256],
+                        "door_thickness":32, "alcove_near":16, "alcove_far":16 }],
+          "pedestals":[
+            { "id":"prize", "room":"a", "at":[256,256], "rise":64,
+              "things":[{ "kind":"blue_card", "at":[288,288], "angle":0 }] }
+          ],
+          "exits":[{ "room":"b", "trigger":"switch", "at":[1088,256], "width":64 }] }"#;
+        assert!(
+            violations(ir_json).is_empty(),
+            "a card on a pedestal is a placed, reachable key: {:?}",
+            violations(ir_json)
+        );
+    }
+
+    /// The reveal half of the rule above, in the same minimal shape: the blue
+    /// card is sealed on a pedestal *reveal* that a switch calls down. P7 has
+    /// to grant the key only after that switch is used — the reveal rests 64
+    /// above the floor, too tall to step onto — and P24 has to count it as
+    /// placed at all.
+    #[test]
+    fn a_key_sealed_in_a_reveal_is_placed_for_p24_and_held_for_p7() {
+        let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]],
+              "floor":0, "ceiling":192, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+            { "id":"b", "footprint":[[576,0],[576,512],[1088,512],[1088,0]],
+              "floor":0, "ceiling":192, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"locked", "lock":"blue_card", "width":64, "at":[512,256],
+                        "door_thickness":32, "alcove_near":16, "alcove_far":16 }],
+          "triggers":[{ "id":"t", "kind":"switch", "room":"a", "at":[0,256] }],
+          "reveals":[
+            { "id":"prize", "room":"a", "at":[256,256], "kind":"pedestal", "rise":64,
+              "things":[{ "kind":"blue_card", "at":[288,288], "angle":0 }], "trigger":"t" }
+          ],
+          "exits":[{ "room":"b", "trigger":"switch", "at":[1088,256], "width":64 }] }"#;
+        assert!(
+            violations(ir_json).is_empty(),
+            "a card on a reveal the switch lowers is a placed, reachable key: {:?}",
+            violations(ir_json)
         );
     }
 

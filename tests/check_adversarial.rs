@@ -1,9 +1,9 @@
 //! Layer-4 proof: a compiled fixture, broken one property at a time, is
 //! caught each time.
 //!
-//! Four fixtures, each with its own `*_udmf()` builder: entrada (the base
-//! map), the teleport golden, the lift golden and ascensor, and the floor
-//! golden. Each test compiles one of them clean, mutates exactly one
+//! Six fixtures, each with its own `*_udmf()` builder: entrada (the base
+//! map), the teleport golden, the lift golden, ascensor, the floor golden
+//! and muralla. Each test compiles one of them clean, mutates exactly one
 //! property on the *parsed* `UdmfMap` (or, for V-P9, the emitted text before
 //! parsing — that field has no `UdmfSidedef` to set, see the test), and
 //! asserts the specific finding [`crustygen::check::run`] raises in
@@ -28,6 +28,7 @@ const ENTRADA: &str = include_str!("fixtures/entrada_base.json");
 const TELEPORTS: &str = include_str!("golden/teleports.json");
 const LIFTS: &str = include_str!("golden/lifts.json");
 const ASCENSOR: &str = include_str!("fixtures/ascensor_base.json");
+const MURALLA: &str = include_str!("fixtures/muralla_base.json");
 const FLOORS: &str = include_str!("golden/floors.json");
 
 /// Compiles entrada, emits its TEXTMAP, and parses it back — the same
@@ -1185,5 +1186,76 @@ fn raising_the_passage_beyond_a_drop_wall_is_a_p7_finding_not_a_p28_one() {
         p7.iter()
             .any(|f| matches!(f.subject, Subject::Sector(s) if s == beyond)),
         "expected the stranded passage {beyond} named: {p7:?}"
+    );
+}
+
+/// Compiles muralla — the floor playtest map paired with the committed
+/// `maps/muralla.wad` — emits its TEXTMAP, and parses it back, the same
+/// round trip `entrada_udmf` uses.
+fn muralla_udmf() -> (UdmfMap, Tables) {
+    let tables = Tables::load().expect("tables");
+    let ir = Ir::from_json(MURALLA).expect("ir");
+    let compiled = compile(&ir, &tables).expect("compiles");
+    let text = emit_textmap(&compiled.data, &compiled.things);
+    (
+        parse_udmf(&text, Limits::default()).expect("parses"),
+        tables,
+    )
+}
+
+/// The same cross-examination on muralla, the floor playtest map that
+/// `maps/muralla.wad` is built from — what `the_ascensor_playtest_map_is_
+/// modeled_not_warned_about` is to the platform toolchain.
+///
+/// Not a restatement of the floor golden. The golden fans its four targets
+/// off one short corridor with a plain portal, a drop wall and a bridge in a
+/// row; muralla puts all three actions on the *single* path from the player
+/// start to the exit switch and gates the last leg behind a key that is the
+/// reveal's own cargo. Its P7 flood therefore has to fire the pedestal to
+/// collect the red card, ride the bridge it raised under itself, and only
+/// then pass the locked door — an ordering the golden never asks for. The
+/// drop wall is off that path (the closet behind it is a pocket), which is
+/// the other half: a sealed region holding monsters must not read as a
+/// stranded one.
+#[test]
+fn the_muralla_playtest_map_is_modeled_not_warned_about() {
+    let (map, tables) = muralla_udmf();
+    let report = run(&map, "MAP01", &tables, None);
+    let unmodeled: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.check == "V-S" && f.message.contains("does not model"))
+        .collect();
+    assert!(
+        unmodeled.is_empty(),
+        "every special muralla emits is one the checker models: {unmodeled:?}"
+    );
+    assert_eq!(
+        count(&report.findings, "V-P7"),
+        0,
+        "the flood lowers the pedestal, takes the card, rides the bridge and \
+         unlocks the exit door: {:?}",
+        report.findings
+    );
+    assert_eq!(
+        count(&report.findings, "V-P28"),
+        0,
+        "every target is one of the three opening shapes and actually moves: {:?}",
+        report.findings
+    );
+    assert_eq!(
+        count(&report.findings, "V-P27"),
+        0,
+        "the closet's imps are behind a drop wall, not sealed away from every trigger: {:?}",
+        report.findings
+    );
+    // Not merely error-free but finding-free, the bar `pristine_entrada_
+    // raises_no_errors` and the floor golden's own pristine test set: this is
+    // the map the playtest is run on, so a warning must not start firing on
+    // it unnoticed.
+    assert!(
+        report.findings.is_empty(),
+        "expected zero findings of any severity on muralla: {:?}",
+        report.findings
     );
 }

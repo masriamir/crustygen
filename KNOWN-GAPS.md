@@ -332,6 +332,22 @@ form stays the compile-side rule's job, since the intent is only legible in the
 IR. The two are not redundant and are not in conflict; they check different
 statements at different layers.
 
+**"Placed" means placed anywhere, island cargo included — and for a while the
+compile side did not agree.** `rules::check_key_lock_coherence` (P24) and
+`reach::graph_from_compiled` (P7) both used to scan `Room::things` only, so a
+key authored as a *pedestal's* or a *reveal's* cargo was invisible to them: the
+compiler refused a map whose only red card sat on a pedestal with `P24 ... which
+is never placed` and four `P7` strandings, while the verifier passed the very
+same emitted geometry, because `check::flood` reads every thing by the sector it
+resolves to. The compile side was the wrong one — it refused a finishable map —
+and now scans island cargo too, with the key's bit set on the *island's* own
+node rather than the host room's, so the flood grants it only once the platform
+has been called down or the reveal has fired. Found while building muralla, the
+floor playtest map, whose red card is a reveal's cargo; the two smallest cases
+are `rules.rs`'s `a_key_placed_on_a_pedestal_…` and `a_key_sealed_in_a_reveal_…`
+tests. A key placed *outside* any room, pedestal or reveal remains impossible to
+author — every thing belongs to one of the three.
+
 **The crate's own lints are `warn`, and CI is what makes them fatal.**
 `Cargo.toml` sets `clippy::all` and `clippy::pedantic` to `warn`, not `deny`,
 so a local `cargo clippy` stays readable while you work. The strictness lives

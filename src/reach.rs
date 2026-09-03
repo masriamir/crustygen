@@ -559,6 +559,11 @@ pub struct BuiltGraph {
 /// actions — either would need a wider [`KeyMask`]. `Ir::from_json` refuses
 /// the second ([`crate::ir::IrError::TooManyFloorActions`]) before this pass
 /// can run.
+///
+/// Also if a pedestal has no emitted platform or a reveal no emitted floor
+/// action, which [`crate::compile::lifts`] and [`crate::compile::floors`]
+/// establish one-for-one before this pass runs — the same invariant
+/// `compile::things`'s own island placement relies on.
 #[must_use]
 pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<BuiltGraph> {
     // The start: the first room placing a `player1_start` (the IR vocabulary
@@ -628,13 +633,47 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
             action: None,
         })
         .collect();
+    // A room's own things sit in the room's sector, and `emit_sectors`
+    // pushes one sector per room in `ir.rooms` order, so the room index is
+    // the node index.
     for (i, room) in ir.rooms.iter().enumerate() {
         for thing in &room.things {
-            if let Some(special) = tables.locked_door_special(&thing.kind)
-                && let Some(class) = class_of(&specials, special)
-            {
-                nodes[i].keys |= 1 << class;
-            }
+            add_key_bit(tables, &specials, &thing.kind, &mut nodes[i].keys);
+        }
+    }
+    // Island cargo is picked up by standing on the *island*, not in its host
+    // room: a key on a pedestal's top or sealed in a reveal's cell belongs
+    // to that construct's own node, so the flood only grants it once the
+    // platform has been called down or the reveal has fired. Putting it on
+    // the host would hand the player a key they cannot yet reach; leaving it
+    // off entirely (what this pass did before) strands them beside a key
+    // they can, and the map is refused. The verifier reads the same
+    // placement from geometry — `check::flood::build_nodes` keys a node by
+    // the sector each emitted thing resolves to — so this is the compile
+    // side agreeing with it rather than a second convention.
+    for (pi, pedestal) in ir.pedestals.iter().enumerate() {
+        let lift = out
+            .lifts
+            .iter()
+            .find(|l| l.pedestal == Some(pi))
+            .expect("emit_lifts emits one platform per pedestal");
+        for thing in &pedestal.things {
+            add_key_bit(tables, &specials, &thing.kind, &mut nodes[lift.sector].keys);
+        }
+    }
+    for (ri, reveal) in ir.reveals.iter().enumerate() {
+        let action = out
+            .floors
+            .iter()
+            .find(|f| f.reveal == Some(ri))
+            .expect("emit_floors emits one action per reveal");
+        for thing in &reveal.things {
+            add_key_bit(
+                tables,
+                &specials,
+                &thing.kind,
+                &mut nodes[action.sector].keys,
+            );
         }
     }
 
@@ -655,6 +694,20 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
         class_names,
         action_names,
     })
+}
+
+/// Sets `kind`'s key-class bit in `keys`, if `kind` is a key thing at all.
+///
+/// One helper rather than three copies of the same `locked_door_special` →
+/// [`class_of`] → shift chain, because the three placements a key can have
+/// — a room's floor, a pedestal's top, a reveal's cell — differ only in
+/// which node's mask they set.
+fn add_key_bit(tables: &Tables, specials: &[u16], kind: &str, keys: &mut KeyMask) {
+    if let Some(special) = tables.locked_door_special(kind)
+        && let Some(class) = class_of(specials, special)
+    {
+        *keys |= 1 << class;
+    }
 }
 
 /// The [`KeyClass`] `special` interns to under `specials` (as built by

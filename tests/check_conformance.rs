@@ -2,10 +2,11 @@
 //! its hand-paired spec — entrada against `tests/fixtures/entrada.spec.md`,
 //! salto (the teleport playtest map) against
 //! `tests/fixtures/salto.spec.md`, ascensor (the lift playtest map) against
-//! `tests/fixtures/ascensor.spec.md`. Every derivable frontmatter number in
-//! those specs was hand-set to that map's own compiled actuals, so a clean
-//! run must show zero `Fail` rows (ascensor's lift-trigger row is the one
-//! deliberate exception, documented on its own test) — proving
+//! `tests/fixtures/ascensor.spec.md`, muralla (the floor playtest map)
+//! against `tests/fixtures/muralla.spec.md`. Every derivable frontmatter
+//! number in those specs was hand-set to that map's own compiled actuals, so
+//! a clean run must show zero `Fail` rows (ascensor's lift-trigger row is the
+//! one deliberate exception, documented on its own test) — proving
 //! `check::run`'s `conform::rows` end to end against real compiled maps, not
 //! just the unit fixtures `src/check/conform.rs` already carries.
 //!
@@ -30,6 +31,8 @@ const SALTO_SPEC: &str = include_str!("fixtures/salto.spec.md");
 const ASCENSOR: &str = include_str!("fixtures/ascensor_base.json");
 const ASCENSOR_SPEC: &str = include_str!("fixtures/ascensor.spec.md");
 const ASCENSOR_BOTH_ENDS_SPEC: &str = include_str!("fixtures/ascensor_both_ends.spec.md");
+const MURALLA: &str = include_str!("fixtures/muralla_base.json");
+const MURALLA_SPEC: &str = include_str!("fixtures/muralla.spec.md");
 const FLOORS: &str = include_str!("golden/floors.json");
 /// The filled, parseable example authors copy — used here only for its
 /// *shape*, so the floor golden gets a conformance report without a paired
@@ -368,6 +371,60 @@ fn the_lift_trigger_row_names_the_same_mix_whichever_trigger_the_spec_asks_for()
                 switch.parameter
             );
         }
+    }
+}
+
+/// Muralla's own conformance run: the floor playtest map judged against
+/// `tests/fixtures/muralla.spec.md`. Every derivable number in that spec was
+/// set from muralla's own compiled output, and unlike ascensor none is left
+/// deliberately failing — every row is `Pass`, `Info` or `NotDerivable`, and
+/// no row is `NotRun`.
+///
+/// The rows the floor toolchain itself produces are named so a regression in
+/// one fails here by name: the shape census (`progression.floors`, an `Info`
+/// row whose `actual` is the whole point — one of each of the three actions,
+/// none refused), the closet the drop wall seals, the three walkover lines
+/// (the reveal's, plus both of the bridge's thresholds) and the two switches
+/// (the wall's and the exit's).
+#[test]
+fn muralla_conforms_to_its_paired_spec() {
+    let rows = conformance_rows_for(MURALLA, MURALLA_SPEC);
+
+    let failed: Vec<_> = rows.iter().filter(|r| r.verdict == Verdict::Fail).collect();
+    assert!(failed.is_empty(), "unexpected Fail rows: {failed:?}");
+
+    let not_run: Vec<_> = rows
+        .iter()
+        .filter(|r| r.verdict == Verdict::NotRun)
+        .collect();
+    assert!(
+        not_run.is_empty(),
+        "unexpected NotRun rows (broken scene): {not_run:?}"
+    );
+
+    let floors = rows
+        .iter()
+        .find(|r| r.parameter == "progression.floors")
+        .expect("the floor census row is always emitted");
+    assert_eq!(floors.verdict, Verdict::Info, "{floors:?}");
+    assert_eq!(
+        floors.actual, "drop walls ×1, reveals ×1, bridges ×1, refused ×0",
+        "{floors:?}"
+    );
+
+    for parameter in [
+        "combat.monster_closets",
+        "progression.walkover_triggers.count",
+        "progression.switches.count",
+        "progression.keys",
+        "progression.locked_doors",
+        "progression.exit.trigger",
+    ] {
+        let row = rows
+            .iter()
+            .find(|r| r.parameter == parameter)
+            .expect(parameter);
+        assert_eq!(row.verdict, Verdict::Pass, "{row:?}");
     }
 }
 
