@@ -607,8 +607,19 @@ thing { x = 320.0; y = 64.0; angle = 0; type = 14; single = true; }
     ///
     /// UDMF indices follow declaration order per type, so appending the two
     /// records gives them the next linedef and sidedef index. The wall itself
-    /// is already drawn by the builder; this line doubles it, which leaves
-    /// every vertex's degree even and so the sector still closes.
+    /// is already drawn by the builder, so this line doubles it — and that
+    /// costs the last room its closure: the doubled segment raises both of
+    /// its endpoints to degree 3, and [`Scene::build`] reports the room with
+    /// a hard `V-S "boundary does not close"`.
+    ///
+    /// **So no caller may place a thing in the far-wall room**: a thing only
+    /// ever resolves to a *closed* sector, so one standing there resolves to
+    /// no sector at all and is invisible to every count that reads
+    /// `SceneThing::sector`. What the fixture is for — which lines carry
+    /// which specials, what the flood and the recognizer make of the
+    /// geometry — does not depend on closure, which is why the tests built
+    /// on it read the scene directly (through [`scene_of`], discarding
+    /// findings) rather than through a clean-scene assertion.
     ///
     /// Ported from `examples/liftprobe/floors.rs`'s test module.
     pub(crate) fn far_wall(text: &mut String, rooms: usize, special: i32, tag: i32) {

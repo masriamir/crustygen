@@ -35,8 +35,11 @@
 //! floor action *does* (which is not a thing a line's special says) on top
 //! of [`crate::check::floors`]'s.
 //!
-//! [`rows`] implements exactly the row catalog in the Task 10 brief, in the
-//! brief's own order, and follows its verdict rules: a `MinMax` or exact-count
+//! [`rows`] implements the row catalog in the Task 10 brief, in the brief's
+//! own order, plus the two rows the floor construct added after it
+//! (`progression.floors` closing the `progression` block and
+//! `combat.monster_closets` opening the `combat` one), and follows the
+//! brief's verdict rules: a `MinMax` or exact-count
 //! target is [`Verdict::Pass`]/[`Verdict::Fail`]; a scalar continuous target
 //! (`hitscanner_ratio`, `deaf_ratio`, `ammo.ratio`) is always
 //! [`Verdict::Info`], its `actual` formatted `"<value> (target <t>, delta
@@ -204,10 +207,7 @@ fn count_teleport_ambushes(scene: &Scene, tables: &Tables) -> u32 {
         .into_iter()
         .map(i32::from)
         .collect();
-    let monster_sectors: BTreeSet<usize> = monsters(scene, tables)
-        .iter()
-        .filter_map(|t| t.sector)
-        .collect();
+    let monster_sectors = monster_sectors(scene, tables);
     let pads: BTreeSet<usize> = scene
         .sectors
         .iter()
@@ -218,6 +218,15 @@ fn count_teleport_ambushes(scene: &Scene, tables: &Tables) -> u32 {
         .filter_map(|b| b.neighbor)
         .collect();
     u32::try_from(pads.len()).expect("pad counts fit u32")
+}
+
+/// The sectors of `scene` holding at least one monster
+/// ([`monsters`], so a thing whose name resolves a `spawnhealth`).
+fn monster_sectors(scene: &Scene, tables: &Tables) -> BTreeSet<usize> {
+    monsters(scene, tables)
+        .iter()
+        .filter_map(|t| t.sector)
+        .collect()
 }
 
 /// Every thing in `scene` classified as a monster: `tables.spawnhealth(name)`
@@ -936,15 +945,6 @@ fn sound_propagation_row(fm: &Frontmatter) -> ConformanceRow {
     )
 }
 
-/// The sectors of `scene` holding at least one monster
-/// ([`monsters`], so a thing whose name resolves a `spawnhealth`).
-fn monster_sectors(scene: &Scene, tables: &Tables) -> BTreeSet<usize> {
-    monsters(scene, tables)
-        .iter()
-        .filter_map(|t| t.sector)
-        .collect()
-}
-
 /// Whether the region reached from `start` without ever entering `wall`
 /// holds a monster **and** is closed — no other neighbor of `wall` lies in
 /// it, so `wall` is the region's only way in.
@@ -998,6 +998,13 @@ fn closed_monster_region(
 /// standing in the room the player begins in, reads as a closet here; the
 /// region test asks whether a region is sealed, not which side of it the
 /// fight is on.
+///
+/// Two foreign-WAD shapes it counts oddly, neither of them emittable today:
+/// two drop walls opening into one pocket count as two closets (each wall's
+/// own walk finds the same monsters), and a wall built of several adjacent
+/// segments on one tag counts as none at all — each segment's neighbors
+/// include the segment beside it, so every walk reaches a sibling of the
+/// wall it started from and reads the region as open.
 fn floor_closets(scene: &Scene, tables: &Tables) -> usize {
     let report = recognize(scene, tables);
     if !report.floors.iter().any(|f| f.refusal.is_none()) {
@@ -1055,15 +1062,29 @@ fn teleport_closets(scene: &Scene, tables: &Tables) -> usize {
         .count()
 }
 
-/// `combat.monster_closets`: how many sealed pockets of monsters this map
-/// opens into the fight, over the two release mechanisms the checker can
-/// re-derive from emitted geometry — [`floor_closets`] (a reveal or a drop
-/// wall) and [`teleport_closets`] (a monsters-only pad).
+/// `combat.monster_closets`: how many pockets of monsters this map releases
+/// into the fight, over the two mechanisms the checker can re-derive from
+/// emitted geometry — a pocket a floor action opens ([`floor_closets`]: a
+/// reveal whose cell holds a monster, or a drop wall with a closed region of
+/// them behind it) or one staged behind a monsters-only teleport pad
+/// ([`teleport_closets`]).
 ///
-/// The two are summed rather than merged: they are disjoint on any map the
-/// compiler emits (a drop wall's sector holds nothing and a reveal's cell
-/// carries no teleport line), and a cell that somehow used both really would
-/// be two ways in.
+/// **The sealing test belongs to the floor half alone**, and it is there for
+/// a reason particular to that half: a drop wall is an ordinary wall until
+/// something says the monsters past it are shut in, so the closed region is
+/// the only thing separating a closet from a wall with a fight somewhere
+/// beyond it. Nothing of the sort is asked of the teleport half — a
+/// monsters-only pad *is* the statement that its occupants arrive by
+/// teleport, wherever they were standing — and asking would be wrong:
+/// salto's own closet (`tests/fixtures/salto_base.json`) opens onto its
+/// arena through a plain portal, and a sealing test would count the map's
+/// one closet as none.
+///
+/// The two counts are summed rather than merged, so a pocket that used both
+/// mechanisms — a region behind a drop wall that itself holds a
+/// monsters-only pad, which nothing in the compiler emits — would count
+/// twice. That is the reading this keeps: such a pocket really does release
+/// its monsters two ways.
 fn count_monster_closets(scene: &Scene, tables: &Tables) -> u32 {
     let closets = floor_closets(scene, tables) + teleport_closets(scene, tables);
     u32::try_from(closets).expect("closet counts fit u32")
