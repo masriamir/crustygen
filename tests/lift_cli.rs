@@ -450,10 +450,22 @@ fn a_recognized_drop_wall_passes_the_floor_axis() {
         .args([path.to_str().unwrap(), "--vocabulary"])
         .output()
         .expect("runs");
+    assert_eq!(
+        human.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
     let json = bin()
         .args([path.to_str().unwrap(), "--vocabulary", "--json"])
         .output()
         .expect("runs");
+    assert_eq!(
+        json.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
     std::fs::remove_file(&path).ok();
     let stdout = String::from_utf8_lossy(&human.stdout);
     assert!(stdout.contains("; expressible: yes"), "{stdout}");
@@ -519,10 +531,22 @@ fn a_pillar_that_seals_refuses_the_map_on_the_floor_axis() {
         .args([path.to_str().unwrap(), "--vocabulary"])
         .output()
         .expect("runs");
+    assert_eq!(
+        human.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
     let json = bin()
         .args([path.to_str().unwrap(), "--vocabulary", "--json"])
         .output()
         .expect("runs");
+    assert_eq!(
+        json.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
     std::fs::remove_file(&path).ok();
     let stdout = String::from_utf8_lossy(&human.stdout);
     assert!(stdout.contains("; expressible: no"), "{stdout}");
@@ -547,6 +571,12 @@ fn a_floor_free_map_gets_no_floor_note() {
         .args([path.to_str().unwrap(), "--vocabulary"])
         .output()
         .expect("runs");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     std::fs::remove_file(&path).ok();
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("; expressible: yes"), "{stdout}");
