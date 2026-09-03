@@ -346,23 +346,24 @@ fn emit_constructs(
     triggers: &[TriggerOut],
     riser: &str,
 ) -> Result<Vec<FloorActionOut>, CompileError> {
+    // A drop wall and a bridge name their trigger the same way, in the one
+    // field `Ir::from_json` requires of both kinds.
+    let trigger_of = |portal: &Portal| {
+        let id = portal
+            .fires_on
+            .as_deref()
+            .expect("Ir::from_json requires a trigger on a drop wall or a bridge");
+        trigger_index(triggers, id)
+    };
     let mut out = Vec::new();
     for (pi, portal) in ir.portals.iter().enumerate() {
         match portal.kind {
             PortalKind::DropWall => {
-                let id = portal
-                    .fires_on
-                    .as_deref()
-                    .expect("Ir::from_json requires a trigger on a drop wall");
-                let ti = trigger_index(triggers, id);
+                let ti = trigger_of(portal);
                 out.push(emit_drop_wall(ir, tables, data, pi, ti, triggers[ti].tag)?);
             }
             PortalKind::Bridge => {
-                let id = portal
-                    .fires_on
-                    .as_deref()
-                    .expect("Ir::from_json requires a trigger on a bridge");
-                let ti = trigger_index(triggers, id);
+                let ti = trigger_of(portal);
                 out.push(emit_bridge(
                     ir,
                     tables,
@@ -427,6 +428,12 @@ fn resolve_trigger(
                     let (along, across) = axis.split(at);
                     across == fixed && along > lo && along < hi
                 })
+                // COVERAGE: unreachable, and kept anyway.
+                // `Ir::from_json`'s `TriggerOffWall` already refuses a switch
+                // trigger whose `at` is not on one of its room's own wall
+                // edges, testing the same footprint this search walks, so no
+                // authored map reaches this arm — see
+                // `CompileError::TriggerWallNotFound`'s own doc.
                 .ok_or_else(|| CompileError::TriggerWallNotFound {
                     id: t.id.clone(),
                     x: at.x,
@@ -648,7 +655,7 @@ fn emit_drop_wall(
     // room `a`'s own wall (`pos0`) to room `b`'s (`pos3`), as in
     // `lifts::emit_portal_lift`.
     let dir = (geometry.span.far - geometry.span.near).signum();
-    let gap = (geometry.span.far - geometry.span.near) * dir;
+    let gap = geometry.span.gap();
     let alcove_near = portal.alcove_near.unwrap_or(0);
     let alcove_far = portal.alcove_far.unwrap_or(0);
     let free = gap - alcove_near - alcove_far;
@@ -916,7 +923,7 @@ fn emit_bridge(
     // `LiftTooShallow` measures a platform: they are a cylinder that must fit
     // entirely between the two rooms' walls.
     let player = tables.player();
-    let gap = (geometry.span.far - geometry.span.near).abs();
+    let gap = geometry.span.gap();
     let need = player.radius * 2;
     if gap < need {
         return Err(CompileError::BridgeTooShallow {

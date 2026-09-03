@@ -865,14 +865,49 @@ fn build_edges(
 /// one `Subject::Map` Error; `stranded` entries are reported only when
 /// finishable (an unfinishable map's stranded list is the degenerate "every
 /// visited state" case — that fact is already the unfinishable finding's
-/// story, not a fresh one per node), each naming its sector and the key
-/// classes held, in words, via [`keys_in_words`]; every `unreachable` sector
-/// is its own `Subject::Sector` Error.
+/// story, not a fresh one per node), each naming its sector, the key
+/// classes held, in words, via [`keys_in_words`], and the floor targets the
+/// state still leaves at rest; every `unreachable` sector is its own
+/// `Subject::Sector` Error.
 fn push_flood_findings(
+    scene: &Scene,
     result: &reach::Findings,
     class_names: &[Vec<String>],
+    bits: &FloorBits,
     findings: &mut Vec<Finding>,
 ) {
+    // Which floor targets had *not* fired in the state being reported, in
+    // the wording the compiler's own `pending` uses (`crate::rules`): a room
+    // the player is stranded in is often one whose way out is a wall still
+    // standing or a pit still sunk, so naming the targets at rest says what
+    // has to be made reachable first. The compiler names the construct it
+    // emitted; a built map has only the sector, which is the same fact in
+    // the vocabulary this side has.
+    let pending = |mask: KeyMask| -> String {
+        let parts: Vec<String> = bits
+            .actions
+            .iter()
+            .enumerate()
+            .filter_map(|(sector, action)| {
+                let (bit, dest) = (*action)?;
+                if mask & (1 << (ACTION_BIT_BASE + u32::from(bit))) != 0 {
+                    return None;
+                }
+                let verb = if dest > scene.sectors[sector].floor {
+                    "raised"
+                } else {
+                    "lowered"
+                };
+                Some(format!("sector {sector} not {verb}"))
+            })
+            .collect();
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", parts.join(", "))
+        }
+    };
+
     if result.unfinishable {
         findings.push(Finding {
             check: "V-P7",
@@ -887,8 +922,9 @@ fn push_flood_findings(
                 severity: Severity::Error,
                 subject: Subject::Sector(node),
                 message: format!(
-                    "reachable holding {}, but no walk from there reaches an exit",
-                    keys_in_words(mask, class_names)
+                    "reachable holding {}, but no walk from there reaches an exit{}",
+                    keys_in_words(mask, class_names),
+                    pending(mask)
                 ),
             });
         }
@@ -953,7 +989,7 @@ pub fn run_flood(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) ->
         max_step: tables.step_height(),
     };
     let result = reach::check(&graph, &limits);
-    push_flood_findings(&result, &class_names, findings);
+    push_flood_findings(scene, &result, &class_names, &bits, findings);
 
     let mut reached = vec![true; scene.sectors.len()];
     for &node in &result.unreachable {
@@ -2360,6 +2396,46 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             "the slab drops flush the moment the start room is entered: {findings:?}"
         );
         assert!(!findings.iter().any(|f| f.check == "V-P7"), "{findings:?}");
+    }
+
+    /// The verifier's own half of the compiler's
+    /// `p7_names_the_floor_actions_still_at_rest_in_a_stranded_state`
+    /// (`crate::rules`): a stranded state names the floor targets it leaves
+    /// at rest, with the direction each moves, alongside the keys held.
+    #[test]
+    fn a_stranded_state_names_the_floor_target_it_leaves_at_rest() {
+        // P(-32, a dead-end drop off the start) — hub(0, start) — b(0) —
+        // T(128, tag 7, the wall) — c(0, exit). The 23 S1 sits on the b|T
+        // link with b on its front, so the wall is only lowered from b:
+        // the player who walks into P first never fired it, which is the
+        // state the finding has to describe.
+        let tables = Tables::load().expect("tables");
+        let mut text = fixtures::chain(
+            &[-32, 0, 0, 128, 0],
+            &[0, 0, 0, 7, 0],
+            &[(0, 0, false), (0, 0, false), (23, 7, false), (0, 0, false)],
+            &start_in_room(1),
+        );
+        fixtures::far_wall(&mut text, 5, i32::from(tables.exit_switch_special()), 0);
+        let (scene, tables) = fixtures::scene_of(&text);
+        let mut findings = Vec::new();
+        let reached = run_flood(&scene, &tables, &mut findings).expect("start and exit exist");
+        assert!(reached[0], "the player can walk down into the dead end");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.message.contains("no feasible walk")),
+            "the route through b finishes the map: {findings:?}"
+        );
+        let stranding = findings
+            .iter()
+            .find(|f| f.check == "V-P7" && matches!(f.subject, Subject::Sector(0)))
+            .unwrap_or_else(|| panic!("expected a V-P7 naming the dead end: {findings:?}"));
+        assert_eq!(
+            stranding.message,
+            "reachable holding no keys, but no walk from there reaches an exit; sector 3 not \
+             lowered"
+        );
     }
 
     #[test]

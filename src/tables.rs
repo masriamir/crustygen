@@ -2495,6 +2495,69 @@ mod tests {
         assert!(FloorForm::G1.shot());
     }
 
+    /// `P_CrossSpecialLine`'s and `P_UseSpecialLine`'s RETRIGGERS/BUTTONS
+    /// blocks leave `line->special` alone, so their forms fire again; the
+    /// TRIGGERS block clears it (`line->special = 0`), SWITCHES passes 0 to
+    /// `P_ChangeSwitchTexture` (no rearm), and a gun line is dispatched from
+    /// `P_ShootSpecialLine`'s one-shot 24/47 cases.
+    #[test]
+    fn only_the_r_forms_survive_their_first_use() {
+        for form in [FloorForm::WR, FloorForm::SR] {
+            assert!(form.repeatable(), "{form:?} is a retriggering form");
+        }
+        for form in [FloorForm::W1, FloorForm::S1, FloorForm::G1] {
+            assert!(!form.repeatable(), "{form:?} fires once");
+        }
+    }
+
+    /// Every engine type's direction, read off `EV_DoFloor`'s own cases at
+    /// the pinned commit (`p_floor.c:289-441`) and the two one-way plats'
+    /// `status = up` (`p_plats.c:190`, `:202`). Four types run downward:
+    /// `lowerFloor` (`direction = -1` at `p_floor.c:292`),
+    /// `lowerFloorToLowest` (`:300`), `turboLower` (`:308`) and
+    /// `lowerAndChange` (`:404`); every other case sets `direction = 1`.
+    ///
+    /// Listed variant by variant rather than by a predicate so that adding a
+    /// type to the enum without stating its direction fails to compile the
+    /// match below.
+    #[test]
+    fn every_engine_type_runs_the_way_its_case_sets_direction() {
+        use FloorEngineType as F;
+        for ty in [
+            F::LowerFloor,
+            F::LowerFloorToLowest,
+            F::TurboLower,
+            F::RaiseFloor,
+            F::RaiseFloorCrush,
+            F::RaiseFloorToNearest,
+            F::RaiseFloorTurbo,
+            F::RaiseFloor24,
+            F::RaiseFloor24AndChange,
+            F::RaiseFloor512,
+            F::RaiseToTexture,
+            F::LowerAndChange,
+            F::PlatRaiseAndChange24,
+            F::PlatRaiseAndChange32,
+            F::PlatRaiseToNearestAndChange,
+        ] {
+            let up = match ty {
+                F::LowerFloor | F::LowerFloorToLowest | F::TurboLower | F::LowerAndChange => false,
+                F::RaiseFloor
+                | F::RaiseFloorCrush
+                | F::RaiseFloorToNearest
+                | F::RaiseFloorTurbo
+                | F::RaiseFloor24
+                | F::RaiseFloor24AndChange
+                | F::RaiseFloor512
+                | F::RaiseToTexture
+                | F::PlatRaiseAndChange24
+                | F::PlatRaiseAndChange32
+                | F::PlatRaiseToNearestAndChange => true,
+            };
+            assert_eq!(ty.raises(), up, "{ty:?}");
+        }
+    }
+
     #[test]
     fn floor_constants_are_the_engines() {
         let t = Tables::load().expect("tables");

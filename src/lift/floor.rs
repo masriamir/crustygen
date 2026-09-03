@@ -425,6 +425,10 @@ fn shape_of(single: Option<&FloorAction>) -> Option<Shape> {
         Some(OpeningShape::DropWall) => Some(Shape::DropWall),
         Some(OpeningShape::Reveal) => Some(Shape::Reveal),
         Some(OpeningShape::Bridge) => Some(Shape::Bridge),
+        // COVERAGE: unreachable, and kept anyway — the match must be total.
+        // `shape_of` is only ever called on a target `refusal_of` let
+        // through, and its `UnsupportedShape` arm above already refused every
+        // other `opening` value, `None` included.
         _ => None,
     }
 }
@@ -1068,7 +1072,7 @@ mod tests {
     }
 
     #[test]
-    fn counts_add_field_wise() {
+    fn adding_two_reports_counts_sums_every_field_and_leaves_the_default_alone() {
         // Four rooms, so the far wall is two rooms from the target and its
         // trigger counts as remote in both maps.
         let mut drop_wall = chain(&[0, 128, 0, 0], &[0, 7, 0, 0], &[(0, 0, false); 3], "");

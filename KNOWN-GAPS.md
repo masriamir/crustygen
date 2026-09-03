@@ -10,7 +10,7 @@ platform recognizer, `lift::floor`'s floor-action recognizer and the
 `crustygen-corpus` corpus sweep (see
 `docs/corpus.md`), plus the `crustygen-build` CLI over the compiler
 (`src/bin/crustygen-build.rs` — see `docs/build.md`).
-927 tests (743 lib + 3 crustygen-build unit + 18 build_cli + 21 check_adversarial + 16 check_cli +
+941 tests (757 lib + 3 crustygen-build unit + 18 build_cli + 21 check_adversarial + 16 check_cli +
 9 check_conformance + 11 corpus_cli + 1 first_map + 1 floor_recognizer + 12 golden_textmap +
 20 lift_cli + 1 plat_recognizer + 3 spec_documents + 1 teleport_recognizer + 6 vanilla_wad + 4
 vocabulary_arbiter + 3 vocabulary_tables + 1 walking_skeleton + 53 in the `liftprobe` example),

@@ -612,8 +612,10 @@ fn place_pedestal_things(
 ///
 /// **This reverses the reading Task 5 shipped**, which measured the
 /// *lowered* cell on the grounds that "an imp lives in rock until the floor
-/// drops". `P_SpawnMapThing` does spawn it there — it reads the sector's
-/// floor and never tests the fit — but the floor then never drops. At the
+/// drops". `P_SpawnMapThing` (`p_mobj.c:708-784`) does spawn it there — it
+/// passes `z = ONFLOORZ` (`p_mobj.c:782`) to `P_SpawnMobj`, which reads the
+/// subsector's own `floorheight` and puts the thing on it (`p_mobj.c:519-523`)
+/// without ever testing the fit — but the floor then never drops. At the
 /// pinned commit `a77dfb96cb91780ca334d0d4cfd86957558007e0`,
 /// `T_MovePlane`'s floor-down branch (`p_floor.c:83-91`) lowers by `speed`,
 /// calls `P_ChangeSector`, and on a true return puts the floor back and

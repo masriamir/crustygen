@@ -4602,7 +4602,7 @@ mod tests {
     }
 
     #[test]
-    fn trigger_structural_errors() {
+    fn a_trigger_names_a_unique_id_and_only_its_own_kinds_fields() {
         let dup = format!("{SWITCH_A}, {SWITCH_A}");
         let err = floors(&format!("{PLAIN_AB}, {WALL_BC}"), &dup, "").expect_err("two `t`s");
         assert!(
@@ -4644,7 +4644,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_wall_and_bridge_field_errors() {
+    fn a_drop_wall_and_a_bridge_each_refuse_the_others_fields_and_a_missing_one() {
         let no_trigger = WALL_BC.replace(", \"fires_on\":\"t\"", "");
         let err = floors(&format!("{PLAIN_AB}, {no_trigger}"), "", "").expect_err("no `fires_on`");
         assert!(
@@ -4745,7 +4745,7 @@ mod tests {
     }
 
     #[test]
-    fn reveal_structural_errors() {
+    fn a_reveal_needs_a_unique_id_a_known_room_and_a_rectangle_inside_it() {
         let portals = format!("{PLAIN_AB}, {WALL_BC}");
         let dup = format!("{CLOSET_C}, {CLOSET_C}");
         let err = floors(&portals, SWITCH_A, &dup).expect_err("two `pen`s");

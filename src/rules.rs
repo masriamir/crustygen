@@ -808,7 +808,7 @@ fn emitted_neighbors(data: &MapData, sector: usize) -> BTreeSet<usize> {
     n
 }
 
-/// `P_FindLowestFloorSurrounding` (`p_spec.c:270-291`): the least floor over
+/// `P_FindLowestFloorSurrounding` (`p_spec.c:270-289`): the least floor over
 /// a sector's two-sided neighbors, starting at the sector's own floor — so a
 /// sector already lower than every neighbor stays where it is.
 fn lowest_floor_surrounding(data: &MapData, sector: usize) -> i32 {
@@ -2160,6 +2160,99 @@ mod tests {
         );
     }
 
+    /// Four rooms in a row, with two lowering walkovers of the *same*
+    /// family: `w1` on the `s`|`b` opening lowers an empty closet in `b`,
+    /// and `w2` on the `c`|`d` opening lowers the drop wall between `b` and
+    /// `c`. The only way to `w2` is through the very wall it lowers, so the
+    /// map is unfinishable — but only because a walkover's special fires the
+    /// trigger whose *tag* its line carries, and not every W1 line of the
+    /// family.
+    ///
+    /// Both triggers therefore write the same special, 38, and differ only
+    /// in their tag: exactly the discrimination `reach::wire_floor_actions`
+    /// makes, and the one no other fixture on this branch exercises, since
+    /// no other has two walkovers at all.
+    const TWO_WALKOVERS: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"s", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[128,128], "angle":0 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":144,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"c", "footprint":[[640,0],[640,256],[896,256],[896,0]], "floor":0, "ceiling":192, "light":144,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"d", "footprint":[[960,0],[960,256],[1216,256],[1216,0]], "floor":0, "ceiling":192, "light":144,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"s", "b":"b", "kind":"plain", "width":64, "at":[256,128] },
+        { "a":"b", "b":"c", "kind":"drop_wall", "width":64, "at":[576,128], "thickness":16, "fires_on":"w2" },
+        { "a":"c", "b":"d", "kind":"plain", "width":64, "at":[896,128] }
+      ],
+      "triggers":[
+        { "id":"w1", "kind":"walkover", "portal":["s","b"] },
+        { "id":"w2", "kind":"walkover", "portal":["c","d"] }
+      ],
+      "reveals":[ { "id":"pen", "room":"b", "at":[448,128], "kind":"closet", "trigger":"w1" } ],
+      "exits":[ { "room":"d", "trigger":"switch", "at":[1216,128], "width":64 } ] }"#;
+
+    /// A walkover fires the action its own tag names, not every action of
+    /// its family: crossing `w1` opens the closet in `b` and leaves the
+    /// `b`|`c` wall standing, so nothing reaches `w2` and nothing reaches
+    /// the exit.
+    ///
+    /// Dropping the tag test from `reach::wire_floor_actions`'s walkover
+    /// wiring makes this map finishable and this assertion fail; without the
+    /// fixture that deletion passes the whole suite.
+    #[test]
+    fn p7_refuses_a_map_whose_only_walkover_lies_behind_the_wall_it_lowers() {
+        let v = p7_violations(TWO_WALKOVERS);
+        assert!(
+            v.iter()
+                .any(|x| x.detail == "no feasible walk from the player start reaches an exit"),
+            "the second walkover is sealed behind the wall it fires: {v:?}"
+        );
+    }
+
+    /// `hub` (start) has the same dead-end pit [`PIT_AND_WALL`] does, but the
+    /// way on to the exit is a **bridge** rather than a drop wall: a pit
+    /// strip 96 below `b` and `c`, raised by a switch in `b`. So the action
+    /// still at rest in the stranded state is a rising one, which the P7
+    /// wording has to call "not raised" rather than "not lowered".
+    const PIT_AND_BRIDGE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[128,128], "angle":0 } ] },
+        { "id":"sink", "footprint":[[0,320],[0,576],[256,576],[256,320]], "floor":-100, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"c", "footprint":[[640,0],[640,256],[896,256],[896,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"hub", "b":"sink", "kind":"plain", "width":64, "at":[128,256] },
+        { "a":"hub", "b":"b", "kind":"plain", "width":64, "at":[256,128] },
+        { "a":"b", "b":"c", "kind":"bridge", "width":64, "at":[576,128], "depth":96, "fires_on":"t" }
+      ],
+      "triggers":[ { "id":"t", "kind":"switch", "room":"b", "at":[448,0] } ],
+      "exits":[ { "room":"c", "trigger":"switch", "at":[896,128], "width":64 } ] }"#;
+
+    #[test]
+    fn p7_says_a_rising_action_is_not_raised() {
+        let v = p7_violations(PIT_AND_BRIDGE);
+        assert!(
+            !v.iter().any(|x| x.detail.contains("no feasible walk")),
+            "the switch route finishes the map: {v:?}"
+        );
+        assert!(
+            v.iter()
+                .any(|x| x.detail.ends_with("bridge b <-> c not raised")),
+            "the rising family takes the other verb: {v:?}"
+        );
+    }
+
     /// [`WALL_MAP`] with room `a` a full step above room `b` — the only
     /// shape in which a fired drop wall's own side is the lower one at the
     /// boundary, and so the only one whose *fired* geometry P8 has anything
@@ -2292,6 +2385,225 @@ mod tests {
             v.iter().any(|x| x.rule == "P28"
                 && x.detail
                     .contains("recorded at rest 192 but its emitted sector floor is 0")),
+            "{v:?}"
+        );
+    }
+
+    /// One room hosting an empty closet that a switch on its west wall
+    /// lowers, plus a second room past a plain portal to hold the exit — the
+    /// reveal counterpart of [`WALL_MAP`], and the only shape whose P29 half
+    /// is the sealed-at-rest one.
+    ///
+    /// The second room is not decoration: it gives the map a sector that is
+    /// neither the cell nor its host, which is what the neighbor-count
+    /// mutation below needs to graft onto the cell.
+    const CLOSET_MAP: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":144,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[ { "a":"a", "b":"b", "kind":"plain", "width":64, "at":[256,128] } ],
+      "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[0,128] } ],
+      "reveals":[ { "id":"pen", "room":"a", "at":[128,128], "kind":"closet", "trigger":"t" } ],
+      "exits":[ { "room":"b", "trigger":"switch", "at":[576,128], "width":64 } ] }"#;
+
+    /// [`wall_compiled`] for [`CLOSET_MAP`].
+    fn closet_compiled() -> (Tables, crate::compile::Compiled) {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(CLOSET_MAP).expect("ir");
+        let out = compile(&ir, &tables).expect("a closet reveal is a legal map");
+        (tables, out)
+    }
+
+    /// The P29 violation `check_all` reports, or a panic naming what it found
+    /// instead.
+    fn one_p29(ir: &str, tables: &Tables, out: &crate::compile::Compiled) -> RuleViolation {
+        let ir = Ir::from_json(ir).expect("ir");
+        let v = check_all(&ir, tables, out);
+        v.iter()
+            .find(|x| x.rule == "P29")
+            .unwrap_or_else(|| panic!("expected a P29, got {v:?}"))
+            .clone()
+    }
+
+    /// Grafts one more two-sided linedef between `sector` and `other`,
+    /// borrowing a real pair of vertices so the record is well formed. P29
+    /// counts a target's two-sided neighbors and reads nothing else off the
+    /// line, which is exactly what this damages.
+    fn graft_neighbor(data: &mut MapData, sector: usize, other: usize) {
+        let (v1, v2) = (data.linedefs[0].v1, data.linedefs[0].v2);
+        let front = data.sidedefs.len();
+        for s in [sector, other] {
+            let lower = data.sectors[s].wall_tex.clone();
+            data.sidedefs.push(SidedefOut {
+                sector: s,
+                upper: lower.clone(),
+                middle: String::new(),
+                lower,
+                x_offset: 0,
+            });
+        }
+        data.linedefs.push(LinedefOut {
+            v1,
+            v2,
+            front,
+            back: Some(front + 1),
+            blocking: false,
+            special: 0,
+            tag: 0,
+            lower_unpegged: false,
+            upper_unpegged: false,
+            secret: false,
+        });
+    }
+
+    #[test]
+    fn p29_fails_when_a_reveal_is_already_open_at_rest() {
+        let (tables, mut out) = closet_compiled();
+        let cell = out.floors[0].sector;
+        let host = *emitted_neighbors(&out.data, cell)
+            .iter()
+            .next()
+            .expect("a closet has one host");
+        // Rest the cell flush with its host instead of at the host's
+        // ceiling. The record moves with the emitted floor so that P28's
+        // rest cross-check stays satisfied and the damage under test is the
+        // seal alone — as in `p29_fails_when_a_lowered_wall_still_blocks_one_side`.
+        out.data.sectors[cell].floor = 0;
+        out.floors[0].rest = 0;
+        let hit = one_p29(CLOSET_MAP, &tables, &out);
+        assert_eq!(
+            hit.detail,
+            format!(
+                "the Closet (ceiling 192, rest 0, destination 0) does not open as intended: at \
+                 rest 0, its host sector {host} (floor 0, ceiling 192) can already cross onto it, \
+                 so it is not sealed, against the 56-unit player height and the 24-unit step"
+            )
+        );
+    }
+
+    #[test]
+    fn p29_fails_when_a_lowered_reveal_is_still_under_the_players_height() {
+        let (tables, mut out) = closet_compiled();
+        let cell = out.floors[0].sector;
+        let host = *emitted_neighbors(&out.data, cell)
+            .iter()
+            .next()
+            .expect("a closet has one host");
+        // A 40-unit lid: still sealed at rest (the 40-unit step up exceeds
+        // the 24-unit one), and lowered it leaves a 40-unit window under the
+        // 56-unit player, so the host never gets in.
+        out.data.sectors[cell].ceiling = 40;
+        out.data.sectors[cell].floor = 40;
+        out.floors[0].rest = 40;
+        let hit = one_p29(CLOSET_MAP, &tables, &out);
+        assert_eq!(
+            hit.detail,
+            format!(
+                "the Closet (ceiling 40, rest 40, destination 0) does not open as intended: at \
+                 destination 0, its host sector {host} (floor 0, ceiling 192) still cannot cross \
+                 onto it, against the 56-unit player height and the 24-unit step"
+            )
+        );
+    }
+
+    #[test]
+    fn p29_fails_when_a_dropped_wall_cannot_be_left_on_the_far_side() {
+        let (tables, mut out) = wall_compiled();
+        let wall = out.floors[0].sector;
+        // Raise the far passage a step and a half above the wall's
+        // destination. Walking *into* the dropped wall still works — descent
+        // is free — but the climb out the far side is 40, so the wall opens
+        // one way only. The near passage is still at 0, so
+        // `P_FindLowestFloorSurrounding` still lands on 0 and P28 stays
+        // satisfied: this is the direction P29 alone can see.
+        let after = emitted_neighbors(&out.data, wall)
+            .into_iter()
+            .max()
+            .expect("the wall has two passage neighbors");
+        out.data.sectors[after].floor = 40;
+        let hit = one_p29(WALL_MAP, &tables, &out);
+        assert_eq!(
+            hit.detail,
+            format!(
+                "the DropWall (ceiling 192, rest 192, destination 0) does not open as intended: \
+                 at destination 0, it cannot cross onto sector {after} (floor 40, ceiling 256), \
+                 against the 56-unit player height and the 24-unit step"
+            )
+        );
+    }
+
+    #[test]
+    fn p29_fails_when_a_dropped_wall_has_a_third_neighbor() {
+        let (tables, mut out) = wall_compiled();
+        let wall = out.floors[0].sector;
+        let n = emitted_neighbors(&out.data, wall);
+        let stranger = (0..out.data.sectors.len())
+            .find(|s| *s != wall && !n.contains(s))
+            .expect("the map has a sector that is neither the wall nor a passage");
+        graft_neighbor(&mut out.data, wall, stranger);
+        let mut all: Vec<usize> = n.iter().copied().collect();
+        all.push(stranger);
+        all.sort_unstable();
+        let hit = one_p29(WALL_MAP, &tables, &out);
+        assert!(
+            hit.detail.contains(&format!(
+                "it has 3 two-sided neighbors ({all:?}), not the two passages it joins"
+            )),
+            "{hit}"
+        );
+    }
+
+    #[test]
+    fn p29_fails_when_a_reveal_has_a_second_neighbor() {
+        let (tables, mut out) = closet_compiled();
+        let cell = out.floors[0].sector;
+        let n = emitted_neighbors(&out.data, cell);
+        let stranger = (0..out.data.sectors.len())
+            .find(|s| *s != cell && !n.contains(s))
+            .expect("the map has a sector that is neither the cell nor its host");
+        graft_neighbor(&mut out.data, cell, stranger);
+        let mut all: Vec<usize> = n.iter().copied().collect();
+        all.push(stranger);
+        all.sort_unstable();
+        let hit = one_p29(CLOSET_MAP, &tables, &out);
+        assert!(
+            hit.detail.contains(&format!(
+                "it has 2 two-sided neighbors ({all:?}), not the one host it is carved into"
+            )),
+            "{hit}"
+        );
+    }
+
+    #[test]
+    fn p30_fails_when_a_target_borders_a_door_sector() {
+        let (tables, mut out) = wall_compiled();
+        let wall = out.floors[0].sector;
+        // The door clause reads a door sector off the *back* of a door line
+        // — `EV_VerticalDoor` takes `sides[line->sidenum[1]].sector` — so
+        // claiming the far passage's own outer threshold as a manual door
+        // makes that passage a door sector without touching any tag.
+        let after = emitted_neighbors(&out.data, wall)
+            .into_iter()
+            .max()
+            .expect("the wall has two passage neighbors");
+        let threshold = (0..out.data.linedefs.len())
+            .find(|&i| {
+                out.data.linedefs[i]
+                    .back
+                    .is_some_and(|b| out.data.sidedefs[b].sector == after)
+            })
+            .expect("the far passage fronts room b across its own threshold");
+        out.data.linedefs[threshold].special = tables.door_special();
+        let ir = Ir::from_json(WALL_MAP).expect("ir");
+        let v = check_all(&ir, &tables, &out);
+        assert!(
+            v.iter()
+                .any(|x| x.rule == "P30"
+                    && x.detail.contains(&format!("borders moving sector {after}"))),
             "{v:?}"
         );
     }

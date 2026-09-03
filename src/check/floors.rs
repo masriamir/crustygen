@@ -69,7 +69,7 @@ fn next_sector(b: &Boundary) -> Option<usize> {
     b.two_sided.then_some(b.neighbor).flatten()
 }
 
-/// `P_FindLowestFloorSurrounding` (`p_spec.c:270-291`): starts at the
+/// `P_FindLowestFloorSurrounding` (`p_spec.c:270-289`): starts at the
 /// sector's **own** floor, minimum over two-sided neighbors.
 #[must_use]
 pub fn lowest_floor_surrounding(scene: &Scene, sec: usize) -> i32 {
@@ -82,10 +82,10 @@ pub fn lowest_floor_surrounding(scene: &Scene, sec: usize) -> i32 {
 }
 
 /// `P_FindHighestFloorSurrounding`'s starting value, `-500*FRACUNIT`
-/// (`p_spec.c:303`). A sector with no two-sided neighbor "lowers" to it.
+/// (`p_spec.c:302`). A sector with no two-sided neighbor "lowers" to it.
 pub const NO_NEIGHBOR_FLOOR: i32 = -500;
 
-/// `P_FindHighestFloorSurrounding` (`p_spec.c:297-318`): starts at
+/// `P_FindHighestFloorSurrounding` (`p_spec.c:297-316`): starts at
 /// [`NO_NEIGHBOR_FLOOR`], maximum over two-sided neighbors.
 #[must_use]
 pub fn highest_floor_surrounding(scene: &Scene, sec: usize) -> i32 {
@@ -102,10 +102,10 @@ pub const MAX_ADJOINING_SECTORS: usize = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NextHighest {
     /// The least neighboring floor strictly above `currentheight`, or
-    /// `currentheight` when no neighbor is above it (`p_spec.c:361-362`).
+    /// `currentheight` when no neighbor is above it (`p_spec.c:364-365`).
     pub height: i32,
     /// Whether the search filled its 20-entry list and broke early
-    /// (`p_spec.c:349-355`) — the map is then reading a truncated
+    /// (`p_spec.c:354-359`) — the map is then reading a truncated
     /// neighborhood, and the destination may not be the true next height.
     pub capped: bool,
 }
@@ -453,6 +453,15 @@ pub fn classify_effect(
             (true, false) => OpeningShape::DropWall,
             (true, true) => OpeningShape::LedgeLower,
             (false, true) => OpeningShape::Bridge,
+            // COVERAGE: unreachable, and kept anyway — it is the fourth
+            // corner of a two-by-two match, and the enum is mirrored by the
+            // shape probe. A rising target (`dest > rest`) no neighbor could
+            // enter before cannot become enterable: `pass(n -> target)` only
+            // tightens as the target rises — the headroom over it, the
+            // opening onto it and the step up all shrink — so
+            // `enterable_after` implies `enterable_before`, and `Effect` is
+            // `Opening` only when something became reachable. See
+            // `invariants.rs`'s V-P28 arm, which states the same fact.
             (false, false) => OpeningShape::OtherOpening,
         })
     } else if effect == Effect::Neutral && !enterable_before && enterable_after {
@@ -838,7 +847,8 @@ pub fn broken_floor_lines(scene: &Scene, tables: &Tables) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Destination, Effect, OpeningShape, Placement, Rider, broken_floor_lines, resolve_floors,
+        Destination, Effect, NextHighest, OpeningShape, Placement, Rider, broken_floor_lines,
+        next_highest_floor, resolve_floors,
     };
     use crate::check::fixtures::{chain, chain_full, far_wall, scene_of};
     use crate::tables::{FloorEngineType, FloorForm};
@@ -1062,6 +1072,142 @@ mod tests {
                 "an unresolved destination classifies nothing: {special}"
             );
         }
+    }
+
+    /// A 64-deep strip with one 64x64 box standing on each 64 units of its
+    /// north edge, every box its own sector behind its own two-sided line:
+    /// the shape [`next_highest_floor`]'s 20-entry cap needs, and the
+    /// smallest one that states it.
+    ///
+    /// The strip is sector 0 at floor 0 under a 256 ceiling; box `i` is
+    /// sector `i + 1` at `floors[i]`. The shared lines are linedefs
+    /// `0..floors.len()` **in box order**, which is the order the engine's
+    /// own `sec->lines` walk visits them (`P_GroupLines` preserves
+    /// declaration order, as [`sector_lines`] says), so the box the cap
+    /// drops is always the last one named.
+    fn comb(floors: &[i32]) -> String {
+        use std::fmt::Write as _;
+
+        let n = floors.len();
+        let w = i32::try_from(n).expect("a test comb is small") * 64;
+        let mut text = String::from("namespace = \"doom\";\n");
+        // Vertices: the boxes' tops (0..=n), the shared edge (n+1..=2n+1),
+        // then the strip's two south corners.
+        for y in [128, 64] {
+            for i in 0..=n {
+                let x = i32::try_from(i).expect("a test comb is small") * 64;
+                let _ = writeln!(text, "vertex {{ x = {x}.000; y = {y}.000; }}");
+            }
+        }
+        let _ = writeln!(text, "vertex {{ x = 0.000; y = 0.000; }}");
+        let _ = writeln!(text, "vertex {{ x = {w}.000; y = 0.000; }}");
+        let (top, mid, bot) = (|i: usize| i, |i: usize| n + 1 + i, |i: usize| 2 * n + 2 + i);
+
+        let mut sidedefs = String::new();
+        let mut next = 0usize;
+        let mut side = |sidedefs: &mut String, sector: usize, two_sided: bool| {
+            let tex = if two_sided {
+                "texturemiddle = \"-\"; texturebottom = \"SUPPORT3\";"
+            } else {
+                "texturemiddle = \"STARTAN2\";"
+            };
+            let _ = writeln!(sidedefs, "sidedef {{ sector = {sector}; {tex} }}");
+            next += 1;
+            next - 1
+        };
+        let mut link = |text: &mut String,
+                        sidedefs: &mut String,
+                        v: (usize, usize),
+                        s: (usize, usize)| {
+            let (sf, sb) = (side(sidedefs, s.0, true), side(sidedefs, s.1, true));
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {}; v2 = {}; sidefront = {sf}; sideback = {sb}; twosided = true; }}",
+                v.0, v.1
+            );
+        };
+        // The strip's north edge, one segment per box: front the strip,
+        // back the box. These come first so the cap drops the last box.
+        for i in 0..n {
+            link(&mut text, &mut sidedefs, (mid(i), mid(i + 1)), (0, i + 1));
+        }
+        // Every box's west edge is its neighbor's east edge.
+        for i in 1..n {
+            link(&mut text, &mut sidedefs, (mid(i), top(i)), (i + 1, i));
+        }
+        let mut wall =
+            |text: &mut String, sidedefs: &mut String, v1: usize, v2: usize, s: usize| {
+                let sf = side(sidedefs, s, false);
+                let _ = writeln!(
+                    text,
+                    "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {sf}; blocking = true; }}"
+                );
+            };
+        wall(&mut text, &mut sidedefs, bot(0), mid(0), 0);
+        wall(&mut text, &mut sidedefs, mid(n), bot(1), 0);
+        wall(&mut text, &mut sidedefs, bot(1), bot(0), 0);
+        wall(&mut text, &mut sidedefs, mid(0), top(0), 1);
+        wall(&mut text, &mut sidedefs, top(n), mid(n), n);
+        for i in 0..n {
+            wall(&mut text, &mut sidedefs, top(i), top(i + 1), i + 1);
+        }
+        text.push_str(&sidedefs);
+        for floor in std::iter::once(0).chain(floors.iter().copied()) {
+            let _ = writeln!(
+                text,
+                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; \
+                 heightfloor = {floor}; heightceiling = 256; lightlevel = 160; }}"
+            );
+        }
+        text
+    }
+
+    /// `P_FindNextHighestFloor` fills a 20-entry list and breaks
+    /// (`p_spec.c:354-359`), so the 21st neighbor above the current height is
+    /// never weighed — even when it is the one the search was looking for.
+    #[test]
+    fn the_twenty_first_neighbor_above_the_floor_is_never_weighed() {
+        let mut floors = vec![64; 20];
+        floors.push(8);
+        let (scene, _) = scene_of(&comb(&floors));
+        assert_eq!(scene.sectors.len(), 22);
+        assert!(
+            scene.sectors.iter().all(|s| s.closed),
+            "the comb is a real closed map, not a boundary list"
+        );
+        assert_eq!(
+            next_highest_floor(&scene, 0, 0),
+            NextHighest {
+                height: 64,
+                capped: true
+            },
+            "the 8 is the 21st candidate, past the cap"
+        );
+
+        // One box shorter the 8 is the 20th candidate, which the list still
+        // holds: the engine tests `h >= MAX_ADJOINING_SECTORS` *after* the
+        // push, so it breaks having already weighed it and the answer is
+        // right even though the walk stopped short.
+        floors.remove(0);
+        let (scene, _) = scene_of(&comb(&floors));
+        assert_eq!(
+            next_highest_floor(&scene, 0, 0),
+            NextHighest {
+                height: 8,
+                capped: true
+            }
+        );
+
+        // Two boxes shorter nothing is capped at all.
+        floors.remove(0);
+        let (scene, _) = scene_of(&comb(&floors));
+        assert_eq!(
+            next_highest_floor(&scene, 0, 0),
+            NextHighest {
+                height: 8,
+                capped: false
+            }
+        );
     }
 
     /// A ledge the player can already step onto, lowered flush: the opening

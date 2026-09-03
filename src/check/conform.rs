@@ -53,7 +53,7 @@ use crate::check::floors::local_adjacency;
 use crate::check::plats::{Activator, Rest, ScenePlat, resolve_plats};
 use crate::check::scene::{Scene, SceneThing};
 use crate::check::{ConformanceRow, MapStats, Verdict};
-use crate::lift::floor::{Shape, recognize};
+use crate::lift::floor::{FloorReport, Shape, recognize};
 use crate::spec::Spec;
 use crate::spec::frontmatter::{
     EncounterStyle, ExitKind, ExitTrigger, Facing, Frontmatter, LiftTrigger, MinMax, Propagation,
@@ -809,6 +809,7 @@ fn progression_rows(
     fm: &Frontmatter,
     scene: &Scene,
     tables: &Tables,
+    floors: &FloorReport,
     rows: &mut Vec<ConformanceRow>,
 ) {
     rows.push(keys_row(fm, scene, tables));
@@ -859,7 +860,7 @@ fn progression_rows(
         &fm.progression.teleports.count,
         count_player_pads(scene, tables),
     ));
-    rows.push(floors_row(scene, tables));
+    rows.push(floors_row(floors));
 }
 
 /// The two emitted floor specials of one trigger form, as `i32`s: the use
@@ -881,8 +882,7 @@ fn floor_specials(tables: &Tables, use_line: bool) -> [i32; 2] {
 /// cannot get from any other row: the four specials are spread across
 /// `switches.count` and `walkover_triggers.count`, which say how the actions
 /// are fired and nothing about what they do.
-fn floors_row(scene: &Scene, tables: &Tables) -> ConformanceRow {
-    let r = recognize(scene, tables);
+fn floors_row(r: &FloorReport) -> ConformanceRow {
     ConformanceRow {
         parameter: "progression.floors".to_owned(),
         target: "any".to_owned(),
@@ -1005,8 +1005,7 @@ fn closed_monster_region(
 /// segments on one tag counts as none at all — each segment's neighbors
 /// include the segment beside it, so every walk reaches a sibling of the
 /// wall it started from and reads the region as open.
-fn floor_closets(scene: &Scene, tables: &Tables) -> usize {
-    let report = recognize(scene, tables);
+fn floor_closets(scene: &Scene, tables: &Tables, report: &FloorReport) -> usize {
     if !report.floors.iter().any(|f| f.refusal.is_none()) {
         // The common case by far — a map with no floor action at all, or
         // none this recognizes — walked without building the adjacency of
@@ -1085,8 +1084,8 @@ fn teleport_closets(scene: &Scene, tables: &Tables) -> usize {
 /// monsters-only pad, which nothing in the compiler emits — would count
 /// twice. That is the reading this keeps: such a pocket really does release
 /// its monsters two ways.
-fn count_monster_closets(scene: &Scene, tables: &Tables) -> u32 {
-    let closets = floor_closets(scene, tables) + teleport_closets(scene, tables);
+fn count_monster_closets(scene: &Scene, tables: &Tables, floors: &FloorReport) -> u32 {
+    let closets = floor_closets(scene, tables, floors) + teleport_closets(scene, tables);
     u32::try_from(closets).expect("closet counts fit u32")
 }
 
@@ -1096,11 +1095,17 @@ fn count_monster_closets(scene: &Scene, tables: &Tables) -> u32 {
 /// every species `scene` places that the spec's list never names at all —
 /// after the one [`exact_row`] this block opens with,
 /// `combat.monster_closets`.
-fn monster_rows(fm: &Frontmatter, scene: &Scene, tables: &Tables, rows: &mut Vec<ConformanceRow>) {
+fn monster_rows(
+    fm: &Frontmatter,
+    scene: &Scene,
+    tables: &Tables,
+    floors: &FloorReport,
+    rows: &mut Vec<ConformanceRow>,
+) {
     rows.push(exact_row(
         "combat.monster_closets".to_owned(),
         fm.combat.monster_closets,
-        count_monster_closets(scene, tables),
+        count_monster_closets(scene, tables, floors),
     ));
 
     let mut spec_species: HashSet<&str> = HashSet::new();
@@ -1478,12 +1483,16 @@ pub fn rows(
     rows.push(start_facing_row(fm, scene));
     rows.push(coop_only_items_row(fm, scene));
 
-    // progression
-    progression_rows(fm, scene, tables, &mut rows);
+    // progression. The recognizer's resolution is the map's, not a row's:
+    // `progression.floors` reads its shape counts and `combat.monster_closets`
+    // its accepted targets, so it is resolved once here and lent to both
+    // rather than re-derived per row.
+    let floors = recognize(scene, tables);
+    progression_rows(fm, scene, tables, &floors, &mut rows);
 
     // combat
     rows.push(encounter_style_row(fm));
-    monster_rows(fm, scene, tables, &mut rows);
+    monster_rows(fm, scene, tables, &floors, &mut rows);
     rows.push(hitscanner_ratio_row(fm, scene, tables));
     rows.push(deaf_ratio_row(fm, scene, tables));
     rows.push(range_row(
@@ -2647,17 +2656,26 @@ thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
         let player_pad = base.replace(START, &format!("{START}\n{IMP}"));
         assert_ne!(player_pad, base, "the patch changed nothing");
         let (scene, tables) = crate::check::fixtures::scene_of(&player_pad);
-        assert_eq!(count_monster_closets(&scene, &tables), 0);
+        assert_eq!(
+            count_monster_closets(&scene, &tables, &recognize(&scene, &tables)),
+            0
+        );
 
         let ambush = player_pad.replace("special = 97;", "special = 126;");
         assert_ne!(ambush, player_pad, "the patch changed nothing");
         let (scene, tables) = crate::check::fixtures::scene_of(&ambush);
-        assert_eq!(count_monster_closets(&scene, &tables), 1);
+        assert_eq!(
+            count_monster_closets(&scene, &tables, &recognize(&scene, &tables)),
+            1
+        );
 
         let no_monster = base.replace("special = 97;", "special = 126;");
         assert_ne!(no_monster, base, "the patch changed nothing");
         let (scene, tables) = crate::check::fixtures::scene_of(&no_monster);
-        assert_eq!(count_monster_closets(&scene, &tables), 0);
+        assert_eq!(
+            count_monster_closets(&scene, &tables, &recognize(&scene, &tables)),
+            0
+        );
     }
 
     /// The [`drop_wall_closet`]'s topological opposite: `T` (sector 1, floor

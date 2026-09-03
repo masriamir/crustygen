@@ -33,7 +33,7 @@ directly as JSON and built with `crustygen-build` (see
 [`docs/build.md`](docs/build.md)). See [Known gaps](#known-gaps).
 
 ```bash
-cargo test                                   # 927 tests
+cargo test                                   # 941 tests
 cargo run --bin crustygen-build -- tests/fixtures/entrada_base.json out.wad
 cargo run --bin crustygen-check -- maps/entrada.wad \
     --spec tests/fixtures/entrada.spec.md
