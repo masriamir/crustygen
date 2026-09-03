@@ -552,6 +552,16 @@ pub struct BuiltGraph {
 /// exit" is a spec-conformance finding for the stage that reads the
 /// map-spec, not a softlock.
 ///
+/// The start is looked for among the **rooms'** things only, and that is
+/// exhaustive rather than a narrowing: island cargo cannot hold a player 1
+/// start, since `compile::things::place_island_things` refuses one on a
+/// reveal ([`CompileError::StartOnReveal`](crate::compile::CompileError::StartOnReveal))
+/// and on a pedestal
+/// ([`CompileError::PlayerStartOnPedestal`](crate::compile::CompileError::PlayerStartOnPedestal)),
+/// the second precisely so this search cannot come up empty on a map that
+/// does have one. `None` here therefore means the map truly has no start,
+/// not that this pass failed to find one.
+///
 /// # Panics
 ///
 /// If the vocabulary lists more than [`ACTION_BIT_BASE`] distinct keyed-door
@@ -567,7 +577,9 @@ pub struct BuiltGraph {
 #[must_use]
 pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<BuiltGraph> {
     // The start: the first room placing a `player1_start` (the IR vocabulary
-    // name; resolved to engine thing 1 by the tables at emission).
+    // name; resolved to engine thing 1 by the tables at emission). Rooms are
+    // the only place one can be — see this function's own doc comment on the
+    // `None` path.
     let start = ir
         .rooms
         .iter()

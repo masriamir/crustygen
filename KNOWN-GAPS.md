@@ -348,6 +348,20 @@ are `rules.rs`'s `a_key_placed_on_a_pedestal_…` and `a_key_sealed_in_a_reveal_
 tests. A key placed *outside* any room, pedestal or reveal remains impossible to
 author — every thing belongs to one of the three.
 
+The **player 1 start** has the same room-versus-island split and is closed the
+other way, by refusal. `graph_from_compiled` begins its flood at the start it
+finds among the rooms' things; a pedestal start used to be legal for every
+player number, so a map whose only player 1 start was a pedestal's cargo made
+that search come up empty, `None` came back, and P7 was skipped for the whole
+map — silently, since `None` is also the legitimate "this map has no start"
+answer. The compiler then wrote a WAD its own verifier refused with five
+blocking findings (`V-P7` ×4 and a `V-P20`), the verifier having located the
+start geometrically. `CompileError::PlayerStartOnPedestal` now refuses that one
+placement; coop starts on a pedestal stay legal, because P7 never looks for
+them. Teaching the flood to find an island start was the other option and was
+not taken: it would have had to pick an origin among several candidate starts,
+where refusing keeps the origin unambiguous.
+
 **The crate's own lints are `warn`, and CI is what makes them fatal.**
 `Cargo.toml` sets `clippy::all` and `clippy::pedantic` to `warn`, not `deny`,
 so a local `cargo clippy` stays readable while you work. The strictness lives

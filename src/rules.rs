@@ -1369,6 +1369,56 @@ mod tests {
         );
     }
 
+    /// The negative that the two tests above cannot state: a key on a reveal
+    /// is held **only once the reveal fires**, so its bit belongs to the
+    /// reveal's own node and not to the host room's.
+    ///
+    /// The map is the smallest one where the two placements disagree. The
+    /// blue card is sealed in a reveal standing in the *start* room, and the
+    /// switch that lowers it is in room `b` — behind the very door the card
+    /// opens. Nothing can be done: no card without the switch, no switch
+    /// without the door, no door without the card, and P7 must say so. Put
+    /// the card's bit on the host instead and the flood hands it over the
+    /// moment the player spawns, the door opens, and this map compiles clean
+    /// — which is exactly the silent defect the placement prevents. (A
+    /// pedestal cannot make this case: its platform is callable from its
+    /// host unconditionally, so island and host are reachable together and
+    /// the two placements agree.)
+    #[test]
+    fn a_key_on_a_reveal_is_held_only_once_the_reveal_fires() {
+        let ir_json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]],
+              "floor":0, "ceiling":192, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+              "things":[{ "kind":"player1_start", "at":[128,128], "angle":90 }] },
+            { "id":"b", "footprint":[[576,0],[576,512],[1088,512],[1088,0]],
+              "floor":0, "ceiling":192, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[{ "a":"a", "b":"b", "kind":"locked", "lock":"blue_card", "width":64, "at":[512,256],
+                        "door_thickness":32, "alcove_near":16, "alcove_far":16 }],
+          "triggers":[{ "id":"t", "kind":"switch", "room":"b", "at":[832,512] }],
+          "reveals":[
+            { "id":"prize", "room":"a", "at":[256,256], "kind":"pedestal", "rise":64,
+              "things":[{ "kind":"blue_card", "at":[288,288], "angle":0 }], "trigger":"t" }
+          ],
+          "exits":[{ "room":"b", "trigger":"switch", "at":[1088,256], "width":64 }] }"#;
+        let found = violations(ir_json);
+        assert!(
+            found.contains(&"P7".to_owned()),
+            "the card is unreachable until a switch behind its own lock fires: {found:?}"
+        );
+        // And P24 stays quiet: the card *is* placed and it *does* open a
+        // door, so the only thing wrong with this map is when the player can
+        // hold it. A P24 here would mean the placement scan had regressed
+        // instead.
+        assert!(
+            !found.contains(&"P24".to_owned()),
+            "the card is placed and opens a door; only its timing is wrong: {found:?}"
+        );
+    }
+
     #[test]
     fn a_doors_own_texture_survives_the_height_pass() {
         // `emit_doors` writes the theme door texture onto both door faces'

@@ -959,18 +959,38 @@ pub enum CompileError {
     },
     /// A reveal's own things list holds a player start.
     ///
-    /// A start on a [`crate::ir::Pedestal`] is legal — the level begins with
-    /// the player standing on the block — but a reveal is *sealed* at rest:
-    /// a closet start begins the level inside solid rock, and a pedestal
-    /// reveal's start begins it on a block nothing can lower from the inside.
-    /// Neither is a level that can be played, so both are refused rather than
-    /// emitted.
+    /// A *coop* start on a [`crate::ir::Pedestal`] is legal — the level
+    /// begins with that player standing on the block (see
+    /// [`PlayerStartOnPedestal`](Self::PlayerStartOnPedestal) for the player
+    /// 1 exception) — but a reveal is *sealed* at rest: a closet start begins
+    /// the level inside solid rock, and a pedestal reveal's start begins it
+    /// on a block nothing can lower from the inside. Neither is a level that
+    /// can be played, so both are refused rather than emitted.
     #[error(
         "reveal `{reveal}` holds a player start, which cannot begin the level in a sealed cell"
     )]
     StartOnReveal {
         /// The reveal.
         reveal: String,
+    },
+    /// A pedestal's own things list holds the **player 1** start.
+    ///
+    /// Not the sealed-cell objection [`StartOnReveal`](Self::StartOnReveal)
+    /// raises — a pedestal is standable, the engine spawns the player on it
+    /// happily, and a coop start there stays legal. The objection is that
+    /// rule P7 begins its flood at the player 1 start it finds among the
+    /// **rooms'** own things
+    /// ([`crate::reach::graph_from_compiled`]), so a player 1 start anywhere
+    /// else leaves that search empty and skips reachability for the whole
+    /// map — the compiler would then accept a map its own verifier calls
+    /// unfinishable. A construct the analysis cannot see is refused rather
+    /// than silently exempted.
+    #[error(
+        "pedestal `{pedestal}` holds the player 1 start, which rule P7's flood looks for among a room's own things; put it in the room and leave the pedestal to coop starts"
+    )]
+    PlayerStartOnPedestal {
+        /// The pedestal.
+        pedestal: String,
     },
     /// The compiled map breaks one or more playability rules.
     #[error(

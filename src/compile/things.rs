@@ -311,8 +311,10 @@ fn check_not_on_an_island(ir: &Ir, room: &str, thing: &IrThing) -> Result<(), Co
 /// gap that is too short raises, and whether a `_start` may stand there.
 #[derive(Clone, Copy)]
 enum IslandShape {
-    /// A pedestal's platform. A `_start` on one is legal — beginning the
-    /// level standing on a pedestal is a fine thing to author.
+    /// A pedestal's platform. A *coop* `_start` on one is legal — beginning
+    /// the level standing on a pedestal is a fine thing to author — but the
+    /// player 1 start is refused, since rule P7's flood begins at the one it
+    /// finds among the rooms' things.
     Pedestal,
     /// A reveal's sealed cell. A `_start` in one is refused: the level
     /// cannot begin inside solid rock, nor on a block nothing can lower
@@ -418,7 +420,8 @@ fn required_height(tables: &Tables, kind: &str) -> i32 {
 /// [`CompileError::ThingTooClose`] when the thing stands closer than its own
 /// radius to whatever it is measured against,
 /// [`CompileError::StartOnReveal`] for a
-/// start in a reveal, [`CompileError::UnboundedRoom`] when there is no
+/// start in a reveal, [`CompileError::PlayerStartOnPedestal`] for the player
+/// 1 start on a pedestal, [`CompileError::UnboundedRoom`] when there is no
 /// boundary to measure against, [`CompileError::PedestalNoHeadroom`] (a
 /// pedestal) or [`CompileError::RevealNoHeadroom`] (a reveal, judged
 /// against its cell at rest — ruling R28) when the gap leaves the thing
@@ -446,15 +449,33 @@ fn place_island_things(
                 kind: thing.kind.clone(),
             })?;
 
-        // A start in a sealed cell is refused before either fit check, for
-        // the reason `check_not_on_an_island` runs before clearance: the
-        // point is categorically wrong, and reporting a radius or a height
-        // would name a symptom the author would then "fix" without
-        // discovering that no start belongs here at all.
-        if thing.kind.ends_with("_start") && matches!(island.shape, IslandShape::Reveal) {
-            return Err(CompileError::StartOnReveal {
-                reveal: island.id.to_owned(),
-            });
+        // A start the island cannot host is refused before either fit
+        // check, for the reason `check_not_on_an_island` runs before
+        // clearance: the point is categorically wrong, and reporting a radius
+        // or a height would name a symptom the author would then "fix"
+        // without discovering that no start belongs here at all.
+        //
+        // The two islands refuse different sets. A reveal refuses *every*
+        // start: its cell is sealed at rest. A pedestal refuses only the
+        // player 1 start, and not because the spot is unstandable — it is —
+        // but because `reach::graph_from_compiled` looks for that one start
+        // among the rooms' things to begin rule P7's flood, so a player 1
+        // start on a platform would skip reachability for the whole map.
+        // Coop starts on a pedestal stay legal; P7 never looks for them.
+        if thing.kind.ends_with("_start") {
+            match island.shape {
+                IslandShape::Reveal => {
+                    return Err(CompileError::StartOnReveal {
+                        reveal: island.id.to_owned(),
+                    });
+                }
+                IslandShape::Pedestal if thing.kind == "player1_start" => {
+                    return Err(CompileError::PlayerStartOnPedestal {
+                        pedestal: island.id.to_owned(),
+                    });
+                }
+                IslandShape::Pedestal => {}
+            }
         }
 
         // The player's dimensions are the floor for anything not listed as a
@@ -1691,9 +1712,11 @@ mod tests {
 
     #[test]
     fn a_start_inside_a_reveal_is_refused() {
-        // A start on a *pedestal* is legal (`TWO_PEDESTALS` above), so this
-        // is the one placement rule the two islands do not share: a reveal
-        // is sealed at rest, and the level cannot begin inside it.
+        // A *coop* start on a pedestal is legal (`TWO_PEDESTALS` above), so
+        // this is the one placement rule the two islands do not share: a
+        // reveal is sealed at rest, and the level cannot begin inside it. The
+        // player 1 start is refused on either island, for the separate reason
+        // `the_player_one_start_may_not_be_a_pedestals_cargo` gives.
         let tables = Tables::load().expect("tables");
         let start = REVEAL.replacen(r#""kind":"imp""#, r#""kind":"player2_start""#, 1);
         let err = compile(&Ir::from_json(&start).expect("ir"), &tables)
@@ -1722,6 +1745,43 @@ mod tests {
             matches!(&err, CompileError::StartOnReveal { reveal } if reveal == "pen"),
             "the shape refusal must outrank the clearance one, got {err}"
         );
+    }
+
+    /// The player 1 start is the one start a pedestal may not carry, and the
+    /// reason is not the spot — it is that the spot is invisible to rule P7.
+    /// `reach::graph_from_compiled` finds the start among the *rooms'* things;
+    /// with the only player 1 start on a platform it finds none, returns
+    /// `None`, and the flood never runs. Before this refusal, the map below
+    /// — whose door's key sits behind that same door — compiled clean at exit
+    /// 0 while `crustygen-check` reported five blocking findings on the WAD it
+    /// wrote (`V-P7` ×4 and `V-P20`), because the verifier locates the start
+    /// geometrically. The compiler refuses what its own analysis cannot see.
+    #[test]
+    fn the_player_one_start_may_not_be_a_pedestals_cargo() {
+        let tables = Tables::load().expect("tables");
+        // `TWO_PEDESTALS`, with the room's own player 1 start swapped for a
+        // shotgun and pedestal `p`'s coop start promoted to player 1: the
+        // map's only player 1 start is now island cargo.
+        let promoted = TWO_PEDESTALS
+            .replacen(
+                r#""kind":"player1_start", "at":[448,448]"#,
+                r#""kind":"shotgun", "at":[448,448]"#,
+                1,
+            )
+            .replacen(r#""kind":"player2_start""#, r#""kind":"player1_start""#, 1);
+        let err = compile(&Ir::from_json(&promoted).expect("ir"), &tables)
+            .expect_err("a player 1 start on a pedestal hides itself from P7");
+        assert!(
+            matches!(&err, CompileError::PlayerStartOnPedestal { pedestal } if pedestal == "p"),
+            "expected PlayerStartOnPedestal naming the pedestal, got {err}"
+        );
+
+        // The coop half is untouched: `TWO_PEDESTALS` itself still compiles
+        // with its player 2 and player 3 starts on pedestals, which
+        // `starts_placed_on_pedestals_join_the_coincident_start_check`
+        // depends on and P7 never looks for.
+        compile(&Ir::from_json(TWO_PEDESTALS).expect("ir"), &tables)
+            .expect("coop starts on pedestals stay legal");
     }
 
     #[test]
