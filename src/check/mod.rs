@@ -162,6 +162,7 @@ impl std::fmt::Display for Finding {
 /// ([`invariants::check_door_openings`], V-P4), and recognized-special
 /// ([`invariants::check_recognized_specials`], the flood's soundness
 /// precondition), lift-return ([`invariants::check_lift_return`], V-P5),
+/// floor-action ([`invariants::check_floor_actions`], V-P28),
 /// teleport-pairing
 /// ([`invariants::check_teleport_pairing`], V-P15) and sealed-monster-sector
 /// ([`invariants::check_sealed_monster_rooms`], V-P27) invariants, runs the
@@ -210,6 +211,7 @@ pub fn run(map: &UdmfMap, map_name: &str, tables: &Tables, spec: Option<&Spec>) 
     invariants::check_door_openings(&scene, tables, &mut findings);
     invariants::check_recognized_specials(&scene, tables, &mut findings);
     invariants::check_lift_return(&scene, tables, &mut findings);
+    invariants::check_floor_actions(&scene, tables, &mut findings);
     invariants::check_teleport_pairing(&scene, tables, &mut findings);
     invariants::check_sealed_monster_rooms(&scene, tables, &mut findings);
     if let Some(reached) = flood::run_flood(&scene, tables, &mut findings) {

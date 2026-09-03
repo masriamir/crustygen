@@ -174,6 +174,52 @@
 //! edges all name the same (host, platform) pair, and a barrier is called
 //! from both of the rooms it stands between.
 //!
+//! # Floor actions
+//!
+//! [`floors::resolve_floors`] resolves every sector a recognized floor line
+//! names by tag, and each such target the flood can model becomes one bit of
+//! the [`KeyMask`] above [`ACTION_BIT_BASE`]: the target sector's
+//! [`Node::action`] carries `(bit, destination)`, so [`Node::effective_floor`]
+//! stands that sector at its destination in every state whose bit is set, and
+//! each trigger driving it ORs the bit in where the player fires it. Bit `i`
+//! is `resolve_floors`'s `i`th target, ascending by sector — the numbering a
+//! warning below names.
+//!
+//! - A **front-only** form (S1/SR/G1 — [`crate::tables::FloorForm::front_only`],
+//!   gated to the side the line's face is drawn on by `P_UseSpecialLine`'s
+//!   "use the back sides of VERY SPECIAL lines" block, pinned
+//!   `p_switch.c:284-297`, which returns false from the back for every
+//!   special but 124) fires from the line's front sector, so its bit goes on
+//!   that sector's [`Node::fires`] and is unioned in on entering the room.
+//! - A **crossing** form (W1/WR) fires from the line itself, so its bit goes
+//!   on the [`Edge`] this module builds for that linedef and is unioned in on
+//!   arrival from either side — `P_CrossSpecialLine` has no side gate (the
+//!   same fact "Exit goals" above cites for a walkover exit), so a bridge
+//!   whose walkover is written on both of its thresholds fires from either
+//!   one. Which crossings actually happen is [`reach::check`]'s per-state
+//!   decision rather than a rest-height one, so a walkover on the far lip of
+//!   a pit fires only from the side a walk can reach. A crossing form on a
+//!   line no edge is built from — one-sided, or blocking — fires nothing,
+//!   for the reason "Edges" gives: `PIT_CheckLine` rejects the move before
+//!   `P_TryMove`'s `spechit` bookkeeping ever runs the special.
+//!
+//! Every recognized form is modeled this way, one-shot and repeatable alike.
+//! That is exact for the one-shot forms (the four this compiler emits are
+//! S1/W1) and partial for a repeatable one: a mask bit only ever
+//! accumulates, so an SR floor that can be sent back down is modeled as
+//! moved once and never returned — the flood may then miss a way back that
+//! a second press would open.
+//!
+//! Three kinds of target get **no** bit, stand at their rest floor, and earn
+//! a `V-P7` [`Severity::Warning`] naming the sector and why: one driven by
+//! lines of two engine types (they give it no one destination), one whose
+//! destination is a texture height this checker does not resolve
+//! ([`floors::Destination::NeedsTexture`]), and every target past the eighth
+//! (`KeyMask::BITS - ACTION_BIT_BASE` action bits fit above the key
+//! classes). Leaving such a target at rest is the conservative reading —
+//! the flood then judges the map as if the action never fired — and the
+//! warning is what keeps that silence from passing for a verdict.
+//!
 //! # Key classes
 //!
 //! Interned the same way [`reach::graph_from_compiled`] does: by the locked
@@ -196,12 +242,12 @@
 
 use crate::check::plats;
 use crate::check::scene::Scene;
-use crate::check::{Finding, Severity, Subject};
+use crate::check::{Finding, Severity, Subject, floors};
 use crate::reach::{
     self, ACTION_BIT_BASE, Edge, EdgeKind, KeyClass, KeyMask, Limits, Node, ReachGraph,
 };
 use crate::tables::Tables;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Interns the vocabulary's locked-door specials into key classes: sorted,
 /// deduped `special` values alongside the key-kind names each class covers
@@ -368,21 +414,134 @@ fn resolve_goals(
     Some(goals)
 }
 
+/// The floor actions the flood models, one resolution feeding both builders
+/// — see "Floor actions" in the module doc for the rules behind it.
+struct FloorBits {
+    /// Per scene sector: the action that sector *is* the target of, as
+    /// [`Node::action`]'s `(bit, destination floor)`.
+    actions: Vec<Option<(u8, i32)>>,
+    /// Per scene sector: the bits entering it fires — a front-only
+    /// trigger's front sector, [`Node::fires`].
+    node_fires: Vec<KeyMask>,
+    /// Per linedef index: the bits crossing it fires — a walkover trigger's
+    /// own line, which [`build_edges`] ORs into that linedef's [`Edge`].
+    line_fires: BTreeMap<usize, KeyMask>,
+}
+
+/// The number of floor actions a [`KeyMask`] can hold above the key classes.
+///
+/// The mirror of [`intern_lock_classes`]'s cap on the key half: a bit at or
+/// past this shifts off the end of the mask, which [`Node::effective_floor`]
+/// documents (and `debug_assert!`s) as an alias onto key class 0. The `as`
+/// widening is how [`intern_lock_classes`] already spells its own.
+const MAX_MODELED_FLOORS: usize = (KeyMask::BITS - ACTION_BIT_BASE) as usize;
+
+/// A `V-P7` Warning naming a floor target the flood leaves at rest, and why.
+fn unmodeled_floor(sector: usize, rest: i32, why: &str) -> Finding {
+    Finding {
+        check: "V-P7",
+        severity: Severity::Warning,
+        subject: Subject::Sector(sector),
+        message: format!("floor target {why}; the flood leaves it at its rest floor {rest}"),
+    }
+}
+
+/// Resolves the map's floor actions into the bits [`build_nodes`] and
+/// [`build_edges`] set, pushing a `V-P7` Warning for every target this
+/// checker declines to model (see "Floor actions" in the module doc).
+///
+/// Reads [`floors::resolve_floors`] — the one resolution the invariants
+/// (V-P28), the conformance rows and the `lift` recognizer share — rather
+/// than anything in `compile/`, per this module's own doc.
+fn resolve_floor_bits(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) -> FloorBits {
+    let mut bits = FloorBits {
+        actions: vec![None; scene.sectors.len()],
+        node_fires: vec![0; scene.sectors.len()],
+        line_fires: BTreeMap::new(),
+    };
+    for (i, f) in floors::resolve_floors(scene, tables).iter().enumerate() {
+        if i >= MAX_MODELED_FLOORS {
+            findings.push(unmodeled_floor(
+                f.sector,
+                f.rest,
+                &format!("is past the first {MAX_MODELED_FLOORS}, all the reachability mask holds"),
+            ));
+            continue;
+        }
+        let Some(action) = f.single() else {
+            findings.push(unmodeled_floor(
+                f.sector,
+                f.rest,
+                &format!(
+                    "is driven by lines of {} engine types, which give it no one destination",
+                    f.actions.len()
+                ),
+            ));
+            continue;
+        };
+        let floors::Destination::Height(dest) = action.destination else {
+            findings.push(unmodeled_floor(
+                f.sector,
+                f.rest,
+                "raises to a texture height this checker does not resolve",
+            ));
+            continue;
+        };
+        // COVERAGE: unreachable. `resolve_floors` builds one `SceneFloor` per
+        // sector — its targets come from `sectors_named_by`'s `BTreeSet` —
+        // so no two entries can name one sector. Handled rather than
+        // asserted because this checker floods arbitrary WADs: a node holds
+        // exactly one action, so a second would silently replace the first,
+        // and the flood would judge a floor nobody can move.
+        if bits.actions[f.sector].is_some() {
+            findings.push(unmodeled_floor(
+                f.sector,
+                f.rest,
+                "is the second action resolved onto this sector, and a node carries one",
+            ));
+            continue;
+        }
+        let bit = u8::try_from(i).expect("the cap above keeps i under MAX_MODELED_FLOORS");
+        bits.actions[f.sector] = Some((bit, dest));
+        let mask: KeyMask = 1 << (ACTION_BIT_BASE + u32::from(bit));
+        for &t in &action.triggers {
+            let trigger = &f.triggers[t];
+            if trigger.form.front_only() {
+                // `Some` for every trigger `resolve_floors` builds — a
+                // linedef whose front side dangles contributes no front
+                // mirror to read it from (`FloorTrigger::front`).
+                if let Some(front) = trigger.front {
+                    bits.node_fires[front] |= mask;
+                }
+            } else {
+                *bits.line_fires.entry(trigger.linedef).or_default() |= mask;
+            }
+        }
+    }
+    bits
+}
+
 /// Builds one [`Node`] per scene sector: floor/ceiling verbatim, `keys` set
 /// from every thing whose name is a key kind ([`Tables::locked_door_kinds`])
-/// with a resolved sector, unioned bit by interned [`KeyClass`].
-fn build_nodes(scene: &Scene, specials: &[u16], kinds: &[(String, u16)]) -> Vec<Node> {
+/// with a resolved sector, unioned bit by interned [`KeyClass`], and the
+/// floor action `bits` resolved for that sector — the action it is the
+/// target of, and the actions entering it fires.
+fn build_nodes(
+    scene: &Scene,
+    specials: &[u16],
+    kinds: &[(String, u16)],
+    bits: &FloorBits,
+) -> Vec<Node> {
     let mut nodes: Vec<Node> = scene
         .sectors
         .iter()
-        .map(|s| Node {
+        .enumerate()
+        .map(|(i, s)| Node {
             floor: s.floor,
             ceiling: s.ceiling,
             keys: 0,
-            // Floor actions reach this builder in its own task; until then
-            // the verifier's flood sees every sector at its emitted floor.
-            fires: 0,
-            action: None,
+            fires: bits.node_fires[i],
+            action: bits.actions[i],
         })
         .collect();
     for thing in &scene.things {
@@ -461,7 +620,19 @@ pub(crate) fn resolve_teleport_destination(
 /// a platform is geometry, not a teleport's optional modeling: the
 /// `teleports` flag exists to measure what a *teleport* is load-bearing for,
 /// and taking the lifts out alongside it would confound that measurement.
-fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool) -> Vec<Edge> {
+///
+/// A boundary edge also carries whatever floor actions crossing its linedef
+/// fires ([`FloorBits::line_fires`], "Floor actions" in the module doc). The
+/// teleport and lift edges carry none: a teleport line's special is its own,
+/// never a floor special, and a lift edge is not a linedef's crossing at all
+/// but a ride the platform gives.
+fn build_edges(
+    scene: &Scene,
+    tables: &Tables,
+    specials: &[u16],
+    teleports: bool,
+    bits: &FloorBits,
+) -> Vec<Edge> {
     let plain_door = tables.door_special();
     let player_teleports = tables.player_teleport_specials();
     let mut edges = Vec::new();
@@ -518,7 +689,7 @@ fn build_edges(scene: &Scene, tables: &Tables, specials: &[u16], teleports: bool
                 a: i,
                 b: neighbor,
                 kind,
-                fires: 0,
+                fires: bits.line_fires.get(&b.linedef).copied().unwrap_or(0),
             });
         }
     }
@@ -618,7 +789,9 @@ fn push_flood_findings(
     }
 }
 
-/// Runs the V-P7 flood over `scene` and pushes its findings.
+/// Runs the V-P7 flood over `scene` and pushes its findings, including one
+/// [`Severity::Warning`] per floor target it declines to model (see "Floor
+/// actions" in the module doc).
 ///
 /// Returns `Some(reached)` — one entry per scene sector, `reached[i]` true
 /// iff sector `i` is forward-reachable from the player 1 start — when the
@@ -648,8 +821,9 @@ pub fn run_flood(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) ->
     };
 
     let kinds = tables.locked_door_kinds();
-    let nodes = build_nodes(scene, &specials, &kinds);
-    let edges = build_edges(scene, tables, &specials, true);
+    let bits = resolve_floor_bits(scene, tables, findings);
+    let nodes = build_nodes(scene, &specials, &kinds, &bits);
+    let edges = build_edges(scene, tables, &specials, true, &bits);
 
     let graph = ReachGraph {
         nodes,
@@ -688,7 +862,11 @@ pub fn teleport_only_sectors(scene: &Scene, tables: &Tables) -> Option<Vec<bool>
     // its identical `None` branch; the pinned vocabulary never triggers it.
     let (specials, _) = intern_lock_classes(tables)?;
     let kinds = tables.locked_door_kinds();
-    let nodes = build_nodes(scene, &specials, &kinds);
+    // Into the same sink: the floor warnings are `run_flood`'s to report,
+    // and `check::run` always calls it, so repeating them here would double
+    // every one.
+    let bits = resolve_floor_bits(scene, tables, &mut sink);
+    let nodes = build_nodes(scene, &specials, &kinds, &bits);
     let limits = Limits {
         player_height: tables.player().height,
         max_step: tables.step_height(),
@@ -696,7 +874,7 @@ pub fn teleport_only_sectors(scene: &Scene, tables: &Tables) -> Option<Vec<bool>
     let reachable_with = |teleports: bool| {
         let graph = ReachGraph {
             nodes: nodes.clone(),
-            edges: build_edges(scene, tables, &specials, teleports),
+            edges: build_edges(scene, tables, &specials, teleports, &bits),
             start,
             goals: goals.clone(),
         };
@@ -1095,6 +1273,13 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
     /// One `thing` block, flagged `single` only.
     fn thing_at(x: f64, y: f64, type_id: u16) -> String {
         format!("thing {{ x = {x:.3}; y = {y:.3}; type = {type_id}; single = true; }}\n")
+    }
+
+    /// The scene's floor actions, discarding the warnings — for the tests
+    /// whose subject is a node or an edge built beside them rather than the
+    /// floor resolution itself.
+    fn floor_bits(scene: &Scene, tables: &Tables) -> FloorBits {
+        resolve_floor_bits(scene, tables, &mut Vec::new())
     }
 
     /// Parses `text` and builds the [`Scene`] it resolves to, returning both
@@ -1749,7 +1934,7 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
                 },
             ],
         };
-        let nodes = build_nodes(&scene, &specials, &kinds);
+        let nodes = build_nodes(&scene, &specials, &kinds, &floor_bits(&scene, &tables));
         assert_eq!(nodes.len(), 1);
         assert_eq!(
             nodes[0].keys, 0,
@@ -1767,7 +1952,13 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             sectors: vec![front, empty_sector()],
             things: vec![],
         };
-        let edges = build_edges(&scene, &tables, &specials, true);
+        let edges = build_edges(
+            &scene,
+            &tables,
+            &specials,
+            true,
+            &floor_bits(&scene, &tables),
+        );
         assert!(
             edges.is_empty(),
             "a blocking twosided boundary is a wall to the flood: {edges:?}"
@@ -1778,7 +1969,13 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
     fn build_edges_dedupes_teleport_edges_by_destination() {
         let (scene, tables) = fixtures::scene_of(TELEPORT_MAP);
         let (specials, _class_names) = intern_lock_classes(&tables).expect("small vocabulary");
-        let edges = build_edges(&scene, &tables, &specials, true);
+        let edges = build_edges(
+            &scene,
+            &tables,
+            &specials,
+            true,
+            &floor_bits(&scene, &tables),
+        );
         let teleports: Vec<&Edge> = edges
             .iter()
             .filter(|e| e.kind == EdgeKind::Teleport)
@@ -1946,7 +2143,13 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             plats[0].low_activator_neighbors().is_empty() && plats[0].callable_low(),
             "a Low activator the platform does not border"
         );
-        let edges = build_edges(&scene, &tables, &specials, true);
+        let edges = build_edges(
+            &scene,
+            &tables,
+            &specials,
+            true,
+            &floor_bits(&scene, &tables),
+        );
         let lifts: Vec<&Edge> = edges.iter().filter(|e| e.kind == EdgeKind::Lift).collect();
         assert_eq!(
             lifts.len(),
@@ -1984,10 +2187,169 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             BTreeSet::from([0]),
             "the switch still fires: `P_UseSpecialLine` is a raycast, not a crossing"
         );
-        let edges = build_edges(&scene, &tables, &specials, true);
+        let edges = build_edges(
+            &scene,
+            &tables,
+            &specials,
+            true,
+            &floor_bits(&scene, &tables),
+        );
         assert!(
             !edges.iter().any(|e| e.kind == EdgeKind::Lift),
             "but nobody can board across a blocking line: {edges:?}"
+        );
+    }
+
+    /// One `player1_start` in room 0 of a [`fixtures::chain`], as the
+    /// floor-action fixtures below spell it.
+    const START_IN_ROOM_0: &str =
+        "thing { x = 64.000; y = 64.000; angle = 90; type = 1; single = true; }\n";
+
+    #[test]
+    fn a_drop_wall_a_remote_switch_lowers_is_crossed_once_the_switch_room_is_entered() {
+        // A(0, start) — T(128, ceiling 128: a solid slab) — B(0, exit), with
+        // a 23 (S1 lowerFloorToLowest) naming T's tag on a wall of A itself.
+        let mut text = fixtures::chain_full(
+            &[0, 128, 0],
+            &[256, 128, 256],
+            &[0, 7, 0],
+            &[(0, 0, false), (0, 0, false)],
+            START_IN_ROOM_0,
+        );
+        fixtures::far_wall(&mut text, 3, 11, 0);
+        // Room 0's west wall is the first `v1 = 0; v2 = 1;` line the builder
+        // writes; rewriting it in place is how the switch lands on a wall
+        // that is neither the target nor a side the action moves.
+        let text = text.replacen(
+            "linedef { v1 = 0; v2 = 1; sidefront = ",
+            "linedef { v1 = 0; v2 = 1; special = 23; arg0 = 7; sidefront = ",
+            1,
+        );
+        let (scene, tables) = fixtures::scene_of(&text);
+        let mut findings = Vec::new();
+        let reached = run_flood(&scene, &tables, &mut findings).expect("start and exit exist");
+        assert_eq!(
+            reached,
+            vec![true, true, true],
+            "the slab drops flush the moment the start room is entered: {findings:?}"
+        );
+        assert!(!findings.iter().any(|f| f.check == "V-P7"), "{findings:?}");
+    }
+
+    #[test]
+    fn a_bridge_pit_whose_walkover_lies_beyond_it_strands_the_player_who_drops_in() {
+        // A(0, start) — T(-96, rises to 0 on a 119 W1) — B(0, exit), with the
+        // W1 on the T|B link: crossing T -> B is a 96 climb the engine
+        // refuses, so the line fires only from B, which is beyond the pit.
+        let mut text = fixtures::chain(
+            &[0, -96, 0],
+            &[0, 7, 0],
+            &[(0, 0, false), (119, 7, false)],
+            START_IN_ROOM_0,
+        );
+        fixtures::far_wall(&mut text, 3, 11, 0);
+        let (scene, tables) = fixtures::scene_of(&text);
+        let mut findings = Vec::new();
+        let reached = run_flood(&scene, &tables, &mut findings).expect("start and exit exist");
+        assert_eq!(
+            reached,
+            vec![true, true, false],
+            "the start drops into the pit and never climbs out: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && f.severity == Severity::Error
+                && matches!(f.subject, Subject::Map)
+                && f.message
+                    .contains("no feasible walk from the start reaches any exit")),
+            "unfinishable, which is how `push_flood_findings` words it: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn the_same_bridge_whose_walkover_is_on_the_near_threshold_carries_the_player_across() {
+        // The pit above with its 119 moved to the A|T link: dropping in
+        // fires the line on the way, so T stands at 0 and B is a walk away.
+        let mut text = fixtures::chain(
+            &[0, -96, 0],
+            &[0, 7, 0],
+            &[(119, 7, false), (0, 0, false)],
+            START_IN_ROOM_0,
+        );
+        fixtures::far_wall(&mut text, 3, 11, 0);
+        let (scene, tables) = fixtures::scene_of(&text);
+        let mut findings = Vec::new();
+        let reached = run_flood(&scene, &tables, &mut findings).expect("start and exit exist");
+        assert_eq!(
+            reached,
+            vec![true, true, true],
+            "the bridge rises under the player who crossed it: {findings:?}"
+        );
+        assert!(!findings.iter().any(|f| f.check == "V-P7"), "{findings:?}");
+    }
+
+    #[test]
+    fn floor_targets_the_flood_cannot_model_stay_at_rest_and_warn() {
+        // Two engine types on one tag: 23 (lowerFloorToLowest) and 18
+        // (raiseFloorToNearest) name the same sector, so it has no one
+        // destination.
+        let (scene, tables) = fixtures::scene_of(&fixtures::chain(
+            &[0, 128, 0],
+            &[0, 7, 0],
+            &[(23, 7, false), (18, 7, false)],
+            "",
+        ));
+        let mut findings = Vec::new();
+        let bits = resolve_floor_bits(&scene, &tables, &mut findings);
+        assert_eq!(bits.actions[1], None, "no bit for an ambiguous destination");
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && f.severity == Severity::Warning
+                && matches!(f.subject, Subject::Sector(1))
+                && f.message.contains("engine types")),
+            "{findings:?}"
+        );
+
+        // A 30 (W1 raiseToTexture): the destination is a texture height
+        // neither this checker nor the probe resolves.
+        let mut text = fixtures::chain(&[0, 0, 0], &[0, 7, 0], &[(0, 0, false), (0, 0, false)], "");
+        fixtures::far_wall(&mut text, 3, 30, 7);
+        let (scene, tables) = fixtures::scene_of(&text);
+        let mut findings = Vec::new();
+        let bits = resolve_floor_bits(&scene, &tables, &mut findings);
+        assert_eq!(bits.actions[1], None, "no bit for an unresolved height");
+        assert!(
+            findings.iter().any(|f| f.check == "V-P7"
+                && f.severity == Severity::Warning
+                && matches!(f.subject, Subject::Sector(1))
+                && f.message.contains("texture height")),
+            "{findings:?}"
+        );
+
+        // Nine targets, one per link of a ten-room chain: the mask holds
+        // eight, and the ninth (sector 9, the last tag) is named and left at
+        // rest.
+        let floors = [0; 10];
+        let tags: Vec<i32> = (0..10).collect();
+        let links: Vec<(i32, i32, bool)> = (1..10).map(|tag| (23, tag, false)).collect();
+        let (scene, tables) = fixtures::scene_of(&fixtures::chain(&floors, &tags, &links, ""));
+        let mut findings = Vec::new();
+        let bits = resolve_floor_bits(&scene, &tables, &mut findings);
+        let modeled: Vec<usize> = (0..10).filter(|&i| bits.actions[i].is_some()).collect();
+        assert_eq!(
+            modeled,
+            (1..9).collect::<Vec<_>>(),
+            "the first eight targets, ascending by sector"
+        );
+        let warnings: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.check == "V-P7" && f.severity == Severity::Warning)
+            .collect();
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            matches!(warnings[0].subject, Subject::Sector(9))
+                && warnings[0].message.contains("past the first 8"),
+            "{warnings:?}"
         );
     }
 }
