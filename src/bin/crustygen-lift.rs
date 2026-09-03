@@ -7,9 +7,10 @@
 //! ingestion path — UDMF or classic Doom binary — and prints one
 //! human-readable census line per map, or a JSON array with `--json`.
 //! `--vocabulary` appends a per-map verdict from `crustygen::lift::vocabulary`,
-//! with `crustygen::lift::teleport`'s refusals folded in as a fourth axis and
-//! `crustygen::lift::plat`'s as a fifth (and both recognizers' per-map counts
-//! alongside the verdict under `--json`).
+//! with `crustygen::lift::teleport`'s refusals folded in as a fourth axis,
+//! `crustygen::lift::plat`'s as a fifth and `crustygen::lift::floor`'s as a
+//! sixth (and all three recognizers' per-map counts alongside the verdict
+//! under `--json`).
 //! Groups that fail to load are named on stderr and skipped; survivors are
 //! still reported. Exit 0 when every selected group surveyed, 1 when some
 //! failed, 2 on a usage, I/O, or WAD-level failure (every such failure
@@ -17,6 +18,7 @@
 
 use crustygen::check::scene::Scene;
 use crustygen::ingest::{self, MapOrigin};
+use crustygen::lift::floor::{self, FloorCounts};
 use crustygen::lift::plat::{self, PlatCounts};
 use crustygen::lift::teleport::{self, TeleportCounts};
 use crustygen::lift::vocabulary::{Verdict, Vocabulary};
@@ -28,12 +30,12 @@ use crustywad::map::udmf::UdmfMap;
 const USAGE: &str = "usage: crustygen-lift <wad> [--map NAME] [--json] [--vocabulary]";
 
 /// One surveyed map's row: its census, which ingest path produced it, and —
-/// only under `--vocabulary` — its verdict paired with the teleport and plat
-/// counts standing behind that verdict's fourth and fifth axes.
+/// only under `--vocabulary` — its verdict paired with the teleport, plat and
+/// floor counts standing behind that verdict's fourth, fifth and sixth axes.
 type Record = (
     MapTelemetry,
     MapOrigin,
-    Option<(Verdict, TeleportCounts, PlatCounts)>,
+    Option<(Verdict, TeleportCounts, PlatCounts, FloorCounts)>,
 );
 
 fn main() {
@@ -158,7 +160,7 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
             for (telemetry, _, verdict) in &records {
                 let mut value = serde_json::to_value(telemetry)
                     .map_err(|err| format!("failed to serialize telemetry: {err}"))?;
-                let (verdict, teleports, lifts) = verdict
+                let (verdict, teleports, lifts, floors) = verdict
                     .as_ref()
                     .expect("--vocabulary set: every record carries a verdict");
                 let object = value
@@ -179,6 +181,11 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
                     serde_json::to_value(lifts)
                         .map_err(|err| format!("failed to serialize plat counts: {err}"))?,
                 );
+                object.insert(
+                    "floors".to_owned(),
+                    serde_json::to_value(floors)
+                        .map_err(|err| format!("failed to serialize floor counts: {err}"))?,
+                );
                 values.push(value);
             }
             serde_json::to_string_pretty(&values)
@@ -192,7 +199,7 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
         for (telemetry, origin, verdict) in &records {
             let suffix = verdict
                 .as_ref()
-                .map(|(v, teleports, lifts)| verdict_suffix(v, teleports, lifts))
+                .map(|(v, teleports, lifts, floors)| verdict_suffix(v, teleports, lifts, floors))
                 .unwrap_or_default();
             println!("{}{suffix}", human_line(telemetry, *origin));
         }
@@ -206,28 +213,36 @@ fn survey_wad(args: &Args) -> Result<i32, String> {
 ///
 /// The histogram is already computed: a map carrying none of the four
 /// teleport specials among its linedef specials has no teleport line for the
-/// recognizer to recognize, and one carrying none of the eight lift specials
-/// has no platform, so each recognizer is skipped when its specials are
+/// recognizer to recognize, one carrying none of the eight lift specials has
+/// no platform, and one carrying none of the 48 recognized floor specials has
+/// no floor target, so each recognizer is skipped when its specials are
 /// absent — the verdict then stays `Vocabulary::classify`'s own
-/// (`teleports_ok` / `lifts_ok == true`) and the counts are the all-zero
-/// default. The `Scene` is built once and shared by both.
+/// (`teleports_ok` / `lifts_ok` / `floors_ok == true`) and the counts are the
+/// all-zero default. The `Scene` is built once and shared by all three.
 fn classify_and_recognize(
     tables: &Tables,
     vocabulary: &Vocabulary,
     telemetry: &MapTelemetry,
     map: &UdmfMap,
-) -> (Verdict, TeleportCounts, PlatCounts) {
+) -> (Verdict, TeleportCounts, PlatCounts, FloorCounts) {
     let mut verdict = vocabulary.classify(telemetry);
     let has = |specials: &[u16]| {
         specials
             .iter()
             .any(|&s| telemetry.linedef_specials.contains_key(&i32::from(s)))
     };
+    let floor_specials: Vec<u16> = tables
+        .recognized_floor_specials()
+        .iter()
+        .map(|&(special, _, _)| special)
+        .collect();
     let has_teleports = has(&tables.teleport_specials());
     let has_lifts = has(&tables.lift_specials());
+    let has_floors = has(&floor_specials);
     let mut teleports = TeleportCounts::default();
     let mut lifts = PlatCounts::default();
-    if has_teleports || has_lifts {
+    let mut floors = FloorCounts::default();
+    if has_teleports || has_lifts || has_floors {
         // `Scene::build`'s findings are dropped: this is a survey, not a
         // verification run. The recognizers read whatever boundaries
         // resolved and refuse what they cannot state — `crustygen-check` is
@@ -243,8 +258,13 @@ fn classify_and_recognize(
             verdict = verdict.with_lifts(&report);
             lifts = report.counts;
         }
+        if has_floors {
+            let report = floor::recognize(&scene, tables);
+            verdict = verdict.with_floors(&report);
+            floors = report.counts;
+        }
     }
-    (verdict, teleports, lifts)
+    (verdict, teleports, lifts, floors)
 }
 
 /// One human-readable census line for a surveyed map.
@@ -272,12 +292,17 @@ fn human_line(t: &MapTelemetry, origin: MapOrigin) -> String {
 /// The `--vocabulary` suffix appended to a [`human_line`] census line: the
 /// overall verdict, an ok/unknown breakdown per membership axis, a
 /// vanilla-only note when the map leaves the pinned engine's vanilla special
-/// list, and — only when a recognizer refused something — how many lines or
-/// platforms it refused. A map with no teleport line, and a map whose every
-/// teleport line was recognized, both read the same: silence on that axis,
-/// because there is nothing there the lifter would have to drop. The lift
-/// axis reads the same way.
-fn verdict_suffix(v: &Verdict, teleports: &TeleportCounts, lifts: &PlatCounts) -> String {
+/// list, and — only when a recognizer refused something — how many lines,
+/// platforms or floor targets it refused. A map with no teleport line, and a
+/// map whose every teleport line was recognized, both read the same: silence
+/// on that axis, because there is nothing there the lifter would have to
+/// drop. The lift and floor axes read the same way.
+fn verdict_suffix(
+    v: &Verdict,
+    teleports: &TeleportCounts,
+    lifts: &PlatCounts,
+    floors: &FloorCounts,
+) -> String {
     use std::fmt::Write as _;
 
     let mut s = format!(
@@ -311,6 +336,9 @@ fn verdict_suffix(v: &Verdict, teleports: &TeleportCounts, lifts: &PlatCounts) -
     }
     if !v.lifts_ok {
         let _ = write!(s, " (lifts refused: {})", lifts.refusals());
+    }
+    if !v.floors_ok {
+        let _ = write!(s, " (floors refused: {})", floors.refusals());
     }
     s
 }

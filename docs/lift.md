@@ -81,25 +81,27 @@ A map assembled from binary format (rather than parsed from a native
 surveyed map in the census/histogram shape above; the origin suffix is a
 human-output-only annotation and is not part of the JSON record.
 
-`--vocabulary` appends a verdict per map on **five** axes. Three are
+`--vocabulary` appends a verdict per map on **six** axes. Three are
 membership: whether every non-zero linedef special and sector special, and
 every thing type, is in the compiler's emittable vocabulary
 (`Tables::emittable_line_specials`, `named_sector_specials`, `thing_kinds`),
 with the unknown values listed per axis, plus — on the line axis only —
 whether every non-zero linedef special the map carries is one the pinned
-vanilla engine dispatches (`(outside vanilla)` when not). The other two are
+vanilla engine dispatches (`(outside vanilla)` when not). The other three are
 the recognizers', and they are the axes that read geometry: a map passes the
-fourth when the teleport recognizer refused none of its teleport lines, and
-the fifth when the plat recognizer refused no platform and every lift line
-named one. A refusal appends `(teleports refused: N)` or `(lifts refused: N)`,
-naming the count. A map with no teleport line and a map whose every teleport
-line was recognized read the same — silence on that axis — because there is
-nothing there the lifter would have to drop; the lift axis reads the same
-way. `--json` carries the same five-axis verdict alongside a `teleports`
-object and a `lifts` object, each with the full shape and refusal counts.
+fourth when the teleport recognizer refused none of its teleport lines, the
+fifth when the plat recognizer refused no platform and every lift line named
+one, and the sixth when the floor recognizer refused no target and every
+floor line named one. A refusal appends `(teleports refused: N)`,
+`(lifts refused: N)` or `(floors refused: N)`, naming the count. A map with no
+teleport line and a map whose every teleport line was recognized read the
+same — silence on that axis — because there is nothing there the lifter would
+have to drop; the lift and floor axes read the same way. `--json` carries the
+same six-axis verdict alongside a `teleports` object, a `lifts` object and a
+`floors` object, each with the full shape and refusal counts.
 
 The three membership axes are an upper bound on lift yield, not a geometric
-judgment; the teleport and lift axes narrow that bound where they can.
+judgment; the teleport, lift and floor axes narrow that bound where they can.
 
 **Per-map failure policy.** A group that fails to load through the shared
 ingest path — for example an unsupported binary format (Hexen, Doom 64), a

@@ -12,12 +12,15 @@
 //! folds [`crate::lift::teleport`]'s refusals in as a fourth axis, so a map
 //! whose every value is nameable can still be refused for a teleport line
 //! the IR could not state. [`Verdict::with_lifts`] is the same move for
-//! [`crate::lift::plat`]'s refusals, the fifth axis. Membership can only
-//! ever say "yes"; a recognizer is what turns a "yes" into a "no".
+//! [`crate::lift::plat`]'s refusals, the fifth axis, and
+//! [`Verdict::with_floors`] for [`crate::lift::floor`]'s, the sixth.
+//! Membership can only ever say "yes"; a recognizer is what turns a "yes"
+//! into a "no".
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::lift::MapTelemetry;
+use crate::lift::floor::FloorReport;
 use crate::lift::plat::PlatReport;
 use crate::lift::teleport::TeleportReport;
 use crate::tables::Tables;
@@ -36,10 +39,10 @@ pub struct Vocabulary {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[expect(
     clippy::struct_excessive_bools,
-    reason = "these seven booleans are independent per-axis verdicts (three membership checks \
-              plus the teleport and plat recognizers') and two derived roll-ups (the five-axis \
-              conjunction and the stricter vanilla-only check) over the same census, not \
-              state-machine flags — and their names are the documented, load-bearing JSON \
+    reason = "these eight booleans are independent per-axis verdicts (three membership checks \
+              plus the teleport, plat and floor recognizers') and two derived roll-ups (the \
+              six-axis conjunction and the stricter vanilla-only check) over the same census, \
+              not state-machine flags — and their names are the documented, load-bearing JSON \
               field names later tasks and reports key off of"
 )]
 pub struct Verdict {
@@ -58,7 +61,11 @@ pub struct Verdict {
     /// ([`crate::lift::plat`]); `true` until [`Verdict::with_lifts`] is
     /// applied.
     pub lifts_ok: bool,
-    /// The conjunction of the five axes.
+    /// Every floor target is one of the three shapes the IR can state and
+    /// every floor line names a target ([`crate::lift::floor`]); `true`
+    /// until [`Verdict::with_floors`] is applied.
+    pub floors_ok: bool,
+    /// The conjunction of the six axes.
     pub expressible: bool,
     /// Every non-zero linedef special is one the pinned vanilla engine
     /// dispatches.
@@ -110,11 +117,12 @@ impl Vocabulary {
             line_specials_ok,
             sector_specials_ok,
             thing_kinds_ok,
-            // Membership knows nothing about geometry: the teleport and
-            // lift axes start clean and only `with_teleports` /
-            // `with_lifts` can refuse them.
+            // Membership knows nothing about geometry: the teleport, lift
+            // and floor axes start clean and only `with_teleports` /
+            // `with_lifts` / `with_floors` can refuse them.
             teleports_ok: true,
             lifts_ok: true,
+            floors_ok: true,
             expressible: false,
             vanilla_only: t
                 .linedef_specials
@@ -139,6 +147,7 @@ impl Verdict {
             && self.thing_kinds_ok
             && self.teleports_ok
             && self.lifts_ok
+            && self.floors_ok
     }
 
     /// Folds the teleport recognizer in: `teleports_ok` is "no refused
@@ -158,6 +167,15 @@ impl Verdict {
         self.expressible = self.conjunction();
         self
     }
+
+    /// Folds the floor recognizer in: `floors_ok` is "no refused target and
+    /// no broken floor line", the sixth axis.
+    #[must_use]
+    pub fn with_floors(mut self, report: &FloorReport) -> Self {
+        self.floors_ok = report.counts.refusals() == 0;
+        self.expressible = self.conjunction();
+        self
+    }
 }
 
 #[cfg(test)]
@@ -165,8 +183,9 @@ mod tests {
     use std::fmt::Write as _;
 
     use super::*;
-    use crate::check::fixtures::chain;
+    use crate::check::fixtures::{chain, far_wall};
     use crate::check::scene::Scene;
+    use crate::lift::floor;
     use crate::lift::plat;
     use crate::lift::survey;
     use crate::lift::teleport::TeleportCounts;
@@ -349,11 +368,67 @@ mod tests {
     }
 
     #[test]
+    fn with_floors_is_the_sixth_axis() {
+        let tables = Tables::load().expect("tables");
+        let vocab = Vocabulary::from_tables(&tables);
+        // A drop wall: A(0) - T(128) - B(0), with a 23 S1 on B's far wall.
+        let mut clean_text = chain(&[0, 128, 0], &[0, 7, 0], &[(0, 0, false); 2], "");
+        far_wall(&mut clean_text, 3, 23, 7);
+        let map = parse_udmf(&clean_text, Limits::default()).expect("parses");
+        let verdict = vocab.classify(&survey("MAP01", &map));
+        assert!(
+            verdict.floors_ok && verdict.line_specials_ok,
+            "23 is emittable and no target is refused yet: {verdict:?}"
+        );
+        let scene = Scene::build(&map, &tables, &mut Vec::new());
+        let ok = verdict
+            .clone()
+            .with_floors(&floor::recognize(&scene, &tables));
+        assert!(ok.floors_ok && ok.expressible);
+        // The same 23, carrying tag 0: a line that can never move a floor.
+        let broken_text = chain(
+            &[0, 128, 0],
+            &[0, 0, 0],
+            &[(23, 0, false), (0, 0, false)],
+            "",
+        );
+        let map = parse_udmf(&broken_text, Limits::default()).expect("parses");
+        let scene = Scene::build(&map, &tables, &mut Vec::new());
+        let refused = vocab
+            .classify(&survey("MAP01", &map))
+            .with_floors(&floor::recognize(&scene, &tables));
+        assert!(
+            !refused.floors_ok && !refused.expressible,
+            "a tag-0 floor line is a refusal: {refused:?}"
+        );
+    }
+
+    /// A clean floor report leaves a membership refusal standing, the way
+    /// `with_teleports` and `with_lifts` do: no recognizer may resurrect an
+    /// `expressible` an out-of-set value already earned.
+    #[test]
+    fn a_clean_floor_report_leaves_the_membership_verdict_alone() {
+        let tables = Tables::load().expect("tables");
+        let mut text = chain(&[0, 128, 0], &[0, 7, 0], &[(0, 0, false); 2], "");
+        far_wall(&mut text, 3, 23, 7);
+        let map = parse_udmf(&text, Limits::default()).expect("parses");
+        let scene = Scene::build(&map, &tables, &mut Vec::new());
+        let report = floor::recognize(&scene, &tables);
+        assert_eq!(report.counts.refusals(), 0);
+        let v = vocab()
+            .classify(&telemetry(&[21], 0, &[1]))
+            .with_floors(&report);
+        assert!(v.floors_ok);
+        assert!(!v.expressible && !v.line_specials_ok);
+    }
+
+    #[test]
     fn verdict_serializes_with_the_documented_field_names() {
         let json = serde_json::to_value(vocab().classify(&telemetry(&[21], 0, &[1]))).unwrap();
         assert_eq!(json["expressible"], false);
         assert_eq!(json["unknown_line_specials"], serde_json::json!([21]));
         assert_eq!(json["vanilla_only"], true);
         assert_eq!(json["lifts_ok"], true);
+        assert_eq!(json["floors_ok"], true);
     }
 }

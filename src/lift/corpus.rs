@@ -1117,6 +1117,7 @@ mod tests {
             thing_kinds_ok: thing_ok,
             teleports_ok: true,
             lifts_ok: true,
+            floors_ok: true,
             expressible: unknown_line.is_empty() && sector_ok && thing_ok,
             vanilla_only: vanilla,
             unknown_line_specials: unknown_line.to_vec(),
