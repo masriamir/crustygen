@@ -1467,7 +1467,7 @@ fn next_sector(b: &Boundary) -> Option<usize> {
     if b.two_sided { b.neighbor } else { None }
 }
 
-/// `P_FindLowestFloorSurrounding` (`p_spec.c:270-291`): starts at the
+/// `P_FindLowestFloorSurrounding` (`p_spec.c:270-289`): starts at the
 /// sector's **own** floor, minimum over two-sided neighbors.
 pub(crate) fn lowest_floor_surrounding(scene: &Scene, sec: usize) -> i32 {
     sector_lines(scene, sec)
@@ -1479,10 +1479,10 @@ pub(crate) fn lowest_floor_surrounding(scene: &Scene, sec: usize) -> i32 {
 }
 
 /// `P_FindHighestFloorSurrounding`'s starting value, `-500*FRACUNIT`
-/// (`p_spec.c:303`). A sector with no two-sided neighbor "lowers" to it.
+/// (`p_spec.c:302`). A sector with no two-sided neighbor "lowers" to it.
 pub(crate) const NO_NEIGHBOR_FLOOR: i32 = -500;
 
-/// `P_FindHighestFloorSurrounding` (`p_spec.c:297-318`): starts at
+/// `P_FindHighestFloorSurrounding` (`p_spec.c:297-316`): starts at
 /// [`NO_NEIGHBOR_FLOOR`], maximum over two-sided neighbors.
 pub(crate) fn highest_floor_surrounding(scene: &Scene, sec: usize) -> i32 {
     sector_lines(scene, sec)
@@ -1497,10 +1497,10 @@ pub(crate) const MAX_ADJOINING_SECTORS: usize = 20;
 /// What [`next_highest_floor`] found.
 pub(crate) struct NextHighest {
     /// The least neighboring floor strictly above `currentheight`, or
-    /// `currentheight` when no neighbor is above it (`p_spec.c:361-362`).
+    /// `currentheight` when no neighbor is above it (`p_spec.c:364-365`).
     pub(crate) height: i32,
     /// Whether the search filled its 20-entry list and broke early
-    /// (`p_spec.c:349-355`) — the map is then reading a truncated
+    /// (`p_spec.c:354-359`) — the map is then reading a truncated
     /// neighborhood, and the destination may not be the true next height.
     pub(crate) capped: bool,
 }
