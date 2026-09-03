@@ -113,7 +113,7 @@ counts and linedef/sector/thing-type histograms per map, human-readable or as
 `--json`. That layer interprets nothing — no table lookups, no spec
 emission. See [`docs/lift.md`](docs/lift.md).
 
-`crustygen-lift --vocabulary` adds a per-map verdict on five axes: whether
+`crustygen-lift --vocabulary` adds a per-map verdict on six axes: whether
 every special and thing type is in the compiler's emittable vocabulary, plus
 two recognizers — the **teleport recognizer**, which resolves every teleport
 line the way `EV_Teleport` does, classifies the pad shape it lands on, and
@@ -154,7 +154,7 @@ the four id/Final Doom IWADs. See
 | [`docs/build.md`](docs/build.md) | The build stage: the `crustygen-build` CLI contract, its per-stage exit codes, and byte-reproducibility of the committed map |
 | [`docs/check.md`](docs/check.md) | The layer-4 verifier: the check catalog, the flood's construction rules, conformance verdicts, and the CLI contract |
 | [`docs/lift.md`](docs/lift.md) | The lifter's charter, its telemetry and its two recognizers' scope, and the `crustygen-lift` CLI contract |
-| [`docs/corpus.md`](docs/corpus.md) | The corpus sweep: what "expressible" means on its five axes (and does not), the `crustygen-corpus` CLI contract, and the per-release re-run procedure |
+| [`docs/corpus.md`](docs/corpus.md) | The corpus sweep: what "expressible" means on its six axes (and does not), the `crustygen-corpus` CLI contract, and the per-release re-run procedure |
 | [`docs/geometry.md`](docs/geometry.md) | Worked coordinates for the gap and door-chain constructions |
 | [`docs/verticality.md`](docs/verticality.md) | Height differences, the shipped lift phase, and the stairs phase still to come |
 | [`docs/measurements/`](docs/measurements/) | Corpus measurements: the retail-IWAD verticality survey, the idgames expressibility instrument, the teleport before/after, and the lift shape probe |
