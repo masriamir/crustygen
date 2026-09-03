@@ -399,7 +399,18 @@ error and nothing is produced.
   "portals": [
     { "a": "entry", "b": "hall", "kind": "door", "lock": null, "width": 128, "at": [512, 128] },
     { "a": "hall", "b": "vault", "kind": "lift", "width": 128, "at": [768, 384],
-      "trigger": "switch", "speed": "normal" }
+      "trigger": "switch", "speed": "normal" },
+    { "a": "entry", "b": "pen", "kind": "drop_wall", "width": 64, "at": [512, 96],
+      "thickness": 16, "fires_on": "t_wall" }
+  ],
+  "triggers": [
+    { "id": "t_wall", "kind": "switch", "room": "entry", "at": [0, 256] },
+    { "id": "t_prize", "kind": "walkover", "portal": ["entry", "hall"] }
+  ],
+  "reveals": [
+    { "id": "prize", "room": "hall", "at": [768, 512], "kind": "pedestal", "rise": 64,
+      "things": [{ "kind": "red_card", "at": [800, 544], "angle": 0 }],
+      "trigger": "t_prize" }
   ],
   "teleports": [
     { "id": "entry_to_vault",
@@ -432,7 +443,7 @@ interior, and the right-hand side of a directed edge only faces inward when the 
 clockwise. Verified empirically rather than assumed — measuring the signed area of every sector
 boundary in nine Freedoom maps across both IWADs, oriented so the sector sits on the front side,
 gives 2611 clockwise and 0 counter-clockwise. Portal `kind` is one of `plain`, `door`, `locked`,
-`lift`; `lock` names a key when `kind` is `locked`. Texture names in the IR are concrete, having
+`lift`, `drop_wall`, `bridge`; `lock` names a key when `kind` is `locked`. Texture names in the IR are concrete, having
 already been resolved from the template's high-level vocabulary.
 
 **Teleports are not portals.** A portal joins two rooms through their shared wall; a teleport
@@ -519,6 +530,55 @@ side the player walks up to, and `things` are the things that ride it — placed
 floor, each strictly inside the rectangle. A room's own `things` may not stand on a pedestal
 (they would spawn in the platform's sector rather than on the room floor the author gave them);
 they belong in the pedestal's own list instead.
+
+**Floor actions are a fourth mechanism: one trigger, fired once, moving one or more floors.** A
+platform rests, travels and comes back under the player's own use; a floor action goes once and
+stays. The corpus authors it that way — 77 % of the floor lines in the sample of record are the
+one-shot W1/S1 forms (`docs/measurements/floor-shapes-2026-09-02.md` §A) — so the IR states a
+*one-time action* and says nothing about repetition. Three nouns state the three shapes the corpus
+builds:
+
+- **A drop wall** is a fifth portal `kind`: a sealed wall sector filling the gap between two
+  rooms, its floor at its ceiling so it reads as solid rock, lowered once to the lower room's
+  floor by `lowerFloorToLowest`. Its depth along the gap is `thickness`, one of
+  `Ir::DROP_WALL_THICKNESS` (8/16/32/64). This is the corpus's monster closet: 1,130 sample
+  pockets are reachable only through one (§D).
+- **A bridge** is the sixth: a pit strip filling the gap between two rooms *at one floor*
+  (`IrError::BridgeFloorsDiffer` otherwise), resting `depth` below them — a positive multiple of
+  `Ir::BRIDGE_DEPTH_STEP` (8) — and raised once to their floor by `raiseFloorToNearest`.
+- **A reveal** is a sealed island inside one room, in its own `reveals` list as
+  `{ id, room, at, size, kind, rise, things, trigger }` — the same rectangle a pedestal is, placed
+  and validated by the same rules, but lowered once on a shared trigger instead of resting raised
+  under the player's use. Its `kind` is `closet` (floor at the host's ceiling, solid at rest) or
+  `pedestal` (resting `rise` above the host's floor, its things on top).
+
+Every construct names a `trigger` by id, and the `triggers` list places them:
+`{ id, kind, room, at }` for a `switch` — a use line centered on that room's own wall, exactly as
+`Exit::at` is read — or `{ id, kind, portal: [a, b] }` for a `walkover`, which lands on the
+opening line of the portal joining those two rooms. A walkover may only name a plain or bridge
+portal (`IrError::WalkoverOnNonPlainPortal`): a door or lift portal's opening already carries a
+special. One trigger is one sector tag and one line special, so every construct naming it moves
+the same way — all lowering or all rising (`IrError::TriggerMixesFamilies`) — and a trigger no
+construct names is an error (`IrError::TriggerUnused`), as is a construct naming no trigger. A map
+carries at most `Ir::MAX_FLOOR_ACTIONS` (8) of them, the width the reachability mask's action half
+holds (§7.3, P7).
+
+**A reveal's things must fit the cell at rest, and a closet therefore holds nothing.** This is an
+engine fact, not a convention. A lowering floor holding a shootable thing that does not fit never
+moves: `P_ThingHeightClip` (`p_map.c:530-556`) returns false once `ceilingz - floorz` is under the
+thing's height, `PIT_ChangeSector` (`p_map.c:1257-1297`) sets `nofit` for a shootable one,
+`T_MovePlane`'s floor-down branch (`p_floor.c:66-92`) restores `lastpos` and returns `crushed`,
+and `T_MoveFloor` (`p_floor.c:213-222`) removes the thinker only on `pastdest` — so the floor
+retries every tic, forever. With `FLOORSPEED` at `FRACUNIT` (`p_spec.h:600`) the first step of a
+sealed cell leaves a one-unit gap, which fits nothing. The compiler therefore measures a reveal's
+things against `host.ceiling − rest` and raises `CompileError::RevealNoHeadroom`, and it judges
+**every** thing rather than only the shootable ones the engine blocks on: an item sealed in a
+closet is engine-legal, but the layer-4 verifier's V-P2 judges every thing against its sector's
+static heights, so allowing it would ship a map the project's own checker calls broken. The
+monster-closet idiom is therefore a **drop wall with a room behind it**, and the pedestal reveal is
+the shape that carries cargo. The same rule, through the same `required_height` helper (species
+height, else a blocking or hanging prop's, else the player's), governs a pedestal's cargo, an
+island's cargo and a room's own things, so the compiler and V-P2 cannot disagree about what fits.
 
 ## 7. Compiler contract
 
@@ -682,14 +742,54 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
   strip has no release at all: retail seals a pen only where a monsters-only teleport or a tier-3
   strip special empties it, and the strip specials are outside this vocabulary.
 
+**Floor actions**
+
+- **P28 — Floor destination** *(implemented)*. Every floor action's destination, re-derived over
+  the *emitted* geometry the way `EV_DoFloor` (`p_floor.c`) reads it, is the floor the construct
+  intends: `P_FindLowestFloorSurrounding` for a lowering action (a drop wall, a reveal),
+  `P_FindNextHighestFloor` for a rising one (a bridge). The destination is not an authored
+  choice — it is whatever the target's neighbors stand at — so the compiler asserts it while it
+  builds each construct and this rule re-derives it from the records that shipped, catching a
+  neighbor some later pass added or moved. It cross-checks the recorded rest against the emitted
+  sector floor first and reports that alone when they disagree: every number the destination check
+  would then print is derived from a floor that should not be there.
+- **P29 — Floor opening** *(implemented)*. A floor action changes where the player can walk, in
+  the direction its shape promises: a drop wall or a bridge passes both ways between its two
+  neighbors once it has moved, and a reveal is sealed against its host at rest and enterable from
+  it afterward. Both halves read the same two refusals the reachability flood does — the crossing
+  window (`P_LineOpening`, `p_maputl.c:300-329`: the lower of the two ceilings over the higher of
+  the two floors, holding the player's full height, `p_map.c:468-469`) and the step
+  (`p_map.c:477-479`) — fed the *effective* heights: the target's `rest` before it fires and its
+  `dest` after, its neighbors' own floors throughout.
+- **P30 — No chained action** *(implemented)*. No floor action's target borders another action's
+  target, a lift platform, or a door sector. Both destination searches read the *current* floors
+  of the target's neighbors, so a neighbor that moves makes the destination a function of when the
+  trigger is pulled; crustygen evaluates it at load, which is exact only without such a chain. The
+  corpus prices the exposure: one target in five borders another, but only one in twenty-three has
+  its *destination* defined by a movable neighbor
+  (`docs/measurements/floor-shapes-2026-09-02.md` §G). A door sector is read off the **back** side
+  of a door line rather than off a tag, because every door special this vocabulary names is a
+  manual `DR` form carrying no tag at all — `EV_VerticalDoor` (`p_doors.c`) takes
+  `sides[line->sidenum[1]].sector`.
+
+  P30 is also what lets P7's flood model a floor action at all. Each action takes one bit of the
+  reachability mask and a node carries at most one action, so nothing composes: without the
+  no-chain rule a sector's effective floor would depend on the order two triggers were pulled in,
+  which the flood does not model. The mask is a `u16` — bits 0..8 the key classes, bits 8..16 the
+  floor actions — which is where `Ir::MAX_FLOOR_ACTIONS` (8) comes from.
+
 ### 7.4 Engine constants and specials table
 
-The thresholds P1–P27 depend on live in `engine.toml` alongside `vocabulary.toml`: maximum step
+The thresholds P1–P30 depend on live in `engine.toml` alongside `vocabulary.toml`: maximum step
 height; player radius and height; per-species radius and height; the door clearance allowance;
 the `[plat]` block behind every platform (the `downWaitUpStay` and `blazeDWUS` speeds, the wait
-at the bottom, and `MAXPLATS`); barrel blast radius and damage; decoration radii, heights, and
-blocking flags; sector damage specials by tier; the secret sector special; the sky flat name;
-the valid light range; and which specials consume a tag.
+at the bottom, and `MAXPLATS`); the `[floor]` block behind every floor action — `FLOORSPEED`, the
+turbo multiplier and the raise-and-change plat divisor, all sourced to `p_spec.h`/`p_floor.c`/
+`p_plats.c`, alongside the two `curated` authoring bounds `drop_wall_thickness` and
+`bridge_depth_step`, which are corpus-bounded choices rather than engine constants and say so in
+their citation; barrel blast radius and damage; decoration radii, heights, and blocking flags;
+sector damage specials by tier; the secret sector special; the sky flat name; the valid light
+range; and which specials consume a tag.
 
 Both tables follow the same sourcing rule: **every entry carries a citation — a `source` field
 recording a primary source, a `derivation` for a computed value, or `curated` for a judgment call

@@ -108,7 +108,7 @@ use crate::tables::Tables;
 pub type NodeIdx = usize;
 
 /// A key class: a bit position in a [`KeyMask`]. Classes are interned by the
-/// keyed-door special the key satisfies, so the card and skull of a colour
+/// keyed-door special the key satisfies, so the card and skull of a color
 /// share one class — `EV_VerticalDoor` (pinned `p_doors.c:371-403`) accepts
 /// either: `!p->cards[it_bluecard] && !p->cards[it_blueskull]`.
 ///
@@ -612,7 +612,7 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
     goals.dedup();
 
     // Intern key classes by keyed-door special: the card and skull of a
-    // colour share a special (`EV_VerticalDoor`, pinned p_doors.c:371-403),
+    // color share a special (`EV_VerticalDoor`, pinned p_doors.c:371-403),
     // so they must share a class.
     let kinds = tables.locked_door_kinds();
     let mut specials: Vec<u16> = kinds.iter().map(|&(_, s)| s).collect();
@@ -1624,9 +1624,9 @@ mod tests {
     }
 
     #[test]
-    fn a_locked_door_edge_and_the_matching_key_share_a_colour_class() {
+    fn a_locked_door_edge_and_the_matching_key_share_a_color_class() {
         // The lock is blue_card; the placed key is blue_SKULL. EV_VerticalDoor
-        // accepts either of a colour, so the classes must collapse.
+        // accepts either of a color, so the classes must collapse.
         let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
           "rooms":[
             { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
@@ -1670,7 +1670,7 @@ mod tests {
         };
         let f = check(&b.graph, &limits);
         assert!(!f.unfinishable, "the skull opens the blue door");
-        // class_names for messages: both kinds of the colour, sorted.
+        // class_names for messages: both kinds of the color, sorted.
         assert_eq!(b.class_names[class as usize], ["blue_card", "blue_skull"]);
     }
 

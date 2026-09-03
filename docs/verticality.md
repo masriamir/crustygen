@@ -74,6 +74,25 @@ in the IR's own `pedestals` list). P5 is re-derived from the emitted geometry in
 riser rendering were measured over DOOM/DOOM2, Final Doom and an idgames sample before any of it
 was designed: `docs/measurements/lift-shapes-2026-08-29.md`.
 
+**Phase 4 — floor actions. Shipped.** A floor moves **once** and stays: `lowerFloorToLowest`
+carrying **23** (S1 switch) or **38** (W1 walkover), and `raiseFloorToNearest` carrying **18**/
+**119** — all four sourced in `data/vocabulary.toml` `[specials.floor]`. This sketch did not
+predict it, and the corpus is why it exists: 77 % of the sample's floor lines are the one-shot
+W1/S1 forms, the opposite of the lift's 95 % repeatable, so a floor action is a *trigger somewhere*
+and a *target somewhere else* rather than a thing the player rides. Three shapes cover the corpus,
+found by measurement rather than assumed: the **drop wall** (a sealed strip between two rooms —
+the monster closet, 1,130 sample pockets open only through one), the **reveal** (a sealed cell
+inside one room, resting solid as a closet or raised as a prize pedestal) and the **bridge** (a pit
+strip that rises to the walkway's floor). `PortalKind` gains `DropWall` and `Bridge`, reveals get
+their own IR list, and every construct names a `Trigger` — one tag, one special, at most
+`Ir::MAX_FLOOR_ACTIONS` (8) per map. Rules **P28** (the destination `EV_DoFloor` would compute),
+**P29** (the opening the shape promises) and **P30** (no chain to another moving sector) are
+re-derived from the emitted geometry in `rules.rs`, and again at layer 4 as `V-P28`; P7's flood
+carries each action as one bit of its reachability mask. The shapes, triggers, destinations and
+rendering were measured before any of it was designed
+(`docs/measurements/floor-shapes-2026-09-02.md`) and re-measured after
+(`docs/measurements/floors-2026-09-03.md`).
+
 **What phases 2 and 3 inherit from phase 1**, and therefore what phase 1 must get right:
 
 - the visible-side texture rule;

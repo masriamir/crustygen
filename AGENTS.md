@@ -11,8 +11,8 @@ not here (see `.meta-manifest.toml` and `just meta-check`).
 Doom PWAD, and emits a binary Doom-format twin. It removes coordinate bookkeeping, not layout
 design: you describe rooms, portals, doors, things and an exit; it produces watertight geometry,
 allocates tags, and rejects a map that fails its **wired** playability checks. The layer-4 verifier
-independently re-derives those same twelve wired rules from the built WAD and adds one verifier-only
-rule (P20); the one compiler-side gap is that its P7 reachability check is skipped when a map has no
+independently re-derives all but one of those wired rules from the built WAD and adds one
+verifier-only rule (P20); the one compiler-side gap is that its P7 reachability check is skipped when a map has no
 player start or no exit (the verifier still catches that as a hard `V-P7` finding — see
 `KNOWN-GAPS.md`). So "refuses every unwalkable map" is the compile-time goal, not yet a guarantee.
 Built on
@@ -169,13 +169,13 @@ Resolved threads over a red required check — or unaddressed missing coverage �
 <!-- <<< meta:copilot-review-loop -->
 
 Crustygen specifics: `just ci` (`lint test doc`) is the local pre-push gate; the required checks on
-the `Main Branch` ruleset (OS-matrix test, MSRV, coverage, `security-deny`, the committed-WADs drift
-guard) are the source of truth via `gh pr checks`. `pr-title` and `meta-check` run on PRs but are
-not yet required — a follow-up adds them to the ruleset.
+the `Main Branch` ruleset are the source of truth via `gh pr checks` — the OS-matrix test, fmt +
+clippy + doc, the MSRV build on 1.94.0, the committed-WADs drift guard, `analyze`, coverage,
+`codecov/patch`, CodeQL, `security-deny`, and — added since — `pr-title` and `meta-check`.
 
 ## Known gaps
 
 The honest, current list is [`KNOWN-GAPS.md`](KNOWN-GAPS.md). Headlines: spec → IR generation does
-not exist (the IR is authored as JSON); no conformance report file; 12 of 25 playability rules are
-enforced by the compiler (the verifier re-derives those twelve and adds P20); texture alignment is
-minimal (offsets do not accumulate across collinear runs).
+not exist (the IR is authored as JSON); no conformance report file; 19 of 30 playability rules are
+enforced by the compiler (the verifier re-derives eighteen of them and adds P20); texture alignment
+is minimal (offsets do not accumulate across collinear runs).

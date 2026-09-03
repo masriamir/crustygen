@@ -22,11 +22,11 @@ use crustygen::tables::Tables;
 use crustywad::map::udmf::{UdmfMap, UdmfSidedef};
 
 use crate::common::{
-    self, Activator, CEILING, DONUT, Destination, Effect, EffectFacts, FLOOR_GUN, FlatSource,
-    FloorTrigger, FloorType, Hist, OpeningShape, PERPETUAL, Placement, RAISE_CEILING_LOWER_FLOOR,
-    REPEATABLE_LIFT, Rider, STAIRS, Shape, TriggerKind, destination, floor_all, floor_type,
-    highest_floor_surrounding, lowest_ceiling_surrounding, lowest_floor_surrounding,
-    next_highest_floor, pct, percentiles,
+    self, Activator, CEILING, DONUT, Destination, Dispatch, Effect, EffectFacts, FLOOR_GUN,
+    FlatSource, FloorTrigger, FloorType, Hist, OpeningShape, PERPETUAL, Placement,
+    RAISE_CEILING_LOWER_FLOOR, REPEATABLE_LIFT, Rider, STAIRS, Shape, TriggerKind, destination,
+    floor_all, floor_type, highest_floor_surrounding, lowest_ceiling_surrounding,
+    lowest_floor_surrounding, next_highest_floor, pct, percentiles,
 };
 
 /// One `(family, target)` action: what the lines of one engine type do to one
@@ -831,7 +831,8 @@ fn survey_lift_carryover(ctx: &MapCtx<'_>, tables: &Tables, agg: &mut Agg) {
                 if l.args[0] != *tag || !PERPETUAL.contains(&l.special) {
                     continue;
                 }
-                let sides = common::trigger_sides(ctx.map, ctx.scene, sec, i, ctx.step, false);
+                let sides =
+                    common::trigger_sides(ctx.map, ctx.scene, sec, i, ctx.step, Dispatch::Cross);
                 p.hops.add(hop_bucket(
                     sides.iter().filter_map(|s| hops.get(s).copied()).min(),
                 ));

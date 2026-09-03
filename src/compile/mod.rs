@@ -67,9 +67,9 @@ pub struct SidedefOut {
     ///
     /// Doom derives a wall texture's horizontal position from this plus the
     /// distance along the line from its start vertex, so a nonzero value
-    /// shifts which texture column lands at the line's start. Used to centre
+    /// shifts which texture column lands at the line's start. Used to center
     /// a texture wider than the line it sits on — see
-    /// [`crate::compile::exits`], which centres an exit's switch.
+    /// [`crate::compile::exits`], which centers an exit's switch.
     pub x_offset: i32,
 }
 

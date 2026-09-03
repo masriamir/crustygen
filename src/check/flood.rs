@@ -1557,7 +1557,7 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         // The pit holds a blue_card: keys_in_words must render the class's
         // full kind list, not just the placed kind, pinning the same
         // card-or-skull wording `a_locked_door_edge_and_the_matching_key_
-        // share_a_colour_class` pins at the `reach.rs` layer.
+        // share_a_color_class` pins at the `reach.rs` layer.
         assert!(
             stranding.message.contains("blue_card/blue_skull"),
             "expected the color class's full kind list in the stranded wording: {stranding:?}"

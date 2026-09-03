@@ -3,8 +3,8 @@
 `crustygen-corpus` turns a directory of idgames zips (or bare WADs) into one
 number the vocabulary roadmap is re-ordered from: the share of maps whose
 every line special, sector special, and thing type is in crustygen's
-emittable vocabulary **and** whose every teleport line and every platform
-resolves to a shape the lifter's recognizers can state. It is the measuring
+emittable vocabulary **and** whose every teleport line, every platform and
+every floor target resolves to a shape the lifter's recognizers can state. It is the measuring
 half of Project G — every vocabulary release re-runs it against the same
 sample so the yield moves with the vocabulary, not with the sample.
 
@@ -15,11 +15,12 @@ compiler reads; the last three read geometry:
 
 | Axis | Set |
 |---|---|
-| line specials | `Tables::emittable_line_specials()` — what a compiler pass writes today (door, keyed doors, four exits, the four teleports 97/39/126/125, and the four repeatable lifts 62/88/123/120); the one-shot lift forms 21/10/122/121 are sourced but never emitted, so they stay *out* |
+| line specials | `Tables::emittable_line_specials()` — what a compiler pass writes today (door, keyed doors, four exits, the four teleports 97/39/126/125, the four repeatable lifts 62/88/123/120, and the four floor actions 23/38/18/119); the one-shot lift forms 21/10/122/121 are sourced but never emitted, so they stay *out* |
 | sector specials | `Tables::named_sector_specials()` — secret, the three damage tiers, the four light effects |
 | thing kinds | `Tables::thing_kinds()` |
 | teleports | no set — `lift::teleport::recognize` resolves every teleport line the way `EV_Teleport` does and refuses the shapes the IR cannot state; the axis passes when the map has no refusal |
 | lifts | no set — `lift::plat::recognize` resolves every platform a lift line names the way `EV_DoPlat` does, classifies it as a lift, a pedestal or a barrier, and refuses the ones the IR cannot state; the axis passes when the map has no refused platform and no lift line that names none |
+| floors | no set — `lift::floor::recognize` resolves every target a floor line names the way `EV_DoFloor` does, classifies it as a drop wall, a reveal or a bridge, and refuses the ones the IR cannot state; the axis passes when the map has no refused target and no floor line that names none |
 
 `tests/vocabulary_arbiter.rs` compiles a fixture per construct and asserts
 the curated line set equals what came out. Adding a special to the curated
@@ -53,8 +54,22 @@ floor and are mutually adjacent — the sub-case of a shared tag a
 geometry-aware lifter could still read as a single lift — so it is reported
 beside the refusals rather than inside them.
 
+The floor axis is the third geometric one, over the sectors floor lines name.
+Its `Floors` section counts the targets the recognizer resolved and the maps
+they sit in — how many are drop walls, reveals or bridges, how many hold a
+thing — plus the twelve refusal classes that gate the verdict (`gun`,
+`conflict`, two families, `unresolved`, `dead`, `closing`, `mixed`, `neutral`,
+rider loses, no activator, unsupported shape, neighbors a mover) and the
+broken lines, split into those carrying tag 0 and those naming no sector.
+Two rows are neither a shape tally nor a refusal: *shared-tag members
+accepted* counts the sectors a shared tag names that qualified on their own —
+where `lift::plat` refuses a shared tag outright, `lift::floor` takes it — and
+*remote triggers* counts, once per `(target, line)` pair, the triggers sitting
+neither on their target nor on a neighbor of it, which the corpus says is four
+floor triggers in five: a floor trigger is *placed*, not attached.
+
 **Not measured:** room geometry, linedef flags, sector tags outside the
-teleport and platform resolutions, texture and flat names, thing flags. The
+teleport, platform and floor resolutions, texture and flat names, thing flags. The
 number is an **upper bound** on what a geometry-aware lifter could express;
 every report says so in its header.
 
@@ -101,9 +116,9 @@ usage: crustygen-corpus <dir> [--json FILE] [--report FILE]
   `--report FILE` writes the Markdown aggregate (header caveat, sample,
   buckets, per-axis shares over all maps and the vanilla slice, top-25
   blockers per axis by map share, the Teleports section described above,
-  the Lifts section beside it, and the greedy curve at k = 1, 5, 10, 21, 51 —
-  once with the other axes held expressible, once over maps already ok on
-  them). With neither flag the Markdown goes to stdout.
+  the Lifts and Floors sections beside it, and the greedy curve at
+  k = 1, 5, 10, 21, 51 — once with the other axes held expressible, once over
+  maps already ok on them). With neither flag the Markdown goes to stdout.
 - Percentages in the Markdown render as `12.3 %` (one decimal place, a
   space before the sign). An axis with no out-of-set value renders `(none)`
   in its blocker table instead of a bare header, and a greedy curve with
@@ -139,14 +154,14 @@ failure.
 2. Here: `just corpus <path-to-sample-dir>` → writes
    `docs/measurements/expressibility-<today>.md` and a gitignored JSON under
    `target/`.
-3. Compare the new "all axes" share, the Teleports and Lifts sections and the
-   blocker tables with the previous doc; re-order the Project G queue from the
-   blocker tables, not from memory.
+3. Compare the new "all axes" share, the Teleports, Lifts and Floors sections
+   and the blocker tables with the previous doc; re-order the Project G queue
+   from the blocker tables, not from memory.
 4. **Only compare like with like.** A per-axis share and a blocker table are
    comparable across runs; a greedy-conjunction checkpoint is not, whenever
    the axes that define its population have changed between the two runs.
-   The teleport axis joining that population, and the lift axis joining it
-   after, are exactly such changes — see
+   The teleport axis joining that population, then the lift axis, then the
+   floor axis, are exactly such changes — see
    [`docs/measurements/teleports-2026-08-28.md`](measurements/teleports-2026-08-28.md),
    which records the before/after for the teleport construct and says so at
    both its curve table and its caveats.
@@ -157,10 +172,14 @@ failure.
    so the numbers can be re-derived when the sample or the loader changes.
 
 **The measurement of record is the newest dated before/after document under `docs/measurements/`.** Today
-that is [`docs/measurements/lifts-2026-08-30.md`](measurements/lifts-2026-08-30.md): the
-before/after for the lift construct (all axes 7.5 % → 8.9 %, line axis 9.0 % → 13.5 %, the new
-lift axis at 61.1 %), the reconciliation of `lift::plat::recognize` against the shape probe on
-both the sample and DOOM+DOOM2, and the full sweep report for that run — which is why there is
-no separate `expressibility-2026-08-30.md`. A run whose report is merged into a narrative
-document this way is the norm for a construct release; a bare `expressibility-<date>.md` is what
-a re-measurement with nothing to narrate leaves behind.
+that is [`docs/measurements/floors-2026-09-03.md`](measurements/floors-2026-09-03.md): the
+before/after for the floor-action construct (all axes 8.9 % → 9.3 %, line axis 13.5 % → 14.6 %,
+the new floor axis at 51.9 % — the lowest of the six), the reconciliation of
+`lift::floor::recognize` against the shape probe map for map (617 refused against the probe gate's
+590, every one of the 27 extra accounted for), the correction of the probe's gun-line siding and
+its delta, and the full sweep report for that run — which is why there is no separate
+`expressibility-2026-09-03.md`. Its predecessor,
+[`docs/measurements/lifts-2026-08-30.md`](measurements/lifts-2026-08-30.md), is the same document
+for the lift construct. A run whose report is merged into a narrative document this way is the
+norm for a construct release; a bare `expressibility-<date>.md` is what a re-measurement with
+nothing to narrate leaves behind.

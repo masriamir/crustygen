@@ -47,10 +47,13 @@ progression:
     default_behavior: repeatable   # repeatable | one_shot | stays_open
     lock_types: [blue_card, red_skull]   # must be a subset of progression.keys (P24)
   switches:
-    count: { min: 2, max: 6 }
-    remote_allowed: true     # a switch may act on a distant sector
+    count: { min: 2, max: 6 }   # exit and lift switches plus floor-action ones (23/18)
+    remote_allowed: true     # a switch may act on a distant sector — which a floor action's
+                             # switch usually does: four floor trigger lines in five sit
+                             # neither on their target nor beside it
   walkover_triggers:
-    count: { min: 1, max: 4 }
+    count: { min: 1, max: 4 }   # exit walkovers plus floor-action ones (38/119); a lift's
+                                # walkover is not counted here (crustygen issue #53)
 
 # Architecture
 architecture:

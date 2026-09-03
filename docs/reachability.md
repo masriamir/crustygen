@@ -206,6 +206,30 @@ purpose.
   now pointing at `reach.rs` as the flood it will consume.
 - `docs/verticality.md` is a dated record and stays untouched.
 
+**Updated again by the floor-action construct (2026-09-02).** A floor action changes the
+geometry the flood walks, so the state had to grow — and it grew *inside* the existing mask
+rather than beside it. `KeyMask` is a `u16`: bits `0..ACTION_BIT_BASE` (8) are key classes and
+bits `8..16` are floor actions, `Ir::MAX_FLOOR_ACTIONS` (8) of them, with a `const` assertion
+that the two halves fit one word and a `debug_assert!` on either side that a class or an action
+bit stays in its own half. A `Node` gains an `action: Option<(bit, destination)>` and
+`effective_floor(mask)` returns the destination when the bit is set and the node's own floor
+otherwise; `Node::fires` and `Edge::fires` carry the bits a sector or a crossing sets, so
+entering a switch's room or crossing a walkover unions the action in exactly as collecting a key
+unions a class in. Masks still only grow along a walk, which is what keeps the search monotone
+and the state space small.
+
+Two consequences worth stating plainly:
+
+- **Nothing composes.** A node carries at most one action, and `effective_floor` reads that one
+  bit — so a floor whose *neighbor* also moves is not modeled. Rule **P30** is what makes that
+  sound rather than optimistic: the compiler refuses a target bordering another mover, so the
+  case the flood cannot express is the case the compiler will not emit.
+- **A repeatable action is modeled as fired once and never returned**, because a mask bit only
+  accumulates. That is exact for the four one-shot specials this compiler emits (S1/W1) and
+  partial for a foreign map's SR/WR forms, where the flood may miss a way back that a second
+  press would open. The layer-4 flood says so with a `V-P7` Warning for every target it declines
+  to model at all; see `docs/check.md`'s "Floor bits".
+
 ## Out of scope
 
 P20's explicit per-pickup loop, the `crustygen-check` verifier and its
@@ -214,6 +238,6 @@ and any lift-riding edge kind (phase 3). The "specified order" clause of §2 —
 doors in the *authored* sequence — needs the map-spec (#1) and belongs to the
 conformance stage; P7 asserts an order exists, not that it matches the spec.
 
-Reconciling P7's colour-class lock checking with P24's exact-string lock checking is
+Reconciling P7's color-class lock checking with P24's exact-string lock checking is
 also out of scope — the two rules deliberately disagree; see `KNOWN-GAPS.md`'s
 "P24 is stricter than the engine about key kinds, and P7 is not."

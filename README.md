@@ -84,7 +84,8 @@ Compilation runs a fixed pass order, each pass depending on the last: emit
 room sectors, resolve secret specials, cut portals, emit doors, carve exits,
 emit teleport pads and their destination markers (`emit_teleports`), emit the
 `downWaitUpStay` platforms behind lifts, barriers and pedestals
-(`emit_lifts`), check no two emitted sectors overlap, apply height textures,
+(`emit_lifts`), emit the one-shot floor actions behind drop walls, reveals and
+bridges (`emit_floors`), check no two emitted sectors overlap, apply height textures,
 place things, check no action sits at tag 0, render `TEXTMAP`, then run the
 playability catalog. A
 violation is a hard error, not a warning — a door the player cannot fit
@@ -100,9 +101,10 @@ assembled and rendered to the same form — and re-derive the same invariants
 from the emitted geometry, reusing the sourced tables and the reachability
 core but nothing from `compile/` or `rules.rs` — the logic under
 cross-examination.
-Seventeen checks, from dangling cross-references to a key-aware flood — with
-directed teleport edges resolved the way `EV_Teleport` resolves them, and lift
-edges the way `EV_DoPlat` does — that proves the map can still be finished.
+Eighteen checks, from dangling cross-references to a key-aware flood — with
+directed teleport edges resolved the way `EV_Teleport` resolves them, lift
+edges the way `EV_DoPlat` does, and a bit per floor action resolved the way
+`EV_DoFloor` does — that proves the map can still be finished.
 Given a map-spec it also grades a fixed catalog of frontmatter parameters
 against their actual values — a parameter with no sourced geometric meaning is
 an explicit not-derivable row rather than a silent gap, and a structurally
@@ -121,11 +123,14 @@ emission. See [`docs/lift.md`](docs/lift.md).
 
 `crustygen-lift --vocabulary` adds a per-map verdict on six axes: whether
 every special and thing type is in the compiler's emittable vocabulary, plus
-two recognizers — the **teleport recognizer**, which resolves every teleport
+three recognizers — the **teleport recognizer**, which resolves every teleport
 line the way `EV_Teleport` does, classifies the pad shape it lands on, and
-refuses the shapes the IR cannot state, and the **plat recognizer**, which
+refuses the shapes the IR cannot state; the **plat recognizer**, which
 resolves every platform a lift line names the way `EV_DoPlat` does, classifies
-it as a lift, a pedestal or a barrier, and refuses the rest. Those two axes
+it as a lift, a pedestal or a barrier, and refuses the rest; and the **floor
+recognizer**, which resolves every target a floor line names the way
+`EV_DoFloor` does, classifies it as a drop wall, a reveal or a bridge, and
+refuses the rest. Those three axes
 are the ones that read geometry rather than a table. `crustygen-corpus <dir>`
 sweeps a directory of idgames zips into the corpus expressibility report the
 vocabulary roadmap is re-ordered from — still an upper bound. See
@@ -159,11 +164,11 @@ the four id/Final Doom IWADs. See
 | [`docs/map-spec.md`](docs/map-spec.md) | The map-spec document format, the parser's API, and the enforcement split |
 | [`docs/build.md`](docs/build.md) | The build stage: the `crustygen-build` CLI contract, its per-stage exit codes, and byte-reproducibility of the committed map |
 | [`docs/check.md`](docs/check.md) | The layer-4 verifier: the check catalog, the flood's construction rules, conformance verdicts, and the CLI contract |
-| [`docs/lift.md`](docs/lift.md) | The lifter's charter, its telemetry and its two recognizers' scope, and the `crustygen-lift` CLI contract |
+| [`docs/lift.md`](docs/lift.md) | The lifter's charter, its telemetry and its three recognizers' scope, and the `crustygen-lift` CLI contract |
 | [`docs/corpus.md`](docs/corpus.md) | The corpus sweep: what "expressible" means on its six axes (and does not), the `crustygen-corpus` CLI contract, and the per-release re-run procedure |
 | [`docs/geometry.md`](docs/geometry.md) | Worked coordinates for the gap and door-chain constructions |
-| [`docs/verticality.md`](docs/verticality.md) | Height differences, the shipped lift phase, and the stairs phase still to come |
-| [`docs/measurements/`](docs/measurements/) | Corpus measurements: the retail-IWAD verticality survey, the idgames expressibility instrument, the teleport before/after, and the lift shape probe |
+| [`docs/verticality.md`](docs/verticality.md) | Height differences, the shipped lift and floor-action phases, and the stairs phase still to come |
+| [`docs/measurements/`](docs/measurements/) | Corpus measurements: the retail-IWAD verticality survey, the idgames expressibility instrument, the teleport / lift / floor-action before-and-afters, and the shape probes behind them |
 | [`examples/`](examples/) | Reproducible measurement probes (`liftprobe`), kept so a measurement can be re-derived when the sample or the loader changes; compiled and linted by CI, never run by tests |
 
 ## Known gaps
@@ -185,8 +190,8 @@ The honest list is [`KNOWN-GAPS.md`](KNOWN-GAPS.md). The headlines:
   a missing start or exit is a hard finding there, and V-P20 checks each
   pickup for prop embedding and flood reachability — but on a built WAD, one
   stage later.
-- **16 of 27 playability rules** are enforced by the compiler; the verifier
-  re-derives fifteen of them from the emitted map and adds P20. The
+- **19 of 30 playability rules** are enforced by the compiler; the verifier
+  re-derives eighteen of them from the emitted map and adds P20. The
   exception is P26 (teleport-only exit room), which the verifier grades as a
   conformance row rather than as a check — a teleport exit emits exactly a
   plain walkover exit's specials, so nothing on the line tells them apart.
