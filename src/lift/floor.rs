@@ -257,6 +257,12 @@ pub struct FloorCounts {
     /// counted once per `(target, line)` pair — one line naming a shared tag
     /// is a remote trigger of each target it drives.
     pub remote_triggers: u64,
+    /// Targets holding at least one thing ([`Floor::things`]), the way
+    /// [`crate::lift::plat::PlatCounts::with_things`] counts platforms. The
+    /// measurement reads two of the three shapes off this: 40 % of reveals
+    /// hold a thing (the monster standing inside the closet, the prize on
+    /// the pedestal) and 38 % of bridges do.
+    pub with_things: u64,
 }
 
 impl FloorCounts {
@@ -303,6 +309,7 @@ impl FloorCounts {
                 .shared_tag_accepted
                 .saturating_add(other.shared_tag_accepted),
             remote_triggers: self.remote_triggers.saturating_add(other.remote_triggers),
+            with_things: self.with_things.saturating_add(other.with_things),
         }
     }
 }
@@ -489,6 +496,7 @@ fn count(
         }
         c.refused += u64::from(f.refusal.is_some());
         c.shared_tag_accepted += u64::from(f.shared_tag >= 2 && f.refusal.is_none());
+        c.with_things += u64::from(f.things > 0);
     }
     c
 }
@@ -504,6 +512,19 @@ mod tests {
         recognize(&scene, &tables)
     }
 
+    /// One case of [`an_earlier_refusal_beats_a_later_one`]: a fixture, the
+    /// refusal that must win, the one it must beat, and a predicate
+    /// asserting the beaten condition holds on that fixture too.
+    type Precedence = (String, Refusal, Refusal, fn(&SceneFloor) -> bool);
+
+    /// Both halves of one map: the resolution and what the recognizer makes
+    /// of it, so a precedence case can assert that the *beaten* condition
+    /// really holds as well as which refusal won.
+    fn resolved_and_recognized(text: &str) -> (Vec<SceneFloor>, FloorReport) {
+        let (scene, tables) = scene_of(text);
+        (resolve_floors(&scene, &tables), recognize(&scene, &tables))
+    }
+
     /// A target with three two-sided neighbors, which `chain`'s row of rooms
     /// cannot build: `T` (sector 1, tagged) spans `x ∈ [128, 256]`,
     /// `y ∈ [0, 128]`, with `W` (sector 0) west of it, `E` (sector 2) east
@@ -511,7 +532,10 @@ mod tests {
     /// is 256, and every linedef is wound so its own sector lies to the
     /// right of `v1 -> v2`. The `special`/`tag` pair goes on `E`'s outer
     /// east wall — the "switch on the far wall" placement of the
-    /// floor-shape worked examples, here two rooms from `T`.
+    /// floor-shape worked examples. `E` is one of `T`'s own two-sided
+    /// neighbors, so that trigger is [`Placement::Adjacent`], not remote;
+    /// what the fixture exists for is `T`'s three neighbors, not where its
+    /// switch sits.
     ///
     /// Three neighbors is the smallest hub in which one move can open a
     /// route while closing another ([`Refusal::Mixed`]) or strand its rider
@@ -716,7 +740,7 @@ mod tests {
         assert_eq!(r.counts.remote_triggers, 1);
     }
 
-    /// The seven refusals the fixed-order test does not reach, each on the
+    /// The eight refusals the fixed-order test does not reach, each on the
     /// geometry that earns it and nothing earlier in the order.
     #[test]
     fn every_other_refusal_reason_is_reachable() {
@@ -739,7 +763,9 @@ mod tests {
             "",
         );
         // A descender whose neighbors' routes are unchanged and whose own
-        // rider is stranded: Neutral wins, being judged before the rider.
+        // rider is stranded. `RiderLoses` needs `Effect::Opening` and this
+        // is `Effect::Neutral`, so the two arms are alternatives rather than
+        // a precedence: only `(Neutral, _, None)` can match here.
         let mut neutral = chain(
             &[128, 128, 0],
             &[0, 7, 0],
@@ -799,6 +825,175 @@ mod tests {
             assert_eq!(target.refusal, Some(expected), "{:?}", r.floors);
             assert!(target.shape.is_none(), "a refused target names no shape");
         }
+    }
+
+    /// The order itself, not merely "some reason beats acceptance". Every
+    /// other fixture in this module makes exactly **one** refusal condition
+    /// true, which pins nothing: `refusal_of`'s arms can then be reordered
+    /// freely and the suite stays green. Each case here makes **two** true
+    /// at once and asserts the earlier one wins, and `also` asserts the
+    /// later condition genuinely holds, so a case cannot rot into a
+    /// one-condition fixture that pins nothing again.
+    ///
+    /// Only the seven top-level positions need pinning; reordering inside
+    /// the `(effect, rider, opening)` match is a no-op, the [`Effect`]
+    /// discriminants being disjoint.
+    #[test]
+    fn an_earlier_refusal_beats_a_later_one() {
+        // Gun (1) over Conflict (2): a 24 (G1 `raiseFloor`) naming tag 7,
+        // and a 62 lift special naming it too.
+        let mut gun_over_conflict = chain(
+            &[0, 128, 0],
+            &[0, 7, 0],
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        );
+        far_wall(&mut gun_over_conflict, 3, 24, 7);
+        // Conflict (2) over TwoFamilies (3): a 23 and an 18 on tag 7 — two
+        // engine types — with a 62 on the same tag.
+        let mut conflict_over_families = chain(
+            &[0, 128, 0],
+            &[0, 7, 0],
+            &[(23, 7, false), (18, 7, false)],
+            "",
+        );
+        far_wall(&mut conflict_over_families, 3, 62, 7);
+        // Dead (5) over NoActivator (10): a 38 (W1) on a one-sided wall,
+        // which no side can cross, driving a target already sitting at the
+        // floor `lowerFloorToLowest` would send it to.
+        let mut dead_over_no_activator = chain(&[0, 0, 0], &[0, 7, 0], &[(0, 0, false); 2], "");
+        far_wall(&mut dead_over_no_activator, 3, 38, 7);
+        // NoActivator (10) over UnsupportedShape (11): the same uncrossable
+        // 38, this time over a ledge that would lower flush.
+        let mut no_activator_over_ledge =
+            chain(&[24, 48, 0, 0], &[0, 7, 0, 0], &[(0, 0, false); 3], "");
+        far_wall(&mut no_activator_over_ledge, 4, 38, 7);
+        // UnsupportedShape (11) over NeighborsMover (12): the same ledge,
+        // fired by a switch that does have an activator, with a lift
+        // platform (tag 5) as the target's east neighbor.
+        let mut ledge_over_mover = chain(
+            &[24, 48, 0, 0],
+            &[0, 7, 5, 0],
+            &[(0, 0, false), (0, 0, false), (62, 5, false)],
+            "",
+        );
+        far_wall(&mut ledge_over_mover, 4, 23, 7);
+
+        let is_ledge: fn(&SceneFloor) -> bool = |f| {
+            matches!(
+                f.single()
+                    .and_then(|a| a.facts.as_ref())
+                    .and_then(|facts| facts.opening),
+                Some(OpeningShape::LedgeLower)
+            )
+        };
+        let cases: [Precedence; 5] = [
+            (gun_over_conflict, Refusal::Gun, Refusal::Conflict, |f| {
+                !f.other_actions.is_empty()
+            }),
+            (
+                conflict_over_families,
+                Refusal::Conflict,
+                Refusal::TwoFamilies,
+                |f| f.actions.len() > 1,
+            ),
+            (
+                dead_over_no_activator,
+                Refusal::Dead,
+                Refusal::NoActivator,
+                |f| f.triggers.iter().all(|t| t.activators.is_empty()),
+            ),
+            (
+                no_activator_over_ledge,
+                Refusal::NoActivator,
+                Refusal::UnsupportedShape,
+                is_ledge,
+            ),
+            (
+                ledge_over_mover,
+                Refusal::UnsupportedShape,
+                Refusal::NeighborsMover,
+                |f| f.borders_mover,
+            ),
+        ];
+        for (text, wins, beaten, also) in cases {
+            let (resolved, report) = resolved_and_recognized(&text);
+            let f = resolved
+                .iter()
+                .find(|f| f.tag == 7)
+                .unwrap_or_else(|| panic!("{wins:?} over {beaten:?}: no target on tag 7"));
+            assert!(
+                also(f),
+                "{beaten:?} must hold too, or this case pins no order: {f:?}"
+            );
+            let target = report
+                .floors
+                .iter()
+                .find(|f| f.tag == 7)
+                .expect("the same target");
+            assert_eq!(
+                target.refusal,
+                Some(wins),
+                "{wins:?} must beat {beaten:?}: {:?}",
+                report.floors
+            );
+        }
+    }
+
+    /// `shared_tag_accepted` counts the members of a shared tag that *pass*,
+    /// and only members of groups of two or more — a group is expressible
+    /// exactly when the count reaches every one of its members.
+    #[test]
+    fn a_shared_tag_counts_only_the_members_that_pass_and_a_lone_tag_counts_none() {
+        // A(0) – T1(128) – B(0) – T2(0) – C(0), both targets on tag 7: T1
+        // is a drop wall, T2 already sits at the floor the 23 would send it
+        // to, so one member of the group passes and the other does not.
+        let mut split = chain(
+            &[0, 128, 0, 0, 0],
+            &[0, 7, 0, 7, 0],
+            &[(0, 0, false); 4],
+            "",
+        );
+        far_wall(&mut split, 5, 23, 7);
+        let r = report_of(&split);
+        assert_eq!(
+            (
+                r.counts.targets,
+                r.counts.shared_tag_accepted,
+                r.counts.dead,
+                r.counts.refused
+            ),
+            (2, 1, 1, 1),
+            "one member of the two passes: {:?}",
+            r.floors
+        );
+        let accepted = r
+            .floors
+            .iter()
+            .find(|f| f.refusal.is_none())
+            .expect("one member passes");
+        assert_eq!(
+            (accepted.shape, accepted.shared_tag),
+            (Some(Shape::DropWall), 2)
+        );
+
+        // The same drop wall alone on its tag: accepted, and no shared-tag
+        // member to count.
+        let mut lone = chain(&[0, 128, 0], &[0, 7, 0], &[(0, 0, false); 2], "");
+        far_wall(&mut lone, 3, 23, 7);
+        let r = report_of(&lone);
+        assert_eq!(
+            (
+                r.counts.targets,
+                r.counts.shared_tag_accepted,
+                r.counts.refused
+            ),
+            (1, 0, 0)
+        );
+        assert_eq!(
+            (r.floors[0].shared_tag, r.floors[0].shape),
+            (1, Some(Shape::DropWall))
+        );
     }
 
     #[test]
@@ -861,6 +1056,15 @@ mod tests {
         let r = report_of(&text);
         assert_eq!(r.floors[0].things, 1);
         assert_eq!(r.floors[0].triggers.len(), 1);
+        assert_eq!(r.counts.with_things, 1);
+
+        // The same map without the thing: the target is still recognized,
+        // and holds nothing.
+        let mut empty = chain(&[0, 128, 0], &[0, 7, 0], &[(0, 0, false); 2], "");
+        far_wall(&mut empty, 3, 23, 7);
+        let r = report_of(&empty);
+        assert_eq!((r.floors[0].things, r.counts.with_things), (0, 0));
+        assert_eq!(r.counts.targets, 1);
     }
 
     #[test]
@@ -880,35 +1084,40 @@ mod tests {
                 sum.drop_walls,
                 sum.dead,
                 sum.refused,
-                sum.remote_triggers
+                sum.remote_triggers,
+                sum.with_things
             ),
-            (2, 1, 1, 1, 2)
+            (2, 1, 1, 1, 2, 0)
         );
         assert_eq!(sum.refusals(), 1);
         assert_eq!(FloorCounts::default().add(&b), b);
     }
 
+    /// Both enums are asserted on a **multi-word** variant, which is the
+    /// only kind a wrong `rename_all` changes: `drop_wall` and
+    /// `two_families` would read `dropWall` and `twoFamilies` under
+    /// `camelCase`, where `bridge` and `closing` read the same either way.
     #[test]
     fn a_report_serializes_to_json_with_snake_case_names() {
-        let mut text = chain(
-            &[64, 0, 64],
-            &[0, 7, 0],
-            &[(0, 0, false), (0, 0, false)],
-            "",
-        );
-        far_wall(&mut text, 3, 20, 7);
+        let mut text = chain(&[0, 128, 0], &[0, 7, 0], &[(0, 0, false); 2], "");
+        far_wall(&mut text, 3, 23, 7);
         let json = serde_json::to_value(report_of(&text)).expect("serializes");
-        assert_eq!(json["counts"]["bridges"], 1);
-        assert_eq!(json["floors"][0]["shape"], "bridge");
-        assert_eq!(json["floors"][0]["destination"], 64);
+        assert_eq!(json["counts"]["drop_walls"], 1);
+        assert_eq!(json["floors"][0]["shape"], "drop_wall");
+        assert_eq!(json["floors"][0]["destination"], 0);
         assert_eq!(json["floors"][0]["refusal"], serde_json::Value::Null);
         assert_eq!(json["floors"][0]["remote"], serde_json::Value::Bool(false));
 
-        let mut text = chain(&[0, 0, 0], &[0, 7, 0], &[(0, 0, false), (0, 0, false)], "");
-        far_wall(&mut text, 3, 101, 7);
+        let mut text = chain(
+            &[0, 128, 0],
+            &[0, 7, 0],
+            &[(23, 7, false), (0, 0, false)],
+            "",
+        );
+        far_wall(&mut text, 3, 18, 7);
         let json = serde_json::to_value(report_of(&text)).expect("serializes");
-        assert_eq!(json["floors"][0]["refusal"], "closing");
+        assert_eq!(json["floors"][0]["refusal"], "two_families");
         assert_eq!(json["floors"][0]["shape"], serde_json::Value::Null);
-        assert_eq!(json["counts"]["closing"], 1);
+        assert_eq!(json["counts"]["two_families"], 1);
     }
 }
