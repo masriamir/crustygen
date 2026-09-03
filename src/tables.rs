@@ -937,10 +937,11 @@ impl Tables {
 
     /// Every special the engine dispatches to a floor action, with its engine
     /// type and form — the verifier's and recognizer's vocabulary. Includes
-    /// the four emitted ones.
+    /// the four emitted ones. Borrowed: the table lives in `self`, so no call
+    /// site need clone the 48-entry list to scan it.
     #[must_use]
-    pub fn recognized_floor_specials(&self) -> Vec<(u16, FloorEngineType, FloorForm)> {
-        self.vocabulary.specials.floor.recognized.clone()
+    pub fn recognized_floor_specials(&self) -> &[(u16, FloorEngineType, FloorForm)] {
+        &self.vocabulary.specials.floor.recognized
     }
 
     /// The pinned floor constants.

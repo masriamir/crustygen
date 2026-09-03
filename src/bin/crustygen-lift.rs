@@ -231,14 +231,15 @@ fn classify_and_recognize(
             .iter()
             .any(|&s| telemetry.linedef_specials.contains_key(&i32::from(s)))
     };
-    let floor_specials: Vec<u16> = tables
-        .recognized_floor_specials()
-        .iter()
-        .map(|&(special, _, _)| special)
-        .collect();
     let has_teleports = has(&tables.teleport_specials());
     let has_lifts = has(&tables.lift_specials());
-    let has_floors = has(&floor_specials);
+    // No intermediate `Vec<u16>`: scan the borrowed recognized-floor-specials
+    // slice directly, the same way `lift::corpus::survey_wad`'s identical
+    // gate does.
+    let has_floors = tables
+        .recognized_floor_specials()
+        .iter()
+        .any(|&(special, _, _)| telemetry.linedef_specials.contains_key(&i32::from(special)));
     let mut teleports = TeleportCounts::default();
     let mut lifts = PlatCounts::default();
     let mut floors = FloorCounts::default();

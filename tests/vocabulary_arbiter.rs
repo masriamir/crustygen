@@ -353,7 +353,7 @@ fn sourced_but_unemitted_specials_stay_out_of_the_emittable_set() {
         }
     }
     let emitted_floors = tables.floor_specials();
-    for (s, _, _) in tables.recognized_floor_specials() {
+    for &(s, _, _) in tables.recognized_floor_specials() {
         if emitted_floors.contains(&s) {
             assert!(
                 set.contains(&s),

@@ -661,8 +661,8 @@ fn floor_lines<'a>(
 fn recognized_specials(tables: &Tables) -> BTreeMap<i32, (FloorEngineType, FloorForm)> {
     tables
         .recognized_floor_specials()
-        .into_iter()
-        .map(|(special, engine_type, form)| (i32::from(special), (engine_type, form)))
+        .iter()
+        .map(|&(special, engine_type, form)| (i32::from(special), (engine_type, form)))
         .collect()
 }
 

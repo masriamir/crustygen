@@ -1040,8 +1040,8 @@ fn recognized_specials(tables: &Tables) -> Vec<i32> {
     specials.extend(
         tables
             .recognized_floor_specials()
-            .into_iter()
-            .map(|(s, _, _)| i32::from(s)),
+            .iter()
+            .map(|&(s, _, _)| i32::from(s)),
     );
     specials
 }

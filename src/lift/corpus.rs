@@ -308,8 +308,8 @@ fn survey_wad(
                     .any(|s| telemetry.linedef_specials.contains_key(&i32::from(s)));
                 let has_floors = tables
                     .recognized_floor_specials()
-                    .into_iter()
-                    .any(|(s, ..)| telemetry.linedef_specials.contains_key(&i32::from(s)));
+                    .iter()
+                    .any(|&(s, ..)| telemetry.linedef_specials.contains_key(&i32::from(s)));
                 let mut teleports = TeleportCounts::default();
                 let mut lifts = PlatCounts::default();
                 let mut floors = FloorCounts::default();

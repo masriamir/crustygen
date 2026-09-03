@@ -2438,6 +2438,91 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
         );
     }
 
+    /// The mirror of [`a_stranded_state_names_the_floor_target_it_leaves_at_rest`]
+    /// with a second trigger of the *same* engine type added on the hub|P
+    /// link: falling into the dead end crosses a walkover that drives the
+    /// same wall the b|T switch does (one `FloorAction`, two triggers), so
+    /// the wall's bit is already set by the time the dead end is reported,
+    /// and `pending`'s filter has to leave it out of the message rather than
+    /// naming an action the player already triggered. The b|T switch keeps
+    /// the map finishable — it, not the walkover, is the route the exit
+    /// depends on.
+    #[test]
+    fn a_stranded_states_pending_list_omits_an_action_already_fired() {
+        // P(-32, a dead-end drop off the start) — hub(0, start) — b(0) —
+        // T(128, tag 7, the wall) — c(0, exit). The 23 S1 still sits on the
+        // b|T link as in the fixture above, but the hub|P link now also
+        // carries a 38 W1 naming the same tag: crossing into P fires T's
+        // action on the way in, since a walkover has no side gate.
+        let tables = Tables::load().expect("tables");
+        let mut text = fixtures::chain(
+            &[-32, 0, 0, 128, 0],
+            &[0, 0, 0, 7, 0],
+            &[(38, 7, false), (0, 0, false), (23, 7, false), (0, 0, false)],
+            &start_in_room(1),
+        );
+        fixtures::far_wall(&mut text, 5, i32::from(tables.exit_switch_special()), 0);
+        let (scene, tables) = fixtures::scene_of(&text);
+        let mut findings = Vec::new();
+        let reached = run_flood(&scene, &tables, &mut findings).expect("start and exit exist");
+        assert!(reached[0], "the player can walk down into the dead end");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.message.contains("no feasible walk")),
+            "the route through b still finishes the map: {findings:?}"
+        );
+        let stranding = findings
+            .iter()
+            .find(|f| f.check == "V-P7" && matches!(f.subject, Subject::Sector(0)))
+            .unwrap_or_else(|| panic!("expected a V-P7 naming the dead end: {findings:?}"));
+        assert_eq!(
+            stranding.message, "reachable holding no keys, but no walk from there reaches an exit",
+            "the wall's own action already fired crossing in, so nothing is left pending: \
+             {stranding:?}"
+        );
+    }
+
+    /// The verifier's own half of the compiler's
+    /// `p7_says_a_rising_action_is_not_raised` (`crate::rules`): a stranded
+    /// state whose only action still at rest is a *rising* one takes the
+    /// other verb.
+    #[test]
+    fn p7_says_a_stranded_rising_action_is_not_raised() {
+        // P(-32, a dead-end drop off the start) — hub(0, start) — b(0) —
+        // T(-96, tag 7, a bridge pit) — c(0, exit). The 18 S1 (raiseFloor-
+        // ToNearest) sits on the b|T link with b on its front, so the
+        // bridge only rises from b: the player who drops into P first
+        // never fired it.
+        let tables = Tables::load().expect("tables");
+        let mut text = fixtures::chain(
+            &[-32, 0, 0, -96, 0],
+            &[0, 0, 0, 7, 0],
+            &[(0, 0, false), (0, 0, false), (18, 7, false), (0, 0, false)],
+            &start_in_room(1),
+        );
+        fixtures::far_wall(&mut text, 5, i32::from(tables.exit_switch_special()), 0);
+        let (scene, tables) = fixtures::scene_of(&text);
+        let mut findings = Vec::new();
+        let reached = run_flood(&scene, &tables, &mut findings).expect("start and exit exist");
+        assert!(reached[0], "the player can walk down into the dead end");
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.message.contains("no feasible walk")),
+            "the route through b finishes the map: {findings:?}"
+        );
+        let stranding = findings
+            .iter()
+            .find(|f| f.check == "V-P7" && matches!(f.subject, Subject::Sector(0)))
+            .unwrap_or_else(|| panic!("expected a V-P7 naming the dead end: {findings:?}"));
+        assert!(
+            stranding.message.ends_with("; sector 3 not raised"),
+            "the rising family takes the other verb: {}",
+            stranding.message
+        );
+    }
+
     #[test]
     fn a_bridge_pit_whose_walkover_lies_beyond_it_strands_the_player_who_drops_in() {
         // A(0, start) — T(-96, rises to 0 on a 119 W1) — B(0, exit), with the
