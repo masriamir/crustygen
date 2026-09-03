@@ -11,7 +11,7 @@
 //! `combat.sound.propagation`, `combat.max_simultaneous`), and several more
 //! become `NotDerivable` only when the map itself gives [`rows`] nothing to
 //! measure; `docs/check.md`'s "Conformance" section has the full list. Unlike
-//! `scene.rs`/`invariants.rs`/`flood.rs`, all but four rows here are plain
+//! `scene.rs`/`invariants.rs`/`flood.rs`, all but six rows here are plain
 //! target-vs-actual comparisons that re-derive no playability rule from the
 //! pinned engine, so the only sourcing burden is the ammo ratio's
 //! damage-per-ammo figures ([`crate::tables::Tables::weapon_damage`],
@@ -19,15 +19,21 @@
 //! ([`crate::tables::Tables::thing_flag`], sourced in `engine.toml`'s
 //! `[thing.flags]`), the teleport specials the two pad counts read
 //! ([`crate::tables::Tables::player_teleport_specials`],
-//! [`crate::tables::Tables::monster_teleport_specials`]), and the engine fact
-//! cited on the `MULTIPLAYER_ONLY_BIT` thing-flag constant below. The four
+//! [`crate::tables::Tables::monster_teleport_specials`]), the four floor
+//! specials the two trigger counts read
+//! ([`crate::tables::Tables::floor_special`]), and the engine fact
+//! cited on the `MULTIPLAYER_ONLY_BIT` thing-flag constant below. The six
 //! exceptions are `progression.exit.trigger` — a teleport exit emits the
 //! same specials as a plain walkover one, so the row borrows
 //! [`crate::check::flood::teleport_only_sectors`]'s reachability predicate
-//! rather than reading the line — and the three `progression.lifts.*` rows,
+//! rather than reading the line — the three `progression.lifts.*` rows,
 //! which read [`crate::check::plats::resolve_plats`]'s engine-style
 //! resolution of what each platform is and who can call it, rather than
-//! counting lift lines.
+//! counting lift lines — and `progression.floors` with
+//! `combat.monster_closets`, which read
+//! [`crate::lift::floor::recognize`]'s engine-style resolution of what each
+//! floor action *does* (which is not a thing a line's special says) on top
+//! of [`crate::check::floors`]'s.
 //!
 //! [`rows`] implements exactly the row catalog in the Task 10 brief, in the
 //! brief's own order, and follows its verdict rules: a `MinMax` or exact-count
@@ -38,16 +44,18 @@
 //! checker cannot derive from emitted geometry at all is
 //! [`Verdict::NotDerivable`], its `actual` carrying the reason.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
+use crate::check::floors::local_adjacency;
 use crate::check::plats::{Activator, Rest, ScenePlat, resolve_plats};
 use crate::check::scene::{Scene, SceneThing};
 use crate::check::{ConformanceRow, MapStats, Verdict};
+use crate::lift::floor::{Shape, recognize};
 use crate::spec::Spec;
 use crate::spec::frontmatter::{
     EncounterStyle, ExitKind, ExitTrigger, Facing, Frontmatter, LiftTrigger, MinMax, Propagation,
 };
-use crate::tables::{AmmoType, Tables};
+use crate::tables::{AmmoType, FloorFamily, Tables};
 
 // ---------------------------------------------------------------------
 // Generic verdict constructors, shared by every row below.
@@ -808,21 +816,27 @@ fn progression_rows(
         i32::from(tables.secret_exit_switch_special()),
     ];
     switch_specials.extend(tables.lift_use_specials().into_iter().map(i32::from));
+    // A floor action's use line is pressed exactly as a lift's is, so it
+    // counts here too. One such line drives every target sharing its tag,
+    // and this row counts switches rather than what they drive, so counting
+    // lines is right: a switch lowering a four-sector wall is one switch.
+    switch_specials.extend(floor_specials(tables, true));
     rows.push(range_row(
         "progression.switches.count".to_owned(),
         &fm.progression.switches.count,
         count_specials(scene, &switch_specials),
     ));
+    let mut walkover_specials = vec![
+        i32::from(tables.exit_walkover_special()),
+        i32::from(tables.secret_exit_walkover_special()),
+    ];
+    // The floor walkovers, by the same reasoning. (A lift walkover is still
+    // absent from this row — that asymmetry is issue #53's, not this row's.)
+    walkover_specials.extend(floor_specials(tables, false));
     rows.push(range_row(
         "progression.walkover_triggers.count".to_owned(),
         &fm.progression.walkover_triggers.count,
-        count_specials(
-            scene,
-            &[
-                i32::from(tables.exit_walkover_special()),
-                i32::from(tables.secret_exit_walkover_special()),
-            ],
-        ),
+        count_specials(scene, &walkover_specials),
     ));
     rows.push(range_row(
         "progression.lifts.count".to_owned(),
@@ -836,6 +850,42 @@ fn progression_rows(
         &fm.progression.teleports.count,
         count_player_pads(scene, tables),
     ));
+    rows.push(floors_row(scene, tables));
+}
+
+/// The two emitted floor specials of one trigger form, as `i32`s: the use
+/// lines with `use_line`, the walkovers without
+/// ([`Tables::floor_special`]).
+fn floor_specials(tables: &Tables, use_line: bool) -> [i32; 2] {
+    [FloorFamily::LowerToLowest, FloorFamily::RaiseToNearest]
+        .map(|family| i32::from(tables.floor_special(family, use_line)))
+}
+
+/// `progression.floors`: the recognized floor targets by shape, plus the
+/// refusals ([`crate::lift::floor::recognize`], which also counts a floor
+/// line naming no target at all as a refusal).
+///
+/// Informational, never graded: the map-spec frontmatter has no floor word
+/// yet — no `progression.floors` parameter to compare against — so the row's
+/// target is `"any"` and its verdict [`Verdict::Info`]. It exists because
+/// the shapes are the one thing about a floor action a reader of the report
+/// cannot get from any other row: the four specials are spread across
+/// `switches.count` and `walkover_triggers.count`, which say how the actions
+/// are fired and nothing about what they do.
+fn floors_row(scene: &Scene, tables: &Tables) -> ConformanceRow {
+    let r = recognize(scene, tables);
+    ConformanceRow {
+        parameter: "progression.floors".to_owned(),
+        target: "any".to_owned(),
+        actual: format!(
+            "drop walls ×{}, reveals ×{}, bridges ×{}, refused ×{}",
+            r.counts.drop_walls,
+            r.counts.reveals,
+            r.counts.bridges,
+            r.counts.refusals()
+        ),
+        verdict: Verdict::Info,
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -886,11 +936,152 @@ fn sound_propagation_row(fm: &Frontmatter) -> ConformanceRow {
     )
 }
 
+/// The sectors of `scene` holding at least one monster
+/// ([`monsters`], so a thing whose name resolves a `spawnhealth`).
+fn monster_sectors(scene: &Scene, tables: &Tables) -> BTreeSet<usize> {
+    monsters(scene, tables)
+        .iter()
+        .filter_map(|t| t.sector)
+        .collect()
+}
+
+/// Whether the region reached from `start` without ever entering `wall`
+/// holds a monster **and** is closed — no other neighbor of `wall` lies in
+/// it, so `wall` is the region's only way in.
+///
+/// Breadth-first over `adjacency`, which is two-sided adjacency
+/// ([`local_adjacency`]) rather than passability: a closet is sealed by
+/// where its lines are, not by whether a player could squeeze through one,
+/// and the wall this walk starts beside is by definition a boundary nobody
+/// can cross yet. Reaching another neighbor of `wall` ends the walk at once:
+/// the region is open whatever it holds.
+fn closed_monster_region(
+    adjacency: &BTreeMap<usize, BTreeSet<usize>>,
+    wall: usize,
+    start: usize,
+    monster_sectors: &BTreeSet<usize>,
+) -> bool {
+    let empty = BTreeSet::new();
+    let siblings = adjacency.get(&wall).unwrap_or(&empty);
+    let mut seen: BTreeSet<usize> = BTreeSet::from([start]);
+    let mut queue: VecDeque<usize> = VecDeque::from([start]);
+    let mut holds_monster = false;
+    while let Some(sector) = queue.pop_front() {
+        holds_monster |= monster_sectors.contains(&sector);
+        for &next in adjacency.get(&sector).unwrap_or(&empty) {
+            if next == wall || !seen.insert(next) {
+                continue;
+            }
+            if siblings.contains(&next) {
+                return false;
+            }
+            queue.push_back(next);
+        }
+    }
+    holds_monster
+}
+
+/// The floor-driven monster closets: a recognized floor target
+/// ([`recognize`]) that releases monsters when it fires.
+///
+/// A [`Shape::Reveal`] counts when its own cell holds a monster — the sealed
+/// island that lowers flush, whose contents step out. A [`Shape::DropWall`]
+/// counts when a [`closed_monster_region`] lies behind it, tried from each
+/// of the wall's two-sided neighbors and counted once however many of them
+/// qualify: the wall is one closet, not two. The walk has to *walk*, because
+/// the compiler puts a passage sector on either side of a drop wall — a
+/// one-neighbor "does this pocket hold a monster" test would only ever see
+/// the passage.
+///
+/// What this cannot see: whether the player starts inside the region. A
+/// sealed dead-end wing of a map, with a drop wall between it and a monster
+/// standing in the room the player begins in, reads as a closet here; the
+/// region test asks whether a region is sealed, not which side of it the
+/// fight is on.
+fn floor_closets(scene: &Scene, tables: &Tables) -> usize {
+    let report = recognize(scene, tables);
+    if !report.floors.iter().any(|f| f.refusal.is_none()) {
+        // The common case by far — a map with no floor action at all, or
+        // none this recognizes — walked without building the adjacency of
+        // every sector on the map first.
+        return 0;
+    }
+    let monsters = monster_sectors(scene, tables);
+    let all: BTreeSet<usize> = (0..scene.sectors.len()).collect();
+    let adjacency = local_adjacency(scene, &all);
+    let empty = BTreeSet::new();
+    report
+        .floors
+        .iter()
+        .filter(|f| f.refusal.is_none())
+        .filter(|f| match f.shape {
+            Some(Shape::Reveal) => monsters.contains(&f.sector),
+            Some(Shape::DropWall) => adjacency
+                .get(&f.sector)
+                .unwrap_or(&empty)
+                .iter()
+                .any(|&n| closed_monster_region(&adjacency, f.sector, n, &monsters)),
+            Some(Shape::Bridge) | None => false,
+        })
+        .count()
+}
+
+/// The teleport-driven monster closets: the rooms holding a monster that a
+/// monsters-only teleport line fronts — the staging cell whose occupants
+/// teleport into the fight rather than walking out of it.
+///
+/// This is [`count_teleport_ambushes`]'s host room, counted by *host* rather
+/// than by pad, because a cell with two pads in it is one closet. Salto's
+/// own paired spec (`tests/fixtures/salto.spec.md`) counts its one teleport
+/// ambush as its one `monster_closets`, which is what says the parameter
+/// means the pocket rather than the mechanism.
+fn teleport_closets(scene: &Scene, tables: &Tables) -> usize {
+    let specials: Vec<i32> = tables
+        .monster_teleport_specials()
+        .into_iter()
+        .map(i32::from)
+        .collect();
+    let monsters = monster_sectors(scene, tables);
+    scene
+        .sectors
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| monsters.contains(i))
+        .filter(|(_, s)| {
+            s.boundary
+                .iter()
+                .any(|b| b.fronts_this && specials.contains(&b.special))
+        })
+        .count()
+}
+
+/// `combat.monster_closets`: how many sealed pockets of monsters this map
+/// opens into the fight, over the two release mechanisms the checker can
+/// re-derive from emitted geometry — [`floor_closets`] (a reveal or a drop
+/// wall) and [`teleport_closets`] (a monsters-only pad).
+///
+/// The two are summed rather than merged: they are disjoint on any map the
+/// compiler emits (a drop wall's sector holds nothing and a reveal's cell
+/// carries no teleport line), and a cell that somehow used both really would
+/// be two ways in.
+fn count_monster_closets(scene: &Scene, tables: &Tables) -> u32 {
+    let closets = floor_closets(scene, tables) + teleport_closets(scene, tables);
+    u32::try_from(closets).expect("closet counts fit u32")
+}
+
 /// One [`range_row`] per [`crate::spec::frontmatter::MonsterSpec`] in
 /// `fm.combat.monsters` (placed count of that species versus its
 /// `min..=max`), plus an extra [`Verdict::Fail`] row, target `"absent"`, for
-/// every species `scene` places that the spec's list never names at all.
+/// every species `scene` places that the spec's list never names at all —
+/// after the one [`exact_row`] this block opens with,
+/// `combat.monster_closets`.
 fn monster_rows(fm: &Frontmatter, scene: &Scene, tables: &Tables, rows: &mut Vec<ConformanceRow>) {
+    rows.push(exact_row(
+        "combat.monster_closets".to_owned(),
+        fm.combat.monster_closets,
+        count_monster_closets(scene, tables),
+    ));
+
     let mut spec_species: HashSet<&str> = HashSet::new();
     for m in &fm.combat.monsters {
         spec_species.insert(m.species.as_str());
@@ -2174,21 +2365,18 @@ thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
         );
     }
 
-    /// [`test_spec_text`] with one frontmatter block replaced: `path`'s last
-    /// dotted component names a two-space-indented block key
+    /// `base` with one frontmatter block replaced: `path`'s last dotted
+    /// component names a two-space-indented block key
     /// (`"progression.lifts"` names the `lifts:` block), and `body` replaces
     /// every line under it. `body`'s first line is written at the block's own
     /// four-space indent; each later line carries its own, the way the caller
     /// writes it.
     ///
-    /// Returns the whole [`Spec`] rather than its [`Frontmatter`] alone
-    /// because [`rows`] takes a `&Spec`; the sibling
-    /// [`frontmatter_with_exit_trigger`] can hand back a `Frontmatter` only
-    /// because it feeds a single row function directly.
-    fn spec_with(path: &str, body: &str) -> Spec {
-        let tables = Tables::load().expect("tables");
+    /// Returns the patched text rather than a [`Spec`] so a caller needing
+    /// two blocks moved at once ([`floor_spec`]) can nest the calls;
+    /// [`spec_with`] is the one-block form.
+    fn patch_block(base: &str, path: &str, body: &str) -> String {
         let key = path.rsplit('.').next().expect("a dotted path names a key");
-        let base = test_spec_text();
         let head = format!("\n  {key}:\n");
         let start = base
             .find(&head)
@@ -2203,9 +2391,346 @@ thing { x = 32.000; y = 32.000; type = 1; angle = 0; single = true; }
         assert!(block > 0, "`{key}:` names an empty block");
         let patched = format!("{}    {body}\n{}", &base[..start], &base[start + block..]);
         assert_ne!(patched, base, "the patch changed nothing");
-        Spec::from_markdown(&patched, &tables)
+        patched
+    }
+
+    /// `text` parsed as a spec document. Panics (via `expect`) rather than
+    /// returning `Result`: every caller here hands it the template with a
+    /// known patch applied, so a parse failure is the test's own setup being
+    /// wrong.
+    ///
+    /// Returns the whole [`Spec`] rather than its [`Frontmatter`] alone
+    /// because [`rows`] takes a `&Spec`; the sibling
+    /// [`frontmatter_with_exit_trigger`] can hand back a `Frontmatter` only
+    /// because it feeds a single row function directly.
+    fn spec_of(text: &str) -> Spec {
+        let tables = Tables::load().expect("tables");
+        Spec::from_markdown(text, &tables)
             .expect("spec parses")
             .spec
+    }
+
+    /// [`test_spec_text`] with one frontmatter block replaced by
+    /// [`patch_block`], parsed.
+    fn spec_with(path: &str, body: &str) -> Spec {
+        spec_of(&patch_block(&test_spec_text(), path, body))
+    }
+
+    /// [`test_spec_text`] with the three frontmatter values a floor fixture
+    /// moves: the whole `switches` and `walkover_triggers` blocks (a floor
+    /// trigger counts in one or the other), and the scalar
+    /// `combat.monster_closets`.
+    fn floor_spec(switches: &str, walkovers: &str, closets: u32) -> Spec {
+        let counts = patch_block(
+            &patch_block(&test_spec_text(), "progression.switches", switches),
+            "progression.walkover_triggers",
+            walkovers,
+        );
+        assert!(
+            counts.contains("monster_closets: 3"),
+            "the template's `monster_closets: 3` line moved"
+        );
+        spec_of(&counts.replace("monster_closets: 3", &format!("monster_closets: {closets}")))
+    }
+
+    /// A drop wall with an imp sealed behind it: a four-room
+    /// [`crate::check::fixtures::chain`] — `A(0)` | `T(128, tag 7)` |
+    /// `B(0)` | `C(0)` — whose `B|C` line is the `23` S1 switch naming tag
+    /// 7, with the imp standing in `C`. `T` is the only two-sided way into
+    /// `{B, C}`, so that pair is the closed region the closet rule looks
+    /// for.
+    ///
+    /// The imp stands one room past the wall's own neighbor on purpose: `B`
+    /// stands in for the passage sector the compiler puts on each side of a
+    /// drop wall, so a rule that only looked at the neighbor would find an
+    /// empty room and call the closet empty.
+    ///
+    /// The switch rides a real line rather than
+    /// [`crate::check::fixtures::far_wall`]'s doubled one: that helper
+    /// leaves the doubled sector's two vertices at odd degree, which
+    /// `Scene::build` reports as a hard `V-S` "boundary does not close" —
+    /// harmless to the recognizer's own tests, which read the scene
+    /// directly, but fatal here, since an unclosed sector also stops every
+    /// thing inside it from resolving to a sector at all.
+    fn drop_wall_closet() -> String {
+        crate::check::fixtures::chain(
+            &[0, 128, 0, 0],
+            &[0, 7, 0, 0],
+            &[(0, 0, false), (0, 0, false), (23, 7, false)],
+            "thing { x = 448.000; y = 64.000; type = 3001; single = true; }\n",
+        )
+    }
+
+    #[test]
+    fn a_floor_switch_counts_as_a_switch_and_a_closet_as_a_monster_closet() {
+        let spec = floor_spec(
+            "count: { min: 1, max: 1 }\n    remote_allowed: true",
+            "count: { min: 0, max: 0 }",
+            1,
+        );
+        let rows = rows_against(&drop_wall_closet(), &spec);
+
+        let switches = row(&rows, "progression.switches.count");
+        assert_eq!(
+            (switches.actual.as_str(), switches.verdict),
+            ("1", Verdict::Pass),
+            "the 23 S1 line is a switch the player presses: {switches:?}"
+        );
+        let walkovers = row(&rows, "progression.walkover_triggers.count");
+        assert_eq!(
+            (walkovers.actual.as_str(), walkovers.verdict),
+            ("0", Verdict::Pass),
+            "a floor use line is not also a walkover: {walkovers:?}"
+        );
+        let closets = row(&rows, "combat.monster_closets");
+        assert_eq!(
+            (
+                closets.target.as_str(),
+                closets.actual.as_str(),
+                closets.verdict
+            ),
+            ("1", "1", Verdict::Pass),
+            "the imp behind the drop wall is a closet: {closets:?}"
+        );
+    }
+
+    /// A pedestal-shaped reveal holding an imp: a two-room
+    /// [`crate::check::fixtures::chain_full`] whose east cell (`x ∈ [128,
+    /// 256]`, floor 64 under a ceiling of 64 — no headroom, so no neighbor
+    /// can enter it) carries tag 7, with the `23` S1 switch on the cell's
+    /// own face and the imp inside. Lowering it flush with the room joins
+    /// nothing new, which is what makes it a [`Shape::Reveal`] rather than a
+    /// drop wall.
+    ///
+    /// [`Shape::Reveal`]: crate::lift::floor::Shape::Reveal
+    fn reveal_closet() -> String {
+        crate::check::fixtures::chain_full(
+            &[0, 64],
+            &[256, 64],
+            &[0, 7],
+            &[(23, 7, false)],
+            "thing { x = 192.000; y = 64.000; type = 3001; single = true; }\n",
+        )
+    }
+
+    #[test]
+    fn the_floors_row_names_the_shapes() {
+        // A pit strip between two walkways, raised to their floor: the
+        // bridge. A `101` S1 pillar rising between two level rooms only
+        // takes reach away: the recognizer refuses it, and the row counts
+        // the refusal.
+        let bridge = crate::check::fixtures::chain(
+            &[64, 0, 64],
+            &[0, 7, 0],
+            &[(18, 7, false), (0, 0, false)],
+            "",
+        );
+        let refused = crate::check::fixtures::chain(
+            &[0, 0, 0],
+            &[0, 7, 0],
+            &[(101, 7, false), (0, 0, false)],
+            "",
+        );
+        for (text, expected) in [
+            (
+                drop_wall_closet(),
+                "drop walls ×1, reveals ×0, bridges ×0, refused ×0",
+            ),
+            (
+                reveal_closet(),
+                "drop walls ×0, reveals ×1, bridges ×0, refused ×0",
+            ),
+            (bridge, "drop walls ×0, reveals ×0, bridges ×1, refused ×0"),
+            (refused, "drop walls ×0, reveals ×0, bridges ×0, refused ×1"),
+        ] {
+            let rows = rows_for(&text);
+            let r = row(&rows, "progression.floors");
+            assert_eq!(
+                (r.target.as_str(), r.actual.as_str(), r.verdict),
+                ("any", expected, Verdict::Info),
+                "{r:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_floor_walkover_counts_as_a_walkover_trigger_and_not_as_a_switch() {
+        let spec = floor_spec(
+            "count: { min: 0, max: 0 }\n    remote_allowed: true",
+            "count: { min: 1, max: 1 }",
+            0,
+        );
+        // The same drop wall, fired by a `38` W1 line instead of the `23`
+        // S1 one, and with no monster behind it.
+        let rows = rows_against(
+            &crate::check::fixtures::chain(
+                &[0, 128, 0, 0],
+                &[0, 7, 0, 0],
+                &[(0, 0, false), (0, 0, false), (38, 7, false)],
+                "",
+            ),
+            &spec,
+        );
+        let switches = row(&rows, "progression.switches.count");
+        assert_eq!(
+            (switches.actual.as_str(), switches.verdict),
+            ("0", Verdict::Pass),
+            "a floor walkover is not a switch: {switches:?}"
+        );
+        let walkovers = row(&rows, "progression.walkover_triggers.count");
+        assert_eq!(
+            (walkovers.actual.as_str(), walkovers.verdict),
+            ("1", Verdict::Pass),
+            "{walkovers:?}"
+        );
+        let closets = row(&rows, "combat.monster_closets");
+        assert_eq!(
+            (closets.actual.as_str(), closets.verdict),
+            ("0", Verdict::Pass),
+            "an empty pocket is no closet: {closets:?}"
+        );
+    }
+
+    #[test]
+    fn a_reveal_holding_a_monster_is_a_closet() {
+        let spec = floor_spec(
+            "count: { min: 1, max: 1 }\n    remote_allowed: true",
+            "count: { min: 0, max: 0 }",
+            1,
+        );
+        let rows = rows_against(&reveal_closet(), &spec);
+        assert_eq!(
+            row(&rows, "progression.floors").actual,
+            "drop walls ×0, reveals ×1, bridges ×0, refused ×0"
+        );
+        let closets = row(&rows, "combat.monster_closets");
+        assert_eq!(
+            (closets.actual.as_str(), closets.verdict),
+            ("1", Verdict::Pass),
+            "the imp sealed in the cell is a closet: {closets:?}"
+        );
+    }
+
+    #[test]
+    fn a_monsters_only_pad_in_a_monster_room_is_a_closet_and_a_player_pad_is_not() {
+        const START: &str = "thing { x = 32.0; y = 32.0; angle = 90; type = 1; single = true; }";
+        const IMP: &str = "thing { x = 32.0; y = 96.0; angle = 0; type = 3001; single = true; }";
+        let base = crate::check::fixtures::TELEPORT_MAP;
+
+        // The same three cases `teleport_ambushes_counts_monsters_only_pads_
+        // in_monster_sectors` pins, read as closets: a pad any thing may
+        // cross (97) is no closet however many monsters stand by it, a
+        // monsters-only pad (126) in a room with a monster is one — counted
+        // once for all four of the pad's edges, because the count is by host
+        // room — and one in an empty room is none.
+        let player_pad = base.replace(START, &format!("{START}\n{IMP}"));
+        assert_ne!(player_pad, base, "the patch changed nothing");
+        let (scene, tables) = crate::check::fixtures::scene_of(&player_pad);
+        assert_eq!(count_monster_closets(&scene, &tables), 0);
+
+        let ambush = player_pad.replace("special = 97;", "special = 126;");
+        assert_ne!(ambush, player_pad, "the patch changed nothing");
+        let (scene, tables) = crate::check::fixtures::scene_of(&ambush);
+        assert_eq!(count_monster_closets(&scene, &tables), 1);
+
+        let no_monster = base.replace("special = 97;", "special = 126;");
+        assert_ne!(no_monster, base, "the patch changed nothing");
+        let (scene, tables) = crate::check::fixtures::scene_of(&no_monster);
+        assert_eq!(count_monster_closets(&scene, &tables), 0);
+    }
+
+    /// The [`drop_wall_closet`]'s topological opposite: `T` (sector 1, floor
+    /// 128, tag 7) still separates `A` (sector 0) from `B` (sector 2), and
+    /// `B` still holds the imp, but a U-shaped corridor `C` (sector 3) runs
+    /// north of all three and joins `A` to `B` around the wall. `C` shares
+    /// no line with `T` — the notch at `y ∈ [128, 160]`, `x ∈ [128, 256]` is
+    /// void, so `T`'s north wall and `C`'s southern step are separate
+    /// one-sided lines — which is what keeps the wall a recognized
+    /// `DropWall`: [`crate::check::floors::classify_effect`] reads only the
+    /// local graph `{T} ∪ neighbors(T)`, in which `A` and `B` are still
+    /// joined by nothing but `T`.
+    ///
+    /// The `23` S1 switch rides `C`'s north wall — a remote trigger, which
+    /// the recognizer accepts.
+    ///
+    /// Every linedef is wound so the sector named by its front sidedef lies
+    /// to the right of `v1 -> v2`, and every sector's vertex degrees are
+    /// even, so all four close.
+    const BYPASSED_DROP_WALL: &str = r#"namespace = "doom";
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 0.000; y = 128.000; }
+vertex { x = 128.000; y = 0.000; }
+vertex { x = 128.000; y = 128.000; }
+vertex { x = 256.000; y = 0.000; }
+vertex { x = 256.000; y = 128.000; }
+vertex { x = 384.000; y = 0.000; }
+vertex { x = 384.000; y = 128.000; }
+vertex { x = 128.000; y = 160.000; }
+vertex { x = 256.000; y = 160.000; }
+vertex { x = 384.000; y = 256.000; }
+vertex { x = 0.000; y = 256.000; }
+linedef { v1 = 3; v2 = 2; sidefront = 0; sideback = 1; twosided = true; }
+linedef { v1 = 5; v2 = 4; sidefront = 2; sideback = 3; twosided = true; }
+linedef { v1 = 1; v2 = 3; sidefront = 4; sideback = 5; twosided = true; }
+linedef { v1 = 5; v2 = 7; sidefront = 6; sideback = 7; twosided = true; }
+linedef { v1 = 0; v2 = 1; sidefront = 8; blocking = true; }
+linedef { v1 = 2; v2 = 0; sidefront = 9; blocking = true; }
+linedef { v1 = 4; v2 = 2; sidefront = 10; blocking = true; }
+linedef { v1 = 3; v2 = 5; sidefront = 11; blocking = true; }
+linedef { v1 = 6; v2 = 4; sidefront = 12; blocking = true; }
+linedef { v1 = 7; v2 = 6; sidefront = 13; blocking = true; }
+linedef { v1 = 8; v2 = 3; sidefront = 14; blocking = true; }
+linedef { v1 = 9; v2 = 8; sidefront = 15; blocking = true; }
+linedef { v1 = 5; v2 = 9; sidefront = 16; blocking = true; }
+linedef { v1 = 7; v2 = 10; sidefront = 17; blocking = true; }
+linedef { v1 = 11; v2 = 10; sidefront = 18; blocking = true; special = 23; arg0 = 7; }
+linedef { v1 = 1; v2 = 11; sidefront = 19; blocking = true; }
+sidedef { sector = 0; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 2; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 0; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 3; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 2; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 3; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sidedef { sector = 3; texturemiddle = "STARTAN2"; }
+sidedef { sector = 3; texturemiddle = "STARTAN2"; }
+sidedef { sector = 3; texturemiddle = "STARTAN2"; }
+sidedef { sector = 3; texturemiddle = "STARTAN2"; }
+sidedef { sector = 3; texturemiddle = "SW1COMP"; }
+sidedef { sector = 3; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 128; heightceiling = 256; lightlevel = 160; id = 7; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; }
+thing { x = 320.000; y = 64.000; type = 3001; single = true; }
+"#;
+
+    #[test]
+    fn a_drop_wall_whose_far_side_is_reachable_another_way_is_no_closet() {
+        let spec = floor_spec(
+            "count: { min: 1, max: 1 }\n    remote_allowed: true",
+            "count: { min: 0, max: 0 }",
+            0,
+        );
+        let rows = rows_against(BYPASSED_DROP_WALL, &spec);
+        assert_eq!(
+            row(&rows, "progression.floors").actual,
+            "drop walls ×1, reveals ×0, bridges ×0, refused ×0",
+            "the wall is still a recognized drop wall"
+        );
+        let closets = row(&rows, "combat.monster_closets");
+        assert_eq!(
+            (closets.actual.as_str(), closets.verdict),
+            ("0", Verdict::Pass),
+            "the imp's room is reachable around the wall, so nothing is closeted: {closets:?}"
+        );
     }
 
     /// The lift golden (`tests/golden/lifts.json`) compiled and emitted as
