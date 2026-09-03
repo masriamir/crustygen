@@ -1393,6 +1393,11 @@ mod tests {
             // A lift-free corpus states its zeros too, for the same reason.
             "| maps with a lift line | 0 (0.0 % of unique maps) |",
             "| lifts / pedestals / barriers | 0 / 0 / 0 |",
+            "## Floors",
+            "| floor targets | 100.0 % | 100.0 % |",
+            // And so does a floor-free one, the sixth axis included.
+            "| maps with a floor line | 0 (0.0 % of unique maps) |",
+            "| drop walls / reveals / bridges | 0 / 0 / 0 |",
             "## Greedy curve",
             "| 97 | 1 | 100.0 % |",
             // The conjunction curve names its denominator, so a plateau
@@ -1689,6 +1694,34 @@ mod tests {
         assert!(
             a.greedy_conjunction.steps.is_empty(),
             "the only line-blocked map is lift-refused, so nothing is left to unblock"
+        );
+        assert!((a.all.expressible - 0.5).abs() < 1e-9);
+    }
+
+    /// The conjunction curve's floor term, the sibling of
+    /// [`the_conjunction_curve_excludes_a_lift_refused_map`]: no number of
+    /// added line specials can un-refuse a floor target either, so a
+    /// floor-blocked map must be filtered out of the curve's population
+    /// rather than counted as one the curve could unblock.
+    #[test]
+    fn the_conjunction_curve_excludes_a_floor_refused_map() {
+        let mut blocked = record(&[97], &[97], true, true, true);
+        blocked.floors = FloorCounts {
+            targets: 1,
+            refused: 1,
+            dead: 1,
+            ..FloorCounts::default()
+        };
+        blocked.verdict.floors_ok = false;
+        blocked.verdict.expressible = false;
+        let a = aggregate(&[blocked, record(&[1], &[], true, true, true)]);
+        assert_eq!(
+            a.greedy_line_axis.steps[0].special, 97,
+            "the line axis alone still walks the blocked map"
+        );
+        assert!(
+            a.greedy_conjunction.steps.is_empty(),
+            "the only line-blocked map is floor-refused, so nothing is left to unblock"
         );
         assert!((a.all.expressible - 0.5).abs() < 1e-9);
     }

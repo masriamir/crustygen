@@ -36,6 +36,12 @@ pub const ASCENSOR: &str = include_str!("../fixtures/ascensor_base.json");
 /// recognizer accepts.
 pub const LIFTS: &str = include_str!("../golden/lifts.json");
 
+/// The floor golden IR — a drop wall and a closet on one switch's shared
+/// tag, a pedestal on a walkover, and a bridge on a walkover of its own —
+/// for the CLI tests that need a map every floor target of which the
+/// recognizer accepts.
+pub const FLOORS: &str = include_str!("../golden/floors.json");
+
 /// Compiles `ir_json` and packs it as a minimal un-noded UDMF PWAD.
 fn udmf_wad(ir_json: &str) -> Vec<u8> {
     let tables = Tables::load().expect("tables load");
@@ -93,6 +99,11 @@ pub fn binary_ascensor_wad() -> Vec<u8> {
 /// Compiles the lift golden and packs it as a minimal un-noded UDMF PWAD.
 pub fn udmf_lifts_wad() -> Vec<u8> {
     udmf_wad(LIFTS)
+}
+
+/// Compiles the floor golden and packs it as a minimal un-noded UDMF PWAD.
+pub fn udmf_floors_wad() -> Vec<u8> {
+    udmf_wad(FLOORS)
 }
 
 /// The binary entrada WAD plus a second, deliberately unloadable map group:

@@ -8,6 +8,11 @@
 //! deliberate exception, documented on its own test) — proving
 //! `check::run`'s `conform::rows` end to end against real compiled maps, not
 //! just the unit fixtures `src/check/conform.rs` already carries.
+//!
+//! One test departs from that pattern deliberately: the floor golden
+//! (`tests/golden/floors.json`) has no paired spec, and is judged against
+//! `map-spec.template.md` for the two rows a floor action moves, whose
+//! `actual` halves are derived from geometry alone.
 
 use crustygen::check::{ConformanceRow, Severity, Subject, Verdict, run};
 use crustygen::compile::compile;
@@ -25,6 +30,11 @@ const SALTO_SPEC: &str = include_str!("fixtures/salto.spec.md");
 const ASCENSOR: &str = include_str!("fixtures/ascensor_base.json");
 const ASCENSOR_SPEC: &str = include_str!("fixtures/ascensor.spec.md");
 const ASCENSOR_BOTH_ENDS_SPEC: &str = include_str!("fixtures/ascensor_both_ends.spec.md");
+const FLOORS: &str = include_str!("golden/floors.json");
+/// The filled, parseable example authors copy — used here only for its
+/// *shape*, so the floor golden gets a conformance report without a paired
+/// spec of its own.
+const SPEC_TEMPLATE: &str = include_str!("../map-spec.template.md");
 
 /// Compiles `ir_json`, emits its TEXTMAP, parses it back, and runs
 /// [`crustygen::check::run`] against `spec_text` parsed through
@@ -359,4 +369,43 @@ fn the_lift_trigger_row_names_the_same_mix_whichever_trigger_the_spec_asks_for()
             );
         }
     }
+}
+
+/// The floor golden's own conformance rows, over the two parameters a floor
+/// action moves — read against `map-spec.template.md` rather than a paired
+/// spec of its own, because both rows' `actual` halves are derived from the
+/// map's geometry and owe nothing to the spec beside them. Every other row
+/// here is measuring the golden against a template written for a much larger
+/// map and is deliberately not read.
+///
+/// **`combat.monster_closets` is 2, and both are real.** The `pen` reveal is
+/// the obvious one: a sealed cell with an imp inside it that lowers flush
+/// with its host room. The drop wall is the second, and it qualifies the way
+/// `conform::floor_closets` says a drop wall does — the region behind it is
+/// closed and holds a monster. `east` and `far` are joined only to each
+/// other (across the bridge) and to the rest of the map through the wall,
+/// and `east` holds an imp; so the walk out from the wall's far side finds a
+/// sealed pocket with a monster in it and counts the wall as the closet it
+/// is. Two mechanisms, two pockets, one count each.
+#[test]
+fn the_floor_golden_reports_its_two_monster_closets_and_its_shape_census() {
+    let rows = conformance_rows_for(FLOORS, SPEC_TEMPLATE);
+
+    let closets = rows
+        .iter()
+        .find(|r| r.parameter == "combat.monster_closets")
+        .expect("the closet row is always emitted");
+    assert_eq!(
+        closets.actual, "2",
+        "the pen reveal and the drop wall's sealed region: {closets:?}"
+    );
+
+    let floors = rows
+        .iter()
+        .find(|r| r.parameter == "progression.floors")
+        .expect("the floor census row is always emitted");
+    assert_eq!(
+        floors.actual, "drop walls ×1, reveals ×2, bridges ×1, refused ×0",
+        "{floors:?}"
+    );
 }
