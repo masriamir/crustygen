@@ -782,21 +782,18 @@ fn neighbors_of(map: &UdmfMap, sector: usize) -> Vec<usize> {
 /// The floor golden is the verifier's own cross-examination of Tasks 4-6's
 /// emission: every floor special it writes is one the checker models, every
 /// target is one of the three opening shapes, the flood crosses the dropped
-/// wall and rides the risen bridge to the exit, and the imp sealed in the
-/// closet is not a sealed monster room.
+/// wall and rides the risen bridge to the exit, and nothing on the map draws
+/// a finding of any severity.
 ///
-/// **One finding stands, and it is a real cross-layer disagreement, not
-/// noise.** V-P2 (thing headroom) reads a thing's sector as it is written in
-/// the `TEXTMAP` — for the closet that is `floor 192, ceiling 192`, zero
-/// headroom — while the compiler measures a reveal's things against the
-/// *lowered* cell (ruling R12: "a closet's imp lives in rock until the floor
-/// drops, which is exactly the corpus idiom"). So the compiler and the
-/// verifier disagree about the one construct whose whole point is a monster
-/// standing in solid rock. It is pinned here rather than filtered out so the
-/// disagreement is visible and so whichever layer moves first has to come
-/// back and update this assertion; `check_thing_headroom`'s own doc comment
-/// records the parallel decision it made for door sectors, which is the
-/// shape a resolution would have to take a position on.
+/// The golden's `pen` closet is **empty**, and that is the whole of ruling
+/// R28. An earlier draft sealed an imp in it — the corpus idiom — and the
+/// verifier was right to refuse it: the engine restores a lowering floor
+/// that a shootable thing does not fit in and leaves the thinker running
+/// (`p_floor.c:83-91`, `p_map.c:1296`, `p_floor.c:209` at the pinned
+/// commit), so a closet with a monster in it is a closet that never opens.
+/// The compiler now refuses the cargo outright
+/// (`CompileError::RevealNoHeadroom`), and the finding-free assertion below
+/// is what holds the two layers to the same answer.
 #[test]
 fn the_floors_golden_is_modeled_not_warned_about() {
     let (map, tables, _) = floors_udmf();
@@ -825,28 +822,16 @@ fn the_floors_golden_is_modeled_not_warned_about() {
     assert_eq!(
         count(&report.findings, "V-P27"),
         0,
-        "neither imp is in a sealed monster room: {:?}",
+        "the imp in `east` is behind a drop wall, not sealed away from every trigger: {:?}",
         report.findings
     );
-    // The known disagreement above, stated exactly.
-    assert_eq!(
-        report.findings.len(),
-        1,
-        "one finding only, the closet's own: {:?}",
+    // Not merely error-free but finding-free, the bar `pristine_entrada_
+    // raises_no_errors` sets, so a future warning cannot start firing on the
+    // shipped golden unnoticed.
+    assert!(
+        report.findings.is_empty(),
+        "expected zero findings of any severity on the floors golden: {:?}",
         report.findings
-    );
-    let closet_imp = &report.findings[0];
-    assert_eq!(closet_imp.check, "V-P2");
-    assert_eq!(closet_imp.severity, Severity::Error);
-    assert!(
-        matches!(closet_imp.subject, Subject::Thing(_)),
-        "{closet_imp:?}"
-    );
-    assert!(
-        closet_imp
-            .message
-            .contains("imp needs 56 units of headroom but its sector (floor 192, ceiling 192)"),
-        "{closet_imp:?}"
     );
 }
 

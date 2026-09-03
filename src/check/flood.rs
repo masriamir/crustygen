@@ -456,6 +456,60 @@ fn unmodeled_floor(sector: usize, rest: i32, why: &str) -> Finding {
     }
 }
 
+/// The first thing in `sector` whose species the engine would block a
+/// lowering floor on: a `MF_SHOOTABLE` mobj that does not fit the sector as
+/// it rests, as `(its scene index, its name, its required height)`.
+///
+/// Verified at the pinned commit
+/// `a77dfb96cb91780ca334d0d4cfd86957558007e0`. `T_MovePlane`'s floor-down
+/// branch (`p_floor.c:83-91`) lowers by `speed`, calls `P_ChangeSector`, and
+/// on a true return puts the floor back and returns `crushed`;
+/// `P_ChangeSector` (`p_map.c:1321`) returns `nofit` (`p_map.c:1337`), which
+/// `PIT_ChangeSector` (`p_map.c:1257`) sets at `p_map.c:1296` for any thing
+/// `P_ThingHeightClip` (`p_map.c:530`) rejects on
+/// `ceilingz - floorz < height` that is not a corpse, is not `MF_DROPPED`,
+/// and *is* `MF_SHOOTABLE` (`p_map.c:1290`). `nofit` is set before the
+/// `crushchange` guard, so a non-crushing floor is blocked identically. And
+/// `T_MoveFloor` (`p_floor.c:209`) drops the thinker only on `pastdest`, so
+/// a blocked floor keeps retrying every tic and never arrives.
+///
+/// **Two approximations, both stated rather than hidden.**
+///
+/// *The rest gap, not the first step's.* `P_ChangeSector` runs after the
+/// floor has already moved one `speed` (`FLOORSPEED` is `FRACUNIT`,
+/// `p_spec.h:600`, and `lowerFloorToLowest` takes it unscaled at
+/// `p_floor.c:302`), so the gap the engine tests is one unit — four, for a
+/// `turboLower` — wider than the gap at rest. This tests the rest gap, so a
+/// thing needing exactly one more unit than the cell rests with is declined
+/// here though the engine would squeeze it through. Declining is the safe
+/// direction for a reachability flood: the cost is a Warning and a target
+/// left at rest, where the opposite error models an opening that does not
+/// exist.
+///
+/// *Species only.* Shootability is read as [`Tables::spawnhealth`]
+/// resolving — the same monster test `check::conform` uses. A barrel is
+/// `MF_SOLID|MF_SHOOTABLE` too (`data/engine.toml`'s `[props.barrel]`
+/// citation) and is not caught, so a target blocked only by a barrel is
+/// still modeled as opening.
+fn blocking_thing<'a>(
+    scene: &'a Scene,
+    tables: &Tables,
+    sector: usize,
+) -> Option<(usize, &'a str, i32)> {
+    let s = &scene.sectors[sector];
+    let rest_gap = s.ceiling - s.floor;
+    scene.things.iter().enumerate().find_map(|(i, t)| {
+        if t.sector != Some(sector) {
+            return None;
+        }
+        let name = t.name.as_deref()?;
+        // Shootable, per the monster test; then the engine's own fit test.
+        tables.spawnhealth(name)?;
+        let height = tables.species(name)?.height;
+        (rest_gap < height).then_some((i, name, height))
+    })
+}
+
 /// Resolves the map's floor actions into the bits [`build_nodes`] and
 /// [`build_edges`] set, pushing a `V-P7` Warning for every target this
 /// checker declines to model (see "Floor actions" in the module doc).
@@ -506,7 +560,28 @@ fn resolve_floor_bits(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding
             ));
             continue;
         }
-        // Last of the four, so a target declined for a reason of its own is
+        // A lowering floor with something in it that does not fit never
+        // lowers: the engine restores the floor and leaves the thinker
+        // running (see `blocking_thing` for the pinned lines). The target
+        // stays at rest and the flood must not model the opening — V-P28
+        // says nothing about this, and V-P2 Errors on the thing itself, so
+        // this Warning is what keeps the *reachability* answer honest.
+        if dest < f.rest
+            && let Some((thing, name, need)) = blocking_thing(scene, tables, f.sector)
+        {
+            let gap = scene.sectors[f.sector].ceiling - f.rest;
+            findings.push(unmodeled_floor(
+                f.sector,
+                f.rest,
+                &format!(
+                    "is blocked by a `{name}` (thing {thing}) that does not fit in it — {gap} \
+                     units of headroom against the {need} it needs — and a floor a shootable \
+                     thing does not fit in never lowers"
+                ),
+            ));
+            continue;
+        }
+        // Last of the five, so a target declined for a reason of its own is
         // reported for that reason rather than for the mask being full.
         if next_bit >= MAX_MODELED_FLOORS {
             findings.push(unmodeled_floor(
@@ -2315,6 +2390,71 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             "the bridge rises under the player who crossed it: {findings:?}"
         );
         assert!(!findings.iter().any(|f| f.check == "V-P7"), "{findings:?}");
+    }
+
+    /// A closet-shaped target — floor resting on its own ceiling — holding
+    /// a monster gets no bit: the engine restores a blocked floor and keeps
+    /// the thinker running, so it never opens. The control half is the same
+    /// map with the imp removed, which *is* modeled — without it the
+    /// assertion could not tell "declined for the thing" from "declined for
+    /// the shape".
+    ///
+    /// Room 1 rests at 256 under a 256 ceiling (zero headroom) and is driven
+    /// by a `23` on the link from room 0; `P_FindLowestFloorSurrounding`
+    /// finds room 0's and room 2's floors at 0, so the action lowers and the
+    /// blocked-thing rule applies. Built with [`fixtures::chain_full`] rather
+    /// than [`fixtures::far_wall`] because the thing has to land in a room
+    /// whose sector the scene resolves.
+    #[test]
+    fn a_lowering_target_holding_a_monster_that_does_not_fit_gets_no_bit() {
+        let tables = Tables::load().expect("tables");
+        let imp = tables.thing_id("imp").expect("imp");
+        let sealed = |things: &str| {
+            fixtures::chain_full(
+                &[0, 256, 0],
+                &[256, 256, 256],
+                &[0, 7, 0],
+                &[(23, 7, false), (0, 0, false)],
+                things,
+            )
+        };
+
+        // Control: nothing inside, so the cell is modeled and takes a bit.
+        let (scene, tables_c) = fixtures::scene_of(&sealed(""));
+        let mut findings = Vec::new();
+        let bits = resolve_floor_bits(&scene, &tables_c, &mut findings);
+        assert!(
+            bits.actions[1].is_some(),
+            "an empty sealed cell is modeled: {findings:?}"
+        );
+        assert!(
+            findings.iter().all(|f| f.check != "V-P7"),
+            "and warns about nothing: {findings:?}"
+        );
+
+        // The imp stands at room 1's center (room i spans x in
+        // [i*128, (i+1)*128], y in [0, 128]).
+        let (scene, tables_b) = fixtures::scene_of(&sealed(&thing_at(192.0, 64.0, imp)));
+        let mut findings = Vec::new();
+        let bits = resolve_floor_bits(&scene, &tables_b, &mut findings);
+        assert_eq!(
+            bits.actions[1], None,
+            "no bit for a floor the imp blocks: {findings:?}"
+        );
+        let blocked = findings
+            .iter()
+            .find(|f| f.check == "V-P7" && matches!(f.subject, Subject::Sector(1)))
+            .unwrap_or_else(|| panic!("expected a V-P7 naming the sealed cell: {findings:?}"));
+        assert_eq!(blocked.severity, Severity::Warning);
+        assert!(
+            blocked.message.contains("is blocked by a `imp`")
+                && blocked
+                    .message
+                    .contains("0 units of headroom against the 56")
+                && blocked.message.contains("never lowers")
+                && blocked.message.contains("rest floor 256"),
+            "expected the blocked-thing wording naming the species and both heights: {blocked:?}"
+        );
     }
 
     #[test]

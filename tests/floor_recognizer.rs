@@ -43,8 +43,9 @@ fn every_compiled_floor_action_round_trips_through_the_recognizer() {
         "the switch in `west` is remote from the wall"
     );
     assert_eq!(
-        r.counts.with_things, 2,
-        "the imp inside the closet and the medikit on the pedestal"
+        r.counts.with_things, 1,
+        "the medikit on the pedestal; the closet is empty, since a floor a \
+         thing does not fit in never lowers (ruling R28)"
     );
     for f in &out.floors {
         let got = r

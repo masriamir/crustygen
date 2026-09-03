@@ -332,7 +332,12 @@ struct Island<'a> {
     /// become level, passable two-sided lines the moment the trigger fires.
     /// `None` for a pedestal, whose edges are exactly what must be cleared.
     ignore_sector: Option<usize>,
-    /// The gap a thing standing here must fit under.
+    /// The gap a thing standing here must fit under — for both shapes, the
+    /// gap **as the map loads**: a pedestal's risen floor to the host's
+    /// ceiling, and a reveal's cell at its own rest floor. A reveal is not
+    /// measured against where its floor will end up, because a floor a thing
+    /// does not fit in never gets there; see
+    /// [`CompileError::RevealNoHeadroom`].
     headroom: i32,
 }
 
@@ -346,10 +351,11 @@ impl Island<'_> {
                 have: self.headroom,
                 need,
             },
-            // A reveal's gap *is* its host room's headroom, so the room is
-            // what the author has to change and the room is what is named.
-            IslandShape::Reveal => CompileError::NoHeadroom {
-                room: self.room.to_owned(),
+            // A reveal's gap is the cell's own, at rest — which for a
+            // closet is zero however tall its host is — so the reveal is
+            // what the author has to change and the reveal is what is named.
+            IslandShape::Reveal => CompileError::RevealNoHeadroom {
+                reveal: self.id.to_owned(),
                 kind: kind.to_owned(),
                 have: self.headroom,
                 need,
@@ -390,6 +396,32 @@ impl Island<'_> {
 /// four edges are cut together — but a reveal measures its **host room**,
 /// and a room a later pass stripped of walls has nothing to measure, exactly
 /// as in [`place_things`]'s own room loop.
+/// The headroom a named thing must be given, in the order the layer-4
+/// verifier's V-P2 resolves it: a monster species' own height, else a
+/// blocking or hanging prop's own height, else the player's.
+///
+/// Deliberately the *same* three accessors `check::invariants`'s own
+/// `required_height` uses, so the compiler cannot pass a thing the verifier
+/// will then Error on. It differs from V-P2 in one direction only, and only
+/// where V-P2 declines to have an opinion: V-P2 returns `None` for a pickup
+/// or a decoration and skips it, while this falls back to the player's
+/// height rather than to nothing. That fallback is what makes a sealed
+/// closet hold nothing at all rather than holding items — see
+/// [`CompileError::RevealNoHeadroom`] for why the stricter reading is the
+/// one this compiler takes.
+///
+/// [`Tables::species`] is consulted before [`Tables::prop`] because a name
+/// in both would be a monster first; no name is, today.
+fn required_height(tables: &Tables, kind: &str) -> i32 {
+    if let Some(dims) = tables.species(kind) {
+        return dims.height;
+    }
+    if let Some(dims) = tables.prop(kind) {
+        return dims.height;
+    }
+    tables.player().height
+}
+
 fn place_island_things(
     tables: &Tables,
     data: &MapData,
@@ -447,8 +479,9 @@ fn place_island_things(
             });
         }
 
-        if island.headroom < dims.height {
-            return Err(island.no_headroom(&thing.kind, dims.height));
+        let need = required_height(tables, &thing.kind);
+        if island.headroom < need {
+            return Err(island.no_headroom(&thing.kind, need));
         }
 
         if thing.kind.ends_with("_start") {
@@ -540,48 +573,42 @@ fn place_pedestal_things(
 /// [`Ir::from_json`](crate::ir::Ir::from_json) required the point strictly
 /// inside the rectangle.
 ///
-/// Headroom is measured against the **lowered** cell, host floor to
-/// host ceiling ([`FloorActionOut::dest`] to the room's ceiling), for every
-/// kind of reveal. That is deliberate, and it is what makes a closet
-/// possible at all — at rest a closet's floor *is* its ceiling, so nothing
-/// would ever fit, yet the engine spawns a thing at its sector's floor
-/// without consulting the ceiling. `P_SpawnMapThing` picks the anchor
-/// (`p_mobj.c:779-782` at the pinned commit
-/// `a77dfb96cb91780ca334d0d4cfd86957558007e0`; the source's tabs are shown
-/// as spaces, as in `check::invariants`'s quotations):
+/// Headroom is measured against the cell **at rest** — its own load-time
+/// floor to the host's ceiling — for every kind of reveal. So a closet, whose
+/// floor at rest *is* its ceiling, holds nothing at all, and a pedestal
+/// reveal holds whatever fits under the host's ceiling above its risen floor
+/// (`host.ceiling - (host.floor + rise)`, the same gap a `pedestals[]`
+/// pedestal offers).
 ///
-/// ```c
-/// if (mobjinfo[i].flags & MF_SPAWNCEILING)
-///     z = ONCEILINGZ;
-/// else
-///     z = ONFLOORZ;
-/// ```
+/// **This reverses the reading Task 5 shipped**, which measured the
+/// *lowered* cell on the grounds that "an imp lives in rock until the floor
+/// drops". `P_SpawnMapThing` does spawn it there — it reads the sector's
+/// floor and never tests the fit — but the floor then never drops. At the
+/// pinned commit `a77dfb96cb91780ca334d0d4cfd86957558007e0`,
+/// `T_MovePlane`'s floor-down branch (`p_floor.c:83-91`) lowers by `speed`,
+/// calls `P_ChangeSector`, and on a true return puts the floor back and
+/// returns `crushed`; `P_ChangeSector` (`p_map.c:1321`) returns `nofit`
+/// (`p_map.c:1337`), set by `PIT_ChangeSector` (`p_map.c:1296`) for any
+/// shootable thing `P_ThingHeightClip` (`p_map.c:530`) rejects on
+/// `ceilingz - floorz < height`; and `T_MoveFloor` (`p_floor.c:209`) drops
+/// the thinker only on `pastdest`, so a blocked floor retries every tic and
+/// never opens. With `FLOORSPEED` at `FRACUNIT` (`p_spec.h:600`) a sealed
+/// cell's first step leaves one unit of gap, which fits nothing.
 ///
-/// and `P_SpawnMobj` resolves it against the subsector's sector alone
-/// (`p_mobj.c:519-523`):
-///
-/// ```c
-/// mobj->floorz = mobj->subsector->sector->floorheight;
-/// mobj->ceilingz = mobj->subsector->sector->ceilingheight;
-///
-/// if (z == ONFLOORZ)
-///     mobj->z = mobj->floorz;
-/// ```
-///
-/// — no height test, no fit test. So an imp authored inside solid rock
-/// spawns there and is released when the floor drops, which is exactly the
-/// corpus idiom: 40 % of reveals hold a thing, imps first in every
-/// population (`docs/measurements/floor-shapes-2026-09-02.md` §D).
+/// The corpus reading behind the old rule is not wrong about the corpus —
+/// 40 % of reveals do hold a thing
+/// (`docs/measurements/floor-shapes-2026-09-02.md` §D) — but those are cells
+/// with real headroom at rest, not cells whose floor sits on their ceiling.
 ///
 /// A `_start` is the exception the shared body refuses
 /// ([`CompileError::StartOnReveal`]): a level cannot begin in a sealed cell.
 ///
 /// # Errors
 /// Returns whatever [`place_island_things`] raises; the headroom failure is
-/// [`CompileError::NoHeadroom`] naming the host room, since a reveal's gap
-/// *is* that room's own headroom and the room is what would have to change,
-/// and [`CompileError::UnboundedRoom`] is reachable here (and only here)
-/// because the boundary measured is a room's rather than an island's.
+/// [`CompileError::RevealNoHeadroom`] naming the reveal, since the gap is the
+/// cell's own and the cell is what would have to change, and
+/// [`CompileError::UnboundedRoom`] is reachable here (and only here) because
+/// the boundary measured is a room's rather than an island's.
 ///
 /// # Panics
 /// Panics if a reveal has no emitted floor action, or names a room that does
@@ -620,7 +647,7 @@ fn place_reveal_things(
                 things: &reveal.things,
                 clearance_sector: host_idx,
                 ignore_sector: Some(action.sector),
-                headroom: host.ceiling - action.dest,
+                headroom: host.ceiling - action.rest,
             },
             starts,
         )?);
@@ -1330,6 +1357,11 @@ mod tests {
     /// `PEDESTAL`'s room with a 128x128 closet in it instead, holding an imp
     /// at the cell's center, lowered by a switch on the room's west wall.
     ///
+    /// As authored it is a **refusal** fixture, not an accept one: ruling
+    /// R28 holds a reveal's cargo against the cell at rest, and a closet's
+    /// floor at rest is its ceiling. The cases below turn it into a pedestal
+    /// reveal, or empty it, when they need one that compiles.
+    ///
     /// The cell sits well clear of the room's walls, so the host-boundary
     /// clearance every case below shares is never the thing under test; the
     /// wall-hugging refusal lives in `floors.rs` beside the emitter.
@@ -1345,18 +1377,86 @@ mod tests {
                     "things":[ { "kind":"imp", "at":[192,192], "angle":0 } ], "trigger":"t" } ],
       "exits":[ { "room":"a", "trigger":"switch", "at":[512,64], "width":64 } ] }"#;
 
-    /// The reveal accept paths go through [`compile`], which raises
-    /// `CompileError::Playability` on any violation: with the flood
-    /// carrying fired floor actions, a switch-opened reveal is clean under
-    /// the whole catalog. The refusals below are hard errors raised long
-    /// before the rule catalog runs, so which entry point they use is
-    /// immaterial.
+    /// Ruling R28: a closet holds **nothing**, because at rest its floor is
+    /// its ceiling and the engine will not lower a floor a thing does not
+    /// fit in — `T_MovePlane`'s floor-down branch restores the floor and
+    /// returns `crushed`, and `T_MoveFloor` keeps the thinker running, so
+    /// the cell retries forever and never opens. The pinned line ranges are
+    /// on [`CompileError::RevealNoHeadroom`].
+    ///
+    /// Both halves matter. The imp is what the engine itself blocks on
+    /// (`MF_SHOOTABLE`). The medikit is **not** — `PIT_ChangeSector` waves
+    /// a non-shootable thing through — and is refused anyway, because the
+    /// layer-4 verifier's V-P2 judges every thing against its sector's
+    /// static heights and would call the emitted map broken. The compiler
+    /// agreeing with its own checker is the reason, and the error's doc
+    /// says so.
     #[test]
-    fn a_thing_in_a_reveal_is_placed_against_the_lowered_cell() {
+    fn a_closet_holds_nothing_because_a_blocked_floor_never_lowers() {
+        let tables = Tables::load().expect("tables");
+
+        // The shootable case: the engine's own refusal.
+        assert!(
+            matches!(
+                compile_reporting(&Ir::from_json(REVEAL).expect("ir"), &tables),
+                Err(CompileError::RevealNoHeadroom {
+                    ref reveal,
+                    ref kind,
+                    have: 0,
+                    need: 56
+                }) if reveal == "pen" && kind == "imp"
+            ),
+            "expected RevealNoHeadroom naming the reveal and a zero-tall cell"
+        );
+
+        // The non-shootable case: engine-legal, refused for agreement with
+        // V-P2. A medikit is in no species and no prop table, so the
+        // player's 56 is the height it is held to.
+        let item = REVEAL.replacen(r#""kind":"imp""#, r#""kind":"medikit""#, 1);
+        assert!(
+            matches!(
+                compile_reporting(&Ir::from_json(&item).expect("ir"), &tables),
+                Err(CompileError::RevealNoHeadroom {
+                    ref reveal,
+                    ref kind,
+                    have: 0,
+                    need: 56
+                }) if reveal == "pen" && kind == "medikit"
+            ),
+            "an item in a sealed closet is refused too, for consistency with V-P2"
+        );
+
+        // Emptied, the same closet compiles: the shape is not what is
+        // refused, only cargo inside it.
+        let empty = REVEAL.replacen(
+            r#""things":[ { "kind":"imp", "at":[192,192], "angle":0 } ], "#,
+            "",
+            1,
+        );
+        assert_ne!(empty, REVEAL, "the patch changed nothing");
+        compile(&Ir::from_json(&empty).expect("ir"), &tables)
+            .expect("an empty closet is a clean map");
+    }
+
+    /// The other half of R28: a **pedestal** reveal holds whatever fits
+    /// between its risen floor and the host's ceiling — the same gap a
+    /// `pedestals[]` pedestal offers — and its cargo is still placed at the
+    /// point it was authored at, inside the cell rather than on the room
+    /// floor.
+    #[test]
+    fn a_pedestal_reveal_holds_what_fits_above_its_risen_floor() {
         let tables = Tables::load().expect("tables");
         let imp = tables.thing_id("imp").expect("imp");
-        let out = compile(&Ir::from_json(REVEAL).expect("ir"), &tables)
-            .expect("an imp sealed in rock is the corpus idiom");
+
+        // Room `a` is 256 tall and the rise is 64, so the cell offers 192 at
+        // rest — room for the imp's 56 several times over.
+        let fits = REVEAL.replacen(
+            r#""size":[128,128], "kind":"closet""#,
+            r#""size":[128,128], "kind":"pedestal", "rise":64"#,
+            1,
+        );
+        let out = compile(&Ir::from_json(&fits).expect("ir"), &tables)
+            .expect("192 units of rest headroom admits an imp");
         let placed = out
             .things
             .iter()
@@ -1368,22 +1468,24 @@ mod tests {
             "at its authored point inside the cell, not on the room floor"
         );
 
-        // Taller than the *lowered* cell, which is the host room's own full
-        // height: a 104-unit room admits the player (56) but not the
-        // cyberdemon's 110. Nothing else in the pass can catch it — the
-        // room's own headroom loop reads `room.things`, and this one is in
-        // the reveal — and the room is what the author has to change, so the
-        // room is what the error names.
-        let tall = REVEAL
-            .replacen(r#""kind":"imp""#, r#""kind":"cyberdemon""#, 1)
-            .replacen(r#""ceiling":256"#, r#""ceiling":104"#, 1);
+        // A rise of 216 leaves 40, under the imp's 56. Not the closet's zero:
+        // this is the general rule biting, not the sealed-cell corner.
+        let tight = REVEAL.replacen(
+            r#""size":[128,128], "kind":"closet""#,
+            r#""size":[128,128], "kind":"pedestal", "rise":216"#,
+            1,
+        );
         assert!(
             matches!(
-                compile_reporting(&Ir::from_json(&tall).expect("ir"), &tables),
-                Err(CompileError::NoHeadroom { ref room, ref kind, have: 104, need: 110 })
-                    if room == "a" && kind == "cyberdemon"
+                compile_reporting(&Ir::from_json(&tight).expect("ir"), &tables),
+                Err(CompileError::RevealNoHeadroom {
+                    ref reveal,
+                    ref kind,
+                    have: 40,
+                    need: 56
+                }) if reveal == "pen" && kind == "imp"
             ),
-            "expected NoHeadroom judged against the lowered cell and naming the host room"
+            "expected RevealNoHeadroom measured against the risen floor"
         );
     }
 

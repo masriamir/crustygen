@@ -23,8 +23,7 @@
     { "id": "b", "kind": "walkover", "portal": ["east", "far"] }
   ],
   "reveals": [
-    { "id": "pen", "room": "mid", "at": [384, 64], "kind": "closet",
-      "things": [ { "kind": "imp", "at": [416, 96], "angle": 270 } ], "trigger": "s" },
+    { "id": "pen", "room": "mid", "at": [384, 64], "kind": "closet", "trigger": "s" },
     { "id": "prize", "room": "mid", "at": [448, 160], "kind": "pedestal", "rise": 64,
       "things": [ { "kind": "medikit", "at": [480, 192], "angle": 0 } ], "trigger": "w" }
   ],

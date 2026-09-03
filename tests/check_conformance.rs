@@ -378,17 +378,22 @@ fn the_lift_trigger_row_names_the_same_mix_whichever_trigger_the_spec_asks_for()
 /// here is measuring the golden against a template written for a much larger
 /// map and is deliberately not read.
 ///
-/// **`combat.monster_closets` is 2, and both are real.** The `pen` reveal is
-/// the obvious one: a sealed cell with an imp inside it that lowers flush
-/// with its host room. The drop wall is the second, and it qualifies the way
+/// **`combat.monster_closets` is 1: the drop wall.** It qualifies the way
 /// `conform::floor_closets` says a drop wall does — the region behind it is
 /// closed and holds a monster. `east` and `far` are joined only to each
 /// other (across the bridge) and to the rest of the map through the wall,
 /// and `east` holds an imp; so the walk out from the wall's far side finds a
-/// sealed pocket with a monster in it and counts the wall as the closet it
-/// is. Two mechanisms, two pockets, one count each.
+/// sealed pocket with a monster in it.
+///
+/// The rule's **reveal** half — a reveal whose own cell holds a monster —
+/// is not exercised here and cannot be exercised by a closet at all any
+/// more: ruling R28 refuses a closet that holds anything, since the engine
+/// never lowers a floor a shootable thing does not fit in. It stays in the
+/// rule because a *pedestal* reveal can still hold a monster (it has real
+/// headroom above its risen floor), and because the recognizer classifies
+/// foreign-WAD reveals this compiler did not emit.
 #[test]
-fn the_floor_golden_reports_its_two_monster_closets_and_its_shape_census() {
+fn the_floor_golden_reports_its_one_monster_closet_and_its_shape_census() {
     let rows = conformance_rows_for(FLOORS, SPEC_TEMPLATE);
 
     let closets = rows
@@ -396,8 +401,8 @@ fn the_floor_golden_reports_its_two_monster_closets_and_its_shape_census() {
         .find(|r| r.parameter == "combat.monster_closets")
         .expect("the closet row is always emitted");
     assert_eq!(
-        closets.actual, "2",
-        "the pen reveal and the drop wall's sealed region: {closets:?}"
+        closets.actual, "1",
+        "the drop wall's sealed region; the `pen` closet is empty: {closets:?}"
     );
 
     let floors = rows

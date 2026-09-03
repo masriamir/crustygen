@@ -434,10 +434,9 @@ pub enum CompileError {
     },
     /// A room is shorter than something that must stand in it.
     ///
-    /// Raised for the room's own things and for the player, and also for a
-    /// [`crate::ir::Reveal`]'s cargo: a reveal lowers flush with its host, so
-    /// the gap its things must fit under *is* the host room's own headroom,
-    /// and naming the room is naming the thing that has to change.
+    /// Raised for the room's own things and for the player. A
+    /// [`crate::ir::Reveal`]'s cargo is *not* judged here — it is measured
+    /// against the cell at rest and raises [`Self::RevealNoHeadroom`].
     #[error("room `{room}` has {have} units of headroom but `{kind}` needs {need}")]
     NoHeadroom {
         /// The room.
@@ -713,6 +712,53 @@ pub enum CompileError {
         /// for the rider the platform must clear regardless of its cargo.
         kind: String,
         /// The gap between the risen floor and the host's ceiling.
+        have: i32,
+        /// Required height.
+        need: i32,
+    },
+    /// A thing authored inside a reveal does not fit the cell at the height
+    /// the cell **rests** at, so the floor the trigger fires can never move.
+    ///
+    /// The engine blocks a lowering floor on a thing that does not fit, and
+    /// it blocks it permanently. Verified at the pinned commit
+    /// `a77dfb96cb91780ca334d0d4cfd86957558007e0`:
+    /// `T_MovePlane`'s floor-down branch (`p_floor.c:83-91`) drops the floor
+    /// by `speed`, calls `P_ChangeSector`, and on a true return restores
+    /// `lastpos` and returns `crushed`; `P_ChangeSector` (`p_map.c:1321`)
+    /// returns `nofit` (`p_map.c:1337`), which `PIT_ChangeSector`
+    /// (`p_map.c:1257`) sets at `p_map.c:1296` for any thing
+    /// `P_ThingHeightClip` (`p_map.c:530`) rejects — its test is
+    /// `if (thing->ceilingz - thing->floorz < thing->height) return false;`
+    /// — that is not a corpse, not `MF_DROPPED`, and is `MF_SHOOTABLE`
+    /// (`p_map.c:1290`). `nofit` is set *before* the `crushchange` guard, so
+    /// a non-crushing floor is blocked just the same. And `T_MoveFloor`
+    /// (`p_floor.c:209`) removes the thinker only on `pastdest`, so a
+    /// `crushed` result leaves it running to retry every tic, forever. With
+    /// `FLOORSPEED` at `FRACUNIT` (`p_spec.h:600`) the first step of a
+    /// sealed cell leaves a one-unit gap, which fits nothing at all.
+    ///
+    /// So a closet holds nothing: at rest its floor *is* its ceiling. A
+    /// pedestal reveal holds whatever fits between its risen floor and the
+    /// host's ceiling.
+    ///
+    /// **Every thing is judged, not only the shootable ones the engine
+    /// blocks on.** An item or a decoration sealed in a closet is legal for
+    /// the engine — `PIT_ChangeSector` waves through anything without
+    /// `MF_SHOOTABLE` (`p_map.c:1290`) — but the layer-4 verifier's V-P2
+    /// judges every thing against its sector's static heights, so allowing
+    /// it here would ship a map the project's own checker calls broken.
+    /// Refused for that agreement, deliberately, rather than because the
+    /// engine minds.
+    #[error(
+        "reveal `{reveal}` is {have} units tall at rest but `{kind}` needs {need}; a floor a \
+         thing does not fit in never lowers"
+    )]
+    RevealNoHeadroom {
+        /// The reveal.
+        reveal: String,
+        /// The vocabulary name of the thing that does not fit.
+        kind: String,
+        /// The cell's floor-to-ceiling gap at rest.
         have: i32,
         /// Required height.
         need: i32,

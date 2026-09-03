@@ -181,5 +181,4 @@ sector { heightfloor = 64; heightceiling = 192; texturefloor = "FLOOR4_8"; textu
 
 thing { x = 64.0; y = 128.0; angle = 0; type = 1; skill1 = true; skill2 = true; skill3 = true; skill4 = true; skill5 = true; single = true; }
 thing { x = 768.0; y = 192.0; angle = 180; type = 3001; skill1 = true; skill2 = true; skill3 = true; skill4 = true; skill5 = true; single = true; }
-thing { x = 416.0; y = 96.0; angle = 270; type = 3001; skill1 = true; skill2 = true; skill3 = true; skill4 = true; skill5 = true; single = true; }
 thing { x = 480.0; y = 192.0; angle = 0; type = 2012; skill1 = true; skill2 = true; skill3 = true; skill4 = true; skill5 = true; single = true; }

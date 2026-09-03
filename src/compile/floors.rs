@@ -2039,30 +2039,51 @@ mod tests {
     }
 
     /// The accept path runs through [`compile`], which raises
-    /// [`CompileError::Playability`] on any violation: a sealed closet the
-    /// switch opens is a clean map end to end, P7 included, now that the
-    /// flood carries a fired floor action in its state.
+    /// [`CompileError::Playability`] on any violation: an **empty** sealed
+    /// closet the switch opens is a clean map end to end, P7 included, now
+    /// that the flood carries a fired floor action in its state.
+    ///
+    /// Empty because a closet can hold nothing (ruling R28): at rest its
+    /// floor is its ceiling, and the engine will not lower a floor a thing
+    /// does not fit in — see [`CompileError::RevealNoHeadroom`] for the
+    /// pinned lines. The refusal itself is
+    /// `things::tests::a_closet_holds_nothing_because_a_blocked_floor_never_lowers`;
+    /// what this pins is that emptying it leaves a map that still compiles.
     #[test]
-    fn a_closets_things_are_placed_against_the_lowered_cell() {
-        let ir = Ir::from_json(CLOSET).expect("ir");
+    fn an_empty_closet_compiles_end_to_end() {
+        let empty = CLOSET.replace(
+            r#""things":[ { "kind":"imp", "at":[160,160], "angle":180 } ], "#,
+            "",
+        );
+        assert_ne!(empty, CLOSET, "the patch changed nothing");
+        let ir = Ir::from_json(&empty).expect("ir");
         let tables = Tables::load().expect("tables");
-        let out = compile(&ir, &tables).expect("an imp inside solid rock is the corpus idiom");
+        let out = compile(&ir, &tables).expect("an empty closet is a clean map");
+        assert_eq!(
+            out.floors.len(),
+            1,
+            "the closet is still emitted; only its cargo is gone"
+        );
         let imp = tables.thing_id("imp").expect("the vocabulary names an imp");
-        let placed = out
-            .things
-            .iter()
-            .find(|t| t.kind == imp)
-            .expect("the imp is emitted");
-        assert_eq!((placed.x, placed.y), (160, 160));
+        assert!(
+            !out.things.iter().any(|t| t.kind == imp),
+            "nothing is sealed in the rock"
+        );
+    }
 
-        // What a reveal's cargo *is* held to is the host's boundary, not the
-        // cell's. The cell (96,184)-(160,248) hugs the room's north wall,
-        // 8 units clear of it, and the imp inside stands at (120,244): 12
-        // units from that wall and only 4 from the cell's own north edge,
-        // against its 20-unit radius. Both distances fail the radius, so the
-        // *reported* `have` is what separates the two rules — 12.0 is the
-        // wall, 4.0 would be the edge — and it is asserted below rather than
-        // elided.
+    /// Clearance is measured against the **host's** boundary, not the
+    /// cell's, and it is measured **before** headroom — so a cargo that
+    /// fails both is reported for the clearance, which is what this pins.
+    ///
+    /// The cell (96,184)-(160,248) hugs the room's north wall, 8 units clear
+    /// of it, and the imp inside stands at (120,244): 12 units from that
+    /// wall and only 4 from the cell's own north edge, against its 20-unit
+    /// radius. Both distances fail the radius, so the *reported* `have` is
+    /// what separates the two rules — 12.0 is the wall, 4.0 would be the
+    /// edge — and it is asserted below rather than elided.
+    #[test]
+    fn a_reveals_cargo_is_cleared_against_the_host_wall_before_it_is_measured_for_height() {
+        let tables = Tables::load().expect("tables");
         let hugging = CLOSET
             .replace(
                 r#""at":[128,128], "kind":"closet""#,
