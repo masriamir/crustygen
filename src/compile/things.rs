@@ -210,12 +210,19 @@ pub fn place_things(
                 });
             }
 
-            if headroom < dims.height {
+            // Ruling R29: the same height source island cargo is held to.
+            // `dims` above is species-or-player and drives the *radius*; a
+            // prop's own height is what the layer-4 verifier's V-P2 measures
+            // (`check::invariants::required_height`), so reading it from
+            // anywhere else would let a tall decoration through here and
+            // Error in the checker.
+            let need = required_height(tables, &thing.kind);
+            if headroom < need {
                 return Err(CompileError::NoHeadroom {
                     room: room.id.clone(),
                     kind: thing.kind.clone(),
                     have: headroom,
-                    need: dims.height,
+                    need,
                 });
             }
 
@@ -364,38 +371,6 @@ impl Island<'_> {
     }
 }
 
-/// Places one island's cargo, proving each thing fits where it stands.
-///
-/// The body [`place_pedestal_things`] and [`place_reveal_things`] share.
-/// Each caller resolves [`Island::clearance_sector`],
-/// [`Island::ignore_sector`] and [`Island::headroom`] for its own shape —
-/// the two islands genuinely disagree about what a thing standing on them
-/// has to clear, and those three fields are where that disagreement lives.
-///
-/// Containment needs no check here:
-/// [`Ir::from_json`](crate::ir::Ir::from_json) already required every one of
-/// these to sit strictly inside its island's rectangle. `starts` arrives
-/// already carrying every room start, since the room loop runs first, and a
-/// start placed here joins it — raised height and sealed rock are no
-/// exemption from telefragging, and two starts at one point spawn one player
-/// inside the other whatever they are standing in.
-///
-/// # Errors
-/// Returns [`CompileError::UnknownThing`] for an unresolvable name,
-/// [`CompileError::ThingTooClose`] when the thing stands closer than its own
-/// radius to whatever it is measured against,
-/// [`CompileError::StartOnReveal`] for a
-/// start in a reveal, [`CompileError::UnboundedRoom`] when there is no
-/// boundary to measure against, [`CompileError::PedestalNoHeadroom`] or
-/// [`CompileError::NoHeadroom`] when the gap leaves the thing less
-/// than its own height, and [`CompileError::OverlappingStarts`] for a start
-/// sharing a point with one already placed.
-///
-/// [`CompileError::UnboundedRoom`] is raised when the clearance sector has no
-/// bordering linedef at all. That cannot happen for a pedestal — an island's
-/// four edges are cut together — but a reveal measures its **host room**,
-/// and a room a later pass stripped of walls has nothing to measure, exactly
-/// as in [`place_things`]'s own room loop.
 /// The headroom a named thing must be given, in the order the layer-4
 /// verifier's V-P2 resolves it: a monster species' own height, else a
 /// blocking or hanging prop's own height, else the player's.
@@ -422,6 +397,40 @@ fn required_height(tables: &Tables, kind: &str) -> i32 {
     tables.player().height
 }
 
+/// Places one island's cargo, proving each thing fits where it stands.
+///
+/// The body [`place_pedestal_things`] and [`place_reveal_things`] share.
+/// Each caller resolves [`Island::clearance_sector`],
+/// [`Island::ignore_sector`] and [`Island::headroom`] for its own shape —
+/// the two islands genuinely disagree about what a thing standing on them
+/// has to clear, and those three fields are where that disagreement lives.
+///
+/// Containment needs no check here:
+/// [`Ir::from_json`](crate::ir::Ir::from_json) already required every one of
+/// these to sit strictly inside its island's rectangle. `starts` arrives
+/// already carrying every room start, since the room loop runs first, and a
+/// start placed here joins it — raised height and sealed rock are no
+/// exemption from telefragging, and two starts at one point spawn one player
+/// inside the other whatever they are standing in.
+///
+/// # Errors
+/// Returns [`CompileError::UnknownThing`] for an unresolvable name,
+/// [`CompileError::ThingTooClose`] when the thing stands closer than its own
+/// radius to whatever it is measured against,
+/// [`CompileError::StartOnReveal`] for a
+/// start in a reveal, [`CompileError::UnboundedRoom`] when there is no
+/// boundary to measure against, [`CompileError::PedestalNoHeadroom`] (a
+/// pedestal) or [`CompileError::RevealNoHeadroom`] (a reveal, judged
+/// against its cell at rest — ruling R28) when the gap leaves the thing
+/// less than the height [`required_height`] gives it, and
+/// [`CompileError::OverlappingStarts`] for a start sharing a point with one
+/// already placed.
+///
+/// [`CompileError::UnboundedRoom`] is raised when the clearance sector has no
+/// bordering linedef at all. That cannot happen for a pedestal — an island's
+/// four edges are cut together — but a reveal measures its **host room**,
+/// and a room a later pass stripped of walls has nothing to measure, exactly
+/// as in [`place_things`]'s own room loop.
 fn place_island_things(
     tables: &Tables,
     data: &MapData,
@@ -889,6 +898,52 @@ mod tests {
             place_things(&bad, &tables, &data_bad, &[], &[], &[]),
             Err(CompileError::NoHeadroom { .. })
         ));
+    }
+
+    /// Ruling R29: a room's own things take their height from the same
+    /// three accessors island cargo does — species, then **prop**, then the
+    /// player — which is what the layer-4 verifier's V-P2 reads.
+    ///
+    /// Before this the room loop resolved species-or-player, so a
+    /// `hang_no_guts` (88 units, `data/engine.toml`'s `[props.hang_no_guts]`)
+    /// took the player's 56 and slid through a 64-tall room that
+    /// `crustygen-check` then Errored on. The prop's own height is now the
+    /// requirement, and the short prop in the same room proves the change is
+    /// the *height source* rather than a blanket tightening.
+    #[test]
+    fn a_room_things_headroom_comes_from_the_prop_table_not_the_player() {
+        let tables = Tables::load().expect("tables");
+        assert_eq!(
+            tables.prop("hang_no_guts").expect("hang_no_guts").height,
+            88,
+            "the fixture's 64-tall room assumes this height"
+        );
+        assert_eq!(
+            tables
+                .prop("short_green_column")
+                .expect("short_green_column")
+                .height,
+            16
+        );
+
+        let tall = Ir::from_json(&ir_with_thing("hang_no_guts", (128, 128), 64)).expect("ir");
+        let data = compiled_data(&tall, &tables);
+        assert!(
+            matches!(
+                place_things(&tall, &tables, &data, &[], &[], &[]),
+                Err(CompileError::NoHeadroom { ref room, ref kind, have: 64, need: 88 })
+                    if room == "a" && kind == "hang_no_guts"
+            ),
+            "a prop taller than the room is refused at its own height, not the player's"
+        );
+
+        let short =
+            Ir::from_json(&ir_with_thing("short_green_column", (128, 128), 64)).expect("ir");
+        let data = compiled_data(&short, &tables);
+        assert!(
+            place_things(&short, &tables, &data, &[], &[], &[]).is_ok(),
+            "a 16-unit prop fits the same 64-tall room"
+        );
     }
 
     #[test]
@@ -1436,6 +1491,60 @@ mod tests {
         assert_ne!(empty, REVEAL, "the patch changed nothing");
         compile(&Ir::from_json(&empty).expect("ir"), &tables)
             .expect("an empty closet is a clean map");
+    }
+
+    /// The prop arm of [`required_height`], on island cargo: widening the
+    /// height source to the prop table does **not** only tighten — for a
+    /// prop shorter than the player it *loosens* the check, and that is the
+    /// point. A `short_green_column` is 16 units
+    /// (`data/engine.toml`'s `[props.short_green_column]`), so it fits a
+    /// 40-unit gap that the player's 56 would have refused; a
+    /// `hang_no_guts` is 88 and does not. Both readings are the ones the
+    /// layer-4 verifier's V-P2 takes, which is the agreement ruling R28
+    /// asked for.
+    ///
+    /// The gap is `REVEAL`'s 256-tall room under a 216 rise: 40 units.
+    #[test]
+    fn island_cargo_takes_a_props_own_height_which_can_admit_what_the_player_could_not() {
+        let tables = Tables::load().expect("tables");
+        let tight = |kind: &str| {
+            REVEAL
+                .replacen(
+                    r#""size":[128,128], "kind":"closet""#,
+                    r#""size":[128,128], "kind":"pedestal", "rise":216"#,
+                    1,
+                )
+                .replacen(r#""kind":"imp""#, &format!(r#""kind":"{kind}""#), 1)
+        };
+        assert!(
+            tables.player().height > 40,
+            "the player must NOT fit the 40-unit gap, or the short prop proves nothing"
+        );
+
+        let short = tight("short_green_column");
+        let out = compile(&Ir::from_json(&short).expect("ir"), &tables)
+            .expect("a 16-unit column fits a 40-unit gap the player would not");
+        let column = tables
+            .thing_id("short_green_column")
+            .expect("short_green_column");
+        assert!(
+            out.things.iter().any(|t| t.kind == column),
+            "the column is placed on the pedestal reveal"
+        );
+
+        let tall = tight("hang_no_guts");
+        assert!(
+            matches!(
+                compile_reporting(&Ir::from_json(&tall).expect("ir"), &tables),
+                Err(CompileError::RevealNoHeadroom {
+                    ref reveal,
+                    ref kind,
+                    have: 40,
+                    need: 88
+                }) if reveal == "pen" && kind == "hang_no_guts"
+            ),
+            "an 88-unit prop is refused at its own height"
+        );
     }
 
     /// The other half of R28: a **pedestal** reveal holds whatever fits

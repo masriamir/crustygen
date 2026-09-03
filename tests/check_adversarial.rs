@@ -1,13 +1,19 @@
-//! Layer-4 proof: entrada, broken one property at a time, is caught each
-//! time.
+//! Layer-4 proof: a compiled fixture, broken one property at a time, is
+//! caught each time.
 //!
-//! Each test compiles entrada clean, mutates exactly one property on the
-//! *parsed* `UdmfMap` (or, for V-P9, the emitted text before parsing — see
-//! that test), and asserts the specific finding [`crustygen::check::run`]
-//! raises in response. Every test also re-establishes the 0 baseline for the
-//! check id it targets before mutating, so a passing assertion proves the
-//! mutation is what broke the property, not that the property was already
-//! broken.
+//! Four fixtures, each with its own `*_udmf()` builder: entrada (the base
+//! map), the teleport golden, the lift golden and ascensor, and the floor
+//! golden. Each test compiles one of them clean, mutates exactly one
+//! property on the *parsed* `UdmfMap` (or, for V-P9, the emitted text before
+//! parsing — that field has no `UdmfSidedef` to set, see the test), and
+//! asserts the specific finding [`crustygen::check::run`] raises in
+//! response. Every test also re-establishes the 0 baseline for the check id
+//! it targets before mutating, so a passing assertion proves the mutation is
+//! what broke the property, not that the property was already broken.
+//!
+//! A handful of tests mutate nothing at all: each golden's own
+//! `*_is_modeled_not_warned_about`, which is the pristine cross-examination
+//! the mutations are measured against.
 
 use crustygen::check::{Finding, Severity, Subject, run};
 use crustygen::compile::floors::FloorShape;

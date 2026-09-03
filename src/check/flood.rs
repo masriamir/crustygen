@@ -218,17 +218,39 @@
 //! moved once and never returned — the flood may then miss a way back that
 //! a second press would open.
 //!
-//! Four kinds of target get **no** bit, stand at their rest floor, and earn
-//! a `V-P7` [`Severity::Warning`] naming the sector and why: one driven by
-//! lines of more than one engine type (they give it no one destination), one
-//! whose destination is a texture height this checker does not resolve
-//! ([`floors::Destination::NeedsTexture`]), one whose sector already carries
-//! an action (a node holds one), and — once the first three have taken their
-//! bits — every target past the eighth, `KeyMask::BITS - ACTION_BIT_BASE`
-//! being what fits above the key classes. Leaving such a target at rest is
-//! the conservative reading — the flood then judges the map as if the action
-//! never fired — and the warning is what keeps that silence from passing for
-//! a verdict.
+//! Five kinds of target get **no** bit, stand at their rest floor, and earn
+//! a `V-P7` [`Severity::Warning`] naming the sector and why:
+//!
+//! 1. one driven by lines of more than one engine type (they give it no one
+//!    destination);
+//! 2. one whose destination is a texture height this checker does not
+//!    resolve ([`floors::Destination::NeedsTexture`]);
+//! 3. one whose sector already carries an action (a node holds one);
+//! 4. **a lowering target holding a shootable thing that does not fit it**
+//!    — the engine restores a blocked floor and leaves the thinker running,
+//!    so the floor retries every tic and never arrives. Ruling R28;
+//!    `blocking_thing` carries the pinned line ranges
+//!    (`p_floor.c:83-91`, `p_map.c:1290-1296`, `p_map.c:1337`,
+//!    `p_floor.c:209-222`);
+//! 5. and — once the first four have taken their bits — every target past
+//!    the eighth, `KeyMask::BITS - ACTION_BIT_BASE` being what fits above
+//!    the key classes.
+//!
+//! Leaving such a target at rest is the conservative reading — the flood
+//! then judges the map as if the action never fired — and the warning is
+//! what keeps that silence from passing for a verdict.
+//!
+//! The fourth is narrower than the engine in two ways, both deliberate and
+//! both restated on `blocking_thing`. Shootability is read as
+//! [`Tables::spawnhealth`] resolving, so a **barrel** — `MF_SHOOTABLE`, but
+//! a prop rather than a species — does not decline a target, and the flood
+//! stays optimistic there. And the fit is tested against the gap **at
+//! rest**, while `P_ChangeSector` runs after the floor has already moved one
+//! `speed`, so a thing needing exactly one unit more than the cell rests
+//! with (four, under `turboLower`) is declined though the engine would
+//! squeeze it through. Declining is the safe direction here: it costs a
+//! warning, where the opposite error models an opening that does not
+//! exist.
 //!
 //! # Key classes
 //!
@@ -574,7 +596,7 @@ fn resolve_floor_bits(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding
                 f.sector,
                 f.rest,
                 &format!(
-                    "is blocked by a `{name}` (thing {thing}) that does not fit in it — {gap} \
+                    "is blocked by `{name}` (thing {thing}), which does not fit in it — {gap} \
                      units of headroom against the {need} it needs — and a floor a shootable \
                      thing does not fit in never lowers"
                 ),
@@ -2447,7 +2469,7 @@ thing {{ x = 16.000; y = 64.000; type = {start_id}; single = true; }}
             .unwrap_or_else(|| panic!("expected a V-P7 naming the sealed cell: {findings:?}"));
         assert_eq!(blocked.severity, Severity::Warning);
         assert!(
-            blocked.message.contains("is blocked by a `imp`")
+            blocked.message.contains("is blocked by `imp`")
                 && blocked
                     .message
                     .contains("0 units of headroom against the 56")
