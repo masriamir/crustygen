@@ -783,20 +783,36 @@ fn emit_drop_wall(
 
     // The faces. On each of the wall's two thresholds the room side is the
     // front sidedef (`emit_segment` binds `sector_near`/`sector_far` there),
-    // and it is the side the engine draws: its own sector has the lower floor
-    // and, where it is taller, the higher ceiling. The lower carries that
-    // side's wall texture as the full-height face at rest, and both pegging
-    // flags stay clear so the face rides down with the floor — the corpus
-    // does that on 95 % of drop-wall boundaries
+    // and it is the side the engine draws at rest: its own sector has the
+    // lower floor and, where it is taller, the higher ceiling. The lower
+    // carries that side's wall texture as the full-height face at rest, and
+    // both pegging flags stay clear so the face rides down with the floor —
+    // the corpus does that on 95 % of drop-wall boundaries
     // (`docs/measurements/floor-shapes-2026-09-02.md` §F).
     // `heights::apply_height_textures` fills only empty slots, so these are
     // written here.
+    //
+    // Fired, the wall comes to rest at the *lower* room's floor, so toward a
+    // passage whose own floor stands above that the wall's side becomes the
+    // lower one and `r_segs.c` draws the wall side's lower instead. No later
+    // pass fills it — `apply_height_textures` reads the geometry at load,
+    // where the wall stands at its ceiling and the room side is always the
+    // lower — so between rooms whose floors differ by up to a step the fired
+    // wall would show a blank strip (a HOM) up to a step tall. The wall
+    // sector's own texture, the lower room's, goes on that back sidedef for
+    // exactly the faces that need it.
+    let wall_tex = data.sectors[wall].wall_tex.clone();
     for (line, room_side_sector) in [(seg.near_line, near_neighbor), (seg.far_line, far_neighbor)] {
         let side = data.linedefs[line].front;
         debug_assert_eq!(data.sidedefs[side].sector, room_side_sector);
         let tex = data.sectors[room_side_sector].wall_tex.clone();
         if data.sectors[room_side_sector].ceiling > rest {
             data.sidedefs[side].upper.clone_from(&tex);
+        }
+        if data.sectors[room_side_sector].floor > dest {
+            let back = data.linedefs[line].back.expect("a wall face is two-sided");
+            debug_assert_eq!(data.sidedefs[back].sector, wall);
+            data.sidedefs[back].lower.clone_from(&wall_tex);
         }
         data.sidedefs[side].lower = tex;
     }
@@ -1445,6 +1461,80 @@ mod tests {
             .expect("the trigger's tag is in the manifest");
         assert_eq!(entry.sector, f.sector);
         assert_eq!(entry.purpose, "trigger t: drop wall a <-> b");
+    }
+
+    /// [`WALL`] with each room's floor tunable and a distinct wall texture
+    /// per room, so a face that took the wrong room's cannot pass.
+    ///
+    /// Both ceilings are 192 here — [`WALL`] already varies them — because
+    /// what this shape is for is the *floors*: a wall between rooms within a
+    /// step of each other comes to rest at the lower room's floor, so one of
+    /// its two faces then looks up at a passage standing above it, which no
+    /// level-room fixture can reach.
+    fn wall_between(floor_a: i32, floor_b: i32) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        {{ "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":{floor_a}, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ {{ "kind":"player1_start", "at":[128,128], "angle":0 }} ] }},
+        {{ "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":{floor_b}, "ceiling":192, "light":144,
+          "floor_tex":"FLAT1", "ceil_tex":"FLAT20", "wall_tex":"BROWN1" }}
+      ],
+      "portals":[ {{ "a":"a", "b":"b", "kind":"drop_wall", "width":64, "at":[256,128], "thickness":16, "fires_on":"t" }} ],
+      "triggers":[ {{ "id":"t", "kind":"switch", "room":"a", "at":[0,128] }} ],
+      "exits":[ {{ "room":"b", "trigger":"switch", "at":[576,128], "width":64 }} ] }}"#
+        )
+    }
+
+    /// A wall between rooms at different floors rests at the shared ceiling
+    /// but comes down to the *lower* room's floor, so toward the higher
+    /// passage its own side is the one the engine draws. Both sides of both
+    /// faces are checked, at 0 and at both signs of a 16 and a full 24 step.
+    ///
+    /// The level pair leads the list as the control: with nothing standing
+    /// above where the wall lands, no back lower is written at all — which
+    /// is why the committed goldens, whose rooms are level, are untouched.
+    #[test]
+    fn a_drop_wall_writes_its_own_lower_toward_a_passage_above_where_it_lands() {
+        for (floor_a, floor_b) in [(0, 0), (24, 0), (0, 24), (16, 0), (0, 16)] {
+            let Built { data, floors, .. } = compile_data(&wall_between(floor_a, floor_b));
+            let f = &floors[0];
+            let low = floor_a.min(floor_b);
+            assert_eq!(
+                (f.rest, f.dest),
+                (192, low),
+                "({floor_a}, {floor_b}): solid at the shared ceiling, down to the lower floor"
+            );
+            // The wall is a piece of the lower room — room `b` when it is the
+            // lower one, which is the arm the level fixtures never take.
+            let wall_tex = if floor_b < floor_a {
+                "BROWN1"
+            } else {
+                "STARTAN3"
+            };
+            assert_eq!(data.sectors[f.sector].wall_tex, wall_tex);
+
+            for (&line, (room_tex, room_floor)) in f
+                .lines
+                .iter()
+                .zip([("STARTAN3", floor_a), ("BROWN1", floor_b)])
+            {
+                let l = &data.linedefs[line];
+                let back = l.back.expect("a face is two-sided");
+                assert_eq!(data.sidedefs[back].sector, f.sector);
+                assert_eq!(
+                    data.sidedefs[l.front].lower, room_tex,
+                    "({floor_a}, {floor_b}): the room side carries its own texture at rest"
+                );
+                let want = if room_floor > low { wall_tex } else { "" };
+                assert_eq!(
+                    data.sidedefs[back].lower, want,
+                    "({floor_a}, {floor_b}): the wall's own lower is written toward a passage \
+                     standing above where it comes to rest, and nowhere else"
+                );
+            }
+        }
     }
 
     #[test]

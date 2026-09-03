@@ -843,8 +843,8 @@ mod tests {
     };
     use crate::ir::Ir;
     use crate::rules::{
-        RuleViolation, check_all, check_lift_return, check_teleport_pairing, emitted_neighbors,
-        lowest_floor_surrounding, next_highest_floor,
+        RuleViolation, check_all, check_lift_return, check_missing_textures,
+        check_teleport_pairing, emitted_neighbors, lowest_floor_surrounding, next_highest_floor,
     };
     use crate::tables::Tables;
 
@@ -2158,6 +2158,47 @@ mod tests {
              drop wall b <-> c not lowered",
             "the state names the action still at rest, with the direction it moves: {v:?}"
         );
+    }
+
+    /// [`WALL_MAP`] with room `a` a full step above room `b` — the only
+    /// shape in which a fired drop wall's own side is the lower one at the
+    /// boundary, and so the only one whose *fired* geometry P8 has anything
+    /// to say about.
+    const STEPPED_WALL_MAP: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":24, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[128,128], "angle":0 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":256, "light":144,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"imp", "at":[448,128], "angle":180 } ] }
+      ],
+      "portals":[ { "a":"a", "b":"b", "kind":"drop_wall", "width":64, "at":[256,128], "thickness":16, "fires_on":"t" } ],
+      "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[0,128] } ],
+      "exits":[ { "room":"b", "trigger":"switch", "at":[576,128], "width":64 } ] }"#;
+
+    /// P8 judges the map at load, where a drop wall stands at its ceiling and
+    /// every face is drawn from the room side. Put the wall where the switch
+    /// leaves it and the boundary flips: toward the passage a step above, the
+    /// wall's own side is now the lower one and its lower is what `r_segs.c`
+    /// draws. `emit_drop_wall` writes that slot, so P8 stays quiet on the
+    /// fired geometry too — a HOM strip no golden can see, since every
+    /// golden's drop wall joins rooms that are level.
+    #[test]
+    fn a_fired_drop_wall_between_unlevel_rooms_leaves_no_untextured_face() {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(STEPPED_WALL_MAP).expect("ir");
+        let mut out = compile(&ir, &tables).expect("a stepped drop wall is a legal map");
+        assert_eq!(
+            (out.floors[0].rest, out.floors[0].dest),
+            (192, 0),
+            "the wall rests at room `a`'s ceiling and falls to room `b`'s floor"
+        );
+        let wall = out.floors[0].sector;
+        out.data.sectors[wall].floor = out.floors[0].dest;
+        let mut v = Vec::new();
+        check_missing_textures(&out, &mut v);
+        assert!(v.is_empty(), "the fired wall shows no blank face: {v:?}");
     }
 
     #[test]
