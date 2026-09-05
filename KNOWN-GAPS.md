@@ -6,25 +6,28 @@ emitted map (`src/check`, `crustygen-check` — see `docs/check.md`), plus the
 shared `crustygen::ingest` path and the `crustygen-lift` telemetry skeleton
 (`src/lift`, `src/ingest.rs` — see `docs/lift.md`), plus `lift::vocabulary`'s
 membership verdict, `lift::teleport`'s shape recognizer, `lift::plat`'s
-platform recognizer and the `crustygen-corpus` corpus sweep (see
+platform recognizer, `lift::floor`'s floor-action recognizer and the
+`crustygen-corpus` corpus sweep (see
 `docs/corpus.md`), plus the `crustygen-build` CLI over the compiler
 (`src/bin/crustygen-build.rs` — see `docs/build.md`).
-782 tests (620 lib + 3 crustygen-build unit + 17 build_cli + 12 check_adversarial + 16 check_cli +
-7 check_conformance + 10 corpus_cli + 1 first_map + 10 golden_textmap + 17 lift_cli + 1
-plat_recognizer + 3 spec_documents + 1 teleport_recognizer + 5 vanilla_wad + 4
-vocabulary_arbiter + 3 vocabulary_tables + 1 walking_skeleton + 51 in the `liftprobe` example),
-plus three separately-run `#[ignore]`d golden-regeneration generators not included in that
+943 tests (759 lib + 3 crustygen-build unit + 18 build_cli + 21 check_adversarial + 16 check_cli +
+9 check_conformance + 11 corpus_cli + 1 first_map + 1 floor_recognizer + 12 golden_textmap +
+20 lift_cli + 1 plat_recognizer + 3 spec_documents + 1 teleport_recognizer + 6 vanilla_wad + 4
+vocabulary_arbiter + 3 vocabulary_tables + 1 walking_skeleton + 53 in the `liftprobe` example),
+plus four separately-run `#[ignore]`d golden-regeneration generators not included in that
 count. This file records what is deliberately absent, what is known-fragile, and the decisions a
 future contributor would otherwise have to re-derive.
 
 ## Not implemented, by design
 
 The compiler covers structural invariants S1–S6 and playability rules P2,
-P3, P4, P5, P7, P8, P9, P11, P13, P14, P15, P19, P24, P25, P26, P27. **P1** is
+P3, P4, P5, P7, P8, P9, P11, P13, P14, P15, P19, P24, P25, P26, P27, P28, P29,
+P30. **P1** is
 retired — see `rules.rs`'s module doc and `CompileError::PortalNoHeadroom`,
 and the gap entry below. The layer-4 verifier (`src/check`, `docs/check.md`)
-independently re-derives fifteen of those sixteen from the *emitted* map, as
-`V-P2`…`V-P27`, and adds `V-P20`. The one it does not is **P26**: a teleport
+independently re-derives eighteen of those nineteen from the *emitted* map, as
+`V-P2`…`V-P28`, and adds `V-P20` — the three floor rules sharing one id, since
+one resolution answers all three. The one it does not is **P26**: a teleport
 exit emits exactly a plain walkover exit's specials, so nothing on the line
 tells them apart, and the verifier grades P26's shape as the
 `progression.exit.trigger` conformance row instead of as a finding.
@@ -37,7 +40,7 @@ verifier covers it, below), **P21** (light sources), **P22** (hanging
 decorations), **P23** (barrel safety).
 
 **Expressibility is mostly membership, and now partly geometry.**
-`lift::vocabulary` and `crustygen-corpus` decide expressibility on **five**
+`lift::vocabulary` and `crustygen-corpus` decide expressibility on **six**
 axes. Three are set membership — line specials, sector specials, thing
 kinds — and read no geometry at all. The fourth is the teleport recognizer
 (`lift::teleport`), which resolves every teleport line the way `EV_Teleport`
@@ -46,8 +49,14 @@ sector adjacency and destination-marker placement, so on that one axis the
 verdict is geometric rather than table-driven. The fifth is the plat
 recognizer (`lift::plat`), which does the same for platforms: it resolves
 every sector a lift line names the way `EV_DoPlat` does, classifies it as a
-lift, a pedestal or a barrier, and refuses the rest. Everything else about a
-map — room shape, linedef flags, tags outside those two resolutions, texture
+lift, a pedestal or a barrier, and refuses the rest. The sixth is the floor
+recognizer (`lift::floor`), which resolves every sector a floor line names the
+way `EV_DoFloor` does, classifies the move by what it does to the local walk
+graph, and accepts only a drop wall, a reveal or a bridge. It is the lowest of
+the six on the sample of record — 51.9 %, against the line axis's 14.6 % and
+the lift axis's 61.1 % (`docs/measurements/floors-2026-09-03.md`). Everything
+else about a
+map — room shape, linedef flags, tags outside those three resolutions, texture
 names — is still unmeasured, so the number remains an upper bound on lift
 yield and every report says so. The remaining recognizers are the lifter's
 next stage.
@@ -112,26 +121,64 @@ WAD. (The verifier itself — `docs/design.md` §8 layer 4 — shipped with issu
 `tests/fixtures/entrada_base.json`, built into `maps/entrada.wad`.)
 Specials for liquid sector effects, monster `spawnhealth`, health/armor
 pickup amounts and caps, the gore prop set, the four one-shot lift forms
-(21/10/122/121), and the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef flags are
+(21/10/122/121), the forty-four floor specials outside the emitted four, and
+the `ML_BLOCKMONSTERS`/`ML_SOUNDBLOCK` linedef flags are
 all **sourced and accessible** but nothing emits any of them yet. Doors, exits
 (`compile::exits`), the secret sector special, the four teleport specials
 (`compile::teleports`, with `lift::teleport` recognizing them on the way back
-in) and the four repeatable lift specials (`compile::lifts`, with
-`lift::plat` recognizing the platforms they name) are wired end to end. Lifts
-were the largest remaining unemitted group and the construct the corpus
-blocker table named next (`docs/measurements/teleports-2026-08-28.md`); what
-the next blocker table names is a question for the run that follows the lift
-release.
+in), the four repeatable lift specials (`compile::lifts`, with
+`lift::plat` recognizing the platforms they name) and the four one-shot floor
+specials 23/38/18/119 (`compile::floors`, with `lift::floor` recognizing the
+targets they name) are wired end to end. The floor family was the construct the
+lift measurement's blocker table named next, with 23 and 38 first and fifth;
+after this release the table's head holds no floor special at all
+(`docs/measurements/floors-2026-09-03.md`), and which family it names next is a
+question for the shape probe that follows.
 
-**The sealed monster pen with a remote release strip is deferred, and P27 is
-why it has to be.** Retail's genuinely sealed pens — 8 of the 97 closet
-sectors in DOOM + DOOM2 — are opened either by a monsters-only teleport
-(7 of the 8) or by a remote linedef special aimed at a zero-height strip
-beside the pen. The first shape crustygen can build today; the second needs
-floor and door specials (the corpus finds 62, 36, 109, 20, 2, 123, 103 and
-102 on those strips) that are outside this vocabulary entirely. Until they
-land, P27 refuses a sealed monster room rather than let the compiler emit
-monsters nothing can ever wake. The measurement records the shares.
+**The sealed monster pen now has its release strip, and it is a drop wall —
+but a closet reveal holds nothing.** Retail's genuinely sealed pens — 8 of the
+97 closet sectors in DOOM + DOOM2 — are opened either by a monsters-only
+teleport (7 of the 8) or by a remote linedef special aimed at a zero-height
+strip beside the pen. Both shapes are now buildable: the first by a
+monsters-only teleport pad, the second by a **drop wall**, which is that strip
+under one of our own specials, and P27 accepts a pen released either way.
+The *idiom* is what crustygen can now build, not retail's own instances of it:
+the corpus finds 62, 36, 109, 20, 2, 123, 103 and 102 on those strips and **not
+one of the eight is emittable**, so a lifted map carrying retail's release strip
+is still outside this vocabulary even though an authored equivalent is inside
+it.
+
+What is *not* buildable is the shape an author reaches for first: a
+`RevealKind::Closet` with a monster standing inside it. A closet rests with its
+floor at its ceiling, so nothing fits in it, and the compiler refuses cargo it
+cannot give headroom (`CompileError::RevealNoHeadroom`). That is the engine's
+rule, not a policy: a lowering floor holding a shootable thing that does not fit
+never moves at all — `P_ThingHeightClip` (`p_map.c:530-556`) fails, `nofit` is
+set (`p_map.c:1257-1297`), `T_MovePlane`'s down branch restores `lastpos` and
+returns `crushed` (`p_floor.c:66-92`), and `T_MoveFloor` removes the thinker only
+on `pastdest` (`p_floor.c:213-222`), so the floor retries every tic forever, with
+`FLOORSPEED` at one unit (`p_spec.h:600`) leaving a one-unit first step that fits
+nothing. **The monster-closet idiom in this IR is therefore a drop wall with a
+room behind it**, which is also what the corpus builds: 1,130 sample pockets are
+reachable only through a drop wall
+(`docs/measurements/floor-shapes-2026-09-02.md` §D). The pedestal reveal is the
+reveal that carries cargo.
+
+Two deliberate strictnesses inside that refusal. **Every thing is judged, not
+only the shootable ones the engine blocks on**: an item or a decoration sealed in
+a closet is engine-legal (`PIT_ChangeSector` waves through anything without
+`MF_SHOOTABLE`, `p_map.c:1290`), but the verifier's V-P2 judges every thing
+against its sector's static heights, so allowing it here would ship a map the
+project's own checker calls broken. And the verifier's flood is narrower than the
+engine in the other direction, in two ways it states on `blocking_thing`:
+shootability is read as `Tables::spawnhealth` resolving, so a **barrel** —
+`MF_SHOOTABLE`, but a prop with no `spawnhealth` — does not decline a target and
+the flood stays optimistic there; and the fit is tested against the gap **at
+rest**, while `P_ChangeSector` runs after the floor has already moved one
+`speed`, so a thing needing exactly one unit more than the cell rests with (four
+under `turboLower`) is declined though the engine would squeeze it through.
+Declining costs a `V-P7` Warning; the opposite error would model an opening that
+does not exist.
 
 **The map-spec parser exists now, and deliberately stops at parsing.**
 `src/spec` turns a filled `map-spec.template.md` copy into a typed
@@ -303,6 +350,102 @@ document asking the other plausible word and failing identically. Adding an
 it widens the template's vocabulary, which is a spec decision rather than a
 checker one.
 
+
+**A floor action goes once and never comes back, and the IR states nothing
+else.** `lowerFloorToLowest` and `raiseFloorToNearest` are emitted only in their
+one-shot forms (23/38 and 18/119), which is what the corpus authors — 77 % of
+the sample's floor lines are W1/S1
+(`docs/measurements/floor-shapes-2026-09-02.md` §A) — so there is no repeatable
+floor, no turbo form, no "and change" family that copies a flat, and no gun
+trigger. The recognizer reads the repeatable and gun forms coming back *in* and
+refuses them by name (`Refusal::Gun`, and a repeatable form is modeled by the
+flood as fired once), but nothing emits them.
+
+**Neither closing shapes nor a target with two families is expressible.** The
+IR states an *opening*: a drop wall or bridge that joins two areas, or a reveal
+that becomes enterable. A floor that closes a way when it moves, one that opens
+one way and closes another, one that moves without changing anyone's reach, and
+one whose destination is already its own floor are all real shapes the corpus
+builds and none of them is authorable. On the sample of record they are the
+single largest block of refusals: `neutral` alone is 1,382 targets of 9,443,
+`conflict` 1,011 and `two_families` 360
+(`docs/measurements/floors-2026-09-03.md`). A tag shared with another family —
+a floor tag that also drives a ceiling, a light or a door — is likewise
+refused on the way in and unauthorable on the way out.
+
+**A floor tag is never shared with another construct, and the compiler's
+allocator is what guarantees it.** One IR trigger is one tag and one special,
+and P13's central allocator hands out a fresh tag per action, so nothing
+crustygen emits can hit the `conflict` refusal. Foreign WADs hit it constantly,
+which is why the recognizer and V-P28 both check.
+
+**Rule P30 forbids a chain, so no floor action composes with another.** A
+target may not border another floor target, a lift platform or a door sector.
+That is a real expressive loss — the corpus's `neighbors_mover` refusal is 594
+targets — and it is what makes the load-time destination exact and lets the
+reachability flood carry one action per node. Lifting it needs a
+destination model evaluated per state rather than at load, which is a change to
+`reach.rs`'s core rather than to a compile pass.
+
+**At most eight floor actions per map, and the reachability mask is why.**
+`Ir::MAX_FLOOR_ACTIONS` is 8 because `KeyMask` is a `u16` whose low eight bits
+are key classes; `IrError::TooManyFloorActions` refuses the ninth. Widening the
+mask to `u32` is the whole of the fix, and nothing else depends on the width —
+a `const` assertion in `reach.rs` pins the two halves against each other so the
+change cannot half-land.
+
+**A switch fires on *entering* its room, which is optimistic in one direction
+and pessimistic in the other.** The flood unions a use trigger's bit into the
+mask at its activator sector, so a player who can stand in the switch's room is
+modeled as having pressed it. For an *opening* action that is the right
+conservatism — the player would press it — but it means a switch room can never
+strand the player with its own action unfired, even where the map's design
+depends on their choosing not to press. For a closing or neutral action it would
+be pessimistic, and the flood declines to model those at all rather than
+guessing.
+
+**A floor action's things ride the floor, and only V-P2's static test is
+applied.** A reveal's or a pedestal's cargo is judged against the cell at rest
+through `compile::things::required_height` — species height, else a blocking or
+hanging prop's, else the player's — the same three accessors V-P2 uses, so the
+two layers agree by construction rather than by luck. What neither layer models
+is the thing *in motion*: `P_ThingHeightClip` runs at every step of the travel,
+and a cell that is legal at rest and legal at its destination is assumed legal
+throughout. For the two one-shot families that is sound (the gap only widens for
+a lowering target and only narrows toward a destination the rules already
+check), and it would stop being sound the moment a chained or repeatable form
+landed.
+
+**Island cargo can be collectible from outside its cell, and the compiler
+checks only half the rule.** Vanilla item pickup runs two gates: XY box overlap
+in `PIT_CheckThing` (`p_map.c:252-268`, `blockdist = thing->radius +
+tmthing->radius`, axis-aligned, no z at all) and a z test in
+`P_TouchSpecialThing` (`p_inter.c:339-355`: `delta = special->z - toucher->z;
+if (delta > toucher->height || delta < -8*FRACUNIT) return;`). So cargo of
+radius `r` resting `R` above the host floor is collectible **from outside its
+cell** exactly when −8 ≤ `R` ≤ 56 (the player's height, `info.c:1126`) **and**
+the cargo's own bounding box crosses the cell edge — the player's own radius
+cancels against the 24-unit step refusal (`p_map.c:477-479`) that keeps their
+center 16 units outside. The compiler enforces neither condition directly: a
+pedestal must rise more than a step, which covers the common case, but nothing
+checks the second half. Muralla clears both gates by a wide margin (its red card
+sits at z 64 > 56 and 32 units from every edge with `r` 20), so the shipped map
+is honest; an author placing small cargo on a low, wide island can still make a
+key takeable before its trigger fires. The reachability flood grants an island's
+cargo on the island's *own* node, after the reveal fires, which is the strict
+reading — a map that is finishable only by an early grab will be refused rather
+than shipped.
+
+**Special 40's ceiling half is unmodeled.** The recognizer and the verifier read
+40 (`RaiseCeilingLowerFloor`) for its floor half alone; the ceiling it also
+raises is invisible to both. 199 sample lines carry it. Nothing emits it, so
+this only affects what the tools say about a foreign map.
+
+**The recognizer's refusal precedence is pinned only at the top level.** Five
+cases in `lift::floor` fix the order of the seven refusals that can co-occur on
+one fixture; the remaining arms are each tested alone. A refusal added later
+needs its own precedence case, or a reordering could pass the suite.
+
 ## Decisions that look wrong without their reason
 
 **P24 is stricter than the engine about key kinds, and P7 is not.**
@@ -331,6 +474,36 @@ that color placed, every placed key opens some door — and the authored-intent
 form stays the compile-side rule's job, since the intent is only legible in the
 IR. The two are not redundant and are not in conflict; they check different
 statements at different layers.
+
+**"Placed" means placed anywhere, island cargo included — and for a while the
+compile side did not agree.** `rules::check_key_lock_coherence` (P24) and
+`reach::graph_from_compiled` (P7) both used to scan `Room::things` only, so a
+key authored as a *pedestal's* or a *reveal's* cargo was invisible to them: the
+compiler refused a map whose only red card sat on a pedestal with `P24 ... which
+is never placed` and four `P7` strandings, while the verifier passed the very
+same emitted geometry, because `check::flood` reads every thing by the sector it
+resolves to. The compile side was the wrong one — it refused a finishable map —
+and now scans island cargo too, with the key's bit set on the *island's* own
+node rather than the host room's, so the flood grants it only once the platform
+has been called down or the reveal has fired. Found while building muralla, the
+floor playtest map, whose red card is a reveal's cargo; the two smallest cases
+are `rules.rs`'s `a_key_placed_on_a_pedestal_…` and `a_key_sealed_in_a_reveal_…`
+tests. A key placed *outside* any room, pedestal or reveal remains impossible to
+author — every thing belongs to one of the three.
+
+The **player 1 start** has the same room-versus-island split and is closed the
+other way, by refusal. `graph_from_compiled` begins its flood at the start it
+finds among the rooms' things; a pedestal start used to be legal for every
+player number, so a map whose only player 1 start was a pedestal's cargo made
+that search come up empty, `None` came back, and P7 was skipped for the whole
+map — silently, since `None` is also the legitimate "this map has no start"
+answer. The compiler then wrote a WAD its own verifier refused with five
+blocking findings (`V-P7` ×4 and a `V-P20`), the verifier having located the
+start geometrically. `CompileError::PlayerStartOnPedestal` now refuses that one
+placement; coop starts on a pedestal stay legal, because P7 never looks for
+them. Teaching the flood to find an island start was the other option and was
+not taken: it would have had to pick an origin among several candidate starts,
+where refusing keeps the origin unambiguous.
 
 **The crate's own lints are `warn`, and CI is what makes them fatal.**
 `Cargo.toml` sets `clippy::all` and `clippy::pedantic` to `warn`, not `deny`,

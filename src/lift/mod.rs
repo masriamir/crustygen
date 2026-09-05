@@ -13,14 +13,17 @@
 //! the verifier's `Scene` and classifies every teleport line by engine
 //! semantics. [`plat`] is the second: over the same `Scene` it classifies
 //! every platform a lift line names as a lift, a pedestal or a barrier, or
-//! names the reason it cannot. The remaining recognizers (rooms, doors,
-//! keys, exits) arrive with Project B.
+//! names the reason it cannot. [`floor`] is the third: over that same
+//! `Scene` it classifies every sector a floor line names as a drop wall, a
+//! reveal or a bridge, or names the reason it cannot. The remaining
+//! recognizers (rooms, doors, keys, exits) arrive with Project B.
 
 use std::collections::BTreeMap;
 
 use crustywad::map::udmf::UdmfMap;
 
 pub mod corpus;
+pub mod floor;
 pub mod plat;
 pub mod teleport;
 pub mod vocabulary;

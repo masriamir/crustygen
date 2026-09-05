@@ -1,0 +1,37 @@
+{
+  "seed": 20260902, "grid": 64, "theme": "tech_base",
+  "rooms": [
+    { "id": "entry", "footprint": [[0,0],[0,512],[512,512],[512,0]], "floor": 0, "ceiling": 192, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
+      "things": [ { "kind": "player1_start", "at": [128, 128], "angle": 90 },
+                  { "kind": "shotgun", "at": [256, 384], "angle": 0 } ] },
+    { "id": "closet", "footprint": [[576,0],[576,192],[832,192],[832,0]], "floor": 0, "ceiling": 192, "light": 128,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
+      "things": [ { "kind": "imp", "at": [704, 96], "angle": 180 }, { "kind": "imp", "at": [768, 96], "angle": 180 } ] },
+    { "id": "hall", "footprint": [[576,320],[576,832],[1088,832],[1088,320]], "floor": 0, "ceiling": 256, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
+      "things": [ { "kind": "shells", "at": [640, 384], "angle": 0 } ] },
+    { "id": "yard", "footprint": [[1152,320],[1152,832],[1664,832],[1664,320]], "floor": 0, "ceiling": 256, "light": 176,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
+      "things": [ { "kind": "imp", "at": [1536, 704], "angle": 180 }, { "kind": "medikit", "at": [1408, 576], "angle": 0 } ] },
+    { "id": "exit", "footprint": [[1728,320],[1728,832],[2240,832],[2240,320]], "floor": 0, "ceiling": 256, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3" }
+  ],
+  "portals": [
+    { "a": "entry", "b": "closet", "kind": "drop_wall", "width": 64, "at": [512, 96], "thickness": 16, "fires_on": "t_wall" },
+    { "a": "entry", "b": "hall", "kind": "plain", "width": 64, "at": [512, 416] },
+    { "a": "hall", "b": "yard", "kind": "bridge", "width": 64, "at": [1088, 576], "depth": 96, "fires_on": "t_bridge" },
+    { "a": "yard", "b": "exit", "kind": "locked", "lock": "red_card", "width": 64, "at": [1664, 576],
+      "door_thickness": 32, "alcove_near": 16, "alcove_far": 16 }
+  ],
+  "triggers": [
+    { "id": "t_wall", "kind": "switch", "room": "entry", "at": [0, 256] },
+    { "id": "t_prize", "kind": "walkover", "portal": ["entry", "hall"] },
+    { "id": "t_bridge", "kind": "walkover", "portal": ["hall", "yard"] }
+  ],
+  "reveals": [
+    { "id": "prize", "room": "hall", "at": [768, 512], "kind": "pedestal", "rise": 64,
+      "things": [ { "kind": "red_card", "at": [800, 544], "angle": 0 } ], "trigger": "t_prize" }
+  ],
+  "exits": [ { "room": "exit", "trigger": "switch", "at": [2240, 576], "width": 64 } ]
+}

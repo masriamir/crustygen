@@ -1,6 +1,6 @@
 //! CLI tests for `crustygen-build`: exit codes per pipeline stage, the
 //! stdout summary, and byte-identity with the committed `maps/entrada.wad`,
-//! `maps/salto.wad` and `maps/ascensor.wad`.
+//! `maps/salto.wad`, `maps/ascensor.wad` and `maps/muralla.wad`.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -9,7 +9,7 @@ use crustywad::Wad;
 
 mod common;
 
-use common::{ASCENSOR, ENTRADA, SALTO};
+use common::{ASCENSOR, ENTRADA, MURALLA, SALTO};
 
 fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_crustygen-build"))
@@ -180,6 +180,28 @@ fn the_ascensor_fixture_builds_byte_identical_to_the_committed_wad() {
         "got: {stdout}"
     );
     assert!(stdout.contains("13 sectors"), "got: {stdout}");
+    assert!(out.stderr.is_empty(), "stderr: {}", stderr(&out));
+}
+
+/// Muralla, the floor playtest map: the same drift guard entrada, salto and
+/// ascensor carry, over the fixture that exercises every floor action the
+/// compiler emits. 14 sectors = 5 rooms + 1 plain passage + 1 door + 2 door
+/// alcoves + 1 drop wall + the 2 approach passages flanking it + 1 bridge
+/// pit + 1 pedestal reveal cell.
+#[test]
+fn the_muralla_fixture_builds_byte_identical_to_the_committed_wad() {
+    let (out, wad) = build(MURALLA, "muralla", &[]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let committed =
+        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("maps/muralla.wad"))
+            .expect("read maps/muralla.wad");
+    assert_eq!(wad.expect("a WAD was written"), committed);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with("MAP01: 5 rooms, 4 portals"),
+        "got: {stdout}"
+    );
+    assert!(stdout.contains("14 sectors"), "got: {stdout}");
     assert!(out.stderr.is_empty(), "stderr: {}", stderr(&out));
 }
 

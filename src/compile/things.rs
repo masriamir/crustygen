@@ -1,10 +1,11 @@
 //! Places things with real clearance, not merely inside their room.
 
+use crate::compile::floors::FloorActionOut;
 use crate::compile::lifts::LiftOut;
 use crate::compile::teleports::Marker;
 use crate::compile::{CompileError, MapData};
 use crate::geom::{Pt, contains, dist_to_segment};
-use crate::ir::{Ir, ThingSkills, square_contains};
+use crate::ir::{Ir, IrThing, ThingSkills, square_contains};
 use crate::tables::{Tables, ThingDims};
 
 /// A thing as it will be emitted.
@@ -47,13 +48,30 @@ pub struct ThingOut {
 /// destination marker can land in a compiler-generated sector — the other
 /// pad of a two-way pair — which is no room and so has no room index.
 pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<f64> {
+    clearance_ignoring(data, sector, None, p)
+}
+
+/// [`emitted_clearance`], with every linedef that also borders `ignore` left
+/// out of the measurement.
+///
+/// One caller needs this: a [`crate::ir::Reveal`]'s cargo, measured against
+/// its **host room** while its own cell's four edges are discounted. Those
+/// edges border the host on their front sidedefs, so a plain
+/// [`emitted_clearance`] over the host would measure the thing against the
+/// cell it stands in — which is exactly the boundary that stops existing.
+/// The reveal comes to rest flush with its host, and at that moment its
+/// edges are two-sided lines with equal floors and equal ceilings on both
+/// sides: the player walks straight over them. The host's own walls are what
+/// can still crush someone collecting the item, so they are what the radius
+/// is held against. See `place_reveal_things`.
+fn clearance_ignoring(data: &MapData, sector: usize, ignore: Option<usize>, p: Pt) -> Option<f64> {
     data.linedefs
         .iter()
         .filter(|line| {
-            data.sidedefs[line.front].sector == sector
-                || line
-                    .back
-                    .is_some_and(|back| data.sidedefs[back].sector == sector)
+            let front = data.sidedefs[line.front].sector;
+            let back = line.back.map(|b| data.sidedefs[b].sector);
+            let touches = |s: usize| front == s || back == Some(s);
+            touches(sector) && !ignore.is_some_and(touches)
         })
         .map(|line| dist_to_segment(p, data.vertices[line.v1], data.vertices[line.v2]))
         .reduce(f64::min)
@@ -73,11 +91,12 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// authored apart, and why measuring the emitted geometry is still the
 /// principled choice rather than an incidental one.
 ///
-/// A room thing standing on one of its room's pedestals is refused rather
-/// than placed: the engine would spawn it in the pedestal's sector at the
-/// raised floor, which is not the floor the room's `things` list describes.
-/// After every room's own things come the pedestals' own — see
-/// `place_pedestal_things`. After every authored thing, each of `markers` —
+/// A room thing standing on one of its room's pedestals or reveals is
+/// refused rather than placed: the engine would spawn it in that island's
+/// sector at that island's floor, which is not the floor the room's `things`
+/// list describes. After every room's own things come the pedestals' and the
+/// reveals' own — see `place_pedestal_things` and `place_reveal_things`.
+/// After every authored thing, each of `markers` —
 /// [`crate::compile::teleports::emit_teleports`]'s destination markers — is
 /// emitted as a `teleport_dest` thing, held to the clearance and headroom
 /// its *arriving* thing needs rather than the marker's own (the marker is in
@@ -88,13 +107,16 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// # Errors
 /// Returns [`CompileError::UnknownThing`] for an unresolvable name,
 /// [`CompileError::ThingOutsideRoom`] for a point outside its room,
-/// [`CompileError::ThingOnPedestal`] for a room thing standing on one of its
-/// room's pedestals, [`CompileError::ThingTooClose`] when radius clearance
+/// [`CompileError::ThingOnPedestal`] and [`CompileError::ThingOnReveal`] for
+/// a room thing standing on one of its room's islands,
+/// [`CompileError::ThingTooClose`] when radius clearance
 /// fails,
 /// [`CompileError::PedestalNoHeadroom`] when a pedestal's raised floor
 /// leaves its own thing too little room under the host's ceiling,
-/// [`CompileError::NoHeadroom`] when the room is too short — for the
-/// tallest placed thing, or for the player if the room is empty or shorter
+/// [`CompileError::StartOnReveal`] for a player start sealed inside a
+/// reveal, [`CompileError::NoHeadroom`] when the room is too short — for the
+/// tallest placed thing, for anything a reveal in it carries, or for the
+/// player if the room is empty or shorter
 /// than the player alone — [`CompileError::UnboundedRoom`] when a room's
 /// sector has no emitted linedef to measure against,
 /// [`CompileError::OverlappingStarts`] for coincident player starts —
@@ -106,11 +128,14 @@ pub(crate) fn emitted_clearance(data: &MapData, sector: usize, p: Pt) -> Option<
 /// for it.
 ///
 /// `lifts` carries the emitted platforms, and is read for the sector each
-/// pedestal was cut into.
+/// pedestal was cut into; `floors` carries the emitted floor actions, and is
+/// read for the sector each reveal was cut into and the floor that reveal
+/// comes to rest on.
 ///
 /// # Panics
-/// Panics only where `place_pedestal_things` and `place_markers` document:
-/// on a missing `teleport_dest` vocabulary entry, which `tables`'s own
+/// Panics only where `place_pedestal_things`, `place_reveal_things` and
+/// `place_markers` document: on a missing `teleport_dest` vocabulary entry,
+/// which `tables`'s own
 /// `exit_lift_teleport_and_sector_specials_resolve` test pins present, and
 /// on geometry or IR shapes an earlier pass has already ruled out.
 pub fn place_things(
@@ -119,6 +144,7 @@ pub fn place_things(
     data: &MapData,
     markers: &[Marker],
     lifts: &[LiftOut],
+    floors: &[FloorActionOut],
 ) -> Result<Vec<ThingOut>, CompileError> {
     let mut out = Vec::new();
     let mut starts: Vec<(i32, i32)> = Vec::new();
@@ -166,29 +192,7 @@ pub fn place_things(
                 });
             }
 
-            // A thing on a pedestal's rectangle would spawn in the
-            // pedestal's sector at its raised floor, not on the room floor
-            // this list describes — the refusal `teleports::resolve_pad`
-            // makes for a pad, on the same grounds. Checked before clearance
-            // so the author is told *why* the point is wrong: measured
-            // against the room, such a point is also within a radius of the
-            // island's edges, and `ThingTooClose` would name the symptom
-            // rather than the cause. Closed on both axes: a point on the
-            // rectangle's edge already sits on the platform's boundary line.
-            if let Some(pedestal) = ir.pedestals.iter().find(|p| {
-                if p.room != room.id {
-                    return false;
-                }
-                let (lo, hi) = p.rect();
-                square_contains(lo, hi, thing.at)
-            }) {
-                return Err(CompileError::ThingOnPedestal {
-                    pedestal: pedestal.id.clone(),
-                    kind: thing.kind.clone(),
-                    x: thing.at.x,
-                    y: thing.at.y,
-                });
-            }
+            check_not_on_an_island(ir, &room.id, thing)?;
 
             let have = emitted_clearance(data, room_idx, thing.at).ok_or_else(|| {
                 CompileError::UnboundedRoom {
@@ -206,12 +210,19 @@ pub fn place_things(
                 });
             }
 
-            if headroom < dims.height {
+            // Ruling R29: the same height source island cargo is held to.
+            // `dims` above is species-or-player and drives the *radius*; a
+            // prop's own height is what the layer-4 verifier's V-P2 measures
+            // (`check::invariants::required_height`), so reading it from
+            // anywhere else would let a tall decoration through here and
+            // Error in the checker.
+            let need = required_height(tables, &thing.kind);
+            if headroom < need {
                 return Err(CompileError::NoHeadroom {
                     room: room.id.clone(),
                     kind: thing.kind.clone(),
                     have: headroom,
-                    need: dims.height,
+                    need,
                 });
             }
 
@@ -237,43 +248,313 @@ pub fn place_things(
     }
 
     out.extend(place_pedestal_things(ir, tables, data, lifts, &mut starts)?);
+    out.extend(place_reveal_things(ir, tables, data, floors, &mut starts)?);
     out.extend(place_markers(tables, data, markers)?);
+    Ok(out)
+}
+
+/// Refuses a room thing standing on one of that room's islands.
+///
+/// A thing on a pedestal's or a reveal's rectangle would spawn in that
+/// island's sector at that island's floor, not on the room floor the room's
+/// `things` list describes — the refusal `teleports::resolve_pad` makes for a
+/// pad, on the same grounds, and a worse mistake on a
+/// [`closet`](crate::ir::RevealKind::Closet), whose sector rests at the
+/// host's *ceiling*: the thing would spawn sealed in the rock rather than
+/// merely at the wrong height.
+///
+/// Checked before clearance so the author is told *why* the point is wrong:
+/// measured against the room, such a point is also within a radius of the
+/// island's edges, and `ThingTooClose` would name the symptom rather than the
+/// cause. Both rectangles are closed on both axes — a point on the edge
+/// already sits on the island's own boundary line — and neither is grown by
+/// the thing's radius the way a pad's is, because an island is authored
+/// geometry the author may deliberately stand something beside.
+///
+/// # Errors
+/// Returns [`CompileError::ThingOnPedestal`] or
+/// [`CompileError::ThingOnReveal`], naming the island the point falls on.
+fn check_not_on_an_island(ir: &Ir, room: &str, thing: &IrThing) -> Result<(), CompileError> {
+    if let Some(p) = ir.pedestals.iter().find(|p| {
+        p.room == room && {
+            let (lo, hi) = p.rect();
+            square_contains(lo, hi, thing.at)
+        }
+    }) {
+        return Err(CompileError::ThingOnPedestal {
+            pedestal: p.id.clone(),
+            kind: thing.kind.clone(),
+            x: thing.at.x,
+            y: thing.at.y,
+        });
+    }
+    if let Some(r) = ir.reveals.iter().find(|r| {
+        r.room == room && {
+            let (lo, hi) = r.rect();
+            square_contains(lo, hi, thing.at)
+        }
+    }) {
+        return Err(CompileError::ThingOnReveal {
+            reveal: r.id.clone(),
+            kind: thing.kind.clone(),
+            x: thing.at.x,
+            y: thing.at.y,
+        });
+    }
+    Ok(())
+}
+
+/// Which island's cargo [`place_island_things`] is placing.
+///
+/// Once the sector and the headroom are resolved, only two things still
+/// differ between a pedestal's platform and a reveal's cell: which error a
+/// gap that is too short raises, and whether a `_start` may stand there.
+#[derive(Clone, Copy)]
+enum IslandShape {
+    /// A pedestal's platform. A *coop* `_start` on one is legal — beginning
+    /// the level standing on a pedestal is a fine thing to author — but the
+    /// player 1 start is refused, since rule P7's flood begins at the one it
+    /// finds among the rooms' things.
+    Pedestal,
+    /// A reveal's sealed cell. A `_start` in one is refused: the level
+    /// cannot begin inside solid rock, nor on a block nothing can lower
+    /// from the inside.
+    Reveal,
+}
+
+/// One island's cargo, and the two measurements it is judged against.
+struct Island<'a> {
+    /// Which of the two it is.
+    shape: IslandShape,
+    /// The island's own id, for the errors that name it.
+    id: &'a str,
+    /// The host room's id, for the errors that name a room.
+    room: &'a str,
+    /// The things authored inside its rectangle.
+    things: &'a [IrThing],
+    /// The emitted sector whose boundary clearance is measured against: a
+    /// **pedestal's own platform**, since stepping off one is a fall, but a
+    /// reveal's **host room**, since a reveal comes to rest flush with it.
+    clearance_sector: usize,
+    /// A sector whose boundary does not count even though it borders
+    /// [`Self::clearance_sector`]: a reveal's own cell, whose four edges
+    /// become level, passable two-sided lines the moment the trigger fires.
+    /// `None` for a pedestal, whose edges are exactly what must be cleared.
+    ignore_sector: Option<usize>,
+    /// The gap a thing standing here must fit under — for both shapes, the
+    /// gap **as the map loads**: a pedestal's risen floor to the host's
+    /// ceiling, and a reveal's cell at its own rest floor. A reveal is not
+    /// measured against where its floor will end up, because a floor a thing
+    /// does not fit in never gets there; see
+    /// [`CompileError::RevealNoHeadroom`].
+    headroom: i32,
+}
+
+impl Island<'_> {
+    /// The headroom error this shape raises, filled in for `kind`.
+    fn no_headroom(&self, kind: &str, need: i32) -> CompileError {
+        match self.shape {
+            IslandShape::Pedestal => CompileError::PedestalNoHeadroom {
+                pedestal: self.id.to_owned(),
+                kind: kind.to_owned(),
+                have: self.headroom,
+                need,
+            },
+            // A reveal's gap is the cell's own, at rest — which for a
+            // closet is zero however tall its host is — so the reveal is
+            // what the author has to change and the reveal is what is named.
+            IslandShape::Reveal => CompileError::RevealNoHeadroom {
+                reveal: self.id.to_owned(),
+                kind: kind.to_owned(),
+                have: self.headroom,
+                need,
+            },
+        }
+    }
+}
+
+/// The headroom a named thing must be given, in the order the layer-4
+/// verifier's V-P2 resolves it: a monster species' own height, else a
+/// blocking or hanging prop's own height, else the player's.
+///
+/// Deliberately the *same* three accessors `check::invariants`'s own
+/// `required_height` uses, so the compiler cannot pass a thing the verifier
+/// will then Error on. It differs from V-P2 in one direction only, and only
+/// where V-P2 declines to have an opinion: V-P2 returns `None` for a pickup
+/// or a decoration and skips it, while this falls back to the player's
+/// height rather than to nothing. That fallback is what makes a sealed
+/// closet hold nothing at all rather than holding items — see
+/// [`CompileError::RevealNoHeadroom`] for why the stricter reading is the
+/// one this compiler takes.
+///
+/// [`Tables::species`] is consulted before [`Tables::prop`] because a name
+/// in both would be a monster first; no name is, today.
+fn required_height(tables: &Tables, kind: &str) -> i32 {
+    if let Some(dims) = tables.species(kind) {
+        return dims.height;
+    }
+    if let Some(dims) = tables.prop(kind) {
+        return dims.height;
+    }
+    tables.player().height
+}
+
+/// Places one island's cargo, proving each thing fits where it stands.
+///
+/// The body [`place_pedestal_things`] and [`place_reveal_things`] share.
+/// Each caller resolves [`Island::clearance_sector`],
+/// [`Island::ignore_sector`] and [`Island::headroom`] for its own shape —
+/// the two islands genuinely disagree about what a thing standing on them
+/// has to clear, and those three fields are where that disagreement lives.
+///
+/// Containment needs no check here:
+/// [`Ir::from_json`](crate::ir::Ir::from_json) already required every one of
+/// these to sit strictly inside its island's rectangle. `starts` arrives
+/// already carrying every room start, since the room loop runs first, and a
+/// start placed here joins it — raised height and sealed rock are no
+/// exemption from telefragging, and two starts at one point spawn one player
+/// inside the other whatever they are standing in.
+///
+/// # Errors
+/// Returns [`CompileError::UnknownThing`] for an unresolvable name,
+/// [`CompileError::ThingTooClose`] when the thing stands closer than its own
+/// radius to whatever it is measured against,
+/// [`CompileError::StartOnReveal`] for a
+/// start in a reveal, [`CompileError::PlayerStartOnPedestal`] for the player
+/// 1 start on a pedestal, [`CompileError::UnboundedRoom`] when there is no
+/// boundary to measure against, [`CompileError::PedestalNoHeadroom`] (a
+/// pedestal) or [`CompileError::RevealNoHeadroom`] (a reveal, judged
+/// against its cell at rest — ruling R28) when the gap leaves the thing
+/// less than the height [`required_height`] gives it, and
+/// [`CompileError::OverlappingStarts`] for a start sharing a point with one
+/// already placed.
+///
+/// [`CompileError::UnboundedRoom`] is raised when the clearance sector has no
+/// bordering linedef at all. That cannot happen for a pedestal — an island's
+/// four edges are cut together — but a reveal measures its **host room**,
+/// and a room a later pass stripped of walls has nothing to measure, exactly
+/// as in [`place_things`]'s own room loop.
+fn place_island_things(
+    tables: &Tables,
+    data: &MapData,
+    island: &Island<'_>,
+    starts: &mut Vec<(i32, i32)>,
+) -> Result<Vec<ThingOut>, CompileError> {
+    let mut out = Vec::new();
+    for thing in island.things {
+        let id = tables
+            .thing_id(&thing.kind)
+            .ok_or_else(|| CompileError::UnknownThing {
+                room: island.room.to_owned(),
+                kind: thing.kind.clone(),
+            })?;
+
+        // A start the island cannot host is refused before either fit
+        // check, for the reason `check_not_on_an_island` runs before
+        // clearance: the point is categorically wrong, and reporting a radius
+        // or a height would name a symptom the author would then "fix"
+        // without discovering that no start belongs here at all.
+        //
+        // The two islands refuse different sets. A reveal refuses *every*
+        // start: its cell is sealed at rest. A pedestal refuses only the
+        // player 1 start, and not because the spot is unstandable — it is —
+        // but because `reach::graph_from_compiled` looks for that one start
+        // among the rooms' things to begin rule P7's flood, so a player 1
+        // start on a platform would skip reachability for the whole map.
+        // Coop starts on a pedestal stay legal; P7 never looks for them.
+        if thing.kind.ends_with("_start") {
+            match island.shape {
+                IslandShape::Reveal => {
+                    return Err(CompileError::StartOnReveal {
+                        reveal: island.id.to_owned(),
+                    });
+                }
+                IslandShape::Pedestal if thing.kind == "player1_start" => {
+                    return Err(CompileError::PlayerStartOnPedestal {
+                        pedestal: island.id.to_owned(),
+                    });
+                }
+                IslandShape::Pedestal => {}
+            }
+        }
+
+        // The player's dimensions are the floor for anything not listed as a
+        // monster species, exactly as in `place_things`.
+        let dims: ThingDims = tables
+            .species(&thing.kind)
+            .unwrap_or_else(|| tables.player());
+
+        // An error rather than a panic: `clearance_sector` is a *room* for a
+        // reveal, and a room whose walls a later pass removed has no
+        // boundary to measure — the same case `place_things`'s own room loop
+        // reports, and reported the same way. (An island's four edges cannot
+        // vanish, so the pedestal path can never reach this.)
+        let have = clearance_ignoring(
+            data,
+            island.clearance_sector,
+            island.ignore_sector,
+            thing.at,
+        )
+        .ok_or_else(|| CompileError::UnboundedRoom {
+            room: island.room.to_owned(),
+        })?;
+        if have < f64::from(dims.radius) {
+            return Err(CompileError::ThingTooClose {
+                room: island.room.to_owned(),
+                kind: thing.kind.clone(),
+                x: thing.at.x,
+                y: thing.at.y,
+                have,
+                need: dims.radius,
+            });
+        }
+
+        let need = required_height(tables, &thing.kind);
+        if island.headroom < need {
+            return Err(island.no_headroom(&thing.kind, need));
+        }
+
+        if thing.kind.ends_with("_start") {
+            if starts.contains(&(thing.at.x, thing.at.y)) {
+                return Err(CompileError::OverlappingStarts {
+                    x: thing.at.x,
+                    y: thing.at.y,
+                });
+            }
+            starts.push((thing.at.x, thing.at.y));
+        }
+
+        out.push(ThingOut {
+            x: thing.at.x,
+            y: thing.at.y,
+            angle: thing.angle,
+            kind: id,
+            skills: thing.skills,
+            ambush: thing.ambush,
+        });
+    }
     Ok(out)
 }
 
 /// Places every thing standing on a pedestal, proving it fits up there.
 ///
 /// A pedestal's things sit on the platform, not on the host room's floor, so
-/// both measurements move with it. Clearance is taken against the platform's
-/// own four edges — `lifts` names the sector `emit_lifts` cut — because
-/// stepping off an island is a fall the author did not ask for; headroom is
+/// both measurements move with it: clearance against the platform's own four
+/// edges — `lifts` names the sector `emit_lifts` cut — and headroom against
 /// what the rise left under the host's ceiling, which the platform keeps.
-///
-/// Containment needs no check here:
-/// [`Ir::from_json`](crate::ir::Ir::from_json) already required every one of
-/// these to sit strictly inside its pedestal's rectangle. A `_start` is
-/// legal on a pedestal — beginning the level on one is a fine thing to
-/// author — but it joins `starts`, the coincident-start ledger `place_things`
-/// keeps for room things, so two starts at one point are refused wherever
-/// they were authored. `starts` arrives already carrying every room start,
-/// since the room loop runs first.
+/// The rest is [`place_island_things`], shared with the reveal.
 ///
 /// # Errors
-/// Returns [`CompileError::UnknownThing`] for an unresolvable name,
-/// [`CompileError::ThingTooClose`] when the thing stands closer to the
-/// pedestal's edge than its own radius,
-/// [`CompileError::PedestalNoHeadroom`] when the risen floor leaves it less
-/// than its own height — `emit_lifts` already held that gap to the
-/// *player's* height, so only a thing taller than the player can fail that
-/// one — and [`CompileError::OverlappingStarts`] for a start sharing a point
-/// with one already placed.
+/// Returns whatever [`place_island_things`] raises; the headroom failure is
+/// [`CompileError::PedestalNoHeadroom`], and `emit_lifts` already held that
+/// gap to the *player's* height, so only a thing taller than the player can
+/// reach it.
 ///
 /// # Panics
 /// Panics if a pedestal has no emitted platform, or names a room that does
 /// not exist — [`crate::compile::lifts::emit_lifts`] emits one platform per
 /// pedestal and [`Ir::from_json`](crate::ir::Ir::from_json) resolves every
-/// `room` before either runs — or if a pedestal's sector has no bordering
-/// linedef, impossible for a square cut as four two-sided edges.
+/// `room` before either runs.
 fn place_pedestal_things(
     ir: &Ir,
     tables: &Tables,
@@ -288,65 +569,120 @@ fn place_pedestal_things(
             .find(|l| l.pedestal == Some(pi))
             .expect("emit_lifts emits one platform per pedestal");
         let host = ir.room(&pedestal.room).expect("validated by Ir::from_json");
-        let headroom = host.ceiling - (host.floor + pedestal.rise);
-        for thing in &pedestal.things {
-            let id = tables
-                .thing_id(&thing.kind)
-                .ok_or_else(|| CompileError::UnknownThing {
-                    room: pedestal.room.clone(),
-                    kind: thing.kind.clone(),
-                })?;
+        out.extend(place_island_things(
+            tables,
+            data,
+            &Island {
+                shape: IslandShape::Pedestal,
+                id: &pedestal.id,
+                room: &pedestal.room,
+                things: &pedestal.things,
+                clearance_sector: lift.sector,
+                ignore_sector: None,
+                headroom: host.ceiling - (host.floor + pedestal.rise),
+            },
+            starts,
+        )?);
+    }
+    Ok(out)
+}
 
-            // The player's dimensions are the floor for anything not listed
-            // as a monster species, exactly as in `place_things`.
-            let dims: ThingDims = tables
-                .species(&thing.kind)
-                .unwrap_or_else(|| tables.player());
-
-            let have = emitted_clearance(data, lift.sector, thing.at)
-                .expect("a pedestal is cut as four two-sided edges");
-            if have < f64::from(dims.radius) {
-                return Err(CompileError::ThingTooClose {
-                    room: pedestal.room.clone(),
-                    kind: thing.kind.clone(),
-                    x: thing.at.x,
-                    y: thing.at.y,
-                    have,
-                    need: dims.radius,
-                });
-            }
-
-            if headroom < dims.height {
-                return Err(CompileError::PedestalNoHeadroom {
-                    pedestal: pedestal.id.clone(),
-                    kind: thing.kind.clone(),
-                    have: headroom,
-                    need: dims.height,
-                });
-            }
-
-            // Raised height is no exemption from telefragging: two starts at
-            // one point spawn one player inside the other whatever they are
-            // standing on.
-            if thing.kind.ends_with("_start") {
-                if starts.contains(&(thing.at.x, thing.at.y)) {
-                    return Err(CompileError::OverlappingStarts {
-                        x: thing.at.x,
-                        y: thing.at.y,
-                    });
-                }
-                starts.push((thing.at.x, thing.at.y));
-            }
-
-            out.push(ThingOut {
-                x: thing.at.x,
-                y: thing.at.y,
-                angle: thing.angle,
-                kind: id,
-                skills: thing.skills,
-                ambush: thing.ambush,
-            });
-        }
+/// Places every thing sealed inside a reveal, proving it fits in the cell
+/// the trigger will open.
+///
+/// **Both measurements are the host's, not the cell's**, because the cell is
+/// not where the player will meet what is in it. A reveal lowers flush with
+/// its host and stops; from then on its four edges are two-sided lines with
+/// equal floors and equal ceilings on both sides, which the player walks
+/// straight over. So clearance is
+/// [`clearance_ignoring`] over the **host room's** boundary with the cell's
+/// own edges discounted — the host's walls are what can still crush someone
+/// collecting the item, and holding a thing to the cell's edges instead
+/// would refuse the corpus's commonest reveal, the 16x16 sunken pedestal
+/// whose center is 8 units from every side. Containment is already the IR's:
+/// [`Ir::from_json`](crate::ir::Ir::from_json) required the point strictly
+/// inside the rectangle.
+///
+/// Headroom is measured against the cell **at rest** — its own load-time
+/// floor to the host's ceiling — for every kind of reveal. So a closet, whose
+/// floor at rest *is* its ceiling, holds nothing at all, and a pedestal
+/// reveal holds whatever fits under the host's ceiling above its risen floor
+/// (`host.ceiling - (host.floor + rise)`, the same gap a `pedestals[]`
+/// pedestal offers).
+///
+/// **This reverses the reading Task 5 shipped**, which measured the
+/// *lowered* cell on the grounds that "an imp lives in rock until the floor
+/// drops". `P_SpawnMapThing` (`p_mobj.c:708-784`) does spawn it there — it
+/// passes `z = ONFLOORZ` (`p_mobj.c:782`) to `P_SpawnMobj`, which reads the
+/// subsector's own `floorheight` and puts the thing on it (`p_mobj.c:519-523`)
+/// without ever testing the fit — but the floor then never drops. At the
+/// pinned commit `a77dfb96cb91780ca334d0d4cfd86957558007e0`,
+/// `T_MovePlane`'s floor-down branch (`p_floor.c:83-91`) lowers by `speed`,
+/// calls `P_ChangeSector`, and on a true return puts the floor back and
+/// returns `crushed`; `P_ChangeSector` (`p_map.c:1321`) returns `nofit`
+/// (`p_map.c:1337`), set by `PIT_ChangeSector` (`p_map.c:1296`) for any
+/// shootable thing `P_ThingHeightClip` (`p_map.c:530`) rejects on
+/// `ceilingz - floorz < height`; and `T_MoveFloor` (`p_floor.c:209`) drops
+/// the thinker only on `pastdest`, so a blocked floor retries every tic and
+/// never opens. With `FLOORSPEED` at `FRACUNIT` (`p_spec.h:600`) a sealed
+/// cell's first step leaves one unit of gap, which fits nothing.
+///
+/// The corpus reading behind the old rule is not wrong about the corpus —
+/// 40 % of reveals do hold a thing
+/// (`docs/measurements/floor-shapes-2026-09-02.md` §D) — but those are cells
+/// with real headroom at rest, not cells whose floor sits on their ceiling.
+///
+/// A `_start` is the exception the shared body refuses
+/// ([`CompileError::StartOnReveal`]): a level cannot begin in a sealed cell.
+///
+/// # Errors
+/// Returns whatever [`place_island_things`] raises; the headroom failure is
+/// [`CompileError::RevealNoHeadroom`] naming the reveal, since the gap is the
+/// cell's own and the cell is what would have to change, and
+/// [`CompileError::UnboundedRoom`] is reachable here (and only here) because
+/// the boundary measured is a room's rather than an island's.
+///
+/// # Panics
+/// Panics if a reveal has no emitted floor action, or names a room that does
+/// not exist — [`crate::compile::floors::emit_floors`] emits one action per
+/// reveal and [`Ir::from_json`](crate::ir::Ir::from_json) resolves every
+/// `room` before either runs.
+fn place_reveal_things(
+    ir: &Ir,
+    tables: &Tables,
+    data: &MapData,
+    floors: &[FloorActionOut],
+    starts: &mut Vec<(i32, i32)>,
+) -> Result<Vec<ThingOut>, CompileError> {
+    let mut out = Vec::new();
+    for (ri, reveal) in ir.reveals.iter().enumerate() {
+        let action = floors
+            .iter()
+            .find(|f| f.reveal == Some(ri))
+            .expect("emit_floors emits one action per reveal");
+        // `emit_sectors` pushes one sector per room in `ir.rooms` order, so
+        // the host room's index is its sector index — the same identity
+        // `place_things`'s own room loop relies on.
+        let host_idx = ir
+            .rooms
+            .iter()
+            .position(|r| r.id == reveal.room)
+            .expect("validated by Ir::from_json");
+        let host = &ir.rooms[host_idx];
+        out.extend(place_island_things(
+            tables,
+            data,
+            &Island {
+                shape: IslandShape::Reveal,
+                id: &reveal.id,
+                room: &reveal.room,
+                things: &reveal.things,
+                clearance_sector: host_idx,
+                ignore_sector: Some(action.sector),
+                headroom: host.ceiling - action.rest,
+            },
+            starts,
+        )?);
     }
     Ok(out)
 }
@@ -428,6 +764,7 @@ mod tests {
     use crate::compile::CompileError;
     use crate::compile::MapData;
     use crate::compile::doors::emit_doors;
+    use crate::compile::floors::{FloorActionOut, FloorShape};
     use crate::compile::portals::cut_portals;
     use crate::compile::sectors::emit_sectors;
     use crate::compile::tags::TagAllocator;
@@ -435,7 +772,7 @@ mod tests {
     use crate::compile::{compile, compile_reporting};
     use crate::geom::{Pt, clearance};
     use crate::ir::Ir;
-    use crate::tables::Tables;
+    use crate::tables::{FloorFamily, Tables};
 
     /// Runs the full geometry pipeline (sectors -> portals -> doors) so
     /// tests exercise `place_things` against real emitted geometry, matching
@@ -465,7 +802,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data, &[], &[]).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[], &[], &[]).expect("placed");
         assert_eq!(things.len(), 1);
         assert_eq!(things[0].kind, 1, "player 1 start");
         assert_eq!(things[0].x, 128);
@@ -477,7 +814,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data, &[], &[]),
+            place_things(&ir, &tables, &data, &[], &[], &[]),
             Err(CompileError::ThingOutsideRoom { .. })
         ));
     }
@@ -490,14 +827,14 @@ mod tests {
         let ok = Ir::from_json(&ir_with_thing("player1_start", (r, 128), 128)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[], &[]).is_ok(),
             "at the radius it fits"
         );
         // One unit closer: it does not.
         let bad = Ir::from_json(&ir_with_thing("player1_start", (r - 1, 128), 128)).expect("ir");
         let data_bad = compiled_data(&bad, &tables);
         assert!(matches!(
-            place_things(&bad, &tables, &data_bad, &[], &[]),
+            place_things(&bad, &tables, &data_bad, &[], &[], &[]),
             Err(CompileError::ThingTooClose { .. })
         ));
     }
@@ -541,7 +878,7 @@ mod tests {
         let data = compiled_data(&ir, &tables);
         assert!(
             matches!(
-                place_things(&ir, &tables, &data, &[], &[]),
+                place_things(&ir, &tables, &data, &[], &[], &[]),
                 Err(CompileError::ThingTooClose { .. })
             ),
             "a point 8*sqrt(2) ~ 11.3 units from the diagonal chamfer must be rejected \
@@ -562,7 +899,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing_near_octagon_chamfer(12)).expect("ir");
         let data = compiled_data(&ir, &tables);
         assert!(
-            place_things(&ir, &tables, &data, &[], &[]).is_ok(),
+            place_things(&ir, &tables, &data, &[], &[], &[]).is_ok(),
             "a point 12*sqrt(2) ~ 17.0 units from the diagonal chamfer must fit against a \
              16-unit radius"
         );
@@ -575,15 +912,61 @@ mod tests {
         let ok = Ir::from_json(&ir_with_thing("player1_start", (128, 128), h)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[], &[]).is_ok(),
             "at exactly its height it fits"
         );
         let bad = Ir::from_json(&ir_with_thing("player1_start", (128, 128), h - 1)).expect("ir");
         let data_bad = compiled_data(&bad, &tables);
         assert!(matches!(
-            place_things(&bad, &tables, &data_bad, &[], &[]),
+            place_things(&bad, &tables, &data_bad, &[], &[], &[]),
             Err(CompileError::NoHeadroom { .. })
         ));
+    }
+
+    /// Ruling R29: a room's own things take their height from the same
+    /// three accessors island cargo does — species, then **prop**, then the
+    /// player — which is what the layer-4 verifier's V-P2 reads.
+    ///
+    /// Before this the room loop resolved species-or-player, so a
+    /// `hang_no_guts` (88 units, `data/engine.toml`'s `[props.hang_no_guts]`)
+    /// took the player's 56 and slid through a 64-tall room that
+    /// `crustygen-check` then Errored on. The prop's own height is now the
+    /// requirement, and the short prop in the same room proves the change is
+    /// the *height source* rather than a blanket tightening.
+    #[test]
+    fn a_room_things_headroom_comes_from_the_prop_table_not_the_player() {
+        let tables = Tables::load().expect("tables");
+        assert_eq!(
+            tables.prop("hang_no_guts").expect("hang_no_guts").height,
+            88,
+            "the fixture's 64-tall room assumes this height"
+        );
+        assert_eq!(
+            tables
+                .prop("short_green_column")
+                .expect("short_green_column")
+                .height,
+            16
+        );
+
+        let tall = Ir::from_json(&ir_with_thing("hang_no_guts", (128, 128), 64)).expect("ir");
+        let data = compiled_data(&tall, &tables);
+        assert!(
+            matches!(
+                place_things(&tall, &tables, &data, &[], &[], &[]),
+                Err(CompileError::NoHeadroom { ref room, ref kind, have: 64, need: 88 })
+                    if room == "a" && kind == "hang_no_guts"
+            ),
+            "a prop taller than the room is refused at its own height, not the player's"
+        );
+
+        let short =
+            Ir::from_json(&ir_with_thing("short_green_column", (128, 128), 64)).expect("ir");
+        let data = compiled_data(&short, &tables);
+        assert!(
+            place_things(&short, &tables, &data, &[], &[], &[]).is_ok(),
+            "a 16-unit prop fits the same 64-tall room"
+        );
     }
 
     #[test]
@@ -592,7 +975,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data, &[], &[]),
+            place_things(&ir, &tables, &data, &[], &[], &[]),
             Err(CompileError::UnknownThing { .. })
         ));
     }
@@ -612,7 +995,7 @@ mod tests {
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
         assert!(matches!(
-            place_things(&ir, &tables, &data, &[], &[]),
+            place_things(&ir, &tables, &data, &[], &[], &[]),
             Err(CompileError::OverlappingStarts { .. })
         ));
     }
@@ -628,7 +1011,7 @@ mod tests {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         assert!(matches!(
-            place_things(&ir, &tables, &MapData::default(), &[], &[]),
+            place_things(&ir, &tables, &MapData::default(), &[], &[], &[]),
             Err(CompileError::UnboundedRoom { .. })
         ));
     }
@@ -667,7 +1050,7 @@ mod tests {
         let ok = Ir::from_json(&ir_json(wall + r)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[], &[]).is_ok(),
             "exactly the radius from room b's own wall fits"
         );
 
@@ -675,7 +1058,7 @@ mod tests {
         let data_bad = compiled_data(&bad, &tables);
         assert!(
             matches!(
-                place_things(&bad, &tables, &data_bad, &[], &[]),
+                place_things(&bad, &tables, &data_bad, &[], &[], &[]),
                 Err(CompileError::ThingTooClose { .. })
             ),
             "one unit closer than the radius does not fit"
@@ -727,7 +1110,7 @@ mod tests {
         let ok = Ir::from_json(&empty_corridor_json(h)).expect("ir");
         let data_ok = compiled_data(&ok, &tables);
         assert!(
-            place_things(&ok, &tables, &data_ok, &[], &[]).is_ok(),
+            place_things(&ok, &tables, &data_ok, &[], &[], &[]).is_ok(),
             "at exactly the player's height, an empty room is fine"
         );
 
@@ -735,7 +1118,7 @@ mod tests {
         let data_bad = compiled_data(&bad, &tables);
         assert!(
             matches!(
-                place_things(&bad, &tables, &data_bad, &[], &[]),
+                place_things(&bad, &tables, &data_bad, &[], &[], &[]),
                 Err(CompileError::NoHeadroom { .. })
             ),
             "an empty room one unit too short must still be rejected"
@@ -1049,12 +1432,366 @@ mod tests {
         ));
     }
 
+    /// `PEDESTAL`'s room with a 128x128 closet in it instead, holding an imp
+    /// at the cell's center, lowered by a switch on the room's west wall.
+    ///
+    /// As authored it is a **refusal** fixture, not an accept one: ruling
+    /// R28 holds a reveal's cargo against the cell at rest, and a closet's
+    /// floor at rest is its ceiling. The cases below turn it into a pedestal
+    /// reveal, or empty it, when they need one that compiles.
+    ///
+    /// The cell sits well clear of the room's walls, so the host-boundary
+    /// clearance every case below shares is never the thing under test; the
+    /// wall-hugging refusal lives in `floors.rs` beside the emitter.
+    const REVEAL: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[448,448], "angle":0 } ] }
+      ],
+      "portals":[],
+      "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[0,256] } ],
+      "reveals":[ { "id":"pen", "room":"a", "at":[128,128], "size":[128,128], "kind":"closet",
+                    "things":[ { "kind":"imp", "at":[192,192], "angle":0 } ], "trigger":"t" } ],
+      "exits":[ { "room":"a", "trigger":"switch", "at":[512,64], "width":64 } ] }"#;
+
+    /// Ruling R28: a closet holds **nothing**, because at rest its floor is
+    /// its ceiling and the engine will not lower a floor a thing does not
+    /// fit in — `T_MovePlane`'s floor-down branch restores the floor and
+    /// returns `crushed`, and `T_MoveFloor` keeps the thinker running, so
+    /// the cell retries forever and never opens. The pinned line ranges are
+    /// on [`CompileError::RevealNoHeadroom`].
+    ///
+    /// Both halves matter. The imp is what the engine itself blocks on
+    /// (`MF_SHOOTABLE`). The medikit is **not** — `PIT_ChangeSector` waves
+    /// a non-shootable thing through — and is refused anyway, because the
+    /// layer-4 verifier's V-P2 judges every thing against its sector's
+    /// static heights and would call the emitted map broken. The compiler
+    /// agreeing with its own checker is the reason, and the error's doc
+    /// says so.
+    #[test]
+    fn a_closet_holds_nothing_because_a_blocked_floor_never_lowers() {
+        let tables = Tables::load().expect("tables");
+
+        // The shootable case: the engine's own refusal.
+        assert!(
+            matches!(
+                compile_reporting(&Ir::from_json(REVEAL).expect("ir"), &tables),
+                Err(CompileError::RevealNoHeadroom {
+                    ref reveal,
+                    ref kind,
+                    have: 0,
+                    need: 56
+                }) if reveal == "pen" && kind == "imp"
+            ),
+            "expected RevealNoHeadroom naming the reveal and a zero-tall cell"
+        );
+
+        // The non-shootable case: engine-legal, refused for agreement with
+        // V-P2. A medikit is in no species and no prop table, so the
+        // player's 56 is the height it is held to.
+        let item = REVEAL.replacen(r#""kind":"imp""#, r#""kind":"medikit""#, 1);
+        assert!(
+            matches!(
+                compile_reporting(&Ir::from_json(&item).expect("ir"), &tables),
+                Err(CompileError::RevealNoHeadroom {
+                    ref reveal,
+                    ref kind,
+                    have: 0,
+                    need: 56
+                }) if reveal == "pen" && kind == "medikit"
+            ),
+            "an item in a sealed closet is refused too, for consistency with V-P2"
+        );
+
+        // Emptied, the same closet compiles: the shape is not what is
+        // refused, only cargo inside it.
+        let empty = REVEAL.replacen(
+            r#""things":[ { "kind":"imp", "at":[192,192], "angle":0 } ], "#,
+            "",
+            1,
+        );
+        assert_ne!(empty, REVEAL, "the patch changed nothing");
+        compile(&Ir::from_json(&empty).expect("ir"), &tables)
+            .expect("an empty closet is a clean map");
+    }
+
+    /// The prop arm of [`required_height`], on island cargo: widening the
+    /// height source to the prop table does **not** only tighten — for a
+    /// prop shorter than the player it *loosens* the check, and that is the
+    /// point. A `short_green_column` is 16 units
+    /// (`data/engine.toml`'s `[props.short_green_column]`), so it fits a
+    /// 40-unit gap that the player's 56 would have refused; a
+    /// `hang_no_guts` is 88 and does not. Both readings are the ones the
+    /// layer-4 verifier's V-P2 takes, which is the agreement ruling R28
+    /// asked for.
+    ///
+    /// The gap is `REVEAL`'s 256-tall room under a 216 rise: 40 units.
+    #[test]
+    fn island_cargo_takes_a_props_own_height_which_can_admit_what_the_player_could_not() {
+        let tables = Tables::load().expect("tables");
+        let tight = |kind: &str| {
+            REVEAL
+                .replacen(
+                    r#""size":[128,128], "kind":"closet""#,
+                    r#""size":[128,128], "kind":"pedestal", "rise":216"#,
+                    1,
+                )
+                .replacen(r#""kind":"imp""#, &format!(r#""kind":"{kind}""#), 1)
+        };
+        assert!(
+            tables.player().height > 40,
+            "the player must NOT fit the 40-unit gap, or the short prop proves nothing"
+        );
+
+        let short = tight("short_green_column");
+        let out = compile(&Ir::from_json(&short).expect("ir"), &tables)
+            .expect("a 16-unit column fits a 40-unit gap the player would not");
+        let column = tables
+            .thing_id("short_green_column")
+            .expect("short_green_column");
+        assert!(
+            out.things.iter().any(|t| t.kind == column),
+            "the column is placed on the pedestal reveal"
+        );
+
+        let tall = tight("hang_no_guts");
+        assert!(
+            matches!(
+                compile_reporting(&Ir::from_json(&tall).expect("ir"), &tables),
+                Err(CompileError::RevealNoHeadroom {
+                    ref reveal,
+                    ref kind,
+                    have: 40,
+                    need: 88
+                }) if reveal == "pen" && kind == "hang_no_guts"
+            ),
+            "an 88-unit prop is refused at its own height"
+        );
+    }
+
+    /// The other half of R28: a **pedestal** reveal holds whatever fits
+    /// between its risen floor and the host's ceiling — the same gap a
+    /// `pedestals[]` pedestal offers — and its cargo is still placed at the
+    /// point it was authored at, inside the cell rather than on the room
+    /// floor.
+    #[test]
+    fn a_pedestal_reveal_holds_what_fits_above_its_risen_floor() {
+        let tables = Tables::load().expect("tables");
+        let imp = tables.thing_id("imp").expect("imp");
+
+        // Room `a` is 256 tall and the rise is 64, so the cell offers 192 at
+        // rest — room for the imp's 56 several times over.
+        let fits = REVEAL.replacen(
+            r#""size":[128,128], "kind":"closet""#,
+            r#""size":[128,128], "kind":"pedestal", "rise":64"#,
+            1,
+        );
+        let out = compile(&Ir::from_json(&fits).expect("ir"), &tables)
+            .expect("192 units of rest headroom admits an imp");
+        let placed = out
+            .things
+            .iter()
+            .find(|t| t.kind == imp)
+            .expect("the reveal's own thing is placed");
+        assert_eq!(
+            (placed.x, placed.y),
+            (192, 192),
+            "at its authored point inside the cell, not on the room floor"
+        );
+
+        // A rise of 216 leaves 40, under the imp's 56. Not the closet's zero:
+        // this is the general rule biting, not the sealed-cell corner.
+        let tight = REVEAL.replacen(
+            r#""size":[128,128], "kind":"closet""#,
+            r#""size":[128,128], "kind":"pedestal", "rise":216"#,
+            1,
+        );
+        assert!(
+            matches!(
+                compile_reporting(&Ir::from_json(&tight).expect("ir"), &tables),
+                Err(CompileError::RevealNoHeadroom {
+                    ref reveal,
+                    ref kind,
+                    have: 40,
+                    need: 56
+                }) if reveal == "pen" && kind == "imp"
+            ),
+            "expected RevealNoHeadroom measured against the risen floor"
+        );
+    }
+
+    /// A 16x16 pedestal reveal — the corpus's sunken pedestal, retail DOOM's
+    /// modal reveal (`docs/measurements/floor-shapes-2026-09-02.md` §D) — is
+    /// a pillar in the floor that drops to hand over the item standing on
+    /// it. Its center is 8 units from every one of its own edges, so holding
+    /// its cargo to those edges would refuse the whole shape; measured
+    /// against the host, the item has a quarter of the room in every
+    /// direction. This is the case ruling R12 exists for.
+    #[test]
+    fn a_sixteen_unit_sunken_pedestal_holding_a_pickup_compiles() {
+        let tables = Tables::load().expect("tables");
+        let json = REVEAL
+            .replacen(
+                r#""size":[128,128], "kind":"closet""#,
+                r#""size":[16,16], "kind":"pedestal", "rise":64"#,
+                1,
+            )
+            .replacen(
+                r#"{ "kind":"imp", "at":[192,192], "angle":0 }"#,
+                r#"{ "kind":"soulsphere", "at":[136,136], "angle":0 }"#,
+                1,
+            );
+        let out = compile(&Ir::from_json(&json).expect("ir"), &tables)
+            .expect("a 16x16 sunken pedestal is the corpus's commonest reveal");
+        let soulsphere = tables.thing_id("soulsphere").expect("soulsphere");
+        assert!(
+            out.things
+                .iter()
+                .any(|t| t.kind == soulsphere && (t.x, t.y) == (136, 136)),
+            "the prize is emitted at the pillar's center"
+        );
+    }
+
+    #[test]
+    fn an_unknown_vocabulary_name_in_a_reveal_is_rejected() {
+        let tables = Tables::load().expect("tables");
+        let unknown = REVEAL.replacen(r#""kind":"imp""#, r#""kind":"no_such_thing""#, 1);
+        let err = compile(&Ir::from_json(&unknown).expect("ir"), &tables)
+            .expect_err("an unresolvable reveal thing is refused");
+        assert!(
+            matches!(
+                &err,
+                CompileError::UnknownThing { room, kind }
+                    if room == "a" && kind == "no_such_thing"
+            ),
+            "expected UnknownThing naming the reveal's host room and the bad kind, got {err}"
+        );
+    }
+
+    /// The reveal path is the only one that measures a **room's** boundary
+    /// rather than an island's, so it is the only one that can meet a sector
+    /// with no boundary at all — the case `place_things`'s own room loop
+    /// reports as [`CompileError::UnboundedRoom`], built here exactly as
+    /// `a_room_with_no_emitted_geometry_is_rejected_rather_than_passing`
+    /// builds it: by handing the pass an empty [`MapData`]. The room carries
+    /// no things of its own, so the room loop places nothing and the reveal
+    /// pass is reached; the floor action is built by hand because
+    /// `emit_floors` would need geometry this test is deliberately denying
+    /// it.
+    #[test]
+    fn a_reveal_in_a_room_with_no_emitted_geometry_is_rejected_rather_than_panicking() {
+        let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+          "rooms":[
+            { "id":"a", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+              "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+          ],
+          "portals":[],
+          "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[0,256] } ],
+          "reveals":[ { "id":"pen", "room":"a", "at":[128,128], "kind":"closet",
+                        "things":[ { "kind":"imp", "at":[160,160], "angle":0 } ], "trigger":"t" } ] }"#;
+        let ir = Ir::from_json(json).expect("ir");
+        let tables = Tables::load().expect("tables");
+        let action = FloorActionOut {
+            sector: 1,
+            family: FloorFamily::LowerToLowest,
+            rest: 256,
+            dest: 0,
+            tag: 1,
+            trigger: 0,
+            shape: FloorShape::Closet,
+            portal: None,
+            reveal: Some(0),
+            lines: Vec::new(),
+        };
+        let err = place_things(&ir, &tables, &MapData::default(), &[], &[], &[action])
+            .expect_err("a room with no walls cannot be measured");
+        assert!(
+            matches!(&err, CompileError::UnboundedRoom { room } if room == "a"),
+            "expected UnboundedRoom naming the reveal's host room, got {err}"
+        );
+    }
+
+    #[test]
+    fn a_start_inside_a_reveal_is_refused() {
+        // A *coop* start on a pedestal is legal (`TWO_PEDESTALS` above), so
+        // this is the one placement rule the two islands do not share: a
+        // reveal is sealed at rest, and the level cannot begin inside it. The
+        // player 1 start is refused on either island, for the separate reason
+        // `the_player_one_start_may_not_be_a_pedestals_cargo` gives.
+        let tables = Tables::load().expect("tables");
+        let start = REVEAL.replacen(r#""kind":"imp""#, r#""kind":"player2_start""#, 1);
+        let err = compile(&Ir::from_json(&start).expect("ir"), &tables)
+            .expect_err("a start sealed in rock cannot begin the level");
+        assert!(
+            matches!(&err, CompileError::StartOnReveal { reveal } if reveal == "pen"),
+            "expected StartOnReveal naming the reveal, got {err}"
+        );
+
+        // And it is refused *categorically*, ahead of the fit checks: this
+        // cell hugs the room's west wall and the start sits 12 units from
+        // it, under the player's own 16-unit radius, so `ThingTooClose`
+        // would also fire. Reporting the radius would send the author to
+        // nudge a start that does not belong here at all — the same reason
+        // `check_not_on_an_island` runs before clearance.
+        let cramped = start
+            .replacen(
+                r#""at":[128,128], "size":[128,128]"#,
+                r#""at":[8,8], "size":[128,128]"#,
+                1,
+            )
+            .replacen(r#""at":[192,192]"#, r#""at":[12,40]"#, 1);
+        let err = compile(&Ir::from_json(&cramped).expect("ir"), &tables)
+            .expect_err("a start sealed in rock is refused whatever else is wrong with it");
+        assert!(
+            matches!(&err, CompileError::StartOnReveal { reveal } if reveal == "pen"),
+            "the shape refusal must outrank the clearance one, got {err}"
+        );
+    }
+
+    /// The player 1 start is the one start a pedestal may not carry, and the
+    /// reason is not the spot — it is that the spot is invisible to rule P7.
+    /// `reach::graph_from_compiled` finds the start among the *rooms'* things;
+    /// with the only player 1 start on a platform it finds none, returns
+    /// `None`, and the flood never runs. Before this refusal, the map below
+    /// — whose door's key sits behind that same door — compiled clean at exit
+    /// 0 while `crustygen-check` reported five blocking findings on the WAD it
+    /// wrote (`V-P7` ×4 and `V-P20`), because the verifier locates the start
+    /// geometrically. The compiler refuses what its own analysis cannot see.
+    #[test]
+    fn the_player_one_start_may_not_be_a_pedestals_cargo() {
+        let tables = Tables::load().expect("tables");
+        // `TWO_PEDESTALS`, with the room's own player 1 start swapped for a
+        // shotgun and pedestal `p`'s coop start promoted to player 1: the
+        // map's only player 1 start is now island cargo.
+        let promoted = TWO_PEDESTALS
+            .replacen(
+                r#""kind":"player1_start", "at":[448,448]"#,
+                r#""kind":"shotgun", "at":[448,448]"#,
+                1,
+            )
+            .replacen(r#""kind":"player2_start""#, r#""kind":"player1_start""#, 1);
+        let err = compile(&Ir::from_json(&promoted).expect("ir"), &tables)
+            .expect_err("a player 1 start on a pedestal hides itself from P7");
+        assert!(
+            matches!(&err, CompileError::PlayerStartOnPedestal { pedestal } if pedestal == "p"),
+            "expected PlayerStartOnPedestal naming the pedestal, got {err}"
+        );
+
+        // The coop half is untouched: `TWO_PEDESTALS` itself still compiles
+        // with its player 2 and player 3 starts on pedestals, which
+        // `starts_placed_on_pedestals_join_the_coincident_start_check`
+        // depends on and P7 never looks for.
+        compile(&Ir::from_json(TWO_PEDESTALS).expect("ir"), &tables)
+            .expect("coop starts on pedestals stay legal");
+    }
+
     #[test]
     fn a_thing_with_no_skills_specified_emits_all_five_true() {
         let ir = Ir::from_json(&ir_with_thing("player1_start", (128, 128), 128)).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data, &[], &[]).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[], &[], &[]).expect("placed");
         let skills = things[0].skills;
         assert!(
             skills.skill1 && skills.skill2 && skills.skill3 && skills.skill4 && skills.skill5,
@@ -1071,7 +1808,7 @@ mod tests {
         let ir = Ir::from_json(&json).expect("ir");
         let tables = Tables::load().expect("tables");
         let data = compiled_data(&ir, &tables);
-        let things = place_things(&ir, &tables, &data, &[], &[]).expect("placed");
+        let things = place_things(&ir, &tables, &data, &[], &[], &[]).expect("placed");
         let skills = things[0].skills;
         assert!(!skills.skill1 && !skills.skill2, "explicitly excluded");
         assert!(

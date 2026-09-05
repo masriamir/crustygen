@@ -17,10 +17,26 @@
 //! locked door opens, so the exit reads reachable. The player who takes that
 //! drop is stranded, holding the key. Reachability of *places* and *items* is
 //! not the property being checked. The property is over **states** —
-//! `(where the player stands, which keys they hold)` — so that "holds the blue
-//! card" and "is stuck in `key_room`" are one state and the search cannot
-//! pretend otherwise. The state space is sectors × 2^keys over a handful of key
-//! classes, so this is a small product-graph BFS, not a solver.
+//! `(where the player stands, which keys they hold, which floor actions have
+//! fired)` — so that "holds the blue card" and "is stuck in `key_room`" are one
+//! state and the search cannot pretend otherwise. The state space is sectors ×
+//! 2^bits over a handful of key classes and floor actions, so this is a small
+//! product-graph BFS, not a solver.
+//!
+//! # Floor actions are bits in the same mask
+//!
+//! A floor action — a drop wall, a revealed closet or pedestal, a bridge —
+//! moves one sector's floor exactly once, and whether it has fired is as much
+//! part of the player's situation as which keys they hold: the wall that seals
+//! the exit is a wall until its switch is pressed, and the pit that strands
+//! them is a pit until its walkover is crossed. So a fired action is one more
+//! bit in the same [`KeyMask`] (bits at or above [`ACTION_BIT_BASE`]), set by
+//! entering a node that fires it ([`Node::fires`] — a switch's room) or by
+//! crossing an edge that does ([`Edge::fires`] — a walkover's line), and read
+//! back by [`Node::effective_floor`], which is the floor every geometric rule
+//! measures. Like keys, these bits only ever accumulate along a walk: the four
+//! specials the compiler writes are the one-shot S1/W1 forms, so an action
+//! that has fired stays fired.
 //!
 //! # The two passability rules
 //!
@@ -84,6 +100,7 @@
 use std::collections::HashSet;
 
 use crate::compile::Compiled;
+use crate::compile::floors::{FloorShape, NamedConstruct, construct_name};
 use crate::ir::Ir;
 use crate::tables::Tables;
 
@@ -91,19 +108,39 @@ use crate::tables::Tables;
 pub type NodeIdx = usize;
 
 /// A key class: a bit position in a [`KeyMask`]. Classes are interned by the
-/// keyed-door special the key satisfies, so the card and skull of a colour
+/// keyed-door special the key satisfies, so the card and skull of a color
 /// share one class — `EV_VerticalDoor` (pinned `p_doors.c:371-403`) accepts
 /// either: `!p->cards[it_bluecard] && !p->cards[it_blueskull]`.
 ///
-/// **Invariant: a class is always below [`KeyMask::BITS`] (8).** Nothing in
-/// the type says so, and a class at or past that width shifts its bit off the
-/// end — a debug panic, but a silent alias onto class 0 in release. Interning
-/// is the one place that can enforce it, and [`graph_from_compiled`] does,
-/// asserting the vocabulary yields at most 8 distinct lock classes.
+/// **Invariant: a class is always below [`ACTION_BIT_BASE`] (8).** Nothing in
+/// the type says so, and a class at or past that base aliases onto a floor
+/// action's bit — a locked door that opens because a wall dropped, with no
+/// test able to see it. Interning is the one place that can enforce it, and
+/// [`graph_from_compiled`] does, asserting the vocabulary yields at most 8
+/// distinct lock classes.
 pub type KeyClass = u8;
 
-/// A set of key classes held, one bit per [`KeyClass`].
-pub type KeyMask = u8;
+/// A set of key classes held and floor actions fired, one bit each: bits
+/// `0..ACTION_BIT_BASE` are key classes ([`KeyClass`]), bits
+/// `ACTION_BIT_BASE..16` are floor actions
+/// ([`crate::ir::Ir::MAX_FLOOR_ACTIONS`] = 8 of them). The two halves are one
+/// word because they are one thing to the search — everything the player has
+/// irreversibly acquired on the way to where they stand.
+pub type KeyMask = u16;
+
+/// The first floor-action bit: bits below it are [`KeyClass`]es, bits from it
+/// up are floor actions.
+pub const ACTION_BIT_BASE: u32 = 8;
+
+// The two halves must fit one mask. Raising either constant without widening
+// `KeyMask` would shift a floor action's bit off the end — a debug panic in
+// `Node::effective_floor`, but in release a silent alias onto key class 0,
+// which is a locked door that opens because a wall dropped. A compile error
+// is the only place that can be caught for certain.
+const _: () = assert!(
+    ACTION_BIT_BASE as usize + Ir::MAX_FLOOR_ACTIONS <= KeyMask::BITS as usize,
+    "the key classes and the floor actions must fit one KeyMask"
+);
 
 /// One sector, reduced to what traversal needs.
 #[derive(Debug, Clone)]
@@ -114,6 +151,55 @@ pub struct Node {
     pub ceiling: i32,
     /// Key classes collectible here. Entering the node collects them all.
     pub keys: KeyMask,
+    /// Floor actions fired by *entering* this node — the room a switch
+    /// trigger stands in. Bits at or above [`ACTION_BIT_BASE`], unioned
+    /// into the mask on entry exactly as [`Node::keys`] is.
+    pub fires: KeyMask,
+    /// This node's own floor action, if it has one: `(bit, destination
+    /// floor)`. Until `bit` is set the node stands at [`Node::floor`];
+    /// afterwards it stands at the destination. See
+    /// [`Node::effective_floor`].
+    ///
+    /// **Invariant: `bit` is below `KeyMask::BITS - ACTION_BIT_BASE` (8).**
+    /// The bit is shifted up by [`ACTION_BIT_BASE`], so one at or past that
+    /// count shifts off the end of the mask — a debug panic in
+    /// [`Node::effective_floor`], but in release `1 << 16` masks to
+    /// `1 << 0` and aliases the action onto key class 0.
+    /// [`graph_from_compiled`] is the enforcement point, capping the action
+    /// list at [`Ir::MAX_FLOOR_ACTIONS`].
+    pub action: Option<(u8, i32)>,
+}
+
+impl Node {
+    /// The floor the player stands on in state `mask`: the destination once
+    /// this node's action has fired, the rest floor before.
+    ///
+    /// Only the floor moves, which is why the crossing window opens up as a
+    /// drop wall comes down rather than sliding with it: `T_MoveFloor`
+    /// (pinned `p_floor.c:208-234`) calls `T_MovePlane` with
+    /// `floorOrCeiling = 0`, and that case writes `sector->floorheight`
+    /// alone (`p_floor.c:62-127`) — the ceiling is the `case 1` branch it
+    /// never takes. So [`Node::ceiling`] is read unchanged by both
+    /// passability rules, in either state.
+    #[must_use]
+    pub fn effective_floor(&self, mask: KeyMask) -> i32 {
+        let Some((bit, dest)) = self.action else {
+            return self.floor;
+        };
+        // The mirror of `passable`'s assert on a key class: an action bit at
+        // or past the action half's width shifts off the end of the mask.
+        // See [`Node::action`]'s invariant for what that costs in release.
+        debug_assert!(
+            u32::from(bit) < KeyMask::BITS - ACTION_BIT_BASE,
+            "floor action {bit} does not fit {} action bits",
+            KeyMask::BITS - ACTION_BIT_BASE
+        );
+        if mask & (1 << (ACTION_BIT_BASE + u32::from(bit))) != 0 {
+            dest
+        } else {
+            self.floor
+        }
+    }
 }
 
 /// How a shared boundary between two sectors traverses.
@@ -165,6 +251,12 @@ pub struct Edge {
     pub b: NodeIdx,
     /// How the boundary traverses.
     pub kind: EdgeKind,
+    /// Floor actions fired by *crossing* this boundary — a walkover
+    /// trigger's line. Bits at or above [`ACTION_BIT_BASE`], unioned into
+    /// the mask on arrival, in either direction: the specials the compiler
+    /// writes are the W1 forms, which `P_CrossSpecialLine` runs from both
+    /// sides (see [`crate::compile::floors`]).
+    pub fires: KeyMask,
 }
 
 /// The traversal graph the flood searches.
@@ -211,8 +303,13 @@ pub struct Findings {
     pub unreachable: Vec<NodeIdx>,
 }
 
-/// Whether one crossing of `kind` from `from` to `to` is possible while
-/// holding `mask`.
+/// Whether one crossing of `kind` from `from` to `to` is possible in state
+/// `mask`.
+///
+/// Both geometric rules measure [`Node::effective_floor`] rather than
+/// [`Node::floor`], so a node whose floor action has fired is judged where
+/// it now stands: that is the whole of how a dropped wall becomes a doorway
+/// and a raised bridge becomes a walk.
 ///
 /// The two geometric rules are `P_TryMove`'s, verified at the pinned commit
 /// (`docs/reachability.md`, "Engine facts"):
@@ -223,24 +320,23 @@ pub struct Findings {
 ///   `min(ceilings) - max(floors)`, and `tmceilingz - tmfloorz <
 ///   thing->height` rejects (`p_map.c:468-469`).
 fn passable(from: &Node, to: &Node, kind: &EdgeKind, mask: KeyMask, limits: &Limits) -> bool {
+    let (from_floor, to_floor) = (from.effective_floor(mask), to.effective_floor(mask));
     match kind {
         EdgeKind::Open => {
-            to.floor - from.floor <= limits.max_step
-                && to.ceiling.min(from.ceiling) - to.floor.max(from.floor) >= limits.player_height
+            to_floor - from_floor <= limits.max_step
+                && to.ceiling.min(from.ceiling) - to_floor.max(from_floor) >= limits.player_height
         }
         EdgeKind::Door { lock } => {
-            to.floor - from.floor <= limits.max_step
+            to_floor - from_floor <= limits.max_step
                 && lock.is_none_or(|k| {
-                    // A class at or past the mask's width would shift its bit
-                    // off the end: a debug panic, but in release `1u8 << 8`
-                    // wraps to `1u8 << 0` and silently aliases the class onto
-                    // class 0 — a locked door that opens to the wrong key,
-                    // with no test able to see it. Interning must keep
-                    // classes under this cap.
+                    // A class at or past `ACTION_BIT_BASE` aliases onto a
+                    // floor action's bit: a debug panic here, but in release
+                    // a locked door that opens because a wall dropped
+                    // somewhere else, with no test able to see it. Interning
+                    // must keep classes under this cap.
                     debug_assert!(
-                        u32::from(k) < KeyMask::BITS,
-                        "key class {k} does not fit a {}-class KeyMask",
-                        KeyMask::BITS
+                        u32::from(k) < ACTION_BIT_BASE,
+                        "key class {k} does not fit {ACTION_BIT_BASE} key classes"
                     );
                     mask & (1 << k) != 0
                 })
@@ -255,8 +351,9 @@ fn passable(from: &Node, to: &Node, kind: &EdgeKind, mask: KeyMask, limits: &Lim
 ///
 /// A set-union flood over sectors alone cannot express "holding the key
 /// strands you" — the shipped `key_room` defect — so the state carries the
-/// mask, and entering a node unions that node's keys in (masks only grow
-/// along a walk).
+/// mask, and entering a node unions that node's keys and the floor actions
+/// it fires in, while crossing an edge unions the actions *it* fires in
+/// (masks only grow along a walk).
 ///
 /// The forward search answers [`Findings::unfinishable`] and, by omission,
 /// [`Findings::unreachable`]. Stranding needs the second direction: a state is
@@ -271,24 +368,46 @@ fn passable(from: &Node, to: &Node, kind: &EdgeKind, mask: KeyMask, limits: &Lim
 /// # Panics
 ///
 /// If the forward search discovers more than `u32::MAX` states, which the
-/// backward pass indexes with a `u32`. The state space is `nodes × 2^8`, so
-/// this needs over 16 million sectors — two orders of magnitude past the
-/// `u16` sector index the map format itself can address.
+/// backward pass indexes with a `u32`. The state space is
+/// `nodes × 2^bits-in-use` and the mask is 16 bits wide, so even at its
+/// widest this needs over 65 thousand sectors — past the `u16` sector index
+/// the map format itself can address.
 #[must_use]
 pub fn check(graph: &ReachGraph, limits: &Limits) -> Findings {
     let n = graph.nodes.len();
-    let mut adj: Vec<Vec<(NodeIdx, &EdgeKind)>> = vec![Vec::new(); n];
+    let mut adj: Vec<Vec<(NodeIdx, &EdgeKind, KeyMask)>> = vec![Vec::new(); n];
     for e in &graph.edges {
-        adj[e.a].push((e.b, &e.kind));
+        adj[e.a].push((e.b, &e.kind, e.fires));
+        // A walkover fires from either side, so the fires bits ride both
+        // directions; only the traversal of a teleport is one-way.
         if e.kind != EdgeKind::Teleport {
-            adj[e.b].push((e.a, &e.kind));
+            adj[e.b].push((e.a, &e.kind, e.fires));
         }
     }
-    let norm = |node: NodeIdx, mask: KeyMask| mask | graph.nodes[node].keys;
-    // A state index packs (node, mask); a KeyMask is 8 bits by construction.
-    let idx = |node: NodeIdx, mask: KeyMask| (node << 8) | mask as usize;
+    let norm =
+        |node: NodeIdx, mask: KeyMask| mask | graph.nodes[node].keys | graph.nodes[node].fires;
 
-    let mut seen = vec![false; n << 8];
+    // `seen` and `pos` below are dense over the whole state space, so the
+    // mask width they are sized for is derived from the bits *this* graph
+    // can ever set rather than fixed at `KeyMask::BITS`. A map with no keys
+    // and no floor actions gets one slot per node; an eight-class,
+    // eight-action map pays the full 2^16. Sizing unconditionally at the
+    // mask's width would multiply both tables by 256 for every action-free
+    // map — including the real WADs the verifier floods, where a
+    // 1,000-sector map alone would want 262 MB for `pos`.
+    let mut used: KeyMask = 0;
+    for node in &graph.nodes {
+        used |= node.keys | node.fires;
+    }
+    for e in &graph.edges {
+        used |= e.fires;
+    }
+    let width = KeyMask::BITS - used.leading_zeros();
+    // A state index packs (node, mask); every mask a walk can reach is a
+    // subset of `used`, so it fits in `width` bits by construction.
+    let idx = |node: NodeIdx, mask: KeyMask| (node << width) | mask as usize;
+
+    let mut seen = vec![false; n << width];
     // `order` doubles as the BFS queue: Vec-backed, so traversal (and every
     // report derived from it) is deterministic.
     let mut order: Vec<(NodeIdx, KeyMask)> = Vec::new();
@@ -299,11 +418,11 @@ pub fn check(graph: &ReachGraph, limits: &Limits) -> Findings {
     while head < order.len() {
         let (at, mask) = order[head];
         head += 1;
-        for &(to, kind) in &adj[at] {
+        for &(to, kind, fires) in &adj[at] {
             if !passable(&graph.nodes[at], &graph.nodes[to], kind, mask, limits) {
                 continue;
             }
-            let to_mask = norm(to, mask);
+            let to_mask = norm(to, mask | fires);
             if !seen[idx(to, to_mask)] {
                 seen[idx(to, to_mask)] = true;
                 order.push((to, to_mask));
@@ -319,17 +438,19 @@ pub fn check(graph: &ReachGraph, limits: &Limits) -> Findings {
 
     // Backward pass over the *discovered* states: which of them can still
     // reach a goal? Position lookup packs into the same (node, mask) space.
-    let mut pos = vec![u32::MAX; n << 8];
+    let mut pos = vec![u32::MAX; n << width];
     for (i, &(node, mask)) in order.iter().enumerate() {
         pos[idx(node, mask)] = u32::try_from(i).expect("state count fits u32");
     }
     let mut preds: Vec<Vec<u32>> = vec![Vec::new(); order.len()];
     for (i, &(node, mask)) in order.iter().enumerate() {
-        for &(to, kind) in &adj[node] {
+        for &(to, kind, fires) in &adj[node] {
             if !passable(&graph.nodes[node], &graph.nodes[to], kind, mask, limits) {
                 continue;
             }
-            let j = pos[idx(to, norm(to, mask))];
+            // The same successor expression the forward search used, or the
+            // two passes would disagree about which state an edge leads to.
+            let j = pos[idx(to, norm(to, mask | fires))];
             debug_assert_ne!(j, u32::MAX, "forward search discovered every successor");
             preds[j as usize].push(u32::try_from(i).expect("state count fits u32"));
         }
@@ -385,6 +506,11 @@ pub struct BuiltGraph {
     /// For each key class, the key kinds that satisfy it, sorted — e.g.
     /// class 0 -> `["blue_card", "blue_skull"]`. Used to word violations.
     pub class_names: Vec<Vec<String>>,
+    /// One name per floor action — `"drop wall a <-> b"`, `"reveal pen"`,
+    /// `"bridge a <-> b"` — indexed by action bit, so `action_names[i]`
+    /// describes mask bit `ACTION_BIT_BASE + i` and, position for position,
+    /// [`Compiled::floors`]`[i]`. Used to word violations.
+    pub action_names: Vec<String>,
 }
 
 /// Derives the traversal graph from what was actually emitted.
@@ -408,22 +534,52 @@ pub struct BuiltGraph {
 /// hand-built graph is the only way to violate them.
 ///
 /// The interning below is likewise the enforcement point for [`KeyClass`]'s
-/// invariant that every class index is below [`KeyMask::BITS`] — the class
-/// *count* may be exactly [`KeyMask::BITS`], which is what the assert admits.
+/// invariant that every class index is below [`ACTION_BIT_BASE`] — the class
+/// *count* may be exactly [`ACTION_BIT_BASE`], which is what the assert
+/// admits.
+///
+/// Floor actions come from [`Compiled::floors`] and [`Compiled::triggers`],
+/// again as emitted rather than as authored: action `i` is mask bit
+/// `ACTION_BIT_BASE + i` and moves its target sector's floor to that
+/// action's destination, a switch trigger sets every bit it drives on the
+/// sector it is used from, and a walkover trigger sets them on the edges
+/// built from the lines that actually carry its tag and its walkover
+/// special — which is both thresholds of a bridge it names, since
+/// [`crate::compile::floors`] writes the special on each.
 ///
 /// Returns `None` when the map has no player 1 start or no exit line —
 /// the vacuous-pass gate: P7 presupposes a goal, and "this map has no
 /// exit" is a spec-conformance finding for the stage that reads the
 /// map-spec, not a softlock.
 ///
+/// The start is looked for among the **rooms'** things only, and that is
+/// exhaustive rather than a narrowing: island cargo cannot hold a player 1
+/// start, since `compile::things::place_island_things` refuses one on a
+/// reveal ([`CompileError::StartOnReveal`](crate::compile::CompileError::StartOnReveal))
+/// and on a pedestal
+/// ([`CompileError::PlayerStartOnPedestal`](crate::compile::CompileError::PlayerStartOnPedestal)),
+/// the second precisely so this search cannot come up empty on a map that
+/// does have one. `None` here therefore means the map truly has no start,
+/// not that this pass failed to find one.
+///
 /// # Panics
 ///
-/// If the vocabulary lists more than [`KeyMask::BITS`] distinct keyed-door
-/// specials, which a [`KeyMask`] cannot represent.
+/// If the vocabulary lists more than [`ACTION_BIT_BASE`] distinct keyed-door
+/// specials, or the map carries more than [`Ir::MAX_FLOOR_ACTIONS`] floor
+/// actions — either would need a wider [`KeyMask`]. `Ir::from_json` refuses
+/// the second ([`crate::ir::IrError::TooManyFloorActions`]) before this pass
+/// can run.
+///
+/// Also if a pedestal has no emitted platform or a reveal no emitted floor
+/// action, which [`crate::compile::lifts`] and [`crate::compile::floors`]
+/// establish one-for-one before this pass runs — the same invariant
+/// `compile::things`'s own island placement relies on.
 #[must_use]
 pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<BuiltGraph> {
     // The start: the first room placing a `player1_start` (the IR vocabulary
-    // name; resolved to engine thing 1 by the tables at emission).
+    // name; resolved to engine thing 1 by the tables at emission). Rooms are
+    // the only place one can be — see this function's own doc comment on the
+    // `None` path.
     let start = ir
         .rooms
         .iter()
@@ -456,23 +612,16 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
     goals.dedup();
 
     // Intern key classes by keyed-door special: the card and skull of a
-    // colour share a special (`EV_VerticalDoor`, pinned p_doors.c:371-403),
+    // color share a special (`EV_VerticalDoor`, pinned p_doors.c:371-403),
     // so they must share a class.
     let kinds = tables.locked_door_kinds();
     let mut specials: Vec<u16> = kinds.iter().map(|&(_, s)| s).collect();
     specials.sort_unstable();
     specials.dedup();
     assert!(
-        specials.len() <= KeyMask::BITS as usize,
-        "a vocabulary with more than {} lock classes needs a wider KeyMask",
-        KeyMask::BITS
+        specials.len() <= ACTION_BIT_BASE as usize,
+        "a vocabulary with more than {ACTION_BIT_BASE} lock classes needs a wider KeyMask"
     );
-    let class_of = |special: u16| -> Option<KeyClass> {
-        specials
-            .iter()
-            .position(|&s| s == special)
-            .map(|i| KeyClass::try_from(i).expect("at most 8 classes"))
-    };
     let class_names: Vec<Vec<String>> = specials
         .iter()
         .map(|&s| {
@@ -492,40 +641,57 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
             floor: s.floor,
             ceiling: s.ceiling,
             keys: 0,
+            fires: 0,
+            action: None,
         })
         .collect();
+    // A room's own things sit in the room's sector, and `emit_sectors`
+    // pushes one sector per room in `ir.rooms` order, so the room index is
+    // the node index.
     for (i, room) in ir.rooms.iter().enumerate() {
         for thing in &room.things {
-            if let Some(special) = tables.locked_door_special(&thing.kind)
-                && let Some(class) = class_of(special)
-            {
-                nodes[i].keys |= 1 << class;
-            }
+            add_key_bit(tables, &specials, &thing.kind, &mut nodes[i].keys);
+        }
+    }
+    // Island cargo is picked up by standing on the *island*, not in its host
+    // room: a key on a pedestal's top or sealed in a reveal's cell belongs
+    // to that construct's own node, so the flood only grants it once the
+    // platform has been called down or the reveal has fired. Putting it on
+    // the host would hand the player a key they cannot yet reach; leaving it
+    // off entirely (what this pass did before) strands them beside a key
+    // they can, and the map is refused. The verifier reads the same
+    // placement from geometry — `check::flood::build_nodes` keys a node by
+    // the sector each emitted thing resolves to — so this is the compile
+    // side agreeing with it rather than a second convention.
+    for (pi, pedestal) in ir.pedestals.iter().enumerate() {
+        let lift = out
+            .lifts
+            .iter()
+            .find(|l| l.pedestal == Some(pi))
+            .expect("emit_lifts emits one platform per pedestal");
+        for thing in &pedestal.things {
+            add_key_bit(tables, &specials, &thing.kind, &mut nodes[lift.sector].keys);
+        }
+    }
+    for (ri, reveal) in ir.reveals.iter().enumerate() {
+        let action = out
+            .floors
+            .iter()
+            .find(|f| f.reveal == Some(ri))
+            .expect("emit_floors emits one action per reveal");
+        for thing in &reveal.things {
+            add_key_bit(
+                tables,
+                &specials,
+                &thing.kind,
+                &mut nodes[action.sector].keys,
+            );
         }
     }
 
-    let plain_door = tables.door_special();
-    let mut edges = Vec::new();
-    for line in &out.data.linedefs {
-        let Some(back) = line.back else { continue };
-        // ML_BLOCKING stops a non-missile even on a two-sided line:
-        // PIT_CheckLine rejects it (pinned p_map.c:214-217).
-        if line.blocking {
-            continue;
-        }
-        let kind = if line.special == plain_door {
-            EdgeKind::Door { lock: None }
-        } else if let Some(class) = class_of(line.special) {
-            EdgeKind::Door { lock: Some(class) }
-        } else {
-            EdgeKind::Open
-        };
-        edges.push(Edge {
-            a: out.data.sidedefs[line.front].sector,
-            b: out.data.sidedefs[back].sector,
-            kind,
-        });
-    }
+    let (mut edges, edge_of_line) = boundary_edges(tables, out, &specials);
+    wire_floor_actions(tables, out, &mut nodes, &mut edges, &edge_of_line);
+    let action_names = floor_action_names(ir, out);
 
     edges.extend(teleport_edges(tables, out));
     edges.extend(lift_edges(out));
@@ -538,7 +704,163 @@ pub fn graph_from_compiled(ir: &Ir, tables: &Tables, out: &Compiled) -> Option<B
             goals,
         },
         class_names,
+        action_names,
     })
+}
+
+/// Sets `kind`'s key-class bit in `keys`, if `kind` is a key thing at all.
+///
+/// One helper rather than three copies of the same `locked_door_special` →
+/// [`class_of`] → shift chain, because the three placements a key can have
+/// — a room's floor, a pedestal's top, a reveal's cell — differ only in
+/// which node's mask they set.
+fn add_key_bit(tables: &Tables, specials: &[u16], kind: &str, keys: &mut KeyMask) {
+    if let Some(special) = tables.locked_door_special(kind)
+        && let Some(class) = class_of(specials, special)
+    {
+        *keys |= 1 << class;
+    }
+}
+
+/// The [`KeyClass`] `special` interns to under `specials` (as built by
+/// [`graph_from_compiled`]), if any.
+fn class_of(specials: &[u16], special: u16) -> Option<KeyClass> {
+    specials
+        .iter()
+        .position(|&s| s == special)
+        .map(|i| KeyClass::try_from(i).expect("at most ACTION_BIT_BASE classes"))
+}
+
+/// One [`EdgeKind::Open`] or [`EdgeKind::Door`] edge per passable two-sided
+/// linedef, alongside the linedef-index → edge-index lookup a walkover
+/// trigger needs to put its bits on the crossing that fires it.
+fn boundary_edges(
+    tables: &Tables,
+    out: &Compiled,
+    specials: &[u16],
+) -> (Vec<Edge>, Vec<Option<usize>>) {
+    let plain_door = tables.door_special();
+    let mut edges = Vec::new();
+    let mut edge_of_line: Vec<Option<usize>> = vec![None; out.data.linedefs.len()];
+    for (li, line) in out.data.linedefs.iter().enumerate() {
+        let Some(back) = line.back else { continue };
+        // ML_BLOCKING stops a non-missile even on a two-sided line:
+        // PIT_CheckLine rejects it (pinned p_map.c:214-217).
+        if line.blocking {
+            continue;
+        }
+        let kind = if line.special == plain_door {
+            EdgeKind::Door { lock: None }
+        } else if let Some(class) = class_of(specials, line.special) {
+            EdgeKind::Door { lock: Some(class) }
+        } else {
+            EdgeKind::Open
+        };
+        edge_of_line[li] = Some(edges.len());
+        edges.push(Edge {
+            a: out.data.sidedefs[line.front].sector,
+            b: out.data.sidedefs[back].sector,
+            kind,
+            fires: 0,
+        });
+    }
+    (edges, edge_of_line)
+}
+
+/// Puts the emitted floor actions into the graph: action `a` — the entry at
+/// `out.floors[a]` — is mask bit `ACTION_BIT_BASE + a`, its target sector's
+/// [`Node::action`] moves that sector's floor to the action's destination,
+/// and every trigger driving it sets the bit where the player fires it. A
+/// switch sets it on the sector it is used from — its
+/// [`TriggerOut::activator`](crate::compile::floors::TriggerOut::activator)
+/// — and a walkover sets it on the edges built from the lines that carry
+/// the trigger's tag and its walkover special.
+///
+/// Those lines are read back off the emitted map rather than taken from
+/// [`crate::compile::floors::TriggerOut::line`], which is only the *first*
+/// one written: a walkover naming a bridge carries its special on both of
+/// that bridge's thresholds, and either crossing fires it.
+///
+/// # Panics
+/// Panics if the map carries more than [`Ir::MAX_FLOOR_ACTIONS`] floor
+/// actions, whose bits would not fit above the key classes.
+/// `Ir::from_json` refuses that before this pass can run.
+fn wire_floor_actions(
+    tables: &Tables,
+    out: &Compiled,
+    nodes: &mut [Node],
+    edges: &mut [Edge],
+    edge_of_line: &[Option<usize>],
+) {
+    assert!(
+        out.floors.len() <= Ir::MAX_FLOOR_ACTIONS,
+        "a map with more than {} floor actions needs a wider KeyMask",
+        Ir::MAX_FLOOR_ACTIONS
+    );
+    for (a, f) in out.floors.iter().enumerate() {
+        let bit = u8::try_from(a).expect("at most Ir::MAX_FLOOR_ACTIONS actions");
+        // A node carries one action, so two of them on one sector would
+        // leave only the last with no diagnostic. The compiler cannot emit
+        // that — one construct per sector, and P30 refuses an action chained
+        // onto another moving sector — so this states the precondition
+        // rather than handling it.
+        debug_assert!(
+            nodes[f.sector].action.is_none(),
+            "sector {} is the target of two floor actions; a node carries one",
+            f.sector
+        );
+        nodes[f.sector].action = Some((bit, f.dest));
+    }
+    for (i, t) in out.triggers.iter().enumerate() {
+        // The bits this trigger sets: every action it drives.
+        let bits: KeyMask = out
+            .floors
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.trigger == i)
+            .map(|(a, _)| 1 << (ACTION_BIT_BASE + u32::try_from(a).expect("at most 8 actions")))
+            .fold(0, |acc: KeyMask, bit| acc | bit);
+        if t.walkover {
+            let special = tables.floor_special(t.family, false);
+            for (li, line) in out.data.linedefs.iter().enumerate() {
+                if line.special == special
+                    && line.tag == t.tag
+                    && let Some(e) = edge_of_line[li]
+                {
+                    edges[e].fires |= bits;
+                }
+            }
+        } else {
+            // A switch fires from the room it is used in: `P_UseSpecialLine`
+            // runs on the front side the player faces, which is that room.
+            nodes[t.activator].fires |= bits;
+        }
+    }
+}
+
+/// One name per emitted floor action, in [`Compiled::floors`] order — the
+/// wording [`BuiltGraph::action_names`] carries into violations.
+///
+/// The words themselves come from [`construct_name`], which the tag manifest
+/// also uses, so a violation and the manifest row for the same construct
+/// cannot drift apart.
+///
+/// # Panics
+/// Panics if a drop wall or bridge names no portal, or a closet or pedestal
+/// no reveal, which [`crate::compile::floors`] sets on every action it
+/// emits.
+fn floor_action_names(ir: &Ir, out: &Compiled) -> Vec<String> {
+    out.floors
+        .iter()
+        .map(|f| match f.shape {
+            FloorShape::DropWall | FloorShape::Bridge => construct_name(NamedConstruct::Portal(
+                &ir.portals[f.portal.expect("a drop wall or bridge names its portal")],
+            )),
+            FloorShape::Closet | FloorShape::Pedestal => construct_name(NamedConstruct::Reveal(
+                &ir.reveals[f.reveal.expect("a closet or pedestal names its reveal")],
+            )),
+        })
+        .collect()
 }
 
 /// Directed [`EdgeKind::Teleport`] edges for every player-usable teleport
@@ -576,6 +898,7 @@ fn teleport_edges(tables: &Tables, out: &Compiled) -> Vec<Edge> {
                 a: from,
                 b: dest,
                 kind: EdgeKind::Teleport,
+                fires: 0,
             });
         }
     }
@@ -594,6 +917,7 @@ fn lift_edges(out: &Compiled) -> Vec<Edge> {
                     a: from,
                     b: lift.sector,
                     kind: EdgeKind::Lift,
+                    fires: 0,
                 });
             }
         }
@@ -666,6 +990,8 @@ mod tests {
             floor,
             ceiling,
             keys,
+            fires: 0,
+            action: None,
         }
     }
     fn open(a: NodeIdx, b: NodeIdx) -> Edge {
@@ -673,6 +999,7 @@ mod tests {
             a,
             b,
             kind: EdgeKind::Open,
+            fires: 0,
         }
     }
     fn door(a: NodeIdx, b: NodeIdx, lock: Option<KeyClass>) -> Edge {
@@ -680,6 +1007,28 @@ mod tests {
             a,
             b,
             kind: EdgeKind::Door { lock },
+            fires: 0,
+        }
+    }
+    /// A node whose own floor moves: it rests at `floor` and stands at
+    /// `dest` once floor action `bit` has fired.
+    fn action_node(floor: i32, ceiling: i32, bit: u8, dest: i32) -> Node {
+        Node {
+            floor,
+            ceiling,
+            keys: 0,
+            fires: 0,
+            action: Some((bit, dest)),
+        }
+    }
+    /// A node that fires floor action `bit` on entry — a switch's room.
+    fn firing_node(floor: i32, ceiling: i32, bit: u8) -> Node {
+        Node {
+            floor,
+            ceiling,
+            keys: 0,
+            fires: 1 << (ACTION_BIT_BASE + u32::from(bit)),
+            action: None,
         }
     }
     fn graph(
@@ -818,6 +1167,170 @@ mod tests {
         assert!(
             passable(&plat, &low, &EdgeKind::Lift, 0, &limits),
             "and descent is free either way"
+        );
+    }
+
+    #[test]
+    fn a_wall_that_lowers_once_its_switch_room_is_entered_opens_the_way() {
+        // start(0) — wall(floor 192 = ceiling 192, lowers to 0, bit 0) —
+        // exit(0); the start room fires bit 0 on entry.
+        let nodes = vec![
+            firing_node(0, 192, 0),
+            action_node(192, 192, 0, 0),
+            node(0, 192, 0),
+        ];
+        let g = graph(nodes.clone(), vec![open(0, 1), open(1, 2)], 0, vec![2]);
+        assert!(
+            !check(&g, &LIMITS).unfinishable,
+            "the wall drops on entering the start room"
+        );
+        // Without the firing node the wall is a wall.
+        let mut sealed = nodes;
+        sealed[0].fires = 0;
+        let g = graph(sealed, vec![open(0, 1), open(1, 2)], 0, vec![2]);
+        assert!(check(&g, &LIMITS).unfinishable);
+    }
+
+    #[test]
+    fn a_walkover_fires_on_crossing_its_edge_in_either_direction() {
+        // start — hall (the crossing fires bit 0) — wall(lowers) — exit
+        let nodes = vec![
+            node(0, 192, 0),
+            node(0, 192, 0),
+            action_node(192, 192, 0, 0),
+            node(0, 192, 0),
+        ];
+        let mut e1 = open(0, 1);
+        e1.fires = 1 << ACTION_BIT_BASE;
+        let g = graph(nodes, vec![e1, open(1, 2), open(2, 3)], 0, vec![3]);
+        let f = check(&g, &LIMITS);
+        assert!(!f.unfinishable);
+        assert!(f.stranded.is_empty());
+
+        // The same edge crossed the other way, and *only* the other way.
+        // `check` expands an undirected edge as `a -> b` and `b -> a`
+        // separately, so pinning the second expansion needs a fixture that
+        // cannot fall back on the first: node 0 sits 100 below node 1, so
+        // the crossing is a free descent one way and an impossible climb
+        // back, and the only firing traversal is 1 -> 0. (A fixture whose
+        // edge is crossable both ways proves nothing here — the walk simply
+        // re-crosses it in the working direction.)
+        //
+        // This is the direction real geometry takes: a bridge walkover's
+        // far threshold has the pit as its front sector, so entering from
+        // the far room is a b -> a crossing.
+        //
+        // nodes: 0 landing, 100 below the start; 1 start; 2 a sealed wall
+        // that lowers to the landing's own floor; 3 the exit beyond it.
+        let nodes = vec![
+            node(-100, 200, 0),
+            node(0, 200, 0),
+            action_node(92, 92, 0, -100),
+            node(-100, 200, 0),
+        ];
+        let mut back = open(0, 1);
+        back.fires = 1 << ACTION_BIT_BASE;
+        let g = graph(nodes, vec![back, open(0, 2), open(2, 3)], 1, vec![3]);
+        let f = check(&g, &LIMITS);
+        assert!(
+            !f.unfinishable,
+            "the drop from 1 into 0 is a b -> a crossing, and it fires: {f:?}"
+        );
+        assert!(f.stranded.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn a_door_onto_a_dropped_wall_is_judged_at_the_floor_the_action_left() {
+        // A door edge skips the crossing window but keeps the step rule, so
+        // it has to read the effective floor too. Here the door's far side
+        // is a wall sector resting 192 up that lowers to 0: a 192 step
+        // before the action fires, level after. Nothing else in this file
+        // puts an action behind a `Door` edge, so the Door arm's own call
+        // is otherwise unexercised.
+        let nodes = vec![
+            firing_node(0, 192, 0),
+            action_node(192, 192, 0, 0),
+            node(0, 192, 0),
+        ];
+        let edges = vec![door(0, 1, None), door(1, 2, None)];
+        let g = graph(nodes.clone(), edges.clone(), 0, vec![2]);
+        assert!(
+            !check(&g, &LIMITS).unfinishable,
+            "the wall came down, so the step through the door is 0"
+        );
+        let mut sealed = nodes;
+        sealed[0].fires = 0;
+        let g = graph(sealed, edges, 0, vec![2]);
+        assert!(
+            check(&g, &LIMITS).unfinishable,
+            "192 is not a step, door or no door"
+        );
+    }
+
+    #[test]
+    fn a_bridge_pit_entered_before_its_trigger_is_a_stranded_state() {
+        // start(0) — pit(-96, rises to 0 on bit 0) — far(0, fires bit 0 on
+        // entry) — exit. Dropping into the pit first: bit unset, pit->far is
+        // a 96 climb, so nothing ever reaches the far room to fire it.
+        let nodes = vec![
+            node(0, 192, 0),
+            action_node(-96, 192, 0, 0),
+            firing_node(0, 192, 0),
+            node(0, 192, 0),
+        ];
+        let g = graph(nodes, vec![open(0, 1), open(1, 2), open(2, 3)], 0, vec![3]);
+        let f = check(&g, &LIMITS);
+        assert!(
+            f.unfinishable,
+            "the only way forward is through the pit, which never rises"
+        );
+        // Put the firing IN the pit (a walkover across the pit floor):
+        let nodes = vec![
+            node(0, 192, 0),
+            Node {
+                floor: -96,
+                ceiling: 192,
+                keys: 0,
+                fires: 1 << ACTION_BIT_BASE,
+                action: Some((0, 0)),
+            },
+            node(0, 192, 0),
+            node(0, 192, 0),
+        ];
+        let g = graph(nodes, vec![open(0, 1), open(1, 2), open(2, 3)], 0, vec![3]);
+        let f = check(&g, &LIMITS);
+        assert!(!f.unfinishable && f.stranded.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn keys_and_actions_share_the_mask_without_aliasing() {
+        // Key class 7 is the top key bit and action 0 is the first action
+        // bit — adjacent in one mask. The wall between the start and the
+        // door lowers on action 0; the door beyond it is locked to class 7.
+        // If either half aliased onto the other, one of the two negative
+        // cases below would read as finishable.
+        let wall = action_node(192, 192, 0, 0);
+        let build = |keys: KeyMask, fires: KeyMask| {
+            let mut start = node(0, 192, keys);
+            start.fires = fires;
+            graph(
+                vec![start, wall.clone(), node(0, 192, 0)],
+                vec![open(0, 1), door(1, 2, Some(7))],
+                0,
+                vec![2],
+            )
+        };
+        assert!(
+            !check(&build(1 << 7, 1 << ACTION_BIT_BASE), &LIMITS).unfinishable,
+            "the action drops the wall and the key opens the door"
+        );
+        assert!(
+            check(&build(1 << 7, 0), &LIMITS).unfinishable,
+            "holding the top key class does not fire action 0"
+        );
+        assert!(
+            check(&build(0, 1 << ACTION_BIT_BASE), &LIMITS).unfinishable,
+            "firing action 0 does not unlock a class-7 door"
         );
     }
 
@@ -1111,9 +1624,9 @@ mod tests {
     }
 
     #[test]
-    fn a_locked_door_edge_and_the_matching_key_share_a_colour_class() {
+    fn a_locked_door_edge_and_the_matching_key_share_a_color_class() {
         // The lock is blue_card; the placed key is blue_SKULL. EV_VerticalDoor
-        // accepts either of a colour, so the classes must collapse.
+        // accepts either of a color, so the classes must collapse.
         let json = r#"{ "seed":1, "grid":64, "theme":"tech_base",
           "rooms":[
             { "id":"hub", "footprint":[[0,0],[0,256],[256,256],[256,0]],
@@ -1157,7 +1670,7 @@ mod tests {
         };
         let f = check(&b.graph, &limits);
         assert!(!f.unfinishable, "the skull opens the blue door");
-        // class_names for messages: both kinds of the colour, sorted.
+        // class_names for messages: both kinds of the color, sorted.
         assert_eq!(b.class_names[class as usize], ["blue_card", "blue_skull"]);
     }
 
@@ -1249,17 +1762,22 @@ mod tests {
                     floor: 0,
                     ceiling: 128,
                     keys: 0,
+                    fires: 0,
+                    action: None,
                 },
                 Node {
                     floor: 200,
                     ceiling: 328,
                     keys: 0,
+                    fires: 0,
+                    action: None,
                 },
             ],
             edges: vec![Edge {
                 a: 0,
                 b: 1,
                 kind: EdgeKind::Teleport,
+                fires: 0,
             }],
             start: 0,
             goals: vec![1],
@@ -1331,6 +1849,139 @@ mod tests {
             (teleports[0].a, teleports[0].b),
             (0, 1),
             "from the host room to room b"
+        );
+    }
+
+    /// A bridge whose walkover names its own two rooms: the special lands
+    /// on *both* of the pit's thresholds, so stepping down into it from
+    /// either side raises it under the player. A verbatim copy of
+    /// `compile::floors`'s own `BRIDGE_WALKOVER`, which lives in that
+    /// module's private test module and so cannot be shared — the same
+    /// arrangement `rules.rs`'s `WALL_MAP` already has.
+    const BRIDGE_WALKOVER: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[ { "a":"a", "b":"b", "kind":"bridge", "width":64, "at":[256,128], "depth":96, "fires_on":"t" } ],
+      "triggers":[ { "id":"t", "kind":"walkover", "portal":["a","b"] } ],
+      "exits":[ { "room":"b", "trigger":"switch", "at":[576,128], "width":64 } ] }"#;
+
+    /// [`BRIDGE_WALKOVER`] with the start and the exit swapped: the player
+    /// begins in room `b` and must cross the pit's *far* threshold — the
+    /// one `TriggerOut::line` does not name — to reach the exit in `a`.
+    const BRIDGE_WALKOVER_FROM_FAR: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[512,64], "angle":0 } ] }
+      ],
+      "portals":[ { "a":"a", "b":"b", "kind":"bridge", "width":64, "at":[256,128], "depth":96, "fires_on":"t" } ],
+      "triggers":[ { "id":"t", "kind":"walkover", "portal":["a","b"] } ],
+      "exits":[ { "room":"a", "trigger":"switch", "at":[0,128], "width":64 } ] }"#;
+
+    /// The `(a, b)` sector pair of each linedef in `lines`, sorted — the
+    /// shape an edge built from that linedef carries.
+    fn sector_pairs(out: &Compiled, lines: &[usize]) -> Vec<(NodeIdx, NodeIdx)> {
+        let mut pairs: Vec<(NodeIdx, NodeIdx)> = lines
+            .iter()
+            .map(|&l| {
+                let line = &out.data.linedefs[l];
+                let back = line.back.expect("a gap threshold is two-sided");
+                (
+                    out.data.sidedefs[line.front].sector,
+                    out.data.sidedefs[back].sector,
+                )
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs
+    }
+
+    #[test]
+    fn a_walkover_bridge_fires_from_both_of_its_thresholds() {
+        // `emit_trigger_line` writes the walkover special onto BOTH of a
+        // bridge's thresholds, and `TriggerOut::line` records only the
+        // first. Reading the emitted lines back — rather than that one
+        // index — is what makes stepping in from the far side raise the
+        // pit; taking only `line` leaves the far threshold inert.
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(BRIDGE_WALKOVER).expect("ir");
+        let out = crate::compile::compile(&ir, &tables).expect("compiles");
+        let b = graph_from_compiled(&ir, &tables, &out).expect("graph");
+        assert_eq!(out.floors.len(), 1, "one bridge, one action");
+        assert_eq!(out.floors[0].lines.len(), 2, "a bridge has two thresholds");
+
+        let mut firing: Vec<(NodeIdx, NodeIdx)> = b
+            .graph
+            .edges
+            .iter()
+            .filter(|e| e.fires != 0)
+            .map(|e| (e.a, e.b))
+            .collect();
+        firing.sort_unstable();
+        assert_eq!(
+            firing,
+            sector_pairs(&out, &out.floors[0].lines),
+            "both thresholds fire, and nothing else does"
+        );
+        assert!(
+            b.graph
+                .edges
+                .iter()
+                .filter(|e| e.fires != 0)
+                .all(|e| e.fires == 1 << ACTION_BIT_BASE),
+            "the map's one action is bit 0 of the action half"
+        );
+    }
+
+    #[test]
+    fn a_walkover_bridge_entered_from_the_far_room_still_raises() {
+        // The same pit approached from the side `TriggerOut::line` does not
+        // name. Dropping in is free either way; walking back out of a
+        // 96-deep pit is not, so a far threshold that failed to fire would
+        // leave the player stranded in it and the map unfinishable.
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(BRIDGE_WALKOVER_FROM_FAR).expect("ir");
+        let out = crate::compile::compile(&ir, &tables).expect("compiles");
+        let b = graph_from_compiled(&ir, &tables, &out).expect("graph");
+        let f = check(
+            &b.graph,
+            &Limits {
+                player_height: tables.player().height,
+                max_step: tables.step_height(),
+            },
+        );
+        assert!(!f.unfinishable, "{f:?}");
+        assert!(f.stranded.is_empty(), "{f:?}");
+        assert!(f.unreachable.is_empty(), "{f:?}");
+    }
+
+    #[test]
+    fn an_actions_name_is_the_one_its_tag_manifest_row_carries() {
+        // `action_names` words P7's violations and the manifest row is what
+        // an author reads beside them; both come from
+        // `floors::construct_name`, and this is what holds them to it.
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(BRIDGE_WALKOVER).expect("ir");
+        let out = crate::compile::compile(&ir, &tables).expect("compiles");
+        let b = graph_from_compiled(&ir, &tables, &out).expect("graph");
+        assert_eq!(b.action_names, ["bridge a <-> b"]);
+        let row = out
+            .tags
+            .manifest()
+            .iter()
+            .find(|e| e.tag == out.floors[0].tag)
+            .expect("the trigger's tag is in the manifest");
+        assert!(
+            row.purpose.contains(&b.action_names[0]),
+            "the manifest row `{}` must quote the action the same way",
+            row.purpose
         );
     }
 

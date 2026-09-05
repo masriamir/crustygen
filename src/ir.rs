@@ -1,6 +1,6 @@
 //! The room-graph intermediate representation.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::Deserialize;
 
@@ -33,6 +33,21 @@ pub enum PortalKind {
     /// equal (rest floor = floor + [`Portal::rise`]). Rests high; travels to
     /// the lowest neighbor and back (`p_plats.c`, `EV_DoPlat`).
     Lift,
+    /// A sealed wall sector filling the gap between two rooms, lowered once
+    /// to the lower room's floor by the trigger [`Portal::fires_on`] names —
+    /// `lowerFloorToLowest`. Rests with its floor equal to its ceiling at the
+    /// lower of the two rooms' ceilings, so it reads as solid rock until it
+    /// fires; its depth along the gap is [`Portal::thickness`].
+    ///
+    /// The lowered wall only joins the two rooms if their floors are within
+    /// a step of each other, which [`Ir::from_json`] does not check: the step
+    /// height is an engine-table constant and IR validation loads no table
+    /// (see [`Ir::FLAT_TILE`]), so that comparison belongs to compilation.
+    DropWall,
+    /// A pit strip filling the gap between two rooms at one floor, resting
+    /// [`Portal::depth`] below them and raised once to their floor by the
+    /// trigger [`Portal::fires_on`] names — `raiseFloorToNearest`.
+    Bridge,
 }
 
 /// A lift's speed: `downWaitUpStay` (62/88) or `blazeDWUS` (123/120).
@@ -303,6 +318,32 @@ pub struct Portal {
     /// [`Self::door_thickness`] already takes on a plain or locked portal.
     #[serde(default)]
     pub rise: Option<i32>,
+    /// Drop wall only: the wall's own depth along the gap, one of
+    /// [`Ir::DROP_WALL_THICKNESS`]. Required on a [`PortalKind::DropWall`]
+    /// ([`IrError::MissingDropWallThickness`]), rejected on every other kind
+    /// ([`IrError::FloorFieldOnOtherPortal`]).
+    #[serde(default)]
+    pub thickness: Option<i32>,
+    /// Bridge only: how far the pit rests below the two rooms' shared floor,
+    /// a positive multiple of [`Ir::BRIDGE_DEPTH_STEP`]. Required on a
+    /// [`PortalKind::Bridge`] ([`IrError::MissingBridgeDepth`]), rejected on
+    /// every other kind ([`IrError::FloorFieldOnOtherPortal`]).
+    ///
+    /// A pit no deeper than a step would be a bridge not worth raising, but
+    /// the step height is a table constant IR validation never loads, so that
+    /// half of the rule belongs to compilation — as for
+    /// [`PortalKind::DropWall`]'s two floors.
+    #[serde(default)]
+    pub depth: Option<i32>,
+    /// Drop wall and bridge: the id of the [`Trigger`] that fires it.
+    /// Required on both ([`IrError::ConstructWithoutTrigger`]) and rejected
+    /// on every other kind ([`IrError::FloorFieldOnOtherPortal`]).
+    ///
+    /// Named `fires_on` rather than `trigger` because [`Self::trigger`] is
+    /// already taken: on a lift that word names where the trigger line is
+    /// *placed*, not which trigger fires the portal.
+    #[serde(default)]
+    pub fires_on: Option<String>,
 }
 
 /// How the player triggers a level exit.
@@ -468,6 +509,120 @@ impl Pedestal {
     }
 }
 
+/// How a floor-action [`Trigger`] fires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TriggerKind {
+    /// A use line on a room's own wall: `P_UseSpecialLine`, one-shot (S1).
+    Switch,
+    /// A crossing of a portal's opening line: `P_CrossSpecialLine`, one-shot
+    /// (W1), from either side.
+    Walkover,
+}
+
+/// A placed trigger that one or more floor constructs name by id.
+///
+/// One trigger is one sector tag and one line special, so every construct
+/// naming it moves the same way: all of them lower, or all of them raise
+/// ([`IrError::TriggerMixesFamilies`]).
+#[derive(Debug, Clone, Deserialize)]
+pub struct Trigger {
+    /// Unique identifier, named by constructs and used in error messages.
+    pub id: String,
+    /// How it fires.
+    pub kind: TriggerKind,
+    /// [`TriggerKind::Switch`] only: the room whose wall carries it.
+    #[serde(default)]
+    pub room: Option<String>,
+    /// [`TriggerKind::Switch`] only: a point on that room's own wall, read
+    /// exactly as [`Exit::at`] is — the switch segment is centered there.
+    #[serde(default)]
+    pub at: Option<Pt>,
+    /// [`TriggerKind::Walkover`] only: the two rooms of the portal whose
+    /// opening line carries it, in either order.
+    #[serde(default)]
+    pub portal: Option<[String; 2]>,
+}
+
+/// The two rest shapes of a [`Reveal`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevealKind {
+    /// Solid at rest: floor equal to ceiling at the host's ceiling, its
+    /// things inside the rock — the monster closet.
+    Closet,
+    /// A raised block at rest, [`Reveal::rise`] above the host's floor and
+    /// under the host's ceiling, its things on top — the prize pedestal.
+    Pedestal,
+}
+
+/// A sealed island inside one room, lowered once to the host's floor by the
+/// trigger it names — `lowerFloorToLowest` with one neighbor.
+///
+/// The same rectangle a [`Pedestal`] is, placed and validated by the same
+/// rules; what differs is that it rests sealed and moves once, on a shared
+/// trigger, rather than resting raised and lowering under the player's own
+/// use.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Reveal {
+    /// Unique identifier, used in error messages.
+    pub id: String,
+    /// Identifier of the room the reveal sits in.
+    pub room: String,
+    /// The rectangle's low corner (minimum x, minimum y).
+    pub at: Pt,
+    /// Width × height; `None` is [`Ir::PEDESTAL_DEFAULT_SIZE`] square.
+    #[serde(default)]
+    pub size: Option<[i32; 2]>,
+    /// Closet or pedestal.
+    pub kind: RevealKind,
+    /// [`RevealKind::Pedestal`] only: rest floor above the host's, which must
+    /// be positive ([`IrError::RevealRiseNotPositive`]); rejected on a
+    /// [`RevealKind::Closet`] ([`IrError::RiseOnCloset`]).
+    ///
+    /// A pedestal reveal is sealed by height rather than by rock, so it also
+    /// has to rise more than a step — the step height is a table constant IR
+    /// validation never loads, so that half of the rule belongs to
+    /// compilation, as it does for [`Portal::depth`].
+    #[serde(default)]
+    pub rise: Option<i32>,
+    /// Things placed inside the cell, each `at` strictly inside the
+    /// rectangle.
+    #[serde(default)]
+    pub things: Vec<IrThing>,
+    /// The id of the [`Trigger`] that lowers it.
+    pub trigger: String,
+}
+
+impl Reveal {
+    /// The rectangle as `(lo, hi)` corners, saturating exactly as
+    /// [`Pedestal::rect`] does and for the same reason.
+    #[must_use]
+    pub fn rect(&self) -> (Pt, Pt) {
+        let [w, h] = self.size.unwrap_or([Ir::PEDESTAL_DEFAULT_SIZE; 2]);
+        (
+            self.at,
+            Pt {
+                x: self.at.x.saturating_add(w),
+                y: self.at.y.saturating_add(h),
+            },
+        )
+    }
+}
+
+/// Which way the constructs on one [`Trigger`] move.
+///
+/// The IR's own word for it: compilation maps this to the engine family the
+/// tables name, and the IR only has to know that a bridge rises while a drop
+/// wall and a reveal lower.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloorFamilyIr {
+    /// Drop walls and reveals: `lowerFloorToLowest`.
+    Lower,
+    /// Bridges: `raiseFloorToNearest`.
+    Raise,
+}
+
 /// A complete room graph.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Ir {
@@ -493,6 +648,14 @@ pub struct Ir {
     /// so every pre-existing fixture parses unchanged.
     #[serde(default)]
     pub pedestals: Vec<Pedestal>,
+    /// The floor-action triggers. Absent means none, so every pre-existing
+    /// fixture parses unchanged.
+    #[serde(default)]
+    pub triggers: Vec<Trigger>,
+    /// The reveals: sealed islands lowered once by a trigger. Absent means
+    /// none, so every pre-existing fixture parses unchanged.
+    #[serde(default)]
+    pub reveals: Vec<Reveal>,
 }
 
 /// Errors raised while loading or validating an IR document.
@@ -693,11 +856,12 @@ pub enum IrError {
         /// The rejected value.
         value: i32,
     },
-    /// A [`PortalKind::Plain`] portal sets [`Portal::door_thickness`],
-    /// [`Portal::alcove_near`], or [`Portal::alcove_far`] — fields that only
-    /// mean something for a door, and would otherwise be silently ignored.
+    /// A [`PortalKind::Plain`] or [`PortalKind::Bridge`] portal sets
+    /// [`Portal::door_thickness`], [`Portal::alcove_near`], or
+    /// [`Portal::alcove_far`] — fields that only mean something for a door,
+    /// and would otherwise be silently ignored.
     #[error(
-        "portal `{a}` <-> `{b}` is plain but sets a door field ({field}); use `door` or `locked`, or remove it"
+        "portal `{a}` <-> `{b}` sets a door field ({field}) but has no door; use `door` or `locked`, or remove it"
     )]
     DoorFieldsOnPlainPortal {
         /// The first room.
@@ -853,8 +1017,10 @@ pub enum IrError {
         /// The second teleport's identifier.
         second: String,
     },
-    /// A lift portal sets [`Portal::door_thickness`], which only a door has.
-    #[error("portal `{a}` <-> `{b}` is a lift but sets door_thickness")]
+    /// A lift or drop-wall portal sets [`Portal::door_thickness`], which
+    /// only a door has — the gap is already filled by the platform's or the
+    /// wall's own sector.
+    #[error("portal `{a}` <-> `{b}` is a lift or drop wall but sets door_thickness")]
     DoorThicknessOnLift {
         /// The first room.
         a: String,
@@ -1012,6 +1178,266 @@ pub enum IrError {
         /// The pedestal it lands on.
         pedestal: String,
     },
+    /// A teleport's destination point lies inside, or on the boundary of, a
+    /// reveal's rectangle in the destination's own room — the reveal's twin
+    /// of [`Self::TeleportDestinationOnPedestal`], and rejected for the same
+    /// reason.
+    ///
+    /// A reveal's rectangle is its own sector, and a sealed one: a closet
+    /// rests solid, so the traveler would arrive inside the rock, and a
+    /// pedestal reveal rests raised, so the traveler would arrive on top of
+    /// the block rather than on the floor the author aimed at.
+    #[error(
+        "teleport `{teleport}` delivers onto reveal `{reveal}`: a destination inside a reveal rectangle would arrive in the sealed cell"
+    )]
+    TeleportDestinationOnReveal {
+        /// The teleport whose destination lands on the reveal.
+        teleport: String,
+        /// The reveal it lands on.
+        reveal: String,
+    },
+    /// Two triggers share an id.
+    #[error("trigger `{id}` is declared twice")]
+    DuplicateTrigger {
+        /// The repeated identifier.
+        id: String,
+    },
+    /// A trigger no construct names — a tag and a special that would move
+    /// nothing.
+    #[error("trigger `{id}` is named by no drop wall, reveal or bridge")]
+    TriggerUnused {
+        /// The trigger's identifier.
+        id: String,
+    },
+    /// A construct names a trigger that does not exist.
+    #[error("{subject} names unknown trigger `{id}`")]
+    UnknownTrigger {
+        /// The construct that names it: ``portal `a` <-> `b` `` or
+        /// ``reveal `id` ``.
+        subject: String,
+        /// The missing trigger identifier.
+        id: String,
+    },
+    /// One trigger named by both a lowering and a rising construct. One
+    /// trigger is one tag and one special, so it can only move one way.
+    #[error(
+        "trigger `{id}` is named by a bridge and by a drop wall or reveal; one trigger moves one way"
+    )]
+    TriggerMixesFamilies {
+        /// The trigger's identifier.
+        id: String,
+    },
+    /// A trigger that is not placed where its kind can be: a switch whose
+    /// point is not on its room's own wall, a switch or walkover that names
+    /// the other kind's fields, or a walkover naming a portal that is not
+    /// there.
+    #[error("trigger `{id}`: {detail}")]
+    TriggerOffWall {
+        /// The trigger's identifier.
+        id: String,
+        /// What was wrong with it.
+        detail: String,
+    },
+    /// A walkover trigger names a portal whose opening line cannot carry it.
+    ///
+    /// A plain portal's opening line can, and so can a bridge's own pit
+    /// thresholds — stepping down into the pit is the crossing that raises
+    /// it. A door, locked, lift or drop-wall portal cannot.
+    #[error("trigger `{id}` names portal `{a}` <-> `{b}`, which is not a plain portal or a bridge")]
+    WalkoverOnNonPlainPortal {
+        /// The trigger's identifier.
+        id: String,
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+    },
+    /// A walkover trigger's `portal: [a, b]` names more than one portal, so
+    /// which opening line would carry the special is undetermined.
+    ///
+    /// Two portals may legally join one room pair — a second opening in the
+    /// same wall is refused only when its span *overlaps* the first's — so
+    /// `[a, b]` is not by itself the name of one line. Rejected rather than
+    /// resolved to whichever portal comes first in the list: the special ends
+    /// up on one specific line, so the author has to be the one who picks it.
+    #[error(
+        "trigger `{id}` names portal `{a}` <-> `{b}`, which {count} portals join; a walkover needs exactly one"
+    )]
+    AmbiguousWalkoverPortal {
+        /// The trigger's identifier.
+        id: String,
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// How many portals join the two rooms.
+        count: usize,
+    },
+    /// Two walkover triggers name the same room pair, so both would write
+    /// their special and tag onto the one opening line that pair has.
+    ///
+    /// The second write wins, silently: the line ends up carrying the second
+    /// trigger's tag, and every construct naming the *first* trigger is left
+    /// with no way to fire — a map that loads, looks right, and cannot be
+    /// finished. One line is one special and one tag, so a portal's opening
+    /// can carry exactly one walkover.
+    ///
+    /// The sibling of [`AmbiguousWalkoverPortal`](Self::AmbiguousWalkoverPortal)
+    /// from the other side: that one is many portals for one trigger, this
+    /// one is many triggers for one portal. Rejected here rather than
+    /// resolved, for the same reason — the author has to be the one who says
+    /// which trigger owns the line.
+    #[error(
+        "triggers `{first}` and `{second}` both walk over portal `{a}` <-> `{b}`; its opening line can carry only one"
+    )]
+    WalkoverPortalClaimedTwice {
+        /// The trigger that claimed the portal first.
+        first: String,
+        /// The trigger that would overwrite it.
+        second: String,
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+    },
+    /// A drop wall or bridge that names no [`Portal::fires_on`], leaving
+    /// nothing to fire it.
+    #[error("portal `{a}` <-> `{b}` is a {kind} but names no trigger in `fires_on`")]
+    ConstructWithoutTrigger {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The kind that needs one: `"drop_wall"` or `"bridge"`.
+        kind: &'static str,
+    },
+    /// [`Portal::thickness`], [`Portal::depth`] or [`Portal::fires_on`] on a
+    /// portal that is neither a drop wall nor a bridge, or on the one of the
+    /// two that has no such field — fields that would otherwise be silently
+    /// ignored, the same reject-don't-degrade posture
+    /// [`Self::DoorFieldsOnPlainPortal`] takes on a door field.
+    #[error("portal `{a}` <-> `{b}` sets `{field}`, which this kind of portal does not have")]
+    FloorFieldOnOtherPortal {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// Which field was set: `"thickness"`, `"depth"` or `"fires_on"`.
+        field: &'static str,
+    },
+    /// A drop wall that names no [`Portal::thickness`], leaving the depth of
+    /// the sector filling its gap undetermined.
+    #[error("portal `{a}` <-> `{b}` is a drop wall but names no thickness")]
+    MissingDropWallThickness {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+    },
+    /// A [`Portal::thickness`] that is not one of
+    /// [`Ir::DROP_WALL_THICKNESS`].
+    #[error("portal `{a}` <-> `{b}` has thickness {value}, which must be 8, 16, 32 or 64")]
+    InvalidDropWallThickness {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The rejected value.
+        value: i32,
+    },
+    /// A bridge that names no [`Portal::depth`], leaving its pit floor
+    /// undetermined.
+    #[error("portal `{a}` <-> `{b}` is a bridge but names no depth")]
+    MissingBridgeDepth {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+    },
+    /// A [`Portal::depth`] that is not a positive multiple of
+    /// [`Ir::BRIDGE_DEPTH_STEP`]. Whether it also clears the step height is
+    /// compilation's question, not the IR's.
+    #[error(
+        "portal `{a}` <-> `{b}` has depth {value}; a bridge rests a positive multiple of 8 below its rooms"
+    )]
+    InvalidBridgeDepth {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The rejected value.
+        value: i32,
+    },
+    /// A bridge whose two rooms are not at one floor — the raised pit comes
+    /// to rest at their shared floor, so there has to be one.
+    #[error(
+        "portal `{a}` <-> `{b}` is a bridge between floors {floor_a} and {floor_b}; a bridge joins rooms at one floor"
+    )]
+    BridgeFloorsDiffer {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The first room's floor.
+        floor_a: i32,
+        /// The second room's floor.
+        floor_b: i32,
+    },
+    /// Two reveals share an id.
+    #[error("reveal `{id}` is declared twice")]
+    DuplicateReveal {
+        /// The repeated identifier.
+        id: String,
+    },
+    /// A reveal names a room that does not exist.
+    #[error("reveal `{id}` names unknown room `{room}`")]
+    RevealUnknownRoom {
+        /// The reveal's identifier.
+        id: String,
+        /// The unresolvable room identifier.
+        room: String,
+    },
+    /// A [`RevealKind::Pedestal`] reveal whose [`Reveal::rise`] is absent,
+    /// zero or negative — the pedestal shape's own rule, as
+    /// [`Self::PedestalRiseNotPositive`] is for a [`Pedestal`].
+    #[error("reveal `{id}` is a pedestal rising {rise}; a pedestal rises above its host")]
+    RevealRiseNotPositive {
+        /// The reveal's identifier.
+        id: String,
+        /// The rejected rise (0 when absent).
+        rise: i32,
+    },
+    /// A [`RevealKind::Closet`] reveal that names a [`Reveal::rise`], which
+    /// only the pedestal shape has.
+    #[error("reveal `{id}` is a closet, which rests solid and takes no `rise`")]
+    RiseOnCloset {
+        /// The reveal's identifier.
+        id: String,
+    },
+    /// A reveal's rectangle broke one of the rules a [`Pedestal`]'s does: a
+    /// side that is not a positive multiple of 8, a rectangle not strictly
+    /// inside its room, one overlapping a pedestal or another reveal, or a
+    /// thing outside it.
+    ///
+    /// One variant carrying a `detail` where a [`Pedestal`] has four specific
+    /// ones: the two lists share the rectangle rule but not their
+    /// vocabulary, and a reveal's own errors read better named after the
+    /// reveal than after the pedestal shape it borrows.
+    #[error("reveal `{id}`: {detail}")]
+    RevealGeometry {
+        /// The reveal's identifier.
+        id: String,
+        /// What was wrong with it.
+        detail: String,
+    },
+    /// More floor actions than the reachability flood can tell apart.
+    #[error("the map has {count} floor actions; at most {max} are allowed")]
+    TooManyFloorActions {
+        /// The actions counted: drop walls, bridges and reveals.
+        count: usize,
+        /// [`Ir::MAX_FLOOR_ACTIONS`].
+        max: usize,
+    },
 }
 
 /// The inclusive coordinate and height range every Doom map format stores in
@@ -1023,6 +1449,30 @@ pub enum IrError {
 /// lumps are `i16`. Rejecting here keeps the two outputs equivalent instead
 /// of letting the binary one silently wrap.
 const MAP_RANGE: std::ops::RangeInclusive<i32> = (i16::MIN as i32)..=(i16::MAX as i32);
+
+/// Which of the two authored islands [`Ir::validate_island_rect`] is judging.
+///
+/// A [`Pedestal`] and a [`Reveal`] are the same rectangle under the same
+/// rules, but each reports a broken one in its own vocabulary, so the shared
+/// body has to know which one it is holding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Island {
+    /// A [`Pedestal`], reporting the `Pedestal*` error variants.
+    Pedestal,
+    /// A [`Reveal`], reporting [`IrError::RevealGeometry`].
+    Reveal,
+}
+
+impl Island {
+    /// The word this island calls itself in a message it shares with the
+    /// other.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pedestal => "pedestal",
+            Self::Reveal => "reveal",
+        }
+    }
+}
 
 impl Ir {
     /// The minimum width of the void between two rooms' facing walls, in map
@@ -1120,6 +1570,63 @@ impl Ir {
     /// engine object, so this is only the default an author gets by leaving
     /// `size` unset.
     pub const PEDESTAL_DEFAULT_SIZE: i32 = 64;
+
+    /// The legal values for [`Portal::thickness`], a drop wall's own depth
+    /// along the gap it fills, in map units.
+    ///
+    /// The IR's own copy of `data/engine.toml`'s `[floor]`
+    /// `drop_wall_thickness` (curated from the corpus's drop-wall bounding
+    /// boxes, and equal to [`Self::LIFT_ALCOVE_DIMENSIONS`]), carried here for
+    /// the same reason [`Self::FLAT_TILE`] is: [`Self::from_json`] validates
+    /// without loading any table. `ir`'s own tests assert the two agree.
+    pub const DROP_WALL_THICKNESS: [i32; 4] = [8, 16, 32, 64];
+
+    /// The grain [`Portal::depth`] — how far a bridge's pit rests below its
+    /// two rooms — must be a positive multiple of, in map units.
+    ///
+    /// The IR's own copy of `data/engine.toml`'s `[floor]`
+    /// `bridge_depth_step` (curated: retail bridge travels are multiples of
+    /// 8), on the same footing as [`Self::DROP_WALL_THICKNESS`].
+    pub const BRIDGE_DEPTH_STEP: i32 = 8;
+
+    /// The most floor actions — drop walls, bridges and reveals — one map may
+    /// carry.
+    ///
+    /// A reachability limit rather than an engine one: the flood has to carry
+    /// which actions have already fired as part of the state it floods over,
+    /// one bit each beside the eight key classes [`crate::reach::KeyMask`]
+    /// already holds, and eight is the budget set aside for them: they are
+    /// the mask's bits from [`crate::reach::ACTION_BIT_BASE`] up, which is
+    /// exactly eight of them in a 16-bit mask. The IR refuses a ninth here,
+    /// where the author can still see which action to drop, rather than
+    /// leaving two of them to alias onto one bit.
+    pub const MAX_FLOOR_ACTIONS: usize = 8;
+
+    /// The trigger with this id.
+    #[must_use]
+    pub fn trigger(&self, id: &str) -> Option<&Trigger> {
+        self.triggers.iter().find(|t| t.id == id)
+    }
+
+    /// Which way the constructs naming trigger `id` move, or `None` when
+    /// nothing names it.
+    ///
+    /// [`Self::from_json`] has already refused a trigger whose constructs
+    /// disagree ([`IrError::TriggerMixesFamilies`]), so the first construct
+    /// found decides for all of them.
+    #[must_use]
+    pub fn trigger_family(&self, id: &str) -> Option<FloorFamilyIr> {
+        if self.reveals.iter().any(|r| r.trigger == id) {
+            return Some(FloorFamilyIr::Lower);
+        }
+        self.portals
+            .iter()
+            .find(|p| p.fires_on.as_deref() == Some(id))
+            .map(|p| match p.kind {
+                PortalKind::Bridge => FloorFamilyIr::Raise,
+                _ => FloorFamilyIr::Lower,
+            })
+    }
 
     /// Whether `portal` is a barrier: a lift portal between rooms at one
     /// floor.
@@ -1221,6 +1728,34 @@ impl Ir {
     /// teleport pad, in one room that overlap or touch, and
     /// [`IrError::TeleportDestinationOnPedestal`] for a teleport whose
     /// destination point lies inside or on a pedestal's rectangle.
+    ///
+    /// The floor actions add [`IrError::DuplicateTrigger`] for a repeated
+    /// trigger id, [`IrError::TriggerOffWall`] for a trigger that is not
+    /// placed where its kind can be, [`IrError::WalkoverOnNonPlainPortal`]
+    /// for a walkover naming a portal that is neither plain nor a bridge,
+    /// [`IrError::UnknownTrigger`] for a construct naming a trigger that does
+    /// not exist, [`IrError::TriggerMixesFamilies`] for a trigger named by
+    /// both a lowering and a rising construct, [`IrError::TriggerUnused`] for
+    /// a trigger no construct names, [`IrError::ConstructWithoutTrigger`] for
+    /// a drop wall or bridge naming none, [`IrError::FloorFieldOnOtherPortal`]
+    /// for `thickness`, `depth` or `fires_on` on a portal that has no such
+    /// field, [`IrError::MissingDropWallThickness`] and
+    /// [`IrError::InvalidDropWallThickness`] for a drop wall's `thickness`,
+    /// [`IrError::MissingBridgeDepth`] and [`IrError::InvalidBridgeDepth`] for
+    /// a bridge's `depth`, [`IrError::BridgeFloorsDiffer`] for a bridge
+    /// between rooms at two floors, [`IrError::DuplicateReveal`] for a
+    /// repeated reveal id, [`IrError::RevealUnknownRoom`] for a reveal naming
+    /// a room that does not exist, [`IrError::RevealRiseNotPositive`] and
+    /// [`IrError::RiseOnCloset`] for a reveal's `rise`,
+    /// [`IrError::AmbiguousWalkoverPortal`] for a walkover naming a room pair
+    /// that more than one portal joins,
+    /// [`IrError::WalkoverPortalClaimedTwice`] for two walkovers naming one
+    /// room pair, [`IrError::RevealGeometry`] for a
+    /// reveal's rectangle (including one overlapping a pedestal, another
+    /// reveal or a teleport pad), [`IrError::TeleportDestinationOnReveal`]
+    /// for a teleport delivering inside a reveal, and
+    /// [`IrError::TooManyFloorActions`] for a map carrying more than
+    /// [`Self::MAX_FLOOR_ACTIONS`] of them.
     pub fn from_json(s: &str) -> Result<Self, IrError> {
         let ir: Self = serde_json::from_str(s)?;
 
@@ -1239,6 +1774,8 @@ impl Ir {
         Self::validate_teleports(&ir, &seen)?;
         Self::validate_lifts(&ir)?;
         Self::validate_pedestals(&ir, &seen)?;
+        Self::validate_triggers(&ir, &seen)?;
+        Self::validate_floors(&ir, &seen)?;
 
         Ok(ir)
     }
@@ -1381,12 +1918,16 @@ impl Ir {
     /// Validates every portal's door/lift-only fields
     /// ([`Portal::door_thickness`]/[`Portal::alcove_near`]/[`Portal::alcove_far`]):
     /// `door_thickness` present and one of [`Self::DOOR_DIMENSIONS`] for
-    /// [`PortalKind::Door`]/[`PortalKind::Locked`], absent for
-    /// [`PortalKind::Plain`]/[`PortalKind::Lift`]; the alcoves, when
-    /// present, one of [`Self::DOOR_DIMENSIONS`] for
+    /// [`PortalKind::Door`]/[`PortalKind::Locked`], and absent for every
+    /// other kind — [`PortalKind::Lift`] and [`PortalKind::DropWall`] report
+    /// the more specific [`IrError::DoorThicknessOnLift`], since each already
+    /// fills its gap with a sector of its own. The alcoves, when present,
+    /// must be one of [`Self::DOOR_DIMENSIONS`] for
     /// [`PortalKind::Door`]/[`PortalKind::Locked`] and one of
-    /// [`Self::LIFT_ALCOVE_DIMENSIONS`] for [`PortalKind::Lift`], and
-    /// absent for [`PortalKind::Plain`].
+    /// [`Self::LIFT_ALCOVE_DIMENSIONS`] for [`PortalKind::Lift`] and
+    /// [`PortalKind::DropWall`], and are rejected outright on
+    /// [`PortalKind::Plain`] and [`PortalKind::Bridge`], neither of which has
+    /// a door construction or (in v1) an alcove.
     ///
     /// Runs unconditionally over every portal — unlike [`Self::validate_door_gap`],
     /// this does not depend on `at` resolving to a real facing span, since a
@@ -1400,7 +1941,9 @@ impl Ir {
                 ("alcove_far", portal.alcove_far),
             ];
             match portal.kind {
-                PortalKind::Plain => {
+                // A bridge joins its two rooms with a pit, not a door
+                // construction, and takes no alcove in v1 either.
+                PortalKind::Plain | PortalKind::Bridge => {
                     for (field, value) in fields {
                         if value.is_some() {
                             return Err(IrError::DoorFieldsOnPlainPortal {
@@ -1431,7 +1974,10 @@ impl Ir {
                         }
                     }
                 }
-                PortalKind::Lift => {
+                // A drop wall's own sector fills the gap exactly as a
+                // platform does, so it admits no door but takes a lift's
+                // alcoves.
+                PortalKind::Lift | PortalKind::DropWall => {
                     if portal.door_thickness.is_some() {
                         return Err(IrError::DoorThicknessOnLift {
                             a: portal.a.clone(),
@@ -1840,71 +2386,8 @@ impl Ir {
                     rise: p.rise,
                 });
             }
-            let [w, h] = p.size.unwrap_or([Self::PEDESTAL_DEFAULT_SIZE; 2]);
-            if w <= 0 || h <= 0 || w % 8 != 0 || h % 8 != 0 {
-                return Err(IrError::PedestalSizeNotMultipleOf8 {
-                    id: p.id.clone(),
-                    width: w,
-                    height: h,
-                });
-            }
             let room = ir.room(&p.room).expect("checked above");
-            // Range-checked before `rect()` is ever called: `size` has no
-            // upper bound of its own, so `at + size` can overflow `i32`
-            // outright, and `rect()`'s saturating sum would then read as a
-            // plausible-looking corner unless it is compared against
-            // `MAP_RANGE` after being computed with checked arithmetic here.
-            if !MAP_RANGE.contains(&p.at.x) || !MAP_RANGE.contains(&p.at.y) {
-                return Err(IrError::CoordinateOutOfRange {
-                    subject: format!("pedestal `{}`", p.id),
-                    x: p.at.x,
-                    y: p.at.y,
-                    min: *MAP_RANGE.start(),
-                    max: *MAP_RANGE.end(),
-                });
-            }
-            let hi_x = p.at.x.checked_add(w);
-            let hi_y = p.at.y.checked_add(h);
-            let in_range = |v: Option<i32>| v.is_some_and(|v| MAP_RANGE.contains(&v));
-            if !in_range(hi_x) || !in_range(hi_y) {
-                return Err(IrError::CoordinateOutOfRange {
-                    subject: format!("pedestal `{}`", p.id),
-                    x: hi_x.unwrap_or(i32::MAX),
-                    y: hi_y.unwrap_or(i32::MAX),
-                    min: *MAP_RANGE.start(),
-                    max: *MAP_RANGE.end(),
-                });
-            }
-            let (lo, hi) = p.rect();
-            // The island pad's containment test, verbatim: every corner
-            // strictly inside, no room vertex inside the rectangle, no wall
-            // through it.
-            let corners = [lo, Pt { x: lo.x, y: hi.y }, hi, Pt { x: hi.x, y: lo.y }];
-            let inside = corners
-                .iter()
-                .all(|&c| contains(&room.footprint, c) && clearance(&room.footprint, c) > 0.0);
-            let vertex_in = room.footprint.iter().any(|&v| square_contains(lo, hi, v));
-            let wall_through =
-                edges(&room.footprint).any(|(s, e)| segment_enters_open_rect(s, e, lo, hi));
-            if !inside || vertex_in || wall_through {
-                return Err(IrError::PedestalOutsideRoom {
-                    id: p.id.clone(),
-                    x: p.at.x,
-                    y: p.at.y,
-                });
-            }
-            for t in &p.things {
-                let strictly_inside =
-                    t.at.x > lo.x && t.at.x < hi.x && t.at.y > lo.y && t.at.y < hi.y;
-                if !strictly_inside {
-                    return Err(IrError::PedestalThingOutside {
-                        id: p.id.clone(),
-                        kind: t.kind.clone(),
-                        x: t.at.x,
-                        y: t.at.y,
-                    });
-                }
-            }
+            Self::validate_island_rect(room, Island::Pedestal, &p.id, p.at, p.size, &p.things)?;
         }
         // One island rule for pads and pedestals alike.
         for (i, a) in ir.pedestals.iter().enumerate() {
@@ -1945,6 +2428,477 @@ impl Ir {
                     return Err(IrError::TeleportDestinationOnPedestal {
                         teleport: t.id.clone(),
                         pedestal: p.id.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The rectangle rule a [`Pedestal`] and a [`Reveal`] share: a size that
+    /// is a positive multiple of 8, corners inside the map range, a rectangle
+    /// strictly inside its host room with no vertex or wall crossing it, and
+    /// every thing strictly inside it.
+    ///
+    /// One body, two vocabularies: a pedestal reports the specific
+    /// `Pedestal*` variants it has always had, a reveal reports the same
+    /// findings as [`IrError::RevealGeometry`] details. [`Island`] picks
+    /// which — the two lists must not drift, since both compile to the same
+    /// kind of sector inside a room.
+    fn validate_island_rect(
+        room: &Room,
+        island: Island,
+        id: &str,
+        at: Pt,
+        size: Option<[i32; 2]>,
+        things: &[IrThing],
+    ) -> Result<(), IrError> {
+        let [w, h] = size.unwrap_or([Self::PEDESTAL_DEFAULT_SIZE; 2]);
+        if w <= 0 || h <= 0 || w % 8 != 0 || h % 8 != 0 {
+            return Err(match island {
+                Island::Pedestal => IrError::PedestalSizeNotMultipleOf8 {
+                    id: id.to_owned(),
+                    width: w,
+                    height: h,
+                },
+                Island::Reveal => IrError::RevealGeometry {
+                    id: id.to_owned(),
+                    detail: format!("is {w}x{h}; each side must be a positive multiple of 8"),
+                },
+            });
+        }
+        // Range-checked before the rectangle is built: `size` has no upper
+        // bound of its own, so `at + size` can overflow `i32` outright, and
+        // the saturating sum `Pedestal::rect`/`Reveal::rect` would report
+        // then reads as a plausible-looking corner unless it is compared
+        // against `MAP_RANGE` after being computed with checked arithmetic
+        // here.
+        let out_of_range = |x: i32, y: i32| IrError::CoordinateOutOfRange {
+            subject: format!("{} `{id}`", island.label()),
+            x,
+            y,
+            min: *MAP_RANGE.start(),
+            max: *MAP_RANGE.end(),
+        };
+        if !MAP_RANGE.contains(&at.x) || !MAP_RANGE.contains(&at.y) {
+            return Err(out_of_range(at.x, at.y));
+        }
+        let hi_x = at.x.checked_add(w);
+        let hi_y = at.y.checked_add(h);
+        let in_range = |v: Option<i32>| v.is_some_and(|v| MAP_RANGE.contains(&v));
+        if !in_range(hi_x) || !in_range(hi_y) {
+            return Err(out_of_range(
+                hi_x.unwrap_or(i32::MAX),
+                hi_y.unwrap_or(i32::MAX),
+            ));
+        }
+        // The corners `Pedestal::rect`/`Reveal::rect` report, now that the
+        // sum above is known to fit.
+        let (lo, hi) = (
+            at,
+            Pt {
+                x: at.x.saturating_add(w),
+                y: at.y.saturating_add(h),
+            },
+        );
+        // The island pad's containment test, verbatim: every corner strictly
+        // inside, no room vertex inside the rectangle, no wall through it.
+        let corners = [lo, Pt { x: lo.x, y: hi.y }, hi, Pt { x: hi.x, y: lo.y }];
+        let inside = corners
+            .iter()
+            .all(|&c| contains(&room.footprint, c) && clearance(&room.footprint, c) > 0.0);
+        let vertex_in = room.footprint.iter().any(|&v| square_contains(lo, hi, v));
+        let wall_through =
+            edges(&room.footprint).any(|(s, e)| segment_enters_open_rect(s, e, lo, hi));
+        if !inside || vertex_in || wall_through {
+            return Err(match island {
+                Island::Pedestal => IrError::PedestalOutsideRoom {
+                    id: id.to_owned(),
+                    x: at.x,
+                    y: at.y,
+                },
+                Island::Reveal => IrError::RevealGeometry {
+                    id: id.to_owned(),
+                    detail: format!(
+                        "at ({}, {}) does not fit strictly inside its room",
+                        at.x, at.y
+                    ),
+                },
+            });
+        }
+        for t in things {
+            let strictly_inside = t.at.x > lo.x && t.at.x < hi.x && t.at.y > lo.y && t.at.y < hi.y;
+            if !strictly_inside {
+                return Err(match island {
+                    Island::Pedestal => IrError::PedestalThingOutside {
+                        id: id.to_owned(),
+                        kind: t.kind.clone(),
+                        x: t.at.x,
+                        y: t.at.y,
+                    },
+                    Island::Reveal => IrError::RevealGeometry {
+                        id: id.to_owned(),
+                        detail: format!(
+                            "places `{}` at ({}, {}), outside its rectangle",
+                            t.kind, t.at.x, t.at.y
+                        ),
+                    },
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates every trigger and every construct that names one: each
+    /// trigger's own placement, that every construct names a trigger that
+    /// exists, that the constructs sharing a trigger all move the same way,
+    /// and that no trigger is declared which nothing names.
+    fn validate_triggers(ir: &Self, seen: &HashSet<&str>) -> Result<(), IrError> {
+        let mut ids: HashSet<&str> = HashSet::new();
+        // Which walkover already owns each room pair. Keyed on the pair in
+        // sorted order, since `portal: [a, b]` names the same opening either
+        // way round; `validate_one_trigger` has already established that the
+        // pair resolves to exactly one portal, so the pair names one line.
+        let mut walkovers: HashMap<(&str, &str), &str> = HashMap::new();
+        for t in &ir.triggers {
+            if !ids.insert(t.id.as_str()) {
+                return Err(IrError::DuplicateTrigger { id: t.id.clone() });
+            }
+            Self::validate_one_trigger(ir, seen, t)?;
+            if let (TriggerKind::Walkover, Some([a, b])) = (t.kind, t.portal.as_ref()) {
+                let key = if a <= b {
+                    (a.as_str(), b.as_str())
+                } else {
+                    (b.as_str(), a.as_str())
+                };
+                if let Some(first) = walkovers.insert(key, t.id.as_str()) {
+                    return Err(IrError::WalkoverPortalClaimedTwice {
+                        first: first.to_owned(),
+                        second: t.id.clone(),
+                        a: a.clone(),
+                        b: b.clone(),
+                    });
+                }
+            }
+        }
+        Self::validate_trigger_families(ir, &ids)
+    }
+
+    /// Validates one trigger's own placement: a switch on a point of its
+    /// room's own wall, a walkover on exactly one portal whose opening line
+    /// can carry it, and neither carrying the other's fields.
+    ///
+    /// A switch's point is judged by exactly the test
+    /// [`crate::compile::exits`] applies to an exit's — [`wall_edges`] and
+    /// [`Axis::split`] — so a switch is placed on a wall the same way an exit
+    /// is, and the two can never disagree about what "on the wall" means.
+    fn validate_one_trigger(ir: &Self, seen: &HashSet<&str>, t: &Trigger) -> Result<(), IrError> {
+        let off_wall = |detail: String| IrError::TriggerOffWall {
+            id: t.id.clone(),
+            detail,
+        };
+        match t.kind {
+            TriggerKind::Switch => {
+                let (Some(room), Some(at)) = (t.room.as_deref(), t.at) else {
+                    return Err(off_wall("a switch needs `room` and `at`".to_owned()));
+                };
+                if t.portal.is_some() {
+                    return Err(off_wall("a switch takes no `portal`".to_owned()));
+                }
+                if !seen.contains(room) {
+                    return Err(off_wall(format!("names unknown room `{room}`")));
+                }
+                let footprint = &ir.room(room).expect("checked above").footprint;
+                let on_wall = wall_edges(footprint).any(|(axis, fixed, lo, hi, _)| {
+                    let (along, across) = axis.split(at);
+                    across == fixed && along > lo && along < hi
+                });
+                if !on_wall {
+                    return Err(off_wall(format!(
+                        "({}, {}) is not on room `{room}`'s own wall",
+                        at.x, at.y
+                    )));
+                }
+            }
+            TriggerKind::Walkover => {
+                let Some([a, b]) = t.portal.as_ref() else {
+                    return Err(off_wall("a walkover needs `portal: [a, b]`".to_owned()));
+                };
+                if t.room.is_some() || t.at.is_some() {
+                    return Err(off_wall("a walkover takes no `room` or `at`".to_owned()));
+                }
+                let mut joining = ir
+                    .portals
+                    .iter()
+                    .filter(|p| (p.a == *a && p.b == *b) || (p.a == *b && p.b == *a));
+                let Some(portal) = joining.next() else {
+                    return Err(off_wall(format!("no portal joins `{a}` and `{b}`")));
+                };
+                // Before the kind test below, which would otherwise judge a
+                // portal that may not be the one the special lands on.
+                let count = 1 + joining.count();
+                if count > 1 {
+                    return Err(IrError::AmbiguousWalkoverPortal {
+                        id: t.id.clone(),
+                        a: a.clone(),
+                        b: b.clone(),
+                        count,
+                    });
+                }
+                // A plain portal's opening line, or a bridge's own two pit
+                // thresholds: stepping down into the pit is the crossing that
+                // raises it, the one bridge trigger that cannot strand the
+                // player who takes the drop.
+                if !matches!(portal.kind, PortalKind::Plain | PortalKind::Bridge) {
+                    return Err(IrError::WalkoverOnNonPlainPortal {
+                        id: t.id.clone(),
+                        a: portal.a.clone(),
+                        b: portal.b.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rejects a construct naming a trigger that does not exist, a trigger
+    /// whose constructs do not agree on which way they move, and a trigger
+    /// nothing names.
+    ///
+    /// One trigger is one sector tag carrying one line special, so a trigger
+    /// named by both a bridge and a drop wall would have to be two specials
+    /// at once.
+    fn validate_trigger_families(ir: &Self, ids: &HashSet<&str>) -> Result<(), IrError> {
+        // Keyed by an owned id rather than a borrow: the closure below takes
+        // `id` with its own anonymous lifetime, which cannot be stored behind
+        // a `&mut` to a map borrowing `ir`.
+        let mut family: HashMap<String, FloorFamilyIr> = HashMap::new();
+        let mut note = |id: &str, subject: String, fam: FloorFamilyIr| -> Result<(), IrError> {
+            if !ids.contains(id) {
+                return Err(IrError::UnknownTrigger {
+                    subject,
+                    id: id.to_owned(),
+                });
+            }
+            match family.get(id) {
+                Some(&seen) if seen != fam => {
+                    Err(IrError::TriggerMixesFamilies { id: id.to_owned() })
+                }
+                _ => {
+                    family.insert(id.to_owned(), fam);
+                    Ok(())
+                }
+            }
+        };
+        for p in &ir.portals {
+            let fam = match p.kind {
+                PortalKind::DropWall => FloorFamilyIr::Lower,
+                PortalKind::Bridge => FloorFamilyIr::Raise,
+                _ => continue,
+            };
+            let id = p
+                .fires_on
+                .as_deref()
+                .ok_or_else(|| IrError::ConstructWithoutTrigger {
+                    a: p.a.clone(),
+                    b: p.b.clone(),
+                    kind: if p.kind == PortalKind::Bridge {
+                        "bridge"
+                    } else {
+                        "drop_wall"
+                    },
+                })?;
+            note(id, format!("portal `{}` <-> `{}`", p.a, p.b), fam)?;
+        }
+        for r in &ir.reveals {
+            note(
+                &r.trigger,
+                format!("reveal `{}`", r.id),
+                FloorFamilyIr::Lower,
+            )?;
+        }
+        for t in &ir.triggers {
+            if !family.contains_key(&t.id) {
+                return Err(IrError::TriggerUnused { id: t.id.clone() });
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates the drop walls, bridges and reveals: the fields each kind
+    /// does and does not take, the floors a bridge joins, every reveal's own
+    /// structure and rectangle, and the map's whole action budget.
+    ///
+    /// Two rules this deliberately leaves to compilation, both of which need
+    /// the engine's step height: a drop wall's two floors within a step of
+    /// each other, and a bridge pit (or a pedestal reveal's rise) deeper than
+    /// one. [`Self::from_json`] loads no table at all — see
+    /// [`Self::FLAT_TILE`] — so a check that needs a table constant cannot
+    /// live here.
+    fn validate_floors(ir: &Self, seen: &HashSet<&str>) -> Result<(), IrError> {
+        for p in &ir.portals {
+            let (a, b) = (p.a.clone(), p.b.clone());
+            match p.kind {
+                PortalKind::DropWall => {
+                    if p.depth.is_some() {
+                        return Err(IrError::FloorFieldOnOtherPortal {
+                            a,
+                            b,
+                            field: "depth",
+                        });
+                    }
+                    let Some(thickness) = p.thickness else {
+                        return Err(IrError::MissingDropWallThickness { a, b });
+                    };
+                    if !Self::DROP_WALL_THICKNESS.contains(&thickness) {
+                        return Err(IrError::InvalidDropWallThickness {
+                            a,
+                            b,
+                            value: thickness,
+                        });
+                    }
+                }
+                PortalKind::Bridge => {
+                    if p.thickness.is_some() {
+                        return Err(IrError::FloorFieldOnOtherPortal {
+                            a,
+                            b,
+                            field: "thickness",
+                        });
+                    }
+                    let Some(depth) = p.depth else {
+                        return Err(IrError::MissingBridgeDepth { a, b });
+                    };
+                    if depth <= 0 || depth % Self::BRIDGE_DEPTH_STEP != 0 {
+                        return Err(IrError::InvalidBridgeDepth { a, b, value: depth });
+                    }
+                    let room_a = ir.room(&p.a).expect("validated by validate_portals");
+                    let room_b = ir.room(&p.b).expect("validated by validate_portals");
+                    if room_a.floor != room_b.floor {
+                        return Err(IrError::BridgeFloorsDiffer {
+                            a,
+                            b,
+                            floor_a: room_a.floor,
+                            floor_b: room_b.floor,
+                        });
+                    }
+                }
+                _ => {
+                    for (field, set) in [
+                        ("thickness", p.thickness.is_some()),
+                        ("depth", p.depth.is_some()),
+                        ("fires_on", p.fires_on.is_some()),
+                    ] {
+                        if set {
+                            return Err(IrError::FloorFieldOnOtherPortal { a, b, field });
+                        }
+                    }
+                }
+            }
+        }
+        Self::validate_reveals(ir, seen)?;
+        let count = ir.reveals.len()
+            + ir.portals
+                .iter()
+                .filter(|p| matches!(p.kind, PortalKind::DropWall | PortalKind::Bridge))
+                .count();
+        if count > Self::MAX_FLOOR_ACTIONS {
+            return Err(IrError::TooManyFloorActions {
+                count,
+                max: Self::MAX_FLOOR_ACTIONS,
+            });
+        }
+        Ok(())
+    }
+
+    /// Validates every reveal: its id and room, the rest shape its `rise`
+    /// belongs to, its rectangle, that no two islands in one room overlap,
+    /// and that no teleport delivers into one.
+    fn validate_reveals(ir: &Self, seen: &HashSet<&str>) -> Result<(), IrError> {
+        let mut ids: HashSet<&str> = HashSet::new();
+        for r in &ir.reveals {
+            if !ids.insert(r.id.as_str()) {
+                return Err(IrError::DuplicateReveal { id: r.id.clone() });
+            }
+            if !seen.contains(r.room.as_str()) {
+                return Err(IrError::RevealUnknownRoom {
+                    id: r.id.clone(),
+                    room: r.room.clone(),
+                });
+            }
+            match (r.kind, r.rise) {
+                (RevealKind::Closet, Some(_)) => {
+                    return Err(IrError::RiseOnCloset { id: r.id.clone() });
+                }
+                (RevealKind::Pedestal, rise) if rise.unwrap_or(0) <= 0 => {
+                    return Err(IrError::RevealRiseNotPositive {
+                        id: r.id.clone(),
+                        rise: rise.unwrap_or(0),
+                    });
+                }
+                _ => {}
+            }
+            let room = ir.room(&r.room).expect("checked above");
+            Self::validate_island_rect(room, Island::Reveal, &r.id, r.at, r.size, &r.things)?;
+        }
+        Self::validate_reveal_overlaps(ir)?;
+        Self::validate_destinations_off_reveals(ir)
+    }
+
+    /// Rejects a reveal that overlaps or touches a pedestal, another reveal
+    /// or a teleport pad in the same room — the whole of the island rule
+    /// [`IrError::PedestalsOverlap`] already keeps between pedestals and
+    /// pads, extended to the third kind of island and in the same order.
+    fn validate_reveal_overlaps(ir: &Self) -> Result<(), IrError> {
+        for (i, r) in ir.reveals.iter().enumerate() {
+            let others = ir
+                .pedestals
+                .iter()
+                .filter(|p| p.room == r.room)
+                .map(|p| (p.id.as_str(), p.rect()))
+                .chain(
+                    ir.reveals[i + 1..]
+                        .iter()
+                        .filter(|o| o.room == r.room)
+                        .map(|o| (o.id.as_str(), o.rect())),
+                );
+            for (id, rect) in others {
+                if squares_overlap_or_touch(r.rect(), rect) {
+                    return Err(IrError::RevealGeometry {
+                        id: r.id.clone(),
+                        detail: format!("overlaps `{id}`"),
+                    });
+                }
+            }
+            for t in ir.teleports.iter().filter(|t| t.room == r.room) {
+                let room = ir.room(&t.room).expect("validated by validate_teleports");
+                let pad = pad_square(room, t.pad).expect("validated by validate_teleports");
+                if squares_overlap_or_touch(r.rect(), pad) {
+                    return Err(IrError::RevealGeometry {
+                        id: r.id.clone(),
+                        detail: format!("overlaps teleport pad `{}`", t.id),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rejects a teleport whose destination point lands inside a reveal.
+    ///
+    /// The reveal's twin of [`Self::validate_destinations_off_pedestals`],
+    /// run in the same place in the order and by the same closed-on-both-axes
+    /// test: a destination is a *point*, so the island rule between two
+    /// rectangles never sees it, and a point on the rectangle's own edge is
+    /// one the arrival's radius straddles.
+    fn validate_destinations_off_reveals(ir: &Self) -> Result<(), IrError> {
+        for r in &ir.reveals {
+            let (lo, hi) = r.rect();
+            for t in ir.teleports.iter().filter(|t| t.to.room == r.room) {
+                if square_contains(lo, hi, t.to.at) {
+                    return Err(IrError::TeleportDestinationOnReveal {
+                        teleport: t.id.clone(),
+                        reveal: r.id.clone(),
                     });
                 }
             }
@@ -2133,8 +3087,8 @@ pub(crate) fn destination_sector_key(ir: &Ir, to: &Destination) -> Option<(usize
 #[cfg(test)]
 mod tests {
     use super::{
-        ExitTrigger, Ir, IrError, LiftSpeed, LiftTrigger, PortalKind, Pt, destination_sector_key,
-        pad_square,
+        ExitTrigger, FloorFamilyIr, Ir, IrError, LiftSpeed, LiftTrigger, PortalKind, Pt,
+        RevealKind, TriggerKind, destination_sector_key, pad_square,
     };
 
     // Room `b` sits a full grid step (64 units, a clean multiple of
@@ -3486,5 +4440,552 @@ mod tests {
             Ir::from_json(&json),
             Err(IrError::PedestalsOverlap { .. })
         ));
+    }
+
+    /// Three rooms in a row, each authored 64 units clear of the next:
+    /// `a` (0..256) — `b` (320..576) — `c` (640..896), all at floor 0. The
+    /// floor-action tests substitute their own portals, triggers and reveals
+    /// into it, so each one reads as the construct it is about.
+    const FLOORS_BASE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[128,128], "angle":0 } ] },
+        { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"c", "footprint":[[640,0],[640,256],[896,256],[896,0]], "floor":0, "ceiling":192, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[ {PORTALS} ],
+      "triggers":[ {TRIGGERS} ],
+      "reveals":[ {REVEALS} ] }"#;
+
+    /// [`FLOORS_BASE`] with its three lists filled in.
+    fn floors(portals: &str, triggers: &str, reveals: &str) -> Result<Ir, IrError> {
+        Ir::from_json(
+            &FLOORS_BASE
+                .replace("{PORTALS}", portals)
+                .replace("{TRIGGERS}", triggers)
+                .replace("{REVEALS}", reveals),
+        )
+    }
+
+    const SWITCH_A: &str = r#"{ "id":"t", "kind":"switch", "room":"a", "at":[0,128] }"#;
+    const WALK_AB: &str = r#"{ "id":"w", "kind":"walkover", "portal":["a","b"] }"#;
+    const PLAIN_AB: &str = r#"{ "a":"a", "b":"b", "kind":"plain", "width":64, "at":[256,128] }"#;
+    const WALL_BC: &str = r#"{ "a":"b", "b":"c", "kind":"drop_wall", "width":64, "at":[576,128], "thickness":16, "fires_on":"t" }"#;
+    const BRIDGE_BC: &str = r#"{ "a":"b", "b":"c", "kind":"bridge", "width":64, "at":[576,128], "depth":96, "fires_on":"w" }"#;
+    const CLOSET_C: &str = r#"{ "id":"pen", "room":"c", "at":[704,64], "kind":"closet",
+        "things":[ { "kind":"imp", "at":[736,96], "angle":180 } ], "trigger":"t" }"#;
+
+    #[test]
+    fn a_drop_wall_with_a_switch_trigger_parses() {
+        let ir = floors(&format!("{PLAIN_AB}, {WALL_BC}"), SWITCH_A, "").expect("parses");
+        assert_eq!(ir.portals[1].kind, PortalKind::DropWall);
+        assert_eq!(ir.portals[1].thickness, Some(16));
+        assert_eq!(ir.portals[1].fires_on.as_deref(), Some("t"));
+        assert_eq!(ir.triggers[0].kind, TriggerKind::Switch);
+        assert_eq!(ir.trigger("t").map(|t| t.kind), Some(TriggerKind::Switch));
+        assert!(ir.trigger("nobody").is_none());
+        assert_eq!(ir.trigger_family("t"), Some(FloorFamilyIr::Lower));
+        assert_eq!(ir.trigger_family("nobody"), None);
+    }
+
+    #[test]
+    fn a_bridge_on_a_walkover_and_a_closet_on_the_switch_parse_together() {
+        let ir = floors(
+            &format!("{PLAIN_AB}, {BRIDGE_BC}"),
+            &format!("{SWITCH_A}, {WALK_AB}"),
+            CLOSET_C,
+        )
+        .expect("parses");
+        assert_eq!(ir.trigger_family("w"), Some(FloorFamilyIr::Raise));
+        assert_eq!(ir.trigger_family("t"), Some(FloorFamilyIr::Lower));
+        assert_eq!(ir.reveals[0].kind, RevealKind::Closet);
+        assert_eq!(
+            ir.reveals[0].rect(),
+            (Pt { x: 704, y: 64 }, Pt { x: 768, y: 128 })
+        );
+    }
+
+    #[test]
+    fn a_trigger_nothing_names_is_rejected() {
+        let err = floors(PLAIN_AB, SWITCH_A, "").expect_err("unused trigger");
+        assert!(
+            matches!(err, IrError::TriggerUnused { ref id } if id == "t"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_construct_naming_an_unknown_trigger_is_rejected() {
+        let err = floors(&format!("{PLAIN_AB}, {WALL_BC}"), "", "").expect_err("unknown trigger");
+        assert!(
+            matches!(err, IrError::UnknownTrigger { ref id, .. } if id == "t"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_trigger_driving_a_lowering_and_a_rising_construct_is_rejected() {
+        // The bridge names the switch `t`, which the closet (lowering) names too.
+        let bridge_on_t = BRIDGE_BC.replace("\"fires_on\":\"w\"", "\"fires_on\":\"t\"");
+        let err = floors(&format!("{PLAIN_AB}, {bridge_on_t}"), SWITCH_A, CLOSET_C)
+            .expect_err("mixed families");
+        assert!(
+            matches!(err, IrError::TriggerMixesFamilies { ref id } if id == "t"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn drop_wall_thickness_and_bridge_depth_are_validated() {
+        let bad_thick = WALL_BC.replace("\"thickness\":16", "\"thickness\":24");
+        let err = floors(&format!("{PLAIN_AB}, {bad_thick}"), SWITCH_A, "").expect_err("24");
+        assert!(
+            matches!(err, IrError::InvalidDropWallThickness { value: 24, .. }),
+            "{err}"
+        );
+        let missing = WALL_BC.replace(", \"thickness\":16", "");
+        let err = floors(&format!("{PLAIN_AB}, {missing}"), SWITCH_A, "").expect_err("none");
+        assert!(
+            matches!(err, IrError::MissingDropWallThickness { .. }),
+            "{err}"
+        );
+        // Zero, not 24: the "deeper than a step" half of the rule needs the
+        // step height, which is a table value `from_json` never loads, so
+        // the IR only holds `depth` to a positive multiple of 8.
+        let flat = BRIDGE_BC.replace("\"depth\":96", "\"depth\":0");
+        let err = floors(&format!("{PLAIN_AB}, {flat}"), WALK_AB, "").expect_err("no pit at all");
+        assert!(
+            matches!(err, IrError::InvalidBridgeDepth { value: 0, .. }),
+            "{err}"
+        );
+        let odd = BRIDGE_BC.replace("\"depth\":96", "\"depth\":100");
+        let err =
+            floors(&format!("{PLAIN_AB}, {odd}"), WALK_AB, "").expect_err("not a multiple of 8");
+        assert!(
+            matches!(err, IrError::InvalidBridgeDepth { value: 100, .. }),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_walkover_must_name_a_plain_portal_and_a_switch_a_wall_point() {
+        let on_wall = r#"{ "id":"w", "kind":"walkover", "portal":["b","c"] }"#;
+        let err = floors(
+            &format!("{PLAIN_AB}, {WALL_BC}"),
+            &format!("{SWITCH_A}, {on_wall}"),
+            "",
+        )
+        .expect_err("a walkover on a drop wall");
+        assert!(
+            matches!(err, IrError::WalkoverOnNonPlainPortal { ref id, .. } if id == "w"),
+            "{err}"
+        );
+        let off_wall = r#"{ "id":"t", "kind":"switch", "room":"a", "at":[64,64] }"#;
+        let err =
+            floors(&format!("{PLAIN_AB}, {WALL_BC}"), off_wall, "").expect_err("inside the room");
+        assert!(
+            matches!(err, IrError::TriggerOffWall { ref id, .. } if id == "t"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_bridge_may_carry_its_own_walkover() {
+        // The one bridge trigger that cannot strand: its special sits on the
+        // pit's own thresholds, so whoever steps in fires the rise.
+        let on_itself = r#"{ "id":"w", "kind":"walkover", "portal":["b","c"] }"#;
+        let ir = floors(&format!("{PLAIN_AB}, {BRIDGE_BC}"), on_itself, "").expect("parses");
+        assert_eq!(ir.trigger_family("w"), Some(FloorFamilyIr::Raise));
+    }
+
+    #[test]
+    fn a_trigger_names_a_unique_id_and_only_its_own_kinds_fields() {
+        let dup = format!("{SWITCH_A}, {SWITCH_A}");
+        let err = floors(&format!("{PLAIN_AB}, {WALL_BC}"), &dup, "").expect_err("two `t`s");
+        assert!(
+            matches!(err, IrError::DuplicateTrigger { ref id } if id == "t"),
+            "{err}"
+        );
+        for (trigger, needle) in [
+            (
+                r#"{ "id":"t", "kind":"switch" }"#,
+                "a switch needs `room` and `at`",
+            ),
+            (
+                r#"{ "id":"t", "kind":"switch", "room":"a", "at":[0,128], "portal":["a","b"] }"#,
+                "a switch takes no `portal`",
+            ),
+            (
+                r#"{ "id":"t", "kind":"switch", "room":"zz", "at":[0,128] }"#,
+                "names unknown room `zz`",
+            ),
+            (
+                r#"{ "id":"w", "kind":"walkover" }"#,
+                "a walkover needs `portal: [a, b]`",
+            ),
+            (
+                r#"{ "id":"w", "kind":"walkover", "portal":["a","b"], "room":"a" }"#,
+                "a walkover takes no `room` or `at`",
+            ),
+            (
+                r#"{ "id":"w", "kind":"walkover", "portal":["a","c"] }"#,
+                "no portal joins `a` and `c`",
+            ),
+        ] {
+            let err = floors(&format!("{PLAIN_AB}, {WALL_BC}"), trigger, "").expect_err(needle);
+            let IrError::TriggerOffWall { ref detail, .. } = err else {
+                panic!("{err}");
+            };
+            assert!(detail.contains(needle), "{err}");
+        }
+    }
+
+    #[test]
+    fn a_drop_wall_and_a_bridge_each_refuse_the_others_fields_and_a_missing_one() {
+        let no_trigger = WALL_BC.replace(", \"fires_on\":\"t\"", "");
+        let err = floors(&format!("{PLAIN_AB}, {no_trigger}"), "", "").expect_err("no `fires_on`");
+        assert!(
+            matches!(
+                err,
+                IrError::ConstructWithoutTrigger {
+                    kind: "drop_wall",
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        let no_trigger = BRIDGE_BC.replace(", \"fires_on\":\"w\"", "");
+        let err = floors(&format!("{PLAIN_AB}, {no_trigger}"), "", "").expect_err("no `fires_on`");
+        assert!(
+            matches!(err, IrError::ConstructWithoutTrigger { kind: "bridge", .. }),
+            "{err}"
+        );
+        let no_depth = BRIDGE_BC.replace("\"depth\":96, ", "");
+        let err = floors(&format!("{PLAIN_AB}, {no_depth}"), WALK_AB, "").expect_err("no depth");
+        assert!(matches!(err, IrError::MissingBridgeDepth { .. }), "{err}");
+        let uneven = FLOORS_BASE
+            .replace("{PORTALS}", &format!("{PLAIN_AB}, {BRIDGE_BC}"))
+            .replace("{TRIGGERS}", WALK_AB)
+            .replace("{REVEALS}", "")
+            .replace(
+                r#""id":"c", "footprint":[[640,0],[640,256],[896,256],[896,0]], "floor":0"#,
+                r#""id":"c", "footprint":[[640,0],[640,256],[896,256],[896,0]], "floor":32"#,
+            );
+        let err = Ir::from_json(&uneven).expect_err("floors differ by 32");
+        assert!(
+            matches!(
+                err,
+                IrError::BridgeFloorsDiffer {
+                    floor_a: 0,
+                    floor_b: 32,
+                    ..
+                }
+            ),
+            "{err}"
+        );
+        // A plain portal takes none of the three; a drop wall and a bridge
+        // take each other's, so each names a trigger that has to exist.
+        for (portals, triggers, field) in [
+            (
+                PLAIN_AB.replace("\"width\":64", "\"width\":64, \"thickness\":16"),
+                "",
+                "thickness",
+            ),
+            (
+                PLAIN_AB.replace("\"width\":64", "\"width\":64, \"depth\":96"),
+                "",
+                "depth",
+            ),
+            (
+                PLAIN_AB.replace("\"width\":64", "\"width\":64, \"fires_on\":\"t\""),
+                "",
+                "fires_on",
+            ),
+            (
+                format!(
+                    "{PLAIN_AB}, {}",
+                    WALL_BC.replace("\"thickness\":16", "\"depth\":96")
+                ),
+                SWITCH_A,
+                "depth",
+            ),
+            (
+                format!(
+                    "{PLAIN_AB}, {}",
+                    BRIDGE_BC.replace("\"depth\":96", "\"thickness\":16")
+                ),
+                WALK_AB,
+                "thickness",
+            ),
+        ] {
+            let err = floors(&portals, triggers, "").expect_err(field);
+            assert!(
+                matches!(err, IrError::FloorFieldOnOtherPortal { field: f, .. } if f == field),
+                "{err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pedestal_reveal_needs_a_positive_rise_and_a_closet_none() {
+        let flat = CLOSET_C.replace("\"kind\":\"closet\"", "\"kind\":\"pedestal\", \"rise\":0");
+        let err = floors(&format!("{PLAIN_AB}, {WALL_BC}"), SWITCH_A, &flat)
+            .expect_err("a pedestal rises");
+        assert!(
+            matches!(err, IrError::RevealRiseNotPositive { rise: 0, .. }),
+            "{err}"
+        );
+        let with_rise = CLOSET_C.replace("\"kind\":\"closet\"", "\"kind\":\"closet\", \"rise\":64");
+        let err =
+            floors(&format!("{PLAIN_AB}, {WALL_BC}"), SWITCH_A, &with_rise).expect_err("closet");
+        assert!(matches!(err, IrError::RiseOnCloset { .. }), "{err}");
+    }
+
+    #[test]
+    fn a_reveal_needs_a_unique_id_a_known_room_and_a_rectangle_inside_it() {
+        let portals = format!("{PLAIN_AB}, {WALL_BC}");
+        let dup = format!("{CLOSET_C}, {CLOSET_C}");
+        let err = floors(&portals, SWITCH_A, &dup).expect_err("two `pen`s");
+        assert!(
+            matches!(err, IrError::DuplicateReveal { ref id } if id == "pen"),
+            "{err}"
+        );
+        let unknown = CLOSET_C.replace("\"room\":\"c\"", "\"room\":\"zz\"");
+        let err = floors(&portals, SWITCH_A, &unknown).expect_err("unknown room");
+        assert!(
+            matches!(err, IrError::RevealUnknownRoom { ref room, .. } if room == "zz"),
+            "{err}"
+        );
+        for (reveal, needle) in [
+            (
+                CLOSET_C.replace(
+                    "\"kind\":\"closet\"",
+                    "\"size\":[60,64], \"kind\":\"closet\"",
+                ),
+                "each side must be a positive multiple of 8",
+            ),
+            (
+                CLOSET_C.replace("\"at\":[704,64]", "\"at\":[880,64]"),
+                "does not fit strictly inside its room",
+            ),
+            (
+                CLOSET_C.replace("\"at\":[736,96]", "\"at\":[800,96]"),
+                "outside its rectangle",
+            ),
+        ] {
+            let err = floors(&portals, SWITCH_A, &reveal).expect_err(needle);
+            let IrError::RevealGeometry { ref detail, .. } = err else {
+                panic!("{err}");
+            };
+            assert!(detail.contains(needle), "{err}");
+        }
+        // The range check the pedestals share: `at + size` is computed with
+        // checked arithmetic, so a corner past the map range is an error and
+        // not a saturated, plausible-looking coordinate.
+        let huge = CLOSET_C.replace("\"at\":[704,64]", "\"at\":[2147483647,64]");
+        let err = floors(&portals, SWITCH_A, &huge).expect_err("outside the map range");
+        assert!(
+            matches!(err, IrError::CoordinateOutOfRange { ref subject, .. } if subject == "reveal `pen`"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn a_reveal_may_not_overlap_a_pedestal_or_another_reveal() {
+        // Touching counts, as it does between two pedestals: two cells that
+        // meet exactly along one edge emit coincident linedefs.
+        let neighbor =
+            r#"{ "id":"pen2", "room":"c", "at":[768,64], "kind":"closet", "trigger":"t" }"#;
+        let err = floors(
+            &format!("{PLAIN_AB}, {WALL_BC}"),
+            SWITCH_A,
+            &format!("{CLOSET_C}, {neighbor}"),
+        )
+        .expect_err("two reveals that touch");
+        let IrError::RevealGeometry { ref id, ref detail } = err else {
+            panic!("{err}");
+        };
+        assert_eq!(id, "pen");
+        assert!(detail.contains("overlaps `pen2`"), "{err}");
+        let with_pedestal = FLOORS_BASE
+            .replace("{PORTALS}", &format!("{PLAIN_AB}, {WALL_BC}"))
+            .replace("{TRIGGERS}", SWITCH_A)
+            .replace("{REVEALS}", CLOSET_C)
+            .replace(
+                r#""reveals":["#,
+                r#""pedestals":[ { "id":"ped", "room":"c", "at":[736,64], "rise":64 } ], "reveals":["#,
+            );
+        let err = Ir::from_json(&with_pedestal).expect_err("a reveal over a pedestal");
+        assert!(
+            matches!(err, IrError::RevealGeometry { ref detail, .. } if detail.contains("overlaps `ped`")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn more_than_eight_actions_are_rejected() {
+        // Nine closets in room `c`, all on one switch: 8x8 cells on a 64 grid.
+        let mut reveals = Vec::new();
+        for i in 0..9 {
+            reveals.push(format!(
+                r#"{{ "id":"r{i}", "room":"c", "at":[{x},{y}], "size":[8,8], "kind":"closet", "trigger":"t" }}"#,
+                x = 656 + (i % 3) * 64,
+                y = 32 + (i / 3) * 64
+            ));
+        }
+        let err = floors(PLAIN_AB, SWITCH_A, &reveals.join(", ")).expect_err("nine actions");
+        assert!(
+            matches!(err, IrError::TooManyFloorActions { count: 9, max: 8 }),
+            "{err}"
+        );
+        // Eight of the same cells parse, so the cap is what rejected them.
+        floors(PLAIN_AB, SWITCH_A, &reveals[..8].join(", ")).expect("eight actions");
+    }
+
+    #[test]
+    fn the_ir_floor_grains_match_the_engine_table() {
+        // The drift guard `tables::tests` keeps over `Ir::FLAT_TILE`, for the
+        // same reason: `from_json` validates without loading a table, so the
+        // IR carries its own copy of `[floor]`'s two curated grains.
+        let floor = crate::tables::Tables::load().expect("tables load").floor();
+        assert_eq!(floor.drop_wall_thickness, Ir::DROP_WALL_THICKNESS);
+        assert_eq!(floor.bridge_depth_step, Ir::BRIDGE_DEPTH_STEP);
+    }
+
+    #[test]
+    fn every_pre_existing_fixture_still_parses() {
+        for text in [
+            include_str!("../tests/golden/lifts.json"),
+            include_str!("../tests/golden/teleports.json"),
+            include_str!("../tests/fixtures/entrada_base.json"),
+            include_str!("../tests/fixtures/ascensor_base.json"),
+        ] {
+            let ir = Ir::from_json(text).expect("parses unchanged");
+            assert!(ir.triggers.is_empty() && ir.reveals.is_empty());
+        }
+    }
+
+    /// [`FLOORS_BASE`] with a `teleports` list spliced in beside the rest.
+    fn floors_with_teleports(
+        portals: &str,
+        triggers: &str,
+        reveals: &str,
+        teleports: &str,
+    ) -> Result<Ir, IrError> {
+        Ir::from_json(
+            &FLOORS_BASE
+                .replace("{PORTALS}", portals)
+                .replace("{TRIGGERS}", triggers)
+                .replace("{REVEALS}", reveals)
+                .replace(
+                    r#""triggers":["#,
+                    &format!(r#""teleports":[ {teleports} ], "triggers":["#),
+                ),
+        )
+    }
+
+    #[test]
+    fn a_reveal_may_not_overlap_a_teleport_pad() {
+        // The third pairing of the island rule, after reveal-vs-pedestal and
+        // reveal-vs-reveal: the pad's square meets the closet's exactly along
+        // x = 768, which would emit coincident one-sided linedefs.
+        let pad = r#"{ "id":"tp", "room":"c", "pad":{"island":[768,64]},
+            "to":{"room":"c","at":[850,200],"angle":0} }"#;
+        let err = floors_with_teleports(&format!("{PLAIN_AB}, {WALL_BC}"), SWITCH_A, CLOSET_C, pad)
+            .expect_err("the pad touches the closet");
+        assert!(
+            matches!(err, IrError::RevealGeometry { ref id, ref detail }
+                if id == "pen" && detail.contains("overlaps teleport pad `tp`")),
+            "{err}"
+        );
+        // The same pad in the room next door is no one's neighbor.
+        let elsewhere = pad.replace(
+            "\"room\":\"c\", \"pad\":{\"island\":[768,64]}",
+            "\"room\":\"b\", \"pad\":{\"island\":[384,64]}",
+        );
+        floors_with_teleports(
+            &format!("{PLAIN_AB}, {WALL_BC}"),
+            SWITCH_A,
+            CLOSET_C,
+            &elsewhere,
+        )
+        .expect("a pad clear of the reveal");
+    }
+
+    #[test]
+    fn a_teleport_may_not_deliver_onto_a_reveal() {
+        // The pedestal rule's companion for the *destination*: a point, which
+        // the rectangle-against-rectangle test above cannot see. The pad sits
+        // in room `b`, well clear of the closet, so only the destination is
+        // at issue in either case.
+        let pad = r#"{ "id":"tp", "room":"b", "pad":{"island":[384,64]},
+            "to":{"room":"c","at":[736,96],"angle":0} }"#;
+        let err = floors_with_teleports(&format!("{PLAIN_AB}, {WALL_BC}"), SWITCH_A, CLOSET_C, pad)
+            .expect_err("the destination is inside the closet");
+        assert!(
+            matches!(err, IrError::TeleportDestinationOnReveal { ref teleport, ref reveal }
+                if teleport == "tp" && reveal == "pen"),
+            "{err}"
+        );
+        let clear = pad.replace("\"at\":[736,96]", "\"at\":[850,200]");
+        floors_with_teleports(
+            &format!("{PLAIN_AB}, {WALL_BC}"),
+            SWITCH_A,
+            CLOSET_C,
+            &clear,
+        )
+        .expect("a destination clear of the reveal");
+    }
+
+    #[test]
+    fn a_walkover_naming_two_portals_between_one_room_pair_is_rejected() {
+        // Two openings in one wall pair are legal as long as their spans do
+        // not overlap (`compile::portals` has its own test for exactly that),
+        // so `[a, b]` names two lines here and the author has to say which
+        // one carries the special.
+        let second = r#"{ "a":"a", "b":"b", "kind":"plain", "width":32, "at":[256,32] }"#;
+        let err = floors(&format!("{PLAIN_AB}, {second}"), WALK_AB, "")
+            .expect_err("two portals join `a` and `b`");
+        assert!(
+            matches!(err, IrError::AmbiguousWalkoverPortal { ref id, count: 2, .. } if id == "w"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn two_walkovers_claiming_one_portal_are_rejected() {
+        // The other side of the same coin: one portal, two triggers. Both
+        // would write onto the one opening line `a` <-> `b` has, and the
+        // second write would take the first's tag off it — leaving `w`'s drop
+        // wall with nothing that opens it, on a map that loads and looks
+        // right. Named `[b, a]` here to prove the pair is matched either way
+        // round.
+        let wall = WALL_BC.replace(r#""fires_on":"t""#, r#""fires_on":"w""#);
+        let extra = r#"{ "id":"w2", "kind":"walkover", "portal":["b","a"] }"#;
+        let closet = CLOSET_C.replace(r#""trigger":"t""#, r#""trigger":"w2""#);
+        let err = floors(
+            &format!("{PLAIN_AB}, {wall}"),
+            &format!("{WALK_AB}, {extra}"),
+            &closet,
+        )
+        .expect_err("both walkovers claim the `a` <-> `b` opening");
+        assert!(
+            matches!(err, IrError::WalkoverPortalClaimedTwice { ref first, ref second, ref a, ref b }
+                if first == "w" && second == "w2" && a == "b" && b == "a"),
+            "{err}"
+        );
+
+        // The same map with the second trigger on its own switch is fine:
+        // what is refused is sharing the line, not sharing the portal's rooms.
+        let switch_c = r#"{ "id":"w2", "kind":"switch", "room":"c", "at":[896,128] }"#;
+        floors(
+            &format!("{PLAIN_AB}, {wall}"),
+            &format!("{WALK_AB}, {switch_c}"),
+            &closet,
+        )
+        .expect("one walkover and one switch claim different lines");
     }
 }

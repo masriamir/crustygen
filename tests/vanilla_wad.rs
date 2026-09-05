@@ -1,6 +1,6 @@
 //! Library-level tests for `crustygen::ingest` (issue #21): the binary
-//! round-trip path, exercised against binary re-emissions of entrada and of
-//! ascensor, the lift playtest map.
+//! round-trip path, exercised against binary re-emissions of entrada, of
+//! ascensor (the lift playtest map) and of muralla (the floor one).
 
 mod common;
 
@@ -56,6 +56,48 @@ fn binary_ascensor_loads_via_assembly() {
             "lift special {special} lost in the round trip; present: {specials:?}"
         );
     }
+    assert!(
+        loaded.notes.is_empty(),
+        "unexpected notes: {:?}",
+        loaded.notes
+    );
+}
+
+/// Muralla, the floor playtest map, through the same binary round trip: the
+/// drop wall, the reveal cell and the bridge pit, their tags and their
+/// use/walkover specials all survive the downconvert and come back through
+/// assembly.
+#[test]
+fn binary_muralla_loads_via_assembly() {
+    let (wad, group) = first_group(common::binary_muralla_wad());
+    let loaded = ingest::load_map(&wad, &group).expect("binary map loads");
+    assert_eq!(loaded.origin, MapOrigin::AssembledFromBinary);
+    assert!(!loaded.map.sectors.is_empty(), "assembled map has sectors");
+    assert!(!loaded.map.things.is_empty(), "assembled map has things");
+    // The three floor specials the map emits — 23 (the switch that drops the
+    // wall), 38 (the walkover that lowers the pedestal reveal) and 119 (the
+    // walkover on each of the bridge's two thresholds) — plus 28, the red-card
+    // door the reveal's card opens, must all come back from LINEDEFS.
+    let specials: std::collections::BTreeSet<i32> =
+        loaded.map.linedefs.iter().map(|l| l.special).collect();
+    for special in [23, 28, 38, 119] {
+        assert!(
+            specials.contains(&special),
+            "special {special} lost in the round trip; present: {specials:?}"
+        );
+    }
+    // Both bridge thresholds carry the rise, not just the near one: the
+    // player fires it from whichever side they step down into the pit.
+    assert_eq!(
+        loaded
+            .map
+            .linedefs
+            .iter()
+            .filter(|l| l.special == 119)
+            .count(),
+        2,
+        "the bridge's rise is written on both of the pit's thresholds"
+    );
     assert!(
         loaded.notes.is_empty(),
         "unexpected notes: {:?}",

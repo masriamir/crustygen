@@ -1,7 +1,8 @@
 //! Shared fixture builders for the integration tests: entrada (and
-//! ascensor, the lift map) compiled to a UDMF PWAD, the same map
-//! round-tripped into a classic binary-format PWAD (with real nodes, via
-//! crustywad's one-shot builder), and a raw TEXTMAP-wrapping helper.
+//! ascensor, the lift map, and muralla, the floor map) compiled to a UDMF
+//! PWAD, the same map round-tripped into a classic binary-format PWAD (with
+//! real nodes, via crustywad's one-shot builder), and a raw TEXTMAP-wrapping
+//! helper.
 
 // Each `tests/*.rs` file that does `mod common;` compiles this module into
 // its own independent integration-test crate, and no single consumer uses
@@ -31,10 +32,20 @@ pub const SALTO: &str = include_str!("../fixtures/salto_base.json");
 /// committed `maps/ascensor.wad`.
 pub const ASCENSOR: &str = include_str!("../fixtures/ascensor_base.json");
 
+/// The muralla base IR fixture — the floor playtest map, paired with the
+/// committed `maps/muralla.wad`.
+pub const MURALLA: &str = include_str!("../fixtures/muralla_base.json");
+
 /// The lift golden IR — one lift, one barrier, one walkover lift and a
 /// pedestal — for the CLI tests that need a map every platform of which the
 /// recognizer accepts.
 pub const LIFTS: &str = include_str!("../golden/lifts.json");
+
+/// The floor golden IR — a drop wall and a closet on one switch's shared
+/// tag, a pedestal on a walkover, and a bridge on a walkover of its own —
+/// for the CLI tests that need a map every floor target of which the
+/// recognizer accepts.
+pub const FLOORS: &str = include_str!("../golden/floors.json");
 
 /// Compiles `ir_json` and packs it as a minimal un-noded UDMF PWAD.
 fn udmf_wad(ir_json: &str) -> Vec<u8> {
@@ -90,9 +101,26 @@ pub fn binary_ascensor_wad() -> Vec<u8> {
     binary_wad(udmf_ascensor_wad())
 }
 
+/// Compiles muralla — the floor playtest map — and packs it as a minimal
+/// un-noded UDMF PWAD.
+pub fn udmf_muralla_wad() -> Vec<u8> {
+    udmf_wad(MURALLA)
+}
+
+/// Compiles muralla, assembles it, and re-emits it as a classic Doom
+/// binary-format PWAD with real nodes — the floor map's vanilla twin.
+pub fn binary_muralla_wad() -> Vec<u8> {
+    binary_wad(udmf_muralla_wad())
+}
+
 /// Compiles the lift golden and packs it as a minimal un-noded UDMF PWAD.
 pub fn udmf_lifts_wad() -> Vec<u8> {
     udmf_wad(LIFTS)
+}
+
+/// Compiles the floor golden and packs it as a minimal un-noded UDMF PWAD.
+pub fn udmf_floors_wad() -> Vec<u8> {
+    udmf_wad(FLOORS)
 }
 
 /// The binary entrada WAD plus a second, deliberately unloadable map group:

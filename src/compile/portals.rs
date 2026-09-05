@@ -17,7 +17,7 @@ use crate::compile::{CompileError, LinedefOut, MapData, SectorOut, SidedefOut};
 use crate::geom::{
     Axis, FacingSpan, Pt, facing_spans, find_facing_span, on_diagonal_wall, outward_sign,
 };
-use crate::ir::{Ir, Portal, PortalKind};
+use crate::ir::{Ir, Portal, PortalKind, Room};
 use crate::tables::Tables;
 
 /// The inclusive coordinate range every Doom map format stores in a signed
@@ -54,8 +54,9 @@ pub(crate) const MAP_RANGE: std::ops::RangeInclusive<i32> = (i16::MIN as i32)..=
 /// [`CompileError::OverlappingPortals`] when two openings overlap on the same
 /// wall line, [`CompileError::OpeningNotInAWall`] when no single solid wall
 /// of a room spans the opening, and [`CompileError::PortalNoHeadroom`] when a
-/// plain portal's passage sector — or the platform of a lift portal, at its
-/// rest floor — would leave too little (or no) headroom for the player.
+/// plain portal's passage sector — or the platform of a lift portal at its
+/// rest floor, or a drop wall or a bridge in the state it comes to rest in
+/// after firing — would leave too little (or no) headroom for the player.
 pub fn cut_portals(ir: &Ir, tables: &Tables, data: &mut MapData) -> Result<(), CompileError> {
     let resolved = ir
         .portals
@@ -72,8 +73,8 @@ pub fn cut_portals(ir: &Ir, tables: &Tables, data: &mut MapData) -> Result<(), C
     Ok(())
 }
 
-/// Rejects a plain or lift portal whose two rooms leave too little headroom
-/// above the sector that fills the gap between them.
+/// Rejects a plain, lift, drop-wall or bridge portal whose two rooms leave
+/// too little headroom above the sector that fills the gap between them.
 ///
 /// Runs here, in the pre-emission pass alongside
 /// [`check_no_overlapping_openings`], over every resolved portal before any
@@ -81,10 +82,13 @@ pub fn cut_portals(ir: &Ir, tables: &Tables, data: &mut MapData) -> Result<(), C
 /// `split_wall_for_opening` has already mutated `data`. Checking it here is
 /// what makes this module's own doc comment ("every portal is resolved and
 /// cross-checked before anything is emitted") actually true: a rejected map
-/// leaves no partially-cut geometry behind. [`PortalKind::Plain`] and
-/// [`PortalKind::Lift`] portals are checked, each against the floor its own
-/// gap sector comes to rest at — see [`CompileError::PortalNoHeadroom`]'s
-/// doc comment for why a door portal is exempt.
+/// leaves no partially-cut geometry behind. [`PortalKind::Plain`],
+/// [`PortalKind::Lift`], [`PortalKind::DropWall`] and [`PortalKind::Bridge`]
+/// portals are checked, each against the floor its own gap sector comes to
+/// rest at — for the two floor kinds, the floor they reach *after* firing,
+/// the only state either is meant to be crossed in. See
+/// [`CompileError::PortalNoHeadroom`]'s doc comment for why a door portal is
+/// exempt.
 fn check_headroom(
     ir: &Ir,
     tables: &Tables,
@@ -94,15 +98,28 @@ fn check_headroom(
     for (portal, geometry) in resolved {
         let room_a = &ir.rooms[geometry.ia];
         let room_b = &ir.rooms[geometry.ib];
-        // What the player must fit above, once the sector filling the gap
-        // has come to rest: the higher floor for a plain passage, and for a
-        // lift the platform's own rest floor — the higher floor plus a
-        // barrier's `rise` (`p_plats.c`, `EV_DoPlat`, `case downWaitUpStay`:
-        // the platform's own floor is its high position). A door portal is
-        // exempt — see `CompileError::PortalNoHeadroom`'s doc comment.
+        // What the player must fit above, once the sector filling the gap has
+        // come to rest.
         let rest = match portal.kind {
-            PortalKind::Plain => room_a.floor.max(room_b.floor),
+            // The higher of the two floors — one formula for all three kinds
+            // whose gap sector comes to rest there. A plain passage rests at
+            // it outright. A bridge's two rooms are at one floor
+            // (`IrError::BridgeFloorsDiffer`) and the risen pit comes to rest
+            // at that shared floor. A dropped wall keeps its ceiling at the
+            // lower of the two rooms' and takes its floor to the lower of the
+            // two floors, so the opening into the *higher* room — the tighter
+            // of its two — is again the lower ceiling over the higher floor.
+            // The two floor kinds are measured after firing, which is the only
+            // state either is meant to be crossed in.
+            PortalKind::Plain | PortalKind::DropWall | PortalKind::Bridge => {
+                room_a.floor.max(room_b.floor)
+            }
+            // A lift is measured at its platform's own rest floor: the higher
+            // floor plus a barrier's `rise` (`p_plats.c`, `EV_DoPlat`, `case
+            // downWaitUpStay`: the platform's own floor is its high position).
             PortalKind::Lift => room_a.floor.max(room_b.floor) + portal.rise.unwrap_or(0),
+            // A door portal is exempt — see `CompileError::PortalNoHeadroom`'s
+            // doc comment.
             PortalKind::Door | PortalKind::Locked => continue,
         };
         let have = room_a.ceiling.min(room_b.ceiling) - rest;
@@ -805,6 +822,111 @@ pub(crate) fn emit_side_wall(
         secret: false,
     });
     data.linedefs.len() - 1
+}
+
+/// A sector borrowing `room`'s light and flats, at explicit heights and with
+/// an explicit wall texture and tag.
+///
+/// Every sector this compiler makes for itself — a door's alcove, a lift's
+/// alcove, the platform between them, a drop wall and the passages leading up
+/// to it — belongs to no [`Room`] and so has no appearance of its own. Each
+/// takes the appearance of the room it adjoins rather than inventing one, and
+/// each does it the same way, from here: [`crate::compile::doors`],
+/// [`crate::compile::lifts`] and [`crate::compile::floors`] all built this
+/// same record independently before it was hoisted, which is three chances
+/// for one of them to drift on what "a piece of that room" means.
+///
+/// `host` is always `None`: an island (a teleport pad, a pedestal, a reveal)
+/// is carved *inside* one room rather than adjoining it, and its caller sets
+/// that field itself.
+pub(crate) fn sector_like(
+    room: &Room,
+    floor: i32,
+    ceiling: i32,
+    wall_tex: &str,
+    tag: u16,
+) -> SectorOut {
+    SectorOut {
+        floor,
+        ceiling,
+        light: room.light,
+        floor_tex: room.floor_tex.clone(),
+        ceil_tex: room.ceil_tex.clone(),
+        special: 0,
+        tag,
+        wall_tex: wall_tex.to_owned(),
+        host: None,
+    }
+}
+
+/// Finds the two-sided line lying exactly on `cut` whose **front** sidedef
+/// belongs to `sector` — the threshold [`emit_opening`] wrote there — or
+/// `None` when no such line exists.
+///
+/// The inverse of [`emit_opening`], for a pass that needs a threshold an
+/// earlier pass emitted and did not hand back: `floors::emit_floors` writes a
+/// walkover trigger's special onto the opening line of a plain portal that
+/// `cut_portals` cut long before any trigger was resolved. Matching on the
+/// cut's own coordinates rather than on a sector's properties is what makes
+/// it exact — a room may border several compiler-made sectors, and only one
+/// of them lies on this span.
+pub(crate) fn find_opening_line(data: &MapData, cut: &Cut, sector: usize) -> Option<usize> {
+    data.linedefs.iter().position(|line| {
+        if line.back.is_none() || data.sidedefs[line.front].sector != sector {
+            return false;
+        }
+        let (along_1, across_1) = cut.axis.split(data.vertices[line.v1]);
+        let (along_2, across_2) = cut.axis.split(data.vertices[line.v2]);
+        across_1 == cut.fixed
+            && across_2 == cut.fixed
+            && along_1.min(along_2) == cut.open_lo
+            && along_1.max(along_2) == cut.open_hi
+    })
+}
+
+/// A one-sided use line on a room's wall carrying `special` and `tag` and
+/// the theme's switch texture, centered on the line: the construction a
+/// switch exit uses (see [`crate::compile::exits`]'s module documentation for
+/// why it needs no alcove) and a floor-action switch trigger reuses. Returns
+/// the line's index.
+///
+/// Doom maps texture column `(offsetx + distance along the line) % width`, so
+/// a line narrower than its texture shows the texture's left edge with no
+/// offset and the switch graphic sits off-center; the offset centers the
+/// *texture*, whose width is IWAD-independent (`vocabulary.toml`'s
+/// `switch_width_source`). Centering the texture rather than the graphic
+/// inside it is deliberate: the graphic's own position varies between IWADs,
+/// the texture's width does not.
+///
+/// `cut`'s wall must already have been split by [`split_wall_for_opening`],
+/// exactly as for [`emit_opening`] and [`emit_recess`].
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each parameter is one independent input the caller resolved; bundling them would \
+              just move the same count into a throwaway struct"
+)]
+pub(crate) fn emit_switch_line(
+    data: &mut MapData,
+    cut: &Cut,
+    room_idx: usize,
+    forward: bool,
+    special: u16,
+    tag: u16,
+    switch_tex: &str,
+    switch_width: i32,
+) -> usize {
+    let (p1, p2) = if forward {
+        (cut.pt(cut.open_lo), cut.pt(cut.open_hi))
+    } else {
+        (cut.pt(cut.open_hi), cut.pt(cut.open_lo))
+    };
+    let line = emit_side_wall(data, p1, p2, room_idx, switch_tex);
+    data.linedefs[line].special = special;
+    data.linedefs[line].tag = tag;
+    let width = cut.open_hi - cut.open_lo;
+    let front = data.linedefs[line].front;
+    data.sidedefs[front].x_offset = ((switch_width - width) / 2).rem_euclid(switch_width);
+    line
 }
 
 /// A recess carved outward from one host wall: its sector and the threshold
@@ -1848,5 +1970,48 @@ mod tests {
         let far_y = data.vertices.iter().map(|v| v.y).max().unwrap();
         assert_eq!(far_y, 256 + 64, "64 deep, outward from the north wall");
         assert_eq!(data.sectors[1].floor, 8);
+    }
+
+    /// Room `a` and room `b` at one floor, 64 units apart, joined by a drop
+    /// wall on a switch in room `a`. `b_ceiling` is the only thing that
+    /// varies: it decides whether the opening the wall leaves behind once it
+    /// has dropped clears the player's own height.
+    fn ir_with_drop_wall(b_ceiling: i32) -> String {
+        format!(
+            r#"{{ "seed":1, "grid":64, "theme":"tech_base",
+              "rooms":[
+                {{ "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]],
+                   "floor":0, "ceiling":128, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }},
+                {{ "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]],
+                   "floor":0, "ceiling":{b_ceiling}, "light":160,
+                   "floor_tex":"F", "ceil_tex":"C", "wall_tex":"W" }}
+              ],
+              "portals":[{{ "a":"a", "b":"b", "kind":"drop_wall", "width":64,
+                            "at":[256,128], "thickness":16, "fires_on":"t" }}],
+              "triggers":[{{ "id":"t", "kind":"switch", "room":"a", "at":[0,128] }}] }}"#
+        )
+    }
+
+    #[test]
+    fn a_drop_wall_under_too_low_a_ceiling_has_no_headroom() {
+        // The wall is not exempt from the headroom rule the way a door is:
+        // once it has dropped, the player walks through the opening it
+        // leaves, which is the lower of the two ceilings over the higher of
+        // the two floors — a plain passage's own measurement.
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(&ir_with_drop_wall(32)).expect("ir");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        assert!(matches!(
+            cut_portals(&ir, &tables, &mut data),
+            Err(CompileError::PortalNoHeadroom {
+                have: 32,
+                need: 56,
+                ..
+            })
+        ));
+        let ir = Ir::from_json(&ir_with_drop_wall(128)).expect("ir");
+        let mut data = emit_sectors(&ir).expect("sectors");
+        cut_portals(&ir, &tables, &mut data).expect("a ceiling the player fits under");
     }
 }

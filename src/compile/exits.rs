@@ -53,7 +53,7 @@
 //! stays a single, exception-free invariant and the tag manifest records
 //! every action a run took, not just the ones that mechanically need one.
 
-use crate::compile::portals::{Cut, emit_recess, emit_side_wall, split_wall_for_opening};
+use crate::compile::portals::{Cut, emit_recess, emit_switch_line, split_wall_for_opening};
 use crate::compile::tags::TagAllocator;
 use crate::compile::{CompileError, MapData, SectorOut};
 use crate::geom::{Axis, on_diagonal_wall, wall_edges};
@@ -249,7 +249,9 @@ pub fn emit_exits(
 
 /// Emits a switch exit's line: the exit's span, replaced by a single
 /// one-sided linedef carrying the special and the switch texture. See the
-/// module documentation for why this needs no alcove.
+/// module documentation for why this needs no alcove, and
+/// [`emit_switch_line`] — shared with the floor-action switch trigger, which
+/// wants the same line on a room's wall — for the texture centering.
 fn emit_switch_exit(
     data: &mut MapData,
     cut: &Cut,
@@ -259,26 +261,16 @@ fn emit_switch_exit(
     switch_tex: &str,
     switch_width: i32,
 ) {
-    let (p1, p2) = if plan.forward {
-        (cut.pt(cut.open_lo), cut.pt(cut.open_hi))
-    } else {
-        (cut.pt(cut.open_hi), cut.pt(cut.open_lo))
-    };
-    let line = emit_side_wall(data, p1, p2, plan.room_idx, switch_tex);
-    data.linedefs[line].special = special;
-    data.linedefs[line].tag = tag;
-
-    // Centre the switch texture on the line. Doom maps texture column
-    // `(offsetx + distance along the line) % width`, so an exit narrower
-    // than its texture shows the texture's left edge with no offset — the
-    // switch graphic then sits off-centre, which a playtest reported.
-    // Centring the *texture* rather than the graphic is deliberate: the
-    // graphic's position inside the texture differs between IWADs, the
-    // texture's width does not. See `vocabulary.toml`'s
-    // `switch_width_source`.
-    let width = cut.open_hi - cut.open_lo;
-    let front = data.linedefs[line].front;
-    data.sidedefs[front].x_offset = ((switch_width - width) / 2).rem_euclid(switch_width);
+    emit_switch_line(
+        data,
+        cut,
+        plan.room_idx,
+        plan.forward,
+        special,
+        tag,
+        switch_tex,
+        switch_width,
+    );
 }
 
 /// Emits a walkover exit's construction: a new closed alcove sector behind
@@ -452,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn a_switch_exit_centres_its_texture_on_the_line() {
+    fn a_switch_exit_centers_its_texture_on_the_line() {
         // SW1STARG is 128 wide; a 32-unit exit line with no offset would
         // show texture columns 0..31 — the far left of the texture, with
         // the switch graphic (which sits near the middle) off the line
@@ -475,19 +467,19 @@ mod tests {
         assert_eq!(
             data.sidedefs[line.front].x_offset,
             (width - 32) / 2,
-            "the switch texture is centred on its line"
+            "the switch texture is centered on its line"
         );
     }
 
     #[test]
-    fn a_wider_exit_still_centres_and_never_offsets_negatively() {
+    fn a_wider_exit_still_centers_and_never_offsets_negatively() {
         // A line as wide as the texture needs no shift at all, and the
         // arithmetic must not produce a negative offset for a line wider
         // than its texture.
         let tables = Tables::load().expect("tables");
         let width = tables.switch_width("tech_base").expect("switch width");
         // The L's south wall runs x = 0..256 at y = 0, so a 128-wide exit
-        // centred at x = 128 fits inside it.
+        // centered at x = 128 fits inside it.
         let json = L_ROOM.replace(
             "\"portals\":[]",
             r#""exits":[{ "room":"a", "trigger":"switch", "width":128, "at":[128,0] }],

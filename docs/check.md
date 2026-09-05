@@ -125,8 +125,9 @@ emits a thing there.
 
 ## The check catalog
 
-Seventeen ids in eighteen rows — `V-P11` earns one row for doors and one for
-lifts. `V-Pn` re-derives playability rule `Pn` from §7.3; `V-S` is the
+Eighteen ids in nineteen rows — `V-P11` earns one row for doors and one for
+lifts. `V-Pn` re-derives playability rule `Pn` from §7.3 (`V-P28` re-derives
+three of them, P28–P30, since one resolution answers all three); `V-S` is the
 structural/unclassifiable-input family. Every finding names a subject (sector,
 linedef, or thing, by TEXTMAP declaration index — or the map as a whole) and
 prints as `{id} {severity} {subject}: {message}`.
@@ -151,6 +152,7 @@ prints as `{id} {severity} {subject}: {message}`.
 | `V-P24` | Every locked-door **class** present has at least one key of that color placed, and every placed key opens at least one door present. Class-level, because `26` is all an emitted linedef retains — it opens to either `blue_card` or `blue_skull`. Doors dedupe by `(door sector, class)`, so one physical door with two faces reports once. | Error |
 | `V-P25` | Every player start clears its sector's **non-passable** walls by at least the player's radius (an open doorway cannot crush you against it); clears every other thing whose name resolves to a blocking prop on **both axes at once** by `prop.radius + player.radius` (`PIT_CheckThing`'s own axis-aligned `blockdist` box, not a circular distance); and no two starts of any kind are within telefrag distance (`2 × radius`) of each other. | Error |
 | `V-P27` | Every sector holding a monster has at least one two-sided boundary, or is a teleport destination. A fully one-sided monster sector can never be woken by sight or sound and is never entered, so its monsters are scenery the player never meets. **Two-sided**, not passable: sound and sight both travel through a two-sided line the player cannot walk across (a window, a fence), so a blocking two-sided boundary is still a way in for the wake-up this rule is about. | Error |
+| `V-P28` | Every floor target, resolved the way `EV_DoFloor` reads it (`check::floors`, the resolution the flood and the `lift::floor` recognizer share), is one of the three opening shapes — a drop wall, a reveal or a bridge — with a rider who is not stranded (P28/P29). A target driven by lines of more than one engine type (the finding prints the count), one raising to a texture height this checker does not resolve, a `LedgeLower`, and a dead, closing, mixed or neutral move each report by name; so, separately, does a target whose tag is driven by some other special. A third finding is rule **P30**'s: a target bordering another moving sector, reported only for a crustygen-emitted target and always as an Error, since the chain is a build defect rather than a shape this checker cannot read. **Severity otherwise turns on the specials, not the shape**: a target every one of whose lines carries one of the four specials this compiler writes (`Tables::floor_specials`) is a build defect and an Error, while the same shape under any other special is a map this checker merely cannot vouch for, and a Warning. A floor line at tag 0 is `V-P14`'s finding and one whose tag names no sector is `V-P13`'s; neither is repeated here. | Error on a crustygen-emitted target; Warning otherwise |
 
 Severity is a discipline, not a mood. **Error** means the map (or the input)
 is provably broken and the CLI exits 1. **Warning** means suspicious but not
@@ -195,6 +197,38 @@ side of the line was the host room and which the recess; a `TEXTMAP` alone
 cannot recover that, so this module names both and accepts a goal set that can
 only ever be too generous, never falsely unfinishable.
 
+**Floor bits ride the same mask as the keys.** `floors::resolve_floors`
+resolves every sector a recognized floor line names, and each target the
+flood can model becomes one bit of the `KeyMask` above `ACTION_BIT_BASE`
+(8) — the node carries `(bit, destination)`, so `Node::effective_floor`
+stands that sector at its destination in every state whose bit is set, and
+each trigger driving it ORs the bit in where the player fires it. Which
+sector fires what is the engine's dispatch question, so the three forms
+differ: a **use** form's bit goes on its line's front sector, a **gun**
+form's on both sectors the line faces (`P_ShootSpecialLine` takes no `side`
+argument and its caller passes none), and a **crossing** form's on the edge
+built for the line itself, unioned in on arrival from either side. Bits are
+handed out to the targets the flood models, in target order, so a declined
+one costs no bit.
+
+Every recognized form is modeled this way, one-shot and repeatable alike.
+That is exact for the one-shot forms — the four this compiler emits are
+S1/W1 — and partial for a repeatable one: a mask bit only accumulates, so an
+SR floor that can be sent back down is modeled as moved once and never
+returned.
+
+**Five kinds of target get no bit**, stand at their rest floor, and earn a
+`V-P7` Warning naming the sector and why: one driven by lines of more than
+one engine type; one whose destination is a texture height this checker does
+not resolve; one whose sector already carries an action; **a lowering target
+holding a shootable thing that does not fit it** (the engine restores a
+blocked floor and leaves the thinker running, so it retries every tic and
+never arrives); and every target past the eighth, which is what fits above
+the key classes. Leaving such a target at rest is the conservative reading —
+the flood judges the map as if the action never fired — and the warning is
+what keeps that silence from passing for a verdict. `flood.rs` states the
+two ways the fourth is narrower than the engine.
+
 **Key classes are interned by lock, not by key name** — a card and a skull of
 one color share a class, because `EV_VerticalDoor` accepts either. Where
 `graph_from_compiled` `assert!`s that the vocabulary fits a `KeyMask`, this
@@ -224,22 +258,43 @@ frontmatter fields (`identity.title`/`.author`/`.iwad`/`.outputs`/`.seed`,
 most of `combat`'s administrative fields, `progression.doors`'s
 speed/behavior settings, and others) have no row at all: nothing this checker
 does turns on their value. Unlike the rest of the module, all of these rows
-but four re-derive no playability rule — each is a target-vs-actual
+but six re-derive no playability rule — each is a target-vs-actual
 comparison — so the only sourcing burden is the ammo ratio's damage figures,
 the two thing-flag bits (`MTF_AMBUSH` = 8; multiplayer-only = 16, which the
-pinned source writes as a raw literal with no named constant), and the
-teleport specials the two pad counts read. The exceptions are
+pinned source writes as a raw literal with no named constant), the
+teleport specials the two pad counts read, and the four floor specials the
+two trigger counts read. The exceptions are
 `progression.exit.trigger`, which borrows the flood's teleport-only
-predicate (see the `NotDerivable` discussion below), and the three
+predicate (see the `NotDerivable` discussion below); the three
 `progression.lifts.*` rows, which read `check::plats`' engine-style plat
 resolution — platforms and who can call them — rather than counting lift
-lines. `progression.lifts.trigger` grades only the platforms that rest at
+lines; and `progression.floors` with `combat.monster_closets`, which read
+`lift::floor::recognize`'s engine-style resolution of what each floor action
+*does*, which is not a thing a line's special says.
+`progression.lifts.trigger` grades only the platforms that rest at
 the top, since a barrier or a pedestal is not a lift the player rides, and a
 map with no such platform passes it vacuously with actual `no lifts`.
 
-Thirty-eight rows are fixed, plus one per spec monster species, one per
+Two rows count a floor action's *trigger* rather than the action:
+`progression.switches.count` counts floor use lines beside exit and lift
+ones (a switch lowering a four-sector wall is one switch, so counting lines
+is the right reading), and `progression.walkover_triggers.count` counts floor
+walkovers beside the two exit walkovers. `progression.floors` is the row that
+says what those triggers *drive* — drop walls, reveals and bridges by shape,
+plus the refusals — and it is always `Info` with target `any`, because the
+frontmatter has no floor parameter to grade against yet.
+`combat.monster_closets` counts the pockets of monsters a map releases into
+the fight over the two mechanisms this checker can re-derive: one a floor
+action opens (a reveal whose cell holds a monster, or a drop wall with a
+closed region of them behind it) and one staged behind a monsters-only
+teleport pad. **The sealing test belongs to the floor half alone** — a drop
+wall is an ordinary wall until something says the monsters past it are shut
+in, while a monsters-only pad *is* the statement that its occupants arrive by
+teleport, wherever they were standing.
+
+Forty rows are fixed, plus one per spec monster species, one per
 placed species the spec never names (always `Fail`, target `absent`), and one
-per `sustain.powerups[]` entry. Entrada against its paired spec produces 51.
+per `sustain.powerups[]` entry. Entrada against its paired spec produces 53.
 
 **Verdict discipline.** A range (`MinMax`) or exact-count or boolean target is
 `Pass`/`Fail` — those are decidable. A **scalar continuous** target
@@ -391,7 +446,7 @@ every conformance row as `{parameter}: {verdict} (target {target}, actual
 then a one-line summary:
 
 ```
-0 blocking, 0 warning(s), 51 conformance row(s), 3 tag(s)
+0 blocking, 0 warning(s), 53 conformance row(s), 3 tag(s)
 ```
 
 Exit codes:
@@ -440,7 +495,13 @@ doing its job on real content, not a false positive.
   specials sat in that unmodeled set until the flood learned to ride a
   platform; they are recognized now (`plats::resolve_plats`,
   `EdgeKind::Lift`, and V-P5 alongside V-P11's lift row), so a lift line no
-  longer draws the warning.
+  longer draws the warning. The **forty-eight** floor specials left it the
+  same way: `Tables::recognized_floor_specials` is the whole dispatch table,
+  not the four this compiler emits, because `check::floors` resolves any of
+  them and the flood carries the modelable ones as mask bits. The set the
+  checker *recognizes* is therefore wider than the set it *emits*, and wider
+  again than the set the `lift::floor` recognizer *accepts* — three different
+  questions, deliberately.
 
   **Teleports are modeled the same way, and the contrast with an unmodeled
   special is the rule.** All four teleport specials (97/39/126/125) *are* in

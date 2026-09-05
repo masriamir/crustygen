@@ -8,7 +8,7 @@ measurements are corpus telemetry, and they are what drive the vocabulary
 roadmap: which linedef specials, sector specials, and thing types are common
 and unambiguous enough across real maps to justify a recognizer.
 
-## Current scope: telemetry, vocabulary membership, and two recognizers
+## Current scope: telemetry, vocabulary membership, and three recognizers
 
 The census interprets nothing: `crustygen-lift` surveys a WAD's maps — UDMF
 or classic Doom binary format, through the same shared `crustygen::ingest`
@@ -59,6 +59,40 @@ gates the shape probe behind `docs/measurements/lift-shapes-2026-08-29.md`
 never applied, so these shape counts are subsets of that measurement's rather
 than the same numbers.
 
+`lift::floor` is the third, over floor actions. It reads `check::floors`'
+engine-side resolution — shared with the flood's action bits, the `V-P28`
+invariant and the conformance rows, so the four cannot drift on what a floor
+target moves to or who can fire its triggers. Every sector a floor line names
+by tag is resolved the way `EV_DoFloor` reads it (`P_FindLowestFloorSurrounding`
+for a lowering family, `P_FindNextHighestFloor` for a rising one; a use line
+fires from its front sector, a gun line from either side it faces, a walkover
+from whichever side can cross it at rest), the move is classified by what it
+does to the local walk graph, and the opening is named. Three shapes are
+accepted, the three the IR states: a **drop wall** (a sealed strip that lowers
+and joins the areas on either side), a **reveal** (a sealed cell no neighbor
+could enter, standable once it has moved and joining nothing new — the closet
+with the monster inside it, or the pedestal that sinks to expose a prize) and
+a **bridge** (a pit strip the player could already drop into, rising to the
+walkway's floor). Twelve refusals name what cannot be stated, judged in a
+fixed precedence so a target wrong in several ways reports its most
+fundamental reason: `gun` (a G1 line names it, and the IR states no gun
+trigger), `conflict` (a non-floor special names the tag too), `two_families`
+(more than one engine type drives it, so it is not one action),
+`unresolved` (`raiseToTexture`, whose destination needs texture heights this
+resolution does not load), `dead` (the destination is already its floor),
+`closing`, `mixed`, `neutral` (it moves and nobody's reach changes),
+`rider_loses` (it opens a route while stranding whoever stands on it),
+`no_activator`, `unsupported_shape` (a `LedgeLower` or an `OtherOpening` — real,
+but no IR construct names it) and `neighbors_mover` (a neighbor is itself a
+mover, which rule P30 refuses because the destination would then depend on
+when the trigger was pulled). A floor line that names no target — tag 0, or a
+tag no sector answers to — is not a refused target but a broken line, counted
+alongside the refusals. Unlike `lift::plat`, a **shared tag is accepted** when
+every member sector qualifies on its own. The chain refusal and the
+`LedgeLower` refusal are gates the shape probe behind
+`docs/measurements/floor-shapes-2026-09-02.md` never applied;
+`docs/measurements/floors-2026-09-03.md` reconciles the two, map for map.
+
 The other recognizers, the ones that name rooms and doors, arrive later
 (below).
 
@@ -81,25 +115,27 @@ A map assembled from binary format (rather than parsed from a native
 surveyed map in the census/histogram shape above; the origin suffix is a
 human-output-only annotation and is not part of the JSON record.
 
-`--vocabulary` appends a verdict per map on **five** axes. Three are
+`--vocabulary` appends a verdict per map on **six** axes. Three are
 membership: whether every non-zero linedef special and sector special, and
 every thing type, is in the compiler's emittable vocabulary
 (`Tables::emittable_line_specials`, `named_sector_specials`, `thing_kinds`),
 with the unknown values listed per axis, plus — on the line axis only —
 whether every non-zero linedef special the map carries is one the pinned
-vanilla engine dispatches (`(outside vanilla)` when not). The other two are
+vanilla engine dispatches (`(outside vanilla)` when not). The other three are
 the recognizers', and they are the axes that read geometry: a map passes the
-fourth when the teleport recognizer refused none of its teleport lines, and
-the fifth when the plat recognizer refused no platform and every lift line
-named one. A refusal appends `(teleports refused: N)` or `(lifts refused: N)`,
-naming the count. A map with no teleport line and a map whose every teleport
-line was recognized read the same — silence on that axis — because there is
-nothing there the lifter would have to drop; the lift axis reads the same
-way. `--json` carries the same five-axis verdict alongside a `teleports`
-object and a `lifts` object, each with the full shape and refusal counts.
+fourth when the teleport recognizer refused none of its teleport lines, the
+fifth when the plat recognizer refused no platform and every lift line named
+one, and the sixth when the floor recognizer refused no target and every
+floor line named one. A refusal appends `(teleports refused: N)`,
+`(lifts refused: N)` or `(floors refused: N)`, naming the count. A map with no
+teleport line and a map whose every teleport line was recognized read the
+same — silence on that axis — because there is nothing there the lifter would
+have to drop; the lift and floor axes read the same way. `--json` carries the
+same six-axis verdict alongside a `teleports` object, a `lifts` object and a
+`floors` object, each with the full shape and refusal counts.
 
 The three membership axes are an upper bound on lift yield, not a geometric
-judgment; the teleport and lift axes narrow that bound where they can.
+judgment; the teleport, lift and floor axes narrow that bound where they can.
 
 **Per-map failure policy.** A group that fails to load through the shared
 ingest path — for example an unsupported binary format (Hexen, Doom 64), a
@@ -118,8 +154,8 @@ Exit codes:
 
 ## Next stages
 
-- **The remaining recognizers** — rooms, doors, keys, exits. Teleports and
-  lifts are done (above); everything else is still a raw histogram. The
+- **The remaining recognizers** — rooms, doors, keys, exits. Teleports, lifts
+  and floors are done (above); everything else is still a raw histogram. The
   recognizers arrive in blocker order, which the corpus measurement re-ranks
   after every vocabulary release (`docs/corpus.md`).
 - **Map-spec emission** — recognized constructs become a crustygen map-spec

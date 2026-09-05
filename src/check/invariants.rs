@@ -9,6 +9,7 @@
 //! `heights::visible_lower_side`/`visible_upper_side` being the single,
 //! un-cross-checked place that comparison is made compile-side).
 
+use crate::check::floors::{Effect, OpeningShape, resolve_floors};
 use crate::check::plats::resolve_plats;
 use crate::check::scene::Scene;
 use crate::check::{Finding, Severity, Subject, TagEntry};
@@ -1024,8 +1025,9 @@ pub fn check_door_openings(scene: &Scene, tables: &Tables, findings: &mut Vec<Fi
 /// The linedef specials this checker recognizes as modeled: `0` (no
 /// special), a manual or locked door ([`door_specials`]), the four exit
 /// specials (switch/walkover crossed with normal/secret), the four teleport
-/// specials ([`Tables::teleport_specials`]), and the eight lift specials
-/// ([`Tables::lift_specials`]).
+/// specials ([`Tables::teleport_specials`]), the eight lift specials
+/// ([`Tables::lift_specials`]), and every floor special the engine
+/// dispatches ([`Tables::recognized_floor_specials`]).
 fn recognized_specials(tables: &Tables) -> Vec<i32> {
     let mut specials = door_specials(tables);
     specials.push(0);
@@ -1035,6 +1037,12 @@ fn recognized_specials(tables: &Tables) -> Vec<i32> {
     specials.push(i32::from(tables.secret_exit_walkover_special()));
     specials.extend(tables.teleport_specials().into_iter().map(i32::from));
     specials.extend(tables.lift_specials().into_iter().map(i32::from));
+    specials.extend(
+        tables
+            .recognized_floor_specials()
+            .iter()
+            .map(|&(s, _, _)| i32::from(s)),
+    );
     specials
 }
 
@@ -1068,6 +1076,16 @@ fn recognized_specials(tables: &Tables) -> Vec<i32> {
 /// [`crate::reach::EdgeKind::Lift`] edge from every sector that can call it.
 /// The four teleport specials are in the set for the same reason (`flood.rs`,
 /// "Edges"), with [`check_teleport_pairing`] (V-P15) checking their pairing.
+///
+/// **The floor specials are in the set for that same reason** (`flood.rs`,
+/// "Floor actions", via [`crate::check::floors`]): a floor line names a
+/// sector by tag, and the flood stands that sector at its destination in
+/// every state where the action has fired. All 48 the engine dispatches are
+/// listed, not just the four crustygen emits — the flood models each of them
+/// the same way, and [`check_floor_actions`] (V-P28) judges the shape. The
+/// handful the flood declines to model raise a `V-P7` Warning of their own
+/// rather than passing silently, so nothing is lost by naming them
+/// recognized here.
 ///
 /// Each linedef is visited once (`fronts_this` only): `special` is
 /// linedef-wide, so both mirrors of a two-sided line would otherwise report
@@ -1121,6 +1139,110 @@ pub fn check_lift_return(scene: &Scene, tables: &Tables, findings: &mut Vec<Find
                     "lift is callable only from above: no trigger fires from its low floor {}",
                     plat.low
                 ),
+            });
+        }
+    }
+}
+
+/// V-P28 — floor actions, re-derived from the map the way `EV_DoFloor` reads
+/// it ([`crate::check::floors`]): every target of a one-type action must be
+/// one of the three opening shapes (a drop wall, a reveal, a bridge) with a
+/// rider who is not stranded; a dead, closing, mixed, neutral or two-type
+/// target is an Error on a map that carries only the four emitted specials
+/// (a crustygen build), a Warning on any other map (the corpus builds all of
+/// them; this checker states what it can model).
+///
+/// Severity turns on [`Tables::floor_specials`] — the four this compiler
+/// writes — rather than on the wider recognized list: a shape crustygen
+/// itself emitted is a build defect, while the same shape under some other
+/// special is a map this checker merely cannot vouch for.
+///
+/// Nothing here reports a floor line that can never fire. A line carrying
+/// tag 0 is [`check_tags`]'s V-P14 finding and one whose tag names no sector
+/// is its V-P13, both already raised over the emitted `UdmfMap`; such a line
+/// resolves to no target at all ([`crate::check::floors::broken_floor_lines`]
+/// is that list), so there is nothing for this pass to add.
+pub fn check_floor_actions(scene: &Scene, tables: &Tables, findings: &mut Vec<Finding>) {
+    let emitted: Vec<i32> = tables.floor_specials().into_iter().map(i32::from).collect();
+    for f in resolve_floors(scene, tables) {
+        let only_emitted = f.triggers.iter().all(|t| emitted.contains(&t.special));
+        let severity = if only_emitted {
+            Severity::Error
+        } else {
+            Severity::Warning
+        };
+        let problem = match f.single() {
+            None => Some(format!(
+                "is driven by lines of {} engine types",
+                f.actions.len()
+            )),
+            Some(a) => match &a.facts {
+                None => Some("raises to a texture height this checker does not resolve".to_owned()),
+                Some(facts) => match (facts.effect, facts.opening) {
+                    (
+                        _,
+                        Some(OpeningShape::DropWall | OpeningShape::Bridge | OpeningShape::Reveal),
+                    ) => None,
+                    (_, Some(OpeningShape::LedgeLower)) => Some(
+                        "is a ledge that lowers to join, a shape no construct states".to_owned(),
+                    ),
+                    // COVERAGE: unreachable, and kept anyway.
+                    // `OtherOpening` is `classify_effect`'s `(dest > rest,
+                    // enterable_before false)` corner, and no floor reaches
+                    // it. `pass(n -> target)` only ever tightens as the
+                    // target rises — the target's own headroom, the opening
+                    // over it and the step onto it all shrink with the
+                    // floor — so enterable-after implies enterable-before
+                    // for a rise; and `Effect::Opening` implies
+                    // enterable-after, since every path that is new to the
+                    // local graph runs through the target (no other edge's
+                    // passability moved). The arm stays because the
+                    // `Effect::Opening` arm below reads "strands whoever
+                    // stands on it", which is true only of the opening whose
+                    // rider *loses* — the one case carrying no shape at all
+                    // — so an `OtherOpening` falling through to it would say
+                    // something false about a target nobody can stand on.
+                    (_, Some(OpeningShape::OtherOpening)) => Some(
+                        "opens a way that is none of a drop wall, a reveal or a bridge".to_owned(),
+                    ),
+                    (Effect::Dead, _) => Some(format!(
+                        "never moves: its floor {} is already the engine's destination",
+                        f.rest
+                    )),
+                    (Effect::Closing, _) => Some("closes a way when it moves".to_owned()),
+                    (Effect::Mixed, _) => Some("opens one way and closes another".to_owned()),
+                    (Effect::Neutral, _) => {
+                        Some("moves without changing where the player can walk".to_owned())
+                    }
+                    (Effect::Opening, _) => Some("strands whoever stands on it".to_owned()),
+                },
+            },
+        };
+        if let Some(p) = problem {
+            findings.push(Finding {
+                check: "V-P28",
+                severity,
+                subject: Subject::Sector(f.sector),
+                message: format!("floor target {p}"),
+            });
+        }
+        if !f.other_actions.is_empty() {
+            findings.push(Finding {
+                check: "V-P28",
+                severity,
+                subject: Subject::Sector(f.sector),
+                message: format!(
+                    "floor target's tag is also driven by specials {:?}",
+                    f.other_actions
+                ),
+            });
+        }
+        if f.borders_mover && only_emitted {
+            findings.push(Finding {
+                check: "V-P28",
+                severity: Severity::Error,
+                subject: Subject::Sector(f.sector),
+                message: "floor target borders another moving sector (rule P30)".to_owned(),
             });
         }
     }
@@ -2175,6 +2297,27 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
         );
     }
 
+    /// The floor specials are modeled now, so none of them is unclassifiable
+    /// input. Deleting `recognized_specials`'s floor arm turns each of these
+    /// into a `V-S` warning that the flood cannot vouch for the line.
+    #[test]
+    fn floor_specials_are_recognized() {
+        // One of the four crustygen emits (23), one it never writes but the
+        // flood still models (101), and a gun line (47).
+        let mut text = chain(
+            &[0, 128, 0],
+            &[0, 7, 0],
+            &[(23, 7, false), (101, 7, false)],
+            "",
+        );
+        fixtures::far_wall(&mut text, 3, 47, 7);
+        let findings = findings_of_check(&text, check_recognized_specials);
+        assert!(
+            findings.is_empty(),
+            "every floor special the engine dispatches is modeled: {findings:?}"
+        );
+    }
+
     #[test]
     fn a_recognized_special_raises_no_v_s_warning() {
         let findings = findings_of(&two_box(64.0, " special = 1; arg0 = 5;", " id = 5;"));
@@ -2562,6 +2705,341 @@ sector {{ texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightceiling =
                 && f[0].subject == Subject::Linedef(0)
                 && f[0].message.contains("dontpegbottom"),
             "{f:?}"
+        );
+    }
+
+    /// A `rooms`-long [`fixtures::chain`] with `special` naming tag 7 on the
+    /// last room's far wall — the floor-shape worked examples' own trigger
+    /// placement, spelled once for the V-P28 cases below.
+    fn floor_case(text: &mut String, rooms: usize, special: i32) -> Vec<Finding> {
+        fixtures::far_wall(text, rooms, special, 7);
+        findings_of_check(text, check_floor_actions)
+    }
+
+    /// The three shapes a crustygen construct states — a drop wall, a
+    /// bridge, and a reveal (`docs/measurements/floor-shapes-2026-09-02.md`)
+    /// — are the ones V-P28 passes without a word.
+    #[test]
+    fn v_p28_passes_a_drop_wall_a_bridge_and_a_reveal() {
+        // A(0) — T(128, ceiling 256) — B(0): the slab drops flush and joins
+        // two rooms it sealed apart.
+        let mut drop_wall = fixtures::chain_full(
+            &[0, 128, 0],
+            &[256, 256, 256],
+            &[0, 7, 0],
+            &[(0, 0, false), (0, 0, false)],
+            "",
+        );
+        assert!(floor_case(&mut drop_wall, 3, 23).is_empty(), "drop wall");
+
+        // A(64) — T(0) — B(64): the pit rises to the walkway.
+        let mut bridge = chain(
+            &[64, 0, 64],
+            &[0, 7, 0],
+            &[(0, 0, false), (0, 0, false)],
+            "",
+        );
+        assert!(floor_case(&mut bridge, 3, 20).is_empty(), "bridge");
+
+        // A(0, ceiling 256) — T(64, ceiling 64): a sealed cell that lowers
+        // into reach.
+        let mut reveal = fixtures::chain_full(&[0, 64], &[256, 64], &[0, 7], &[(0, 0, false)], "");
+        assert!(floor_case(&mut reveal, 2, 23).is_empty(), "reveal");
+    }
+
+    /// Every other shape the engine can drive, each named for what it is.
+    /// Severity splits on the trigger's special: one of the four crustygen
+    /// emits is an Error (a build got it wrong), anything else a Warning
+    /// (the corpus builds all of them).
+    #[test]
+    fn v_p28_names_every_shape_no_construct_states() {
+        // A ledge the player can already step onto, lowered flush: 23 is
+        // emitted, so a crustygen build authored it.
+        let mut ledge = chain(
+            &[24, 48, 0, 0],
+            &[0, 7, 0, 0],
+            &[(0, 0, false), (0, 0, false), (0, 0, false)],
+            "",
+        );
+        let f = floor_case(&mut ledge, 4, 23);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(
+            f[0].check == "V-P28"
+                && f[0].severity == Severity::Error
+                && f[0].subject == Subject::Sector(1)
+                && f[0].message.contains("ledge that lowers to join"),
+            "{f:?}"
+        );
+
+        // A pillar rising to the ceiling closes the way it stood in. 101 is
+        // not emitted, so the map is somebody else's.
+        let mut pillar = chain(&[0, 0, 0], &[0, 7, 0], &[(0, 0, false), (0, 0, false)], "");
+        let f = floor_case(&mut pillar, 3, 101);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(
+            f[0].severity == Severity::Warning && f[0].message.contains("closes a way"),
+            "{f:?}"
+        );
+
+        // A descender nobody else can see move, which strands its rider.
+        let mut descender = chain(
+            &[128, 128, 0],
+            &[0, 7, 0],
+            &[(0, 0, false), (0, 0, false)],
+            "",
+        );
+        let f = floor_case(&mut descender, 3, 23);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(
+            f[0].severity == Severity::Error
+                && f[0]
+                    .message
+                    .contains("without changing where the player can walk"),
+            "{f:?}"
+        );
+
+        // A floor already standing at its destination: the thinker runs and
+        // nothing moves.
+        let mut dead = chain(&[0, 0, 0], &[0, 7, 0], &[(0, 0, false), (0, 0, false)], "");
+        let f = floor_case(&mut dead, 3, 18);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(
+            f[0].severity == Severity::Error && f[0].message.contains("never moves: its floor 0"),
+            "{f:?}"
+        );
+
+        // A raise to the shortest lower texture: a destination neither this
+        // checker nor the probe resolves, so the shape is unknown.
+        let mut texture = chain(&[0, 0, 0], &[0, 7, 0], &[(0, 0, false), (0, 0, false)], "");
+        let f = floor_case(&mut texture, 3, 30);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(
+            f[0].severity == Severity::Warning && f[0].message.contains("texture height"),
+            "{f:?}"
+        );
+    }
+
+    /// A target with **three** neighbors, the only shape that can open one
+    /// way while closing another: with two, the step rule's intervals nest
+    /// (the pair that can cross a target one way is a subset of the pair
+    /// that can cross it the other), so no chain fixture can produce
+    /// [`Effect::Mixed`].
+    ///
+    /// T (rest 24, tag 7) is joined west to A (0), east to B (60) and north
+    /// to D (24), and a 58 (W1 `raiseFloor24`) lifts it to 48: A can no
+    /// longer climb in, and B — 36 above T at rest — now can walk out
+    /// across it. Every room is 128 deep under a 256 ceiling, so no window
+    /// is ever the binding constraint.
+    #[test]
+    fn v_p28_names_a_three_neighbor_target_that_opens_one_way_and_closes_another() {
+        let f = findings_of_check(&tee_junction([0, 24, 60, 24], 58), check_floor_actions);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(
+            f[0].check == "V-P28"
+                && f[0].severity == Severity::Warning
+                && f[0].subject == Subject::Sector(1)
+                && f[0].message.contains("opens one way and closes another"),
+            "{f:?}"
+        );
+    }
+
+    /// The opening that is no construct either: one that strands the player
+    /// standing on it. T rests at 20 with neighbors at 0, −30 and −50, and
+    /// a `23` drops it to the lowest of them (−50). Everyone else gains —
+    /// the two low neighbors can now walk to each other across it, which is
+    /// [`Effect::Opening`] — while whoever rode it down can no longer climb
+    /// the 50 back to the room they came from, so the rider *loses* and the
+    /// action carries no [`OpeningShape`] at all.
+    ///
+    /// `23` is one of the four crustygen emits, so this is an Error: a build
+    /// that shipped it got it wrong.
+    #[test]
+    fn v_p28_names_an_opening_that_strands_its_rider() {
+        let f = findings_of_check(&tee_junction([0, 20, -30, -50], 23), check_floor_actions);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(
+            f[0].check == "V-P28"
+                && f[0].severity == Severity::Error
+                && f[0].subject == Subject::Sector(1)
+                && f[0].message.contains("strands whoever stands on it"),
+            "{f:?}"
+        );
+    }
+
+    /// A T-junction, the shape a [`fixtures::chain`] cannot make: sector 1
+    /// (`x ∈ [128, 256]`, `y ∈ [0, 128]`, `id = 7`) bordered west by sector
+    /// 0, east by sector 2 and north by sector 3 (`y ∈ [128, 256]`), so the
+    /// target has **three** neighbors. `floors` are those four sectors in
+    /// declaration order, and the east link carries `special` naming tag 7.
+    /// Every ceiling is 256 — no window is ever the binding constraint —
+    /// and every linedef is wound so its own sector lies on the right of
+    /// `v1 -> v2`.
+    fn tee_junction(floors: [i32; 4], special: i32) -> String {
+        use std::fmt::Write as _;
+
+        let mut text = String::from("namespace = \"doom\";\n");
+        for (x, y) in [
+            (0, 0),
+            (0, 128),
+            (128, 0),
+            (128, 128),
+            (256, 0),
+            (256, 128),
+            (384, 0),
+            (384, 128),
+            (128, 256),
+            (256, 256),
+        ] {
+            let _ = writeln!(text, "vertex {{ x = {x}.000; y = {y}.000; }}");
+        }
+        // The three two-sided links: west (0|1), east (1|2, the trigger),
+        // north (1|3).
+        let _ = writeln!(
+            text,
+            "linedef {{ v1 = 3; v2 = 2; sidefront = 0; sideback = 1; twosided = true; }}\n\
+             linedef {{ v1 = 5; v2 = 4; sidefront = 2; sideback = 3; twosided = true; \
+             special = {special}; arg0 = 7; }}\n\
+             linedef {{ v1 = 3; v2 = 5; sidefront = 4; sideback = 5; twosided = true; }}"
+        );
+        for (n, (v1, v2)) in [
+            (0, 1),
+            (1, 3),
+            (2, 0),
+            (4, 2),
+            (5, 7),
+            (7, 6),
+            (6, 4),
+            (3, 8),
+            (8, 9),
+            (9, 5),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let _ = writeln!(
+                text,
+                "linedef {{ v1 = {v1}; v2 = {v2}; sidefront = {}; blocking = true; }}",
+                n + 6
+            );
+        }
+        for sector in [0, 1, 1, 2, 1, 3] {
+            let _ = writeln!(
+                text,
+                "sidedef {{ sector = {sector}; texturemiddle = \"-\"; \
+                 texturebottom = \"SUPPORT3\"; }}"
+            );
+        }
+        for sector in [0, 0, 0, 1, 2, 2, 2, 3, 3, 3] {
+            let _ = writeln!(
+                text,
+                "sidedef {{ sector = {sector}; texturemiddle = \"STARTAN2\"; }}"
+            );
+        }
+        for (i, floor) in floors.into_iter().enumerate() {
+            let id = if i == 1 { 7 } else { 0 };
+            let _ = writeln!(
+                text,
+                "sector {{ texturefloor = \"FLOOR4_8\"; textureceiling = \"CEIL3_5\"; \
+                 heightfloor = {floor}; heightceiling = 256; lightlevel = 160; id = {id}; }}"
+            );
+        }
+        text
+    }
+
+    /// The two findings that are about the tag rather than the shape: a
+    /// second engine type driving one target, and a non-floor special
+    /// sharing its tag.
+    #[test]
+    fn v_p28_reports_a_two_type_target_and_a_tag_another_special_shares() {
+        let mut text = chain(
+            &[0, 128, 0],
+            &[0, 7, 0],
+            &[(23, 7, false), (18, 7, false)],
+            "",
+        );
+        let f = floor_case(&mut text, 3, 62);
+        assert_eq!(f.len(), 2, "{f:?}");
+        assert!(
+            f.iter().all(|x| x.check == "V-P28"
+                && x.severity == Severity::Error
+                && x.subject == Subject::Sector(1)),
+            "both 23 and 18 are emitted specials: {f:?}"
+        );
+        assert!(
+            f[0].message.contains("lines of 2 engine types"),
+            "the count is read off the resolution, not hardcoded: {f:?}"
+        );
+        assert!(
+            f[1].message.contains("also driven by specials [62]"),
+            "{f:?}"
+        );
+    }
+
+    /// Rule P30's verifier half: a target whose neighbor also moves. Two
+    /// sectors carrying one tag are each the other's mover, and the 23 that
+    /// names them is emitted, so both are Errors.
+    #[test]
+    fn v_p28_reports_a_floor_target_that_borders_another_mover() {
+        let f = findings_of_check(
+            &chain(
+                &[0, 128, 0],
+                &[7, 7, 0],
+                &[(23, 7, false), (0, 0, false)],
+                "",
+            ),
+            check_floor_actions,
+        );
+        let chained: Vec<&Finding> = f
+            .iter()
+            .filter(|x| x.message.contains("borders another moving sector"))
+            .collect();
+        assert_eq!(chained.len(), 2, "{f:?}");
+        assert!(
+            chained
+                .iter()
+                .all(|x| x.check == "V-P28" && x.severity == Severity::Error),
+            "{chained:?}"
+        );
+        assert_eq!(
+            (chained[0].subject, chained[1].subject),
+            (Subject::Sector(0), Subject::Sector(1)),
+            "{chained:?}"
+        );
+    }
+
+    /// R20's check: V-P28 says nothing about a floor line that can never
+    /// fire, because [`check_tags`] already does — tag 0 as V-P14, a tag no
+    /// sector carries as V-P13. Both lines here are floor specials, and
+    /// neither resolves to a target at all.
+    #[test]
+    fn a_floor_line_that_names_nothing_is_v_p13_and_v_p14_not_v_p28() {
+        let text = chain(
+            &[0, 0, 0],
+            &[0, 0, 0],
+            &[(23, 0, false), (38, 9, false)],
+            "",
+        );
+        let map = parse_udmf(&text, Limits::default()).expect("fixture parses");
+        let tables = Tables::load().expect("tables");
+        let scene = Scene::build(&map, &tables, &mut Vec::new());
+        let mut findings = Vec::new();
+        check_tags(&map, &tables, &mut findings);
+        check_floor_actions(&scene, &tables, &mut findings);
+        assert!(
+            findings.iter().any(|f| f.check == "V-P14"
+                && f.severity == Severity::Error
+                && f.subject == Subject::Linedef(0)),
+            "the tag-0 23 is V-P14's: {findings:?}"
+        );
+        assert!(
+            findings.iter().any(|f| f.check == "V-P13"
+                && f.severity == Severity::Error
+                && f.subject == Subject::Linedef(1)),
+            "the dangling 38 is V-P13's: {findings:?}"
+        );
+        assert!(
+            !findings.iter().any(|f| f.check == "V-P28"),
+            "V-P28 has no target to judge: {findings:?}"
         );
     }
 }

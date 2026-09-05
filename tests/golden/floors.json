@@ -1,0 +1,31 @@
+{
+  "seed": 20260902, "grid": 64, "theme": "tech_base",
+  "rooms": [
+    { "id": "west", "footprint": [[0,0],[0,256],[256,256],[256,0]], "floor": 0, "ceiling": 192, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
+      "things": [ { "kind": "player1_start", "at": [64, 128], "angle": 0 } ] },
+    { "id": "mid", "footprint": [[320,0],[320,256],[576,256],[576,0]], "floor": 0, "ceiling": 192, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3" },
+    { "id": "east", "footprint": [[640,0],[640,256],[896,256],[896,0]], "floor": 0, "ceiling": 192, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
+      "things": [ { "kind": "imp", "at": [768, 192], "angle": 180 } ] },
+    { "id": "far", "footprint": [[960,0],[960,256],[1216,256],[1216,0]], "floor": 0, "ceiling": 192, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3" }
+  ],
+  "portals": [
+    { "a": "west", "b": "mid", "kind": "plain", "width": 64, "at": [256, 128] },
+    { "a": "mid", "b": "east", "kind": "drop_wall", "width": 64, "at": [576, 128], "thickness": 16, "fires_on": "s" },
+    { "a": "east", "b": "far", "kind": "bridge", "width": 64, "at": [896, 128], "depth": 96, "fires_on": "b" }
+  ],
+  "triggers": [
+    { "id": "s", "kind": "switch", "room": "west", "at": [0, 128] },
+    { "id": "w", "kind": "walkover", "portal": ["west", "mid"] },
+    { "id": "b", "kind": "walkover", "portal": ["east", "far"] }
+  ],
+  "reveals": [
+    { "id": "pen", "room": "mid", "at": [384, 64], "kind": "closet", "trigger": "s" },
+    { "id": "prize", "room": "mid", "at": [448, 160], "kind": "pedestal", "rise": 64,
+      "things": [ { "kind": "medikit", "at": [480, 192], "angle": 0 } ], "trigger": "w" }
+  ],
+  "exits": [ { "room": "far", "trigger": "switch", "at": [1216, 128], "width": 64 } ]
+}

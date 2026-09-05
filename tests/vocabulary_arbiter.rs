@@ -2,9 +2,11 @@
 //! `Tables::named_sector_specials`: the curated sets must equal what the
 //! compiler really writes. Fixtures below cover every IR construct that
 //! emits a special — plain, door and locked portals (one per key color), the
-//! four exit kinds, the four teleport specials, a secret room, and
+//! four exit kinds, the four teleport specials, a secret room,
 //! `tests/golden/lifts.json`'s switch lift, fast walkover lift and fast
-//! barrier — between them, every repeatable lift special.
+//! barrier — between them, every repeatable lift special — and
+//! `tests/golden/floors.json` plus [`FLOOR_SWITCH_BRIDGE`], which between
+//! them write all four emitted floor specials.
 //!
 //! These tests still do not detect a new emitting pass on their own: no
 //! fixture can author a construct the IR cannot yet express. The teleport
@@ -53,6 +55,33 @@ const BASE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
 /// [`every_construct_the_compiler_emits_is_in_the_curated_sets`] instead of
 /// going through it.
 const LIFTS: &str = include_str!("golden/lifts.json");
+
+/// The Task 13 floor golden: a drop wall and a closet reveal sharing one
+/// switch's tag (23), a pedestal reveal on a walkover (38), and a bridge on
+/// a walkover of its own (119) — three of the four emitted floor specials in
+/// one fixture. Compiled directly for the same reason [`LIFTS`] is:
+/// [`specials_of`]'s template has no room to author a floor construct.
+const FLOORS: &str = include_str!("golden/floors.json");
+
+/// The fourth emitted floor special, 18 (S1 `raiseFloorToNearest`): a bridge
+/// on a *switch* rather than a walkover. [`FLOORS`] carries its bridge on a
+/// walkover — the trigger form that cannot strand whoever steps into the pit
+/// — so nothing there ever writes 18, and only a second fixture can.
+///
+/// Two rooms 64 apart over a pit 96 deep, one switch on room `a`'s far wall
+/// and a switch exit in room `b`: the `BRIDGE` map from
+/// `src/compile/floors.rs`'s own tests, verbatim.
+const FLOOR_SWITCH_BRIDGE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+  "rooms":[
+    { "id":"a", "footprint":[[0,0],[0,256],[256,256],[256,0]], "floor":0, "ceiling":192, "light":160,
+      "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+      "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+    { "id":"b", "footprint":[[320,0],[320,256],[576,256],[576,0]], "floor":0, "ceiling":192, "light":160,
+      "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+  ],
+  "portals":[ { "a":"a", "b":"b", "kind":"bridge", "width":64, "at":[256,128], "depth":96, "fires_on":"t" } ],
+  "triggers":[ { "id":"t", "kind":"switch", "room":"a", "at":[0,128] } ],
+  "exits":[ { "room":"b", "trigger":"switch", "at":[576,128], "width":64 } ] }"#;
 
 const PLAIN: &str = r#"{ "a":"a", "b":"b", "kind":"plain", "width":128, "at":[256,128] }"#;
 const DOOR: &str = r#"{ "a":"a", "b":"b", "kind":"door", "width":128, "at":[256,128],
@@ -132,6 +161,31 @@ fn teleport_exit(at_y: i32) -> String {
     format!(
         r#"{{ "room":"b", "trigger":"teleport", "secret":false, "width":64, "at":[576,{at_y}] }}"#
     )
+}
+
+/// Every non-zero line and sector special a whole-map fixture compiles to.
+///
+/// [`specials_of`] fills [`BASE`]'s template; this takes a fixture that is
+/// already a complete map — [`LIFTS`], [`FLOORS`], [`FLOOR_SWITCH_BRIDGE`] —
+/// because the template has no room to author a lift or floor construct.
+fn specials_of_whole_map(json: &str, tables: &Tables) -> (BTreeSet<u16>, BTreeSet<u16>) {
+    let ir = Ir::from_json(json).expect("fixture parses");
+    let out = compile(&ir, tables).expect("fixture compiles");
+    let lines = out
+        .data
+        .linedefs
+        .iter()
+        .map(|l| l.special)
+        .filter(|&s| s != 0)
+        .collect();
+    let sectors = out
+        .data
+        .sectors
+        .iter()
+        .map(|s| s.special)
+        .filter(|&s| s != 0)
+        .collect();
+    (lines, sectors)
 }
 
 fn specials_of(
@@ -226,28 +280,31 @@ fn every_construct_the_compiler_emits_is_in_the_curated_sets() {
         lines.extend(l);
         sectors.extend(s);
     }
-    // The lift golden, compiled directly since it does not fit `BASE`'s
-    // template: a switch lift (62/88, `both_ends`), a fast barrier (123 on
-    // both faces) and a fast walkover lift (120 on the alcove's outer
-    // threshold) — every repeatable lift special in one fixture.
-    let lift_ir = Ir::from_json(LIFTS).expect("lifts fixture parses");
-    let lift_out = compile(&lift_ir, &tables).expect("lifts fixture compiles");
-    lines.extend(
-        lift_out
-            .data
-            .linedefs
-            .iter()
-            .map(|l| l.special)
-            .filter(|&s| s != 0),
-    );
-    sectors.extend(
-        lift_out
-            .data
-            .sectors
-            .iter()
-            .map(|s| s.special)
-            .filter(|&s| s != 0),
-    );
+    // The three whole-map fixtures, compiled directly since none of them
+    // fits `BASE`'s template:
+    //
+    // - the lift golden: a switch lift (62/88, `both_ends`), a fast barrier
+    //   (123 on both faces) and a fast walkover lift (120 on the alcove's
+    //   outer threshold) — every repeatable lift special in one fixture;
+    // - the floor golden: a switch driving a drop wall and a closet on one
+    //   shared tag (23), a walkover driving a pedestal (38) and a walkover
+    //   driving a bridge (119 on both of the pit's thresholds);
+    // - the switch bridge: 18, the one emitted floor special the golden
+    //   never writes.
+    for (l, s) in [
+        specials_of_whole_map(LIFTS, &tables),
+        specials_of_whole_map(FLOORS, &tables),
+        specials_of_whole_map(FLOOR_SWITCH_BRIDGE, &tables),
+    ] {
+        lines.extend(l);
+        sectors.extend(s);
+    }
+    for floor in tables.floor_specials() {
+        assert!(
+            lines.contains(&floor),
+            "no fixture emits floor special {floor}"
+        );
+    }
     assert_eq!(
         lines,
         tables.emittable_line_specials(),
@@ -266,7 +323,7 @@ fn the_curated_sets_hold_their_expected_values_today() {
     assert_eq!(
         tables.emittable_line_specials(),
         BTreeSet::from([
-            1, 26, 27, 28, 11, 51, 52, 124, 39, 97, 125, 126, 62, 88, 123, 120
+            1, 26, 27, 28, 11, 51, 52, 124, 39, 97, 125, 126, 62, 88, 123, 120, 23, 38, 18, 119
         ])
     );
     assert_eq!(
@@ -291,6 +348,20 @@ fn sourced_but_unemitted_specials_stay_out_of_the_emittable_set() {
             assert!(
                 !set.contains(&s),
                 "one-shot lift special {s} has no compiler pass — it is never emitted"
+            );
+        }
+    }
+    let emitted_floors = tables.floor_specials();
+    for &(s, _, _) in tables.recognized_floor_specials() {
+        if emitted_floors.contains(&s) {
+            assert!(
+                set.contains(&s),
+                "emitted floor special {s} should be emittable"
+            );
+        } else {
+            assert!(
+                !set.contains(&s),
+                "recognized-only floor special {s} has no compiler pass — it is never emitted"
             );
         }
     }

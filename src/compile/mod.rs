@@ -2,6 +2,7 @@
 
 pub mod doors;
 pub mod exits;
+pub mod floors;
 pub mod heights;
 pub mod lifts;
 pub mod portals;
@@ -40,11 +41,14 @@ pub struct SectorOut {
     /// recess), which belong to no room and so have no
     /// [`crate::ir::Room::wall_tex`] of their own to read.
     pub wall_tex: String,
-    /// For an island — a teleport pad or a pedestal — the index of the room
-    /// sector it is carved inside. [`sectors::check_no_sector_overlaps`]
+    /// For an island — a teleport pad, a pedestal or a reveal — the index of
+    /// the room sector it is carved inside.
+    /// [`sectors::check_no_sector_overlaps`]
     /// exempts exactly that pair, since an island lies inside its host by
-    /// construction, and tests every other pair as usual. `None` for every
-    /// other sector.
+    /// construction, and tests every other pair as usual. That check reads
+    /// only the two sectors' polygons, never their heights, so a reveal's
+    /// floor == ceiling cell passes it exactly as a pedestal's raised one
+    /// does. `None` for every other sector.
     pub host: Option<usize>,
 }
 
@@ -63,9 +67,9 @@ pub struct SidedefOut {
     ///
     /// Doom derives a wall texture's horizontal position from this plus the
     /// distance along the line from its start vertex, so a nonzero value
-    /// shifts which texture column lands at the line's start. Used to centre
+    /// shifts which texture column lands at the line's start. Used to center
     /// a texture wider than the line it sits on — see
-    /// [`crate::compile::exits`], which centres an exit's switch.
+    /// [`crate::compile::exits`], which centers an exit's switch.
     pub x_offset: i32,
 }
 
@@ -386,6 +390,30 @@ pub enum CompileError {
         /// Y coordinate.
         y: i32,
     },
+    /// An authored room thing stands on a reveal's rectangle; it would spawn
+    /// in the reveal's own sector rather than on the room floor the author
+    /// placed it on.
+    ///
+    /// The reveal twin of [`ThingOnPedestal`](Self::ThingOnPedestal), refused
+    /// on the same grounds and against the same closed rectangle. The stakes
+    /// are higher here than on a pedestal: a
+    /// [`closet`](crate::ir::RevealKind::Closet) rests at its host's
+    /// *ceiling*, so a thing that strayed onto one would spawn sealed inside
+    /// the rock and never be seen until the trigger fired.
+    ///
+    /// A thing genuinely meant to be revealed goes in the reveal's own
+    /// [`things`](crate::ir::Reveal::things) list instead.
+    #[error("thing `{kind}` at ({x}, {y}) stands on reveal `{reveal}`")]
+    ThingOnReveal {
+        /// The reveal it stands on.
+        reveal: String,
+        /// The vocabulary name.
+        kind: String,
+        /// X coordinate.
+        x: i32,
+        /// Y coordinate.
+        y: i32,
+    },
     /// A thing sits closer to a wall than its own radius.
     #[error(
         "thing `{kind}` at ({x}, {y}) in room `{room}` has {have:.1} units of clearance but needs {need}"
@@ -405,6 +433,10 @@ pub enum CompileError {
         need: i32,
     },
     /// A room is shorter than something that must stand in it.
+    ///
+    /// Raised for the room's own things and for the player. A
+    /// [`crate::ir::Reveal`]'s cargo is *not* judged here — it is measured
+    /// against the cell at rest and raises [`Self::RevealNoHeadroom`].
     #[error("room `{room}` has {have} units of headroom but `{kind}` needs {need}")]
     NoHeadroom {
         /// The room.
@@ -684,6 +716,53 @@ pub enum CompileError {
         /// Required height.
         need: i32,
     },
+    /// A thing authored inside a reveal does not fit the cell at the height
+    /// the cell **rests** at, so the floor the trigger fires can never move.
+    ///
+    /// The engine blocks a lowering floor on a thing that does not fit, and
+    /// it blocks it permanently. Verified at the pinned commit
+    /// `a77dfb96cb91780ca334d0d4cfd86957558007e0`:
+    /// `T_MovePlane`'s floor-down branch (`p_floor.c:83-91`) drops the floor
+    /// by `speed`, calls `P_ChangeSector`, and on a true return restores
+    /// `lastpos` and returns `crushed`; `P_ChangeSector` (`p_map.c:1321`)
+    /// returns `nofit` (`p_map.c:1337`), which `PIT_ChangeSector`
+    /// (`p_map.c:1257`) sets at `p_map.c:1296` for any thing
+    /// `P_ThingHeightClip` (`p_map.c:530`) rejects — its test is
+    /// `if (thing->ceilingz - thing->floorz < thing->height) return false;`
+    /// — that is not a corpse, not `MF_DROPPED`, and is `MF_SHOOTABLE`
+    /// (`p_map.c:1290`). `nofit` is set *before* the `crushchange` guard, so
+    /// a non-crushing floor is blocked just the same. And `T_MoveFloor`
+    /// (`p_floor.c:209`) removes the thinker only on `pastdest`, so a
+    /// `crushed` result leaves it running to retry every tic, forever. With
+    /// `FLOORSPEED` at `FRACUNIT` (`p_spec.h:600`) the first step of a
+    /// sealed cell leaves a one-unit gap, which fits nothing at all.
+    ///
+    /// So a closet holds nothing: at rest its floor *is* its ceiling. A
+    /// pedestal reveal holds whatever fits between its risen floor and the
+    /// host's ceiling.
+    ///
+    /// **Every thing is judged, not only the shootable ones the engine
+    /// blocks on.** An item or a decoration sealed in a closet is legal for
+    /// the engine — `PIT_ChangeSector` waves through anything without
+    /// `MF_SHOOTABLE` (`p_map.c:1290`) — but the layer-4 verifier's V-P2
+    /// judges every thing against its sector's static heights, so allowing
+    /// it here would ship a map the project's own checker calls broken.
+    /// Refused for that agreement, deliberately, rather than because the
+    /// engine minds.
+    #[error(
+        "reveal `{reveal}` is {have} units tall at rest but `{kind}` needs {need}; a floor a \
+         thing does not fit in never lowers"
+    )]
+    RevealNoHeadroom {
+        /// The reveal.
+        reveal: String,
+        /// The vocabulary name of the thing that does not fit.
+        kind: String,
+        /// The cell's floor-to-ceiling gap at rest.
+        have: i32,
+        /// Required height.
+        need: i32,
+    },
     /// The map emits more platforms than the engine can run at once.
     ///
     /// `MAXPLATS` bounds `p_plats.c`'s active-plat table, and overflowing it
@@ -697,6 +776,221 @@ pub enum CompileError {
         count: usize,
         /// `MAXPLATS`.
         max: usize,
+    },
+    /// A floor-action switch trigger names a point that lies on no wall
+    /// segment of its room.
+    ///
+    /// The trigger form of [`ExitOffWall`](Self::ExitOffWall), raised by
+    /// [`floors::emit_floors`] rather than by `Ir::from_json`, which validates
+    /// a switch trigger's `room` and `at` fields but knows nothing about the
+    /// room's real edges. Defense in depth: `Ir::from_json` already refuses a
+    /// trigger whose `at` is not on one of its room's walls, so nothing an
+    /// author can write reaches this today.
+    #[error("trigger `{id}`: ({x}, {y}) is not on any wall of its room")]
+    TriggerWallNotFound {
+        /// The trigger's identifier.
+        id: String,
+        /// The requested X.
+        x: i32,
+        /// The requested Y.
+        y: i32,
+    },
+    /// A drop wall is deeper than the free part of the gap it fills, so
+    /// there is no room for it between its two rooms.
+    ///
+    /// The gap is measured after the portal's alcoves are taken out of it,
+    /// exactly as [`LiftTooShallow`](Self::LiftTooShallow) measures a
+    /// platform's remaining depth — a drop wall declares its own thickness,
+    /// so unlike a platform it does not simply fill whatever is left.
+    #[error(
+        "portal `{a}` <-> `{b}` is a drop wall {thickness} units deep, but only {gap} units of its gap are free"
+    )]
+    DropWallTooThick {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The declared thickness.
+        thickness: i32,
+        /// The gap left once the alcoves are taken out of it.
+        gap: i32,
+    },
+    /// A drop wall's two rooms' floors differ by more than the player's step
+    /// height, so the dropped wall would be a one-way drop rather than an
+    /// opening.
+    ///
+    /// The wall lowers to `P_FindLowestFloorSurrounding`, which is the lower
+    /// of the two rooms' floors, so a player who steps down onto it from the
+    /// higher room can never climb back: `P_TryMove` refuses a move that
+    /// raises `tmfloorz` more than `max_step_height`. Judged here rather than
+    /// in `Ir::from_json` for the reason [`PedestalRiseTooLow`](Self::PedestalRiseTooLow)
+    /// is: the step height is a table constant IR validation never loads.
+    #[error(
+        "portal `{a}` <-> `{b}` is a drop wall but its rooms' floors ({floor_a} and {floor_b}) differ by more than the {step}-unit step: the dropped wall would be a one-way drop"
+    )]
+    DropWallFloorsDiffer {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The first room's floor.
+        floor_a: i32,
+        /// The second room's floor.
+        floor_b: i32,
+        /// The player's step height.
+        step: i32,
+    },
+    /// A bridge's [`crate::ir::Portal::depth`] is no more than the player's
+    /// step height, so they could step out of the pit instead of waiting for
+    /// it to rise.
+    ///
+    /// The bridge form of
+    /// [`LiftTravelTooShort`](Self::LiftTravelTooShort): a bridge's two rooms
+    /// are level by definition ([`crate::ir::IrError::BridgeFloorsDiffer`]),
+    /// so its depth *is* its travel and is what must clear the step.
+    /// `P_TryMove` lets the player climb any difference up to
+    /// `max_step_height` unaided, so a pit under that is a dip the rising
+    /// strip crosses for nobody. Judged here rather than in `Ir::from_json`,
+    /// which requires only a positive multiple of 8
+    /// ([`crate::ir::IrError::InvalidBridgeDepth`]), for the reason
+    /// [`DropWallFloorsDiffer`](Self::DropWallFloorsDiffer) is: the step
+    /// height is a table constant IR validation never loads.
+    #[error(
+        "portal `{a}` <-> `{b}` is a bridge but its pit is only {depth} deep, within the {step}-unit step: the player would step out of it"
+    )]
+    BridgeDepthTooLow {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The declared depth, which is also the pit's travel.
+        depth: i32,
+        /// The player's step height.
+        step: i32,
+    },
+    /// A bridge's gap is narrower than the player's own diameter, so they
+    /// could not stand on the risen strip.
+    ///
+    /// The bridge form of [`LiftTooShallow`](Self::LiftTooShallow), and
+    /// measured the same way: the player is a cylinder that must fit
+    /// entirely between the two rooms' walls. `depth` here is the gap along
+    /// the direction of travel — how far the player walks across the
+    /// bridge — not the bridge's own vertical
+    /// [`depth`](crate::ir::Portal::depth), which
+    /// [`BridgeDepthTooLow`](Self::BridgeDepthTooLow) judges. A bridge fills
+    /// its whole gap: it declares neither alcoves nor a thickness, so unlike
+    /// a drop wall there is nothing between the rooms to squeeze it.
+    #[error(
+        "portal `{a}` <-> `{b}` leaves {depth} units for the bridge, but the player is {need} units across"
+    )]
+    BridgeTooShallow {
+        /// The first room.
+        a: String,
+        /// The second room.
+        b: String,
+        /// The gap between the two rooms' walls.
+        depth: i32,
+        /// The player's diameter.
+        need: i32,
+    },
+    /// Two floor-action triggers would write their special onto one line.
+    ///
+    /// The compiler-side half of
+    /// [`crate::ir::IrError::WalkoverPortalClaimedTwice`], which refuses two
+    /// walkover triggers naming one room pair before this pass ever runs — so
+    /// nothing an author can write reaches this. It is here because the cost
+    /// of the write going through unchecked is invisible: the second trigger's
+    /// tag replaces the first's on the line, and every construct the first
+    /// trigger drives is left with nothing that fires it, on a map that loads
+    /// and renders correctly.
+    #[error("trigger `{id}` would overwrite the special already on line {line}")]
+    TriggerLineAlreadyClaimed {
+        /// The trigger that arrived second.
+        id: String,
+        /// The linedef already carrying a special.
+        line: usize,
+    },
+    /// A [`crate::ir::RevealKind::Pedestal`] reveal's
+    /// [`crate::ir::Reveal::rise`] is no more than the player's step height,
+    /// so they could walk onto the block rather than wait for it to drop.
+    ///
+    /// The reveal form of [`PedestalRiseTooLow`](Self::PedestalRiseTooLow),
+    /// and judged in the emitter rather than in `Ir::from_json` for the
+    /// reason [`DropWallFloorsDiffer`](Self::DropWallFloorsDiffer) is: the
+    /// step height is a table constant IR validation never loads. A pedestal
+    /// reveal is sealed by height alone — unlike a closet, which is sealed by
+    /// rock — so a rise within the step seals nothing, and the trigger that
+    /// was meant to hand the player their prize is scenery.
+    #[error(
+        "reveal `{reveal}` rises only {rise}, within the {step}-unit step: the player would walk onto it"
+    )]
+    RevealRiseTooLow {
+        /// The reveal.
+        reveal: String,
+        /// The declared rise.
+        rise: i32,
+        /// The player's step height.
+        step: i32,
+    },
+    /// A [`crate::ir::RevealKind::Pedestal`] reveal's
+    /// [`crate::ir::Reveal::rise`] reaches its host's ceiling or passes
+    /// through it, which would emit a sector whose floor is at or above its
+    /// own ceiling.
+    ///
+    /// The upper bound to [`RevealRiseTooLow`](Self::RevealRiseTooLow)'s
+    /// lower one, and the reason both are needed: nothing else in the
+    /// compiler reads an island's heights. `check_no_sector_overlaps`
+    /// compares polygons only, and the playability rules judge the emitted
+    /// map rather than the IR, so an inverted cell would load, render as
+    /// garbage and ship. A pedestal reveal rests **strictly below** its
+    /// host's ceiling; a block that reaches the ceiling is a
+    /// [`closet`](crate::ir::RevealKind::Closet), which is how that shape is
+    /// authored.
+    #[error(
+        "reveal `{reveal}` rises {rise}, at or through its host's ceiling ({max} above the floor): a pedestal reveal rests strictly below the ceiling, and a block that reaches it is authored as a closet"
+    )]
+    RevealRiseTooHigh {
+        /// The reveal.
+        reveal: String,
+        /// The declared rise.
+        rise: i32,
+        /// The host room's own height, which the rise must stay under.
+        max: i32,
+    },
+    /// A reveal's own things list holds a player start.
+    ///
+    /// A *coop* start on a [`crate::ir::Pedestal`] is legal — the level
+    /// begins with that player standing on the block (see
+    /// [`PlayerStartOnPedestal`](Self::PlayerStartOnPedestal) for the player
+    /// 1 exception) — but a reveal is *sealed* at rest: a closet start begins
+    /// the level inside solid rock, and a pedestal reveal's start begins it
+    /// on a block nothing can lower from the inside. Neither is a level that
+    /// can be played, so both are refused rather than emitted.
+    #[error(
+        "reveal `{reveal}` holds a player start, which cannot begin the level in a sealed cell"
+    )]
+    StartOnReveal {
+        /// The reveal.
+        reveal: String,
+    },
+    /// A pedestal's own things list holds the **player 1** start.
+    ///
+    /// Not the sealed-cell objection [`StartOnReveal`](Self::StartOnReveal)
+    /// raises — a pedestal is standable, the engine spawns the player on it
+    /// happily, and a coop start there stays legal. The objection is that
+    /// rule P7 begins its flood at the player 1 start it finds among the
+    /// **rooms'** own things
+    /// ([`crate::reach::graph_from_compiled`]), so a player 1 start anywhere
+    /// else leaves that search empty and skips reachability for the whole
+    /// map — the compiler would then accept a map its own verifier calls
+    /// unfinishable. A construct the analysis cannot see is refused rather
+    /// than silently exempted.
+    #[error(
+        "pedestal `{pedestal}` holds the player 1 start, which rule P7's flood looks for among a room's own things; put it in the room and leave the pedestal to coop starts"
+    )]
+    PlayerStartOnPedestal {
+        /// The pedestal.
+        pedestal: String,
     },
     /// The compiled map breaks one or more playability rules.
     #[error(
@@ -732,6 +1026,10 @@ pub struct Compiled {
     pub markers: Vec<teleports::Marker>,
     /// The emitted platforms — lifts, barriers and pedestals.
     pub lifts: Vec<lifts::LiftOut>,
+    /// The emitted floor-action triggers.
+    pub triggers: Vec<floors::TriggerOut>,
+    /// The emitted floor actions — drop walls, reveals and bridges.
+    pub floors: Vec<floors::FloorActionOut>,
 }
 
 /// Compiles a room graph into UDMF `TEXTMAP` text.
@@ -751,10 +1049,10 @@ pub struct Compiled {
 ///    (rooms are authored apart — see [`crate::ir::Portal`] — so a portal
 ///    never shares a single coincident wall between its two rooms). For a
 ///    [`crate::ir::PortalKind::Plain`] portal this also fills the gap
-///    between the two openings with an open passage sector; for a door or
-///    lift portal it leaves both flanking walls cut but the gap itself still
-///    empty, because that gap is a sector of its own rather than a single
-///    line.
+///    between the two openings with an open passage sector; for a door, lift,
+///    drop-wall or bridge portal it leaves both flanking walls cut but the
+///    gap itself still empty, because that gap is a sector of its own rather
+///    than a single line.
 /// 4. [`doors::emit_doors`] fills that gap with a dedicated closed sector for
 ///    every door portal — optionally flanked by up to two trim alcove
 ///    sectors ([`crate::ir::Portal::alcove_near`]/
@@ -771,39 +1069,49 @@ pub struct Compiled {
 ///    exits so a wall pad and an exit compete for wall spans through
 ///    `portals::split_wall_for_opening` like any two openings, and before
 ///    the overlap check since it emits sectors.
-/// 7. [`lifts::emit_lifts`] fills every lift portal's gap with one
+/// 7. [`floors::emit_floors`] places every floor-action trigger, cuts every
+///    reveal's island, and fills every drop-wall portal's gap with the sealed
+///    sector that trigger lowers and every bridge portal's with the pit it
+///    raises, again from the same [`TagAllocator`]. Runs after `cut_portals`
+///    left that gap empty (step 3) and before the overlap check since it
+///    emits sectors — and, like every other pass that *splits* a wall (steps
+///    5 and 6), before step 8, whose recorded linedef indices a later split
+///    would silently shift; see the comment at its call site. Its two faces'
+///    textures must be written before step 10, for the reason step 8's
+///    risers must be.
+/// 8. [`lifts::emit_lifts`] fills every lift portal's gap with one
 ///    `downWaitUpStay` platform sector — again optionally flanked by
 ///    alcoves — and cuts every pedestal as a hosted island inside its room,
 ///    tagging each from the same [`TagAllocator`]. Runs after `cut_portals`
 ///    left that gap empty (step 3) and before the overlap check since it
-///    emits sectors. Its risers must be written before step 9: `heights`
+///    emits sectors. Its risers must be written before step 10: `heights`
 ///    fills only empty texture slots, and the platform's own top-face riser
 ///    is invisible at load-time heights, so `heights` would never write it.
-/// 8. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
+/// 9. [`sectors::check_no_sector_overlaps`] rejects any two emitted sectors
 ///    that overlap in 2-D — a gap sector driven through a third room, or two
 ///    gap sectors from unrelated portals crossing each other. Must run after
-///    every sector-emitting pass (steps 1, 3, 4, 5, 6, 7) and before
+///    every sector-emitting pass (steps 1, 3, 4, 5, 6, 7, 8) and before
 ///    anything that trusts the geometry is sound, which is everything from
 ///    here on.
-/// 9. [`heights::apply_height_textures`] writes the upper and lower textures
-///    every height difference exposes, on the one side `r_segs.c` draws.
-///    Runs after every sector-emitting pass because it reads final floor and
-///    ceiling heights, and after the overlap check because it trusts the
-///    geometry it walks.
-/// 10. [`things::place_things`] places every thing, measuring clearance and
-///     headroom against the geometry emitted by steps 1–7 — not the IR's
+/// 10. [`heights::apply_height_textures`] writes the upper and lower textures
+///     every height difference exposes, on the one side `r_segs.c` draws.
+///     Runs after every sector-emitting pass because it reads final floor and
+///     ceiling heights, and after the overlap check because it trusts the
+///     geometry it walks.
+/// 11. [`things::place_things`] places every thing, measuring clearance and
+///     headroom against the geometry emitted by steps 1–8 — not the IR's
 ///     declared footprints, which an exit alcove can still make stale even
 ///     though a door no longer does — so it must run after doors, exits,
-///     teleport pads, and platforms are carved, not before. It also places
-///     step 6's markers, holding each to the clearance its arriving thing
-///     needs.
-/// 11. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
+///     teleport pads, platforms and floor actions are carved, not before. It
+///     also places step 6's markers, holding each to the clearance its
+///     arriving thing needs.
+/// 12. [`tags::check_no_action_at_tag_zero`] rejects any linedef special left
 ///     at tag 0, which would match every untagged sector in-engine.
-/// 12. [`textmap::emit_textmap`] renders the final, validated geometry.
-/// 13. [`crate::rules::check_all`] runs the playability catalog over the
+/// 13. [`textmap::emit_textmap`] renders the final, validated geometry.
+/// 14. [`crate::rules::check_all`] runs the playability catalog over the
 ///     result and fails the compile if anything is violated.
 ///
-/// Step 13 is part of `compile` rather than a separate call the caller may
+/// Step 14 is part of `compile` rather than a separate call the caller may
 /// forget, because the design makes playability violations hard errors: "a
 /// door the player cannot fit through is a broken map, not a missed target".
 /// Leaving `check_all` optional meant every rule in `rules` was inert unless
@@ -848,10 +1156,20 @@ pub fn compile_reporting(
     doors::emit_doors(ir, tables, &mut data, &mut tags)?;
     exits::emit_exits(ir, tables, &mut data, &mut tags)?;
     let markers = teleports::emit_teleports(ir, tables, &mut data, &mut tags)?;
+    // Every pass that *splits* a wall — `emit_exits`'s switch lines,
+    // `emit_teleports`'s wall pads, and now the floor triggers — runs before
+    // `emit_lifts`, because `portals::split_wall_for_opening` removes the wall
+    // it splits and so shifts every linedef index above it: the
+    // `LiftOut::{low_line, top_line}` indices `emit_lifts` records would
+    // otherwise be silently invalidated by a later split. `emit_lifts` only
+    // appends lines, so `TriggerOut::line` and `FloorActionOut::lines` survive
+    // it. Nothing else here wants the other order: the no-chain rule (P30) is
+    // judged in `rules.rs` over the finished `Compiled`, not inside a pass.
+    let (triggers, floors) = floors::emit_floors(ir, tables, &mut data, &mut tags)?;
     let lifts = lifts::emit_lifts(ir, tables, &mut data, &mut tags)?;
     sectors::check_no_sector_overlaps(ir, &data)?;
     heights::apply_height_textures(&mut data);
-    let things = things::place_things(ir, tables, &data, &markers, &lifts)?;
+    let things = things::place_things(ir, tables, &data, &markers, &lifts, &floors)?;
     tags::check_no_action_at_tag_zero(&data)?;
     let textmap = textmap::emit_textmap(&data, &things);
     let compiled = Compiled {
@@ -861,6 +1179,8 @@ pub fn compile_reporting(
         tags,
         markers,
         lifts,
+        triggers,
+        floors,
     };
     let violations = check_all(ir, tables, &compiled);
     Ok((compiled, violations))

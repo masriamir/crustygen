@@ -401,6 +401,188 @@ fn a_dead_lift_refuses_the_map_on_the_lift_axis() {
     assert_eq!(value[0]["lifts"]["dead"], 1);
 }
 
+/// A map whose one floor target the recognizer accepts passes the sixth
+/// axis: three rooms in a row, the middle one (sector 1) tagged 7 and
+/// standing 128 above its two neighbors, with a `23` (S1
+/// `lowerFloorToLowest`) on the A|T link. Pressing it drops the wall flush
+/// and joins A to B — the corpus's drop wall.
+const FLOOR_TEXTMAP: &str = r#"namespace = "doom";
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 0.000; y = 128.000; }
+vertex { x = 128.000; y = 0.000; }
+vertex { x = 128.000; y = 128.000; }
+vertex { x = 256.000; y = 0.000; }
+vertex { x = 256.000; y = 128.000; }
+vertex { x = 384.000; y = 0.000; }
+vertex { x = 384.000; y = 128.000; }
+linedef { v1 = 3; v2 = 2; sidefront = 0; sideback = 1; twosided = true; special = 23; arg0 = 7; }
+linedef { v1 = 5; v2 = 4; sidefront = 2; sideback = 3; twosided = true; }
+linedef { v1 = 0; v2 = 1; sidefront = 4; blocking = true; }
+linedef { v1 = 1; v2 = 3; sidefront = 5; blocking = true; }
+linedef { v1 = 2; v2 = 0; sidefront = 6; blocking = true; }
+linedef { v1 = 3; v2 = 5; sidefront = 7; blocking = true; }
+linedef { v1 = 4; v2 = 2; sidefront = 8; blocking = true; }
+linedef { v1 = 5; v2 = 7; sidefront = 9; blocking = true; }
+linedef { v1 = 7; v2 = 6; sidefront = 10; blocking = true; }
+linedef { v1 = 6; v2 = 4; sidefront = 11; blocking = true; }
+sidedef { sector = 0; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 2; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; id = 0; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 128; heightceiling = 256; lightlevel = 160; id = 7; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; id = 0; }
+thing { x = 64.0; y = 64.0; angle = 90; type = 1; single = true; }
+"#;
+
+#[test]
+fn a_recognized_drop_wall_passes_the_floor_axis() {
+    let path = write_temp(&common::wad_with_textmap(FLOOR_TEXTMAP), "floors-ok");
+    let human = bin()
+        .args([path.to_str().unwrap(), "--vocabulary"])
+        .output()
+        .expect("runs");
+    assert_eq!(
+        human.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let json = bin()
+        .args([path.to_str().unwrap(), "--vocabulary", "--json"])
+        .output()
+        .expect("runs");
+    assert_eq!(
+        json.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("; expressible: yes"), "{stdout}");
+    assert!(!stdout.contains("floors refused"), "{stdout}");
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json");
+    assert_eq!(value[0]["verdict"]["floors_ok"], true);
+    assert_eq!(value[0]["verdict"]["expressible"], true);
+    assert_eq!(value[0]["floors"]["targets"], 1);
+    assert_eq!(value[0]["floors"]["drop_walls"], 1);
+}
+
+/// A pillar that rises to seal itself refuses the map on the sixth axis, and
+/// on the first as well: `101` (S1 `raiseFloor`) sends a level middle room to
+/// the lowest neighboring ceiling, which is its own — `Refusal::Closing`,
+/// nothing left standable — and `101` is not one of the four floor specials
+/// the compiler emits, so membership refuses it too. Both are asserted: this
+/// map is not the isolated recognizer refusal `FLOOR_TEXTMAP`'s twin would
+/// be, and the test would otherwise pass on the membership axis alone.
+const SEALING_PILLAR_TEXTMAP: &str = r#"namespace = "doom";
+vertex { x = 0.000; y = 0.000; }
+vertex { x = 0.000; y = 128.000; }
+vertex { x = 128.000; y = 0.000; }
+vertex { x = 128.000; y = 128.000; }
+vertex { x = 256.000; y = 0.000; }
+vertex { x = 256.000; y = 128.000; }
+vertex { x = 384.000; y = 0.000; }
+vertex { x = 384.000; y = 128.000; }
+linedef { v1 = 3; v2 = 2; sidefront = 0; sideback = 1; twosided = true; special = 101; arg0 = 7; }
+linedef { v1 = 5; v2 = 4; sidefront = 2; sideback = 3; twosided = true; }
+linedef { v1 = 0; v2 = 1; sidefront = 4; blocking = true; }
+linedef { v1 = 1; v2 = 3; sidefront = 5; blocking = true; }
+linedef { v1 = 2; v2 = 0; sidefront = 6; blocking = true; }
+linedef { v1 = 3; v2 = 5; sidefront = 7; blocking = true; }
+linedef { v1 = 4; v2 = 2; sidefront = 8; blocking = true; }
+linedef { v1 = 5; v2 = 7; sidefront = 9; blocking = true; }
+linedef { v1 = 7; v2 = 6; sidefront = 10; blocking = true; }
+linedef { v1 = 6; v2 = 4; sidefront = 11; blocking = true; }
+sidedef { sector = 0; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 1; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 2; texturemiddle = "-"; texturebottom = "SUPPORT3"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 0; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 1; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sidedef { sector = 2; texturemiddle = "STARTAN2"; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; id = 0; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; id = 7; }
+sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0; heightceiling = 256; lightlevel = 160; id = 0; }
+thing { x = 64.0; y = 64.0; angle = 90; type = 1; single = true; }
+"#;
+
+#[test]
+fn a_pillar_that_seals_refuses_the_map_on_the_floor_axis() {
+    let path = write_temp(
+        &common::wad_with_textmap(SEALING_PILLAR_TEXTMAP),
+        "floors-closing",
+    );
+    let human = bin()
+        .args([path.to_str().unwrap(), "--vocabulary"])
+        .output()
+        .expect("runs");
+    assert_eq!(
+        human.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&human.stderr)
+    );
+    let json = bin()
+        .args([path.to_str().unwrap(), "--vocabulary", "--json"])
+        .output()
+        .expect("runs");
+    assert_eq!(
+        json.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&human.stdout);
+    assert!(stdout.contains("; expressible: no"), "{stdout}");
+    assert!(stdout.contains("(floors refused: 1)"), "{stdout}");
+    assert!(
+        stdout.contains("(line specials unknown: 101)"),
+        "101 is not emittable either: {stdout}"
+    );
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).expect("json");
+    assert_eq!(value[0]["verdict"]["floors_ok"], false);
+    assert_eq!(value[0]["verdict"]["line_specials_ok"], false);
+    assert_eq!(value[0]["floors"]["targets"], 1);
+    assert_eq!(value[0]["floors"]["closing"], 1);
+}
+
+/// Without a refusal, the human line carries no floor note at all — the same
+/// silence the teleport and lift axes keep.
+#[test]
+fn a_floor_free_map_gets_no_floor_note() {
+    let path = write_temp(&common::binary_entrada_wad(), "floors-none");
+    let out = bin()
+        .args([path.to_str().unwrap(), "--vocabulary"])
+        .output()
+        .expect("runs");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    std::fs::remove_file(&path).ok();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("; expressible: yes"), "{stdout}");
+    assert!(!stdout.contains("floors refused"), "{stdout}");
+}
+
 /// Without a refusal, the human line carries no teleport note at all.
 #[test]
 fn a_teleport_free_map_gets_no_teleport_note() {

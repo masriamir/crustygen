@@ -321,6 +321,43 @@ source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, P_UseSpecialLine, under th
 fast_source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, P_UseSpecialLine, BUTTONS block: 'case 123: // Blazing PlatDownWaitUpStay / if (EV_DoPlat(line,blazeDWUS,0)) / P_ChangeSwitchTexture(line,1);' — the SR blazing form; p_spec.c, P_CrossSpecialLine, RETRIGGERS block: 'case 120: // Blazing PlatDownWaitUpStay. / EV_DoPlat(line,blazeDWUS,0);' — the WR blazing form. p_plats.c, EV_DoPlat, 'case blazeDWUS: plat->speed = PLATSPEED * 8;' against 'case downWaitUpStay: plat->speed = PLATSPEED * 4;' — the only difference between the two types. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_switch.c, .../p_spec.c, .../p_plats.c"
 one_shot_source = "NOT EMITTED — recorded so the verifier and recognizer can name every form the engine dispatches. p_switch.c, P_UseSpecialLine, SWITCHES block: 'case 21: // PlatDownWaitUpStay / if (EV_DoPlat(line,downWaitUpStay,0)) / P_ChangeSwitchTexture(line,0);' (S1) and 'case 122: // Blazing PlatDownWaitUpStay / if (EV_DoPlat(line,blazeDWUS,0)) / P_ChangeSwitchTexture(line,0);' (S1 blazing); p_spec.c, P_CrossSpecialLine, TRIGGERS block: 'case 10: // PlatDownWaitUp / EV_DoPlat(line,downWaitUpStay,0); / line->special = 0;' (W1) and 'case 121: // Blazing PlatDownWaitUpStay / EV_DoPlat(line,blazeDWUS,0); / line->special = 0;' (W1 blazing). The compiler never writes a one-shot lift: P5 requires a lift be operable again after use, and the corpus uses the repeatable forms 99.3 % / 97.5 % / 95.0 % of the time (docs/measurements/lift-shapes-2026-08-29.md §A). Same commit URL as above."
 
+# Line specials for a one-way floor action: `EV_DoFloor` (`p_floor.c`) moves
+# a tagged sector's floor to a destination and `T_MoveFloor` removes the
+# thinker on arrival — every floor action fires once and stays. The IR's
+# three nouns lower a sealed wall or cell (`lowerFloorToLowest`) or raise a
+# pit strip (`raiseFloorToNearest`); the compiler writes the one-shot
+# ("S1"/"W1") forms, which is how 77 % of corpus floor lines are authored
+# (docs/measurements/floor-shapes-2026-09-02.md §A).
+[specials.floor]
+lower_switch = 23
+lower_walkover = 38
+raise_switch = 18
+raise_walkover = 119
+source = "id-Software/DOOM linuxdoom-1.10/p_switch.c, P_UseSpecialLine, under the '// SWITCHES' block: 'case 23: // Lower Floor to Lowest / if (EV_DoFloor(line,lowerFloorToLowest)) / P_ChangeSwitchTexture(line,0);' and 'case 18: // Raise Floor to next highest floor / if (EV_DoFloor(line, raiseFloorToNearest)) / P_ChangeSwitchTexture(line,0);' — useAgain=0, the one-shot ('S1') forms. p_spec.c, P_CrossSpecialLine, in the leading '// TRIGGERS' block: 'case 38: // Lower Floor to Lowest / EV_DoFloor( line, lowerFloorToLowest ); / line->special = 0;' and 'case 119: // Raise floor to nearest surr. floor / EV_DoFloor(line,raiseFloorToNearest); / line->special = 0;' — the one-shot ('W1') forms. p_floor.c, EV_DoFloor: 'case lowerFloorToLowest: floor->direction = -1; ... floor->floordestheight = P_FindLowestFloorSurrounding(sec);' and 'case raiseFloorToNearest: floor->direction = 1; ... floor->floordestheight = P_FindNextHighestFloor(sec,sec->floorheight);'. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_switch.c, .../p_spec.c and .../p_floor.c"
+
+# NOT EMITTED — every other special the engine dispatches to `EV_DoFloor` or
+# to the two one-way `EV_DoPlat` raise types, recorded so the verifier and
+# recognizer can name every form a map carries. One triple per special:
+# `[number, engine type, form]`, form ∈ W1 | WR | S1 | SR | G1.
+recognized = [
+  [19, "lowerFloor", "W1"], [83, "lowerFloor", "WR"], [102, "lowerFloor", "S1"], [45, "lowerFloor", "SR"],
+  [38, "lowerFloorToLowest", "W1"], [40, "lowerFloorToLowest", "W1"], [82, "lowerFloorToLowest", "WR"], [23, "lowerFloorToLowest", "S1"], [60, "lowerFloorToLowest", "SR"],
+  [36, "turboLower", "W1"], [98, "turboLower", "WR"], [71, "turboLower", "S1"], [70, "turboLower", "SR"],
+  [5, "raiseFloor", "W1"], [91, "raiseFloor", "WR"], [101, "raiseFloor", "S1"], [64, "raiseFloor", "SR"], [24, "raiseFloor", "G1"],
+  [56, "raiseFloorCrush", "W1"], [94, "raiseFloorCrush", "WR"], [55, "raiseFloorCrush", "S1"], [65, "raiseFloorCrush", "SR"],
+  [119, "raiseFloorToNearest", "W1"], [128, "raiseFloorToNearest", "WR"], [18, "raiseFloorToNearest", "S1"], [69, "raiseFloorToNearest", "SR"],
+  [130, "raiseFloorTurbo", "W1"], [129, "raiseFloorTurbo", "WR"], [131, "raiseFloorTurbo", "S1"], [132, "raiseFloorTurbo", "SR"],
+  [58, "raiseFloor24", "W1"], [92, "raiseFloor24", "WR"],
+  [59, "raiseFloor24AndChange", "W1"], [93, "raiseFloor24AndChange", "WR"],
+  [140, "raiseFloor512", "S1"],
+  [30, "raiseToTexture", "W1"], [96, "raiseToTexture", "WR"],
+  [37, "lowerAndChange", "W1"], [84, "lowerAndChange", "WR"],
+  [15, "platRaiseAndChange24", "S1"], [66, "platRaiseAndChange24", "SR"],
+  [14, "platRaiseAndChange32", "S1"], [67, "platRaiseAndChange32", "SR"],
+  [22, "platRaiseToNearestAndChange", "W1"], [95, "platRaiseToNearestAndChange", "WR"], [20, "platRaiseToNearestAndChange", "S1"], [68, "platRaiseToNearestAndChange", "SR"], [47, "platRaiseToNearestAndChange", "G1"],
+]
+recognized_source = "NOT EMITTED. Transcribed from the dispatch tables at the pinned commit: p_spec.c, P_CrossSpecialLine — the W1 block (cases 541-784, each ending 'line->special = 0;') and the WR block (from line 786) — and P_ShootSpecialLine (cases 24 and 47); p_switch.c, P_UseSpecialLine — the S1 '// SWITCHES' block (347-511, P_ChangeSwitchTexture(line,0)) and the SR '// BUTTONS' block (513-647, P_ChangeSwitchTexture(line,1)). Case 40 is 'RaiseCeilingLowerFloor': EV_DoCeiling(line, raiseToHighest) and EV_DoFloor(line, lowerFloorToLowest) (p_spec.c:664-669). Engine types are p_spec.h's floor_e names and p_plats.c's raiseAndChange (amount 24 or 32 by dispatch) and raiseToNearestAndChange plat types; the two plat types are one-way like the floors (T_PlatRaise removes them on pastdest, p_plats.c:96-99). The full per-special count in the sample is docs/measurements/floor-shapes-2026-09-02.md §A. https://github.com/id-Software/DOOM/blob/a77dfb96cb91780ca334d0d4cfd86957558007e0/linuxdoom-1.10/p_spec.c, .../p_switch.c, .../p_floor.c and .../p_plats.c"
+
 # Line specials for a teleporter: the four vanilla forms, crossed on who may
 # cross (any thing vs monsters only) and whether the line survives its first
 # use (repeatable "WR" vs one-shot "W1"). The IR picks: `monsters_only`
@@ -415,11 +452,11 @@ curated = "NOT sourced from the engine or derivable from it — which texture na
 # DOORTRAK, and are not door panels.
 #
 # Card versus skull: across DOOM.WAD, DOOM2.WAD, TNT.WAD and PLUTONIA.WAD,
-# restricted to maps containing exactly ONE key of a given colour so the
+# restricted to maps containing exactly ONE key of a given color so the
 # attribution is unambiguous, the plain name accompanies a keycard 117 times
 # against 18 for the `2` variant, and the `2` variant accompanies a skull key
 # 92 times against 26 for the plain name. The split holds in the same
-# direction for all three colours (blue 45/6 vs 8/30, red 38/6 vs 10/34,
+# direction for all three colors (blue 45/6 vs 8/30, red 38/6 vs 10/34,
 # yellow 34/6 vs 8/28). Not absolute — mappers are not strict, and a map with
 # several doors can mix them — but overwhelmingly one-directional.
 [key_trim]
@@ -429,4 +466,4 @@ red_card = "DOORRED"
 red_skull = "DOORRED2"
 yellow_card = "DOORYEL"
 yellow_skull = "DOORYEL2"
-curated = "Asset-naming convention, not an engine constant — nothing in linuxdoom-1.10 associates a texture name with a key. The colour-to-name mapping is self-evident from the names; the card-versus-skull mapping is the measured convention described in the comment above, counted over the four id/Final Doom IWADs in RETAIL/ by correlating each map's key things (doomednums 5/6/13 card and 40/39/38 skull, per this file's [things] table) against the key-door textures its sidedefs carry. All six confirmed present in the TEXTURE1 lump of DOOM.WAD, DOOM2.WAD and freedoom2.wad, at 8x128 (plain) and 16x128 (`2`), via crustywad::Wad::texture_set()."
+curated = "Asset-naming convention, not an engine constant — nothing in linuxdoom-1.10 associates a texture name with a key. The color-to-name mapping is self-evident from the names; the card-versus-skull mapping is the measured convention described in the comment above, counted over the four id/Final Doom IWADs in RETAIL/ by correlating each map's key things (doomednums 5/6/13 card and 40/39/38 skull, per this file's [things] table) against the key-door textures its sidedefs carry. All six confirmed present in the TEXTURE1 lump of DOOM.WAD, DOOM2.WAD and freedoom2.wad, at 8x128 (plain) and 16x128 (`2`), via crustywad::Wad::texture_set()."

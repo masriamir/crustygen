@@ -573,10 +573,43 @@ fn placement_of(
     }
 }
 
+/// Which of the three dispatchers fires a trigger line, which is what
+/// decides the sides it can be fired from. Mirrors
+/// `crustygen::check::plats::Dispatch` so the probe and the verifier cannot
+/// drift on who can press what.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Dispatch {
+    /// `P_CrossSpecialLine` — a walkover. No side gate; a side fires it when
+    /// the crossing from it is possible at rest.
+    Cross,
+    /// `P_UseSpecialLine` — a switch, front side only (`p_switch.c:284-297`:
+    /// the opening `if (side)` block `return false`s for every special but
+    /// 124).
+    Use,
+    /// `P_ShootSpecialLine` — a gun line, fired from **either** side it
+    /// faces. `P_ShootSpecialLine` (`p_spec.c:955-1000`) takes no `side`
+    /// argument and gates on none, and its only caller passes none:
+    /// `PTR_ShootTraverse` runs `if (li->special) P_ShootSpecialLine
+    /// (shootthing, li);` (`p_map.c:919-920`) two lines before it has read
+    /// `ML_TWOSIDED` (`p_map.c:922`). The dispatch carries floor specials 24
+    /// and 47 (plus door 46); no lift special reaches it.
+    Shot,
+}
+
+impl Dispatch {
+    /// The dispatcher a [`TriggerKind`] goes through.
+    pub(crate) fn of(kind: TriggerKind) -> Self {
+        match kind {
+            TriggerKind::Walk => Self::Cross,
+            TriggerKind::Switch => Self::Use,
+            TriggerKind::Gun => Self::Shot,
+        }
+    }
+}
+
 /// The sides of a trigger line that can fire it, per the engine's dispatch
-/// rules, as `(sector, class)` pairs. `front_only` selects the
-/// `P_UseSpecialLine` / `P_ShootSpecialLine` rule (the front side alone) over
-/// `P_CrossSpecialLine`'s (either side the player can step from).
+/// rules, as `(sector, class)` pairs. `dispatch` selects the rule — see
+/// [`Dispatch`].
 fn activator_sides(
     map: &UdmfMap,
     scene: &Scene,
@@ -584,7 +617,7 @@ fn activator_sides(
     target_floor: i32,
     line_idx: usize,
     step: i32,
-    front_only: bool,
+    dispatch: Dispatch,
 ) -> Vec<(usize, Activator)> {
     let l = &map.linedefs[line_idx];
     // A dangling side or sector reference cannot fire anything: the engine
@@ -595,27 +628,35 @@ fn activator_sides(
     let (plat, plat_floor) = (target, target_floor);
     let back = l.sideback.and_then(|b| side_sector(map, b));
     let mut out = Vec::new();
-    if front_only {
-        // `P_UseSpecialLine`: front side only (`p_switch.c:288`); a gun line
-        // (`P_ShootSpecialLine`) is reached from the side its face is drawn
-        // on, so it takes the same path.
-        out.push((
-            front,
-            classify_activator(scene, plat, plat_floor, front, step),
-        ));
-    } else if let Some(b) = back {
+    let push = |s: usize, out: &mut Vec<(usize, Activator)>| {
+        out.push((s, classify_activator(scene, plat, plat_floor, s, step)));
+    };
+    match dispatch {
+        // `P_UseSpecialLine`: front side only (`p_switch.c:284-297`).
+        Dispatch::Use => push(front, &mut out),
+        // `P_ShootSpecialLine` has no side gate and neither does its caller,
+        // so a shot from either bordering sector fires it. A
+        // self-referencing line's back sector is the front one: one sector
+        // to shoot from, not two.
+        Dispatch::Shot => {
+            push(front, &mut out);
+            if let Some(b) = back.filter(|&b| b != front) {
+                push(b, &mut out);
+            }
+        }
         // `P_CrossSpecialLine` has no side gate; a side can activate if the
         // crossing from it is possible at rest under `P_TryMove`'s step rule.
-        let ff = scene.sectors[front].floor;
-        let bf = scene.sectors[b].floor;
-        if bf - ff <= step {
-            out.push((
-                front,
-                classify_activator(scene, plat, plat_floor, front, step),
-            ));
-        }
-        if ff - bf <= step {
-            out.push((b, classify_activator(scene, plat, plat_floor, b, step)));
+        Dispatch::Cross => {
+            if let Some(b) = back {
+                let ff = scene.sectors[front].floor;
+                let bf = scene.sectors[b].floor;
+                if bf - ff <= step {
+                    push(front, &mut out);
+                }
+                if ff - bf <= step {
+                    push(b, &mut out);
+                }
+            }
         }
     }
     out
@@ -745,15 +786,14 @@ fn triggers_of(
                 }
             }
         }
-        let sides = activator_sides(
-            map,
-            scene,
-            plat,
-            plat_floor,
-            i,
-            step,
-            USE_LIFT.contains(&l.special),
-        );
+        // No lift special reaches `P_ShootSpecialLine`, so the two lift
+        // dispatchers are the use forms and the crossings.
+        let dispatch = if USE_LIFT.contains(&l.special) {
+            Dispatch::Use
+        } else {
+            Dispatch::Cross
+        };
+        let sides = activator_sides(map, scene, plat, plat_floor, i, step, dispatch);
         // For a walkover the player fires from below, measure the far sector
         // the crossing would land in — once per `Low` side, since a line in a
         // flat low room can have two.
@@ -1427,7 +1467,7 @@ fn next_sector(b: &Boundary) -> Option<usize> {
     if b.two_sided { b.neighbor } else { None }
 }
 
-/// `P_FindLowestFloorSurrounding` (`p_spec.c:270-291`): starts at the
+/// `P_FindLowestFloorSurrounding` (`p_spec.c:270-289`): starts at the
 /// sector's **own** floor, minimum over two-sided neighbors.
 pub(crate) fn lowest_floor_surrounding(scene: &Scene, sec: usize) -> i32 {
     sector_lines(scene, sec)
@@ -1439,10 +1479,10 @@ pub(crate) fn lowest_floor_surrounding(scene: &Scene, sec: usize) -> i32 {
 }
 
 /// `P_FindHighestFloorSurrounding`'s starting value, `-500*FRACUNIT`
-/// (`p_spec.c:303`). A sector with no two-sided neighbor "lowers" to it.
+/// (`p_spec.c:302`). A sector with no two-sided neighbor "lowers" to it.
 pub(crate) const NO_NEIGHBOR_FLOOR: i32 = -500;
 
-/// `P_FindHighestFloorSurrounding` (`p_spec.c:297-318`): starts at
+/// `P_FindHighestFloorSurrounding` (`p_spec.c:297-316`): starts at
 /// [`NO_NEIGHBOR_FLOOR`], maximum over two-sided neighbors.
 pub(crate) fn highest_floor_surrounding(scene: &Scene, sec: usize) -> i32 {
     sector_lines(scene, sec)
@@ -1457,10 +1497,10 @@ pub(crate) const MAX_ADJOINING_SECTORS: usize = 20;
 /// What [`next_highest_floor`] found.
 pub(crate) struct NextHighest {
     /// The least neighboring floor strictly above `currentheight`, or
-    /// `currentheight` when no neighbor is above it (`p_spec.c:361-362`).
+    /// `currentheight` when no neighbor is above it (`p_spec.c:364-365`).
     pub(crate) height: i32,
     /// Whether the search filled its 20-entry list and broke early
-    /// (`p_spec.c:349-355`) — the map is then reading a truncated
+    /// (`p_spec.c:354-359`) — the map is then reading a truncated
     /// neighborhood, and the destination may not be the true next height.
     pub(crate) capped: bool,
 }
@@ -1877,10 +1917,10 @@ pub(crate) fn trigger_sides(
     target: usize,
     line_idx: usize,
     step: i32,
-    front_only: bool,
+    dispatch: Dispatch,
 ) -> Vec<usize> {
     let floor = scene.sectors[target].floor;
-    activator_sides(map, scene, target, floor, line_idx, step, front_only)
+    activator_sides(map, scene, target, floor, line_idx, step, dispatch)
         .into_iter()
         .map(|(s, _)| s)
         .collect()
@@ -1940,14 +1980,23 @@ pub(crate) fn floor_triggers(
         };
         let front = side_sector(map, l.sidefront);
         let back = l.sideback.and_then(|b| side_sector(map, b));
-        // A gun line is fired by a hitscan that crosses the line, which
-        // reaches it from the side its face is drawn on — the front, as for a
-        // use line (`P_ShootSpecialLine`, `p_spec.c:959-1000`, has no side
-        // gate of its own).
-        let front_only = kind != TriggerKind::Walk;
-        let sides = activator_sides(map, scene, target, target_floor, i, step, front_only);
+        let sides = activator_sides(
+            map,
+            scene,
+            target,
+            target_floor,
+            i,
+            step,
+            Dispatch::of(kind),
+        );
         let mut switch_slots = Vec::new();
-        if front_only && let Some(sd) = sidedef(map, l.sidefront) {
+        // `P_ChangeSwitchTexture` rewrites the **front** sidedef, and both
+        // the use forms and the two gun floor specials call it
+        // (`p_switch.c:284-297`; `p_spec.c:955-1000`), so a walkover is the
+        // only kind with no switch face to read.
+        if kind != TriggerKind::Walk
+            && let Some(sd) = sidedef(map, l.sidefront)
+        {
             for (slot, tex) in [
                 ("top", &sd.texturetop),
                 ("mid", &sd.texturemiddle),
@@ -2760,6 +2809,57 @@ pub(crate) mod tests {
         assert_eq!(p.triggers[0].activators, vec![Activator::Low]);
         assert!(p.callable_low);
         assert_eq!(p.shape, Shape::Core);
+    }
+
+    #[test]
+    fn a_gun_line_fires_from_either_sector_it_faces() {
+        // Room 1 sits 96 above room 0, so a *crossing* fires from the high
+        // side only and a *use* from the line's front side only. A gunshot is
+        // gated by neither: `P_ShootSpecialLine` (`p_spec.c:955-1000`) takes
+        // no `side` argument, and `PTR_ShootTraverse` passes none
+        // (`p_map.c:919-920`), two lines before `ML_TWOSIDED` is even read.
+        // The link's front is room 0 (`east_front` false).
+        let f = fixture(&chain(
+            &[0, 96, 0],
+            &[0, 7, 0],
+            &[(47, 7, false), (0, 0, false)],
+            "",
+        ));
+        assert_eq!(
+            trigger_sides(&f.map, &f.scene, 1, 0, f.step, Dispatch::Shot),
+            vec![0, 1],
+            "a shot from either bordering sector fires the line"
+        );
+        assert_eq!(
+            trigger_sides(&f.map, &f.scene, 1, 0, f.step, Dispatch::Use),
+            vec![0],
+            "`P_UseSpecialLine` is front-side only (`p_switch.c:284-297`)"
+        );
+        assert_eq!(
+            trigger_sides(&f.map, &f.scene, 1, 0, f.step, Dispatch::Cross),
+            vec![1],
+            "the 96-unit climb out of room 0 refuses the crossing"
+        );
+    }
+
+    #[test]
+    fn a_self_referencing_gun_line_is_one_sector_to_shoot_from() {
+        // Both mirrors name sidedef 0 — `chain` allocates the first link's
+        // front side there — so front and back resolve to one sector. That is
+        // one place to stand and shoot from, not two.
+        let extra = "linedef { v1 = 0; v2 = 1; sidefront = 0; sideback = 0; \
+                     twosided = true; special = 47; arg0 = 7; }\n";
+        let f = fixture(&chain(
+            &[0, 96, 0],
+            &[0, 7, 0],
+            &[(0, 0, false), (0, 0, false)],
+            extra,
+        ));
+        let line = f.map.linedefs.len() - 1;
+        assert_eq!(
+            trigger_sides(&f.map, &f.scene, 1, line, f.step, Dispatch::Shot),
+            vec![0]
+        );
     }
 
     #[test]

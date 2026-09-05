@@ -282,6 +282,179 @@ fn dead_end_pocket(scene: &Scene, linedef: usize, sector: usize, step: i32, radi
     deepest <= f64::from(radius)
 }
 
+/// Which of the three dispatchers fires a trigger line, which is what
+/// decides the sides it can be fired from. The distinction is the engine's,
+/// not a convenience: each function gates on the side differently, and two
+/// of the three do not gate at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Dispatch {
+    /// `P_CrossSpecialLine` — a walkover, fired by the crossing itself, so
+    /// no side gate and every side the player can actually cross from.
+    Cross,
+    /// `P_UseSpecialLine` — a switch, front side only
+    /// (`p_switch.c:284-297`).
+    Use,
+    /// `P_ShootSpecialLine` — a gun line, fired from either side it faces
+    /// (`p_spec.c:955-1000` takes no `side`; `p_map.c:919-920` passes
+    /// none). No lift special reaches this dispatcher — it carries only 24,
+    /// 46 and 47 — so this arm exists for [`crate::check::floors`]'s two
+    /// gun forms.
+    Shot,
+}
+
+/// The sides of a trigger line that can fire it, in the engine's own terms.
+///
+/// `b` is the line's **front** mirror and `front` the sector it is filed
+/// under; `dispatch` names the function that fires it, which is what selects
+/// the rule:
+///
+/// - [`Dispatch::Use`] — the front side alone. `P_UseSpecialLine`'s opening
+///   `if (side)` block (pinned `p_switch.c:284-297`) `return false`s for
+///   every special but 124.
+/// - [`Dispatch::Shot`] — the front side, plus the back when the line has
+///   one. `P_ShootSpecialLine` (pinned `p_spec.c:955-1000`) takes no `side`
+///   argument at all, and `PTR_ShootTraverse` passes none: `if
+///   (li->special) P_ShootSpecialLine (shootthing, li);`
+///   (`p_map.c:919-920`), two lines before `ML_TWOSIDED` is so much as read
+///   (`p_map.c:922`). A shot from either bordering sector fires it, and
+///   neither the step rule nor [`Boundary::passable`] applies — a bullet
+///   crosses what a player cannot. (What a hitscan from *further* away can
+///   reach is a line-of-sight question this checker does not model, so this
+///   stays the two sectors the line itself faces.)
+/// - [`Dispatch::Cross`] — no side gate either (`P_CrossSpecialLine`), but
+///   the crossing is the player's own, so it fires from whichever side they
+///   can actually cross from at rest under `P_TryMove`'s step rule.
+///
+/// `(step, radius)` are [`Tables::step_height`] and
+/// [`Tables::player`]`().radius`.
+///
+/// Shared with [`crate::check::floors`], whose lines fire by the same three
+/// dispatchers, so the two resolutions cannot drift on who can press what.
+/// The walkover arm carries the two deliberate divergences from the probe
+/// this module's doc comment argues for: an impassable boundary
+/// ([`Boundary::passable`]) fires from neither side, and neither does one
+/// with a [`dead_end_pocket`] behind it.
+pub(crate) fn activator_sides(
+    scene: &Scene,
+    b: &Boundary,
+    front: usize,
+    dispatch: Dispatch,
+    (step, radius): (i32, i32),
+) -> Vec<usize> {
+    let mut sides = Vec::new();
+    match dispatch {
+        Dispatch::Use => sides.push(front),
+        Dispatch::Shot => {
+            sides.push(front);
+            // A self-referencing line's back sector is the front one; it is
+            // one sector to shoot from, not two.
+            if let Some(back) = b.neighbor.filter(|&back| back != front) {
+                sides.push(back);
+            }
+        }
+        Dispatch::Cross => {
+            if let Some(back) = b.neighbor.filter(|_| b.passable()) {
+                // A walkover with a dead-end pocket on either side fires
+                // from neither: nobody can cross *into* the pocket, and
+                // nobody can stand in it to cross *out*. The same shape as
+                // the `passable()` gate above, one layer further out.
+                let pocket = [front, back]
+                    .iter()
+                    .any(|&s| dead_end_pocket(scene, b.linedef, s, step, radius));
+                let (ff, bf) = (scene.sectors[front].floor, scene.sectors[back].floor);
+                if !pocket && bf - ff <= step {
+                    sides.push(front);
+                }
+                if !pocket && ff - bf <= step {
+                    sides.push(back);
+                }
+            }
+        }
+    }
+    sides
+}
+
+/// Every sector named by a nonzero tag on some line whose special satisfies
+/// `is_special` — the targets one resolution models.
+///
+/// `P_FindSectorFromLineTag` matches by tag equality, so a line's tag names
+/// every sector carrying it, and a tag-0 line names none: an untagged sector
+/// does not "have tag 0", it answers to nothing. Front mirrors only —
+/// `special` and `tag` are linedef-wide, so the back mirror of a two-sided
+/// line would otherwise contribute the same target a second time.
+///
+/// Shared with [`crate::check::floors`]: a lift line and a floor line resolve
+/// a tag by the same engine rule, so which sectors an action drives must not
+/// be answered twice.
+pub(crate) fn sectors_named_by(scene: &Scene, is_special: impl Fn(i32) -> bool) -> BTreeSet<usize> {
+    let tags: BTreeSet<i32> = scene
+        .sectors
+        .iter()
+        .flat_map(|s| s.boundary.iter())
+        .filter(|b| b.fronts_this && b.tag != 0 && is_special(b.special))
+        .map(|b| b.tag)
+        .collect();
+    scene
+        .sectors
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| tags.contains(&s.tag))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The lines of the family `is_special` selects that can never fire anything:
+/// tag 0, or a tag naming no sector.
+///
+/// Ascending by linedef declaration index, each named once. The walk is over
+/// sectors' boundaries, so the raw order would be sector-then-boundary and
+/// only coincidentally sorted; a `BTreeSet` makes it the caller-visible index
+/// order instead. Front mirrors only — `special` and `tag` are linedef-wide,
+/// so the back mirror of a two-sided line would otherwise report the same
+/// line twice.
+///
+/// Shared with [`crate::check::floors`], for the reason
+/// [`sectors_named_by`] gives: this is the complement of that set, read off
+/// the same rule.
+pub(crate) fn broken_tag_lines(scene: &Scene, is_special: impl Fn(i32) -> bool) -> Vec<usize> {
+    scene
+        .sectors
+        .iter()
+        .flat_map(|s| s.boundary.iter())
+        .filter(|b| b.fronts_this && is_special(b.special))
+        .filter(|b| b.tag == 0 || !scene.sectors.iter().any(|s| s.tag == b.tag))
+        .map(|b| b.linedef)
+        .collect::<BTreeSet<usize>>()
+        .into_iter()
+        .collect()
+}
+
+/// The nonzero specials naming `tag` that `is_own` does not claim, sorted and
+/// deduped — the other actions sharing a resolution's tag.
+///
+/// Another action on the same tag drives the same sector, which is what makes
+/// it a conflict to report rather than a trigger to model. Front mirrors
+/// only, for the reason [`sectors_named_by`] gives.
+///
+/// Shared with [`crate::check::floors`], whose "not a floor line" is the same
+/// question asked of a different vocabulary.
+pub(crate) fn other_specials_on_tag(
+    scene: &Scene,
+    tag: i32,
+    is_own: impl Fn(i32) -> bool,
+) -> Vec<i32> {
+    let mut others: Vec<i32> = scene
+        .sectors
+        .iter()
+        .flat_map(|s| s.boundary.iter())
+        .filter(|b| b.fronts_this && b.tag == tag && b.special != 0 && !is_own(b.special))
+        .map(|b| b.special)
+        .collect();
+    others.sort_unstable();
+    others.dedup();
+    others
+}
+
 /// Every lift line naming `tag`, as the trigger it is for the plat at
 /// sector `plat`: which sectors fire it, and each one's [`Activator`] class.
 ///
@@ -300,29 +473,18 @@ fn triggers_for(
         .filter(|(_, b)| b.tag == tag)
         .map(|&(front, b)| {
             let is_use = specials.use_line.contains(&b.special);
-            let mut activators = Vec::new();
-            if is_use {
-                // `P_UseSpecialLine`: the front side alone.
-                activators.push((front, classify(scene, plat, front, step)));
-            } else if let Some(back) = b.neighbor.filter(|_| b.passable()) {
-                // A walkover with a dead-end pocket on either side fires from
-                // neither: nobody can cross *into* the pocket, and nobody can
-                // stand in it to cross *out*. The same shape as the
-                // `passable()` gate above, one layer further out.
-                let pocket = [front, back]
-                    .iter()
-                    .any(|&s| dead_end_pocket(scene, b.linedef, s, step, radius));
-                // `P_CrossSpecialLine` has no side gate, so either side fires
-                // it — from whichever the player can actually cross at rest
-                // (`P_TryMove`'s step rule).
-                let (ff, bf) = (scene.sectors[front].floor, scene.sectors[back].floor);
-                if !pocket && bf - ff <= step {
-                    activators.push((front, classify(scene, plat, front, step)));
-                }
-                if !pocket && ff - bf <= step {
-                    activators.push((back, classify(scene, plat, back, step)));
-                }
-            }
+            // Lift lines are only ever crossed or used: `EV_DoPlat`'s
+            // `downWaitUpStay` forms carry no gun line (`P_ShootSpecialLine`
+            // dispatches 24, 46 and 47 alone).
+            let dispatch = if is_use {
+                Dispatch::Use
+            } else {
+                Dispatch::Cross
+            };
+            let activators = activator_sides(scene, b, front, dispatch, (step, radius))
+                .into_iter()
+                .map(|s| (s, classify(scene, plat, s, step)))
+                .collect();
             SceneTrigger {
                 linedef: b.linedef,
                 special: b.special,
@@ -363,18 +525,7 @@ pub fn resolve_plats(scene: &Scene, tables: &Tables) -> Vec<ScenePlat> {
                 .map(move |b| (i, b))
         })
         .collect();
-    let named: BTreeSet<usize> = lines
-        .iter()
-        .filter(|(_, b)| b.tag != 0)
-        .flat_map(|(_, b)| {
-            scene
-                .sectors
-                .iter()
-                .enumerate()
-                .filter(move |(_, s)| s.tag == b.tag)
-                .map(|(i, _)| i)
-        })
-        .collect();
+    let named = sectors_named_by(scene, |s| specials.all.contains(&s));
     named
         .into_iter()
         .map(|sector| {
@@ -395,20 +546,6 @@ pub fn resolve_plats(scene: &Scene, tables: &Tables) -> Vec<ScenePlat> {
             } else {
                 Rest::AboveAll
             };
-            let mut other_actions: Vec<i32> = scene
-                .sectors
-                .iter()
-                .flat_map(|s| s.boundary.iter())
-                .filter(|b| {
-                    b.fronts_this
-                        && b.tag == ss.tag
-                        && b.special != 0
-                        && !specials.all.contains(&b.special)
-                })
-                .map(|b| b.special)
-                .collect();
-            other_actions.sort_unstable();
-            other_actions.dedup();
             ScenePlat {
                 sector,
                 tag: ss.tag,
@@ -418,7 +555,7 @@ pub fn resolve_plats(scene: &Scene, tables: &Tables) -> Vec<ScenePlat> {
                 distinct_neighbor_floors: floors.iter().copied().collect::<BTreeSet<i32>>().len(),
                 shared_tag: scene.sectors.iter().filter(|s| s.tag == ss.tag).count(),
                 triggers: triggers_for(scene, &lines, &specials, sector, ss.tag, (step, radius)),
-                other_actions,
+                other_actions: other_specials_on_tag(scene, ss.tag, |s| specials.all.contains(&s)),
                 neighbors,
             }
         })
@@ -427,25 +564,11 @@ pub fn resolve_plats(scene: &Scene, tables: &Tables) -> Vec<ScenePlat> {
 
 /// Lift lines that can never fire a plat: tag 0, or a tag naming no sector.
 ///
-/// Ascending by linedef declaration index, each named once. The walk is over
-/// sectors' boundaries, so the raw order would be sector-then-boundary and
-/// only coincidentally sorted; a `BTreeSet` makes it the caller-visible index
-/// order instead. Front mirrors only — `special` and `tag` are linedef-wide,
-/// so the back mirror of a two-sided lift line would otherwise report the
-/// same line twice.
+/// `plats::broken_tag_lines` documents the ordering and the front-mirror rule.
 #[must_use]
 pub fn broken_lift_lines(scene: &Scene, tables: &Tables) -> Vec<usize> {
     let lift = LiftSpecials::resolve(tables).all;
-    scene
-        .sectors
-        .iter()
-        .flat_map(|s| s.boundary.iter())
-        .filter(|b| b.fronts_this && lift.contains(&b.special))
-        .filter(|b| b.tag == 0 || !scene.sectors.iter().any(|s| s.tag == b.tag))
-        .map(|b| b.linedef)
-        .collect::<BTreeSet<usize>>()
-        .into_iter()
-        .collect()
+    broken_tag_lines(scene, |s| lift.contains(&s))
 }
 
 #[cfg(test)]

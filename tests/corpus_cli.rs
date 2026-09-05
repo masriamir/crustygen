@@ -333,3 +333,33 @@ fn a_loadable_hexen_map_is_bucketed_as_an_unsupported_format() {
     );
     assert_eq!(report["buckets"]["maps_unique"], 0);
 }
+
+/// The floor recognizer reaches the sweep: a swept floor map is classified
+/// on the sixth axis, its counts land in the JSON record, and the report
+/// grows a `## Floors` section carrying the shape census.
+#[test]
+fn a_floor_map_is_recognized_reported_and_carried_into_the_json_record() {
+    let dir = corpus_dir("floors", &[("f.wad", common::udmf_floors_wad())]);
+    let json_path = dir.join("out.json");
+    let report_out = bin().arg(&dir).output().unwrap();
+    let out = bin()
+        .args([dir.to_str().unwrap(), "--json", json_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    let md = String::from_utf8_lossy(&report_out.stdout);
+    assert!(md.contains("## Floors"), "{md}");
+    assert!(md.contains("| targets | 4 |"), "{md}");
+    assert!(
+        md.contains("| drop walls / reveals / bridges | 1 / 2 / 1 |"),
+        "{md}"
+    );
+    assert_eq!(report["maps"][0]["floors"]["targets"], 4);
+    assert_eq!(report["maps"][0]["verdict"]["floors_ok"], true);
+    assert_eq!(report["aggregate"]["floors"]["maps_with_floors"], 1);
+}
