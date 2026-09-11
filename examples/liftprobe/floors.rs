@@ -794,14 +794,16 @@ fn survey_tag_groups(ctx: &MapCtx<'_>, agg: &mut Agg) {
 /// Where a perpetual plat rests at load, against the bounds `EV_DoPlat`
 /// gives it: `low` is `P_FindLowestFloorSurrounding` clamped up to the
 /// sector's own floor and `high` is `P_FindHighestFloorSurrounding` clamped
-/// down to it (`p_plats.c:233-247`).
+/// down to it (`p_plats.c:233-247`). These are load-time rest positions
+/// only: the first direction is `plat->status = P_Random()&1` (`:243`), so
+/// a plat at a bound may spend one wait there before it leaves it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub(crate) enum PerpetualRest {
-    /// `floor == low < high`: the first move is up.
+    /// `floor == low < high`: the plat loads resting at its low bound.
     AtLow,
-    /// `low < high == floor`: the first move is down.
+    /// `low < high == floor`: the plat loads resting at its high bound.
     AtHigh,
-    /// `low < floor < high`.
+    /// `low < floor < high`: the plat loads between its bounds.
     Between,
     /// `low == high`: no neighbor is above or below, and the plat cannot
     /// move at all.
