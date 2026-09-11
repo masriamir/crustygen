@@ -322,6 +322,22 @@ fn travel_bucket(travel: i32) -> &'static str {
     }
 }
 
+/// The sector holding the first player-1 start the scene could place, the
+/// start's type resolved through the vocabulary (`[things] player1_start`,
+/// the name `check::conform` reads it by) rather than spelled here.
+fn player1_sector(scene: &Scene, tables: &Tables) -> Option<usize> {
+    let start = i32::from(
+        tables
+            .thing_id("player1_start")
+            .expect("player1_start is in the vocabulary"),
+    );
+    scene
+        .things
+        .iter()
+        .find(|t| t.type_id == start)
+        .and_then(|t| t.sector)
+}
+
 /// The per-map state the perpetual and one-shot analyses share.
 struct VarCtx<'a> {
     ctx: MapCtx<'a>,
@@ -716,6 +732,12 @@ struct Agg {
     perpetual_max: u64,
     moving_per_map: Hist,
     moving_max: u64,
+    perpetual_tag_max: Hist,
+    lift_tag_max: Hist,
+    perpetual_tag_max_n: u64,
+    lift_tag_max_n: u64,
+    maps_perpetual_tag_over_30: u64,
+    maps_lift_tag_over_30: u64,
     combined_over_15: u64,
     combined_over_30: u64,
     combined_max: u64,
@@ -751,8 +773,11 @@ struct Agg {
     member_own_line: u64,
     member_callable_low: u64,
     member_own_low_line: u64,
+    member_neighbor_low_line: u64,
     member_within_one_hop: u64,
     group_self_callable: Hist,
+    group_neighbor_called: Hist,
+    common_neighbor_all_a_prime: u64,
     group_callable_low: Hist,
     line_reach: Hist,
     group_line_reach: Hist,
@@ -783,9 +808,10 @@ struct BankColumn {
 }
 
 /// The §I column labels, in report order.
-const BANK_COLUMNS: [&str; 4] = [
+const BANK_COLUMNS: [&str; 5] = [
     "today",
     "+A (bank-A gate)",
+    "+A′ (neighbor-called)",
     "+B (bank-B ceiling)",
     "+split as one lift",
 ];
@@ -888,11 +914,7 @@ fn survey_map(name: &str, map: &UdmfMap, tables: &Tables, vocab: &Vocabulary, ag
     let arbiter = map_arbiter(name, map, &scene, tables, vocab);
     let ctx = map_ctx(map, &scene, tables);
     let v = VarCtx {
-        p1_sector: scene
-            .things
-            .iter()
-            .find(|t| t.type_id == 1)
-            .and_then(|t| t.sector),
+        p1_sector: player1_sector(&scene, tables),
         ctx,
         tables,
     };
@@ -906,7 +928,8 @@ fn survey_map(name: &str, map: &UdmfMap, tables: &Tables, vocab: &Vocabulary, ag
     for p in &plats {
         record_perpetual(p, agg);
     }
-    survey_concurrency(&v, plats.len(), agg);
+    let perpetual_sectors: BTreeSet<usize> = plats.iter().map(|p| p.plat.sector).collect();
+    survey_concurrency(&v, &perpetual_sectors, agg);
     survey_one_shot(&v, agg);
     let banks = survey_banks(&v, agg);
     record_arbiter(&arbiter, &plats, bad_start, banks, agg);
@@ -1059,10 +1082,39 @@ fn record_rendering(p: &PerpetualFacts, agg: &mut Agg) {
     }
 }
 
-/// §F — how many plat thinkers a map can have alive at once. Returns the
-/// count of moving DWUS/blaze plats.
-fn survey_concurrency(v: &VarCtx<'_>, perpetual: usize, agg: &mut Agg) -> usize {
-    let moving = v
+/// The most sectors any one tag among `specials`' lines names in the map,
+/// `None` when no such line resolves.
+fn max_sectors_per_tag(v: &VarCtx<'_>, is_special: impl Fn(i32) -> bool) -> Option<usize> {
+    v.ctx
+        .map
+        .linedefs
+        .iter()
+        .filter(|l| is_special(l.special) && l.args[0] != 0)
+        .filter_map(|l| v.ctx.index.by_tag.get(&l.args[0]).map(Vec::len))
+        .max()
+}
+
+/// The bucket for the most sectors one tag names.
+fn tag_size_bucket(n: usize) -> &'static str {
+    match n {
+        0..=15 => "0-15",
+        16..=30 => "16-30",
+        _ => "31+",
+    }
+}
+
+/// §F — how many plat thinkers a map can have alive at once. `perpetual`
+/// is the set of perpetual plat sectors; the moving DWUS/blaze plats are
+/// unioned with it, so a sector named by both a 53/87 and a lift tag
+/// counts once. Returns the count of moving DWUS/blaze plats.
+///
+/// The per-map sum is an upper bound on concurrency. What `EV_DoPlat`
+/// allocates in one call is one `plat_t` per sector matching **one** line's
+/// tag (`p_plats.c:164-181`), so the per-tag maximum is the figure that
+/// can overflow `MAXPLATS` at once; several smaller banks need never be
+/// active together.
+fn survey_concurrency(v: &VarCtx<'_>, perpetual: &BTreeSet<usize>, agg: &mut Agg) -> usize {
+    let moving_set: BTreeSet<usize> = v
         .ctx
         .index
         .plat_sectors(v.ctx.map)
@@ -1071,7 +1123,19 @@ fn survey_concurrency(v: &VarCtx<'_>, perpetual: usize, agg: &mut Agg) -> usize 
             common::analyze_plat(v.ctx.map, v.ctx.scene, &v.ctx.index, s, v.ctx.step)
                 .is_some_and(|f| f.moving())
         })
-        .count();
+        .collect();
+    let moving = moving_set.len();
+    if let Some(n) = max_sectors_per_tag(v, |s| START.contains(&s)) {
+        agg.perpetual_tag_max.add(tag_size_bucket(n));
+        agg.perpetual_tag_max_n = agg.perpetual_tag_max_n.max(count_len(n));
+        agg.maps_perpetual_tag_over_30 += u64::from(n > MAX_PLATS);
+    }
+    if let Some(n) = max_sectors_per_tag(v, is_lift) {
+        agg.lift_tag_max.add(tag_size_bucket(n));
+        agg.lift_tag_max_n = agg.lift_tag_max_n.max(count_len(n));
+        agg.maps_lift_tag_over_30 += u64::from(n > MAX_PLATS);
+    }
+    let perpetual_n = perpetual.len();
     let bucket = |n: usize| match n {
         0 => "0",
         1 => "1",
@@ -1080,14 +1144,14 @@ fn survey_concurrency(v: &VarCtx<'_>, perpetual: usize, agg: &mut Agg) -> usize 
         6..=10 => "6-10",
         _ => "11+",
     };
-    agg.perpetual_per_map.add(bucket(perpetual));
-    agg.perpetual_max = agg.perpetual_max.max(count_len(perpetual));
+    agg.perpetual_per_map.add(bucket(perpetual_n));
+    agg.perpetual_max = agg.perpetual_max.max(count_len(perpetual_n));
     agg.moving_per_map.add(bucket(moving));
     agg.moving_max = agg.moving_max.max(count_len(moving));
     // The combined rows are over maps that have a perpetual plat at all:
     // a map of DWUS lifts alone never holds a slot for the whole level.
-    if perpetual > 0 {
-        let combined = perpetual + moving;
+    if perpetual_n > 0 {
+        let combined = perpetual.union(&moving_set).count();
         agg.combined_max = agg.combined_max.max(count_len(combined));
         agg.combined_over_15 += u64::from(combined > MAX_PLATS / 2);
         agg.combined_over_30 += u64::from(combined > MAX_PLATS);
@@ -1202,7 +1266,7 @@ fn record_arbiter(
 ) {
     let line_today = a.unknown.is_empty();
     let base = line_today && a.others_ok && a.floors_ok;
-    for (i, lifts) in [a.lifts_today, banks.a, banks.b, banks.split]
+    for (i, lifts) in [a.lifts_today, banks.a, banks.a_prime, banks.b, banks.split]
         .into_iter()
         .enumerate()
     {
@@ -1351,6 +1415,10 @@ struct Member {
     /// Some lift line on the member's own boundary fires from `Low` — the
     /// shipped construct's "called from its own face".
     own_low_line: bool,
+    /// Some lift line naming the tag fires from a sector that is both a
+    /// two-sided neighbor of the member and at the member's own `low` —
+    /// adjacency plus height. The line itself may sit anywhere.
+    neighbor_low_line: bool,
     /// Some lift line is on the member's face or adjacent to it.
     within_one_hop: bool,
     rest: PlatRest,
@@ -1403,6 +1471,12 @@ impl Group {
     /// Gate B, and every member has a `Low`-activator line on its own face.
     fn gate_a(&self) -> bool {
         self.gate_b() && self.members.iter().all(|m| m.own_low_line)
+    }
+
+    /// Gate B, and every member is called from a neighbor standing at its
+    /// own `low`.
+    fn gate_a_prime(&self) -> bool {
+        self.gate_b() && self.members.iter().all(|m| m.neighbor_low_line)
     }
 
     /// A split group whose merged reading is a shape.
@@ -1562,10 +1636,17 @@ fn merged_verdict(scene: &Scene, plats: &[&ScenePlat], step: i32) -> Result<Plat
 
 /// The map-level lift axis under each §I column.
 #[derive(Clone, Copy, Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is one §I column's verdict on the map; the columns are reported \
+              side by side and never combined into a state"
+)]
 struct BankVerdict {
     /// No broken lift line, every single-tag platform accepted by the
     /// recognizer, every group passing gate A.
     a: bool,
+    /// The same with gate A′.
+    a_prime: bool,
     /// The same with gate B.
     b: bool,
     /// The same with the split reading.
@@ -1586,6 +1667,11 @@ fn analyze_group(scene: &Scene, plats: &[&ScenePlat], step: i32) -> Group {
                 own_low_line: p.triggers.iter().any(|t| {
                     reach(t) == Reach::OnFace
                         && t.activators.iter().any(|&(_, a)| a == SceneActivator::Low)
+                }),
+                neighbor_low_line: p.triggers.iter().any(|t| {
+                    t.activators
+                        .iter()
+                        .any(|&(s, _)| p.neighbors.contains(&s) && scene.sectors[s].floor == p.low)
                 }),
                 within_one_hop: p.triggers.iter().any(|t| reach(t) != Reach::Remote),
                 rest: p.rest,
@@ -1660,6 +1746,7 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
     }
     let mut verdict = BankVerdict {
         a: singles_ok,
+        a_prime: singles_ok,
         b: singles_ok,
         split: singles_ok,
     };
@@ -1669,7 +1756,13 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
             .iter()
             .filter(|p| recognizer_refusal(p.sector) == Some(Refusal::SharedTag))
             .count();
-        let gates = [false, g.gate_a(), g.gate_b(), g.gate_split()];
+        let gates = [
+            false,
+            g.gate_a(),
+            g.gate_a_prime(),
+            g.gate_b(),
+            g.gate_split(),
+        ];
         for (i, pass) in gates.into_iter().enumerate() {
             if pass {
                 agg.bank_columns[i].groups += 1;
@@ -1677,8 +1770,9 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
             }
         }
         verdict.a &= gates[1];
-        verdict.b &= gates[2];
-        verdict.split &= gates[3];
+        verdict.a_prime &= gates[2];
+        verdict.b &= gates[3];
+        verdict.split &= gates[4];
         record_group(&g, agg);
     }
     verdict
@@ -1699,8 +1793,15 @@ fn record_group(g: &Group, agg: &mut Agg) {
         agg.member_own_line += u64::from(m.own_line);
         agg.member_callable_low += u64::from(m.callable_low);
         agg.member_own_low_line += u64::from(m.own_low_line);
+        agg.member_neighbor_low_line += u64::from(m.neighbor_low_line);
         agg.member_within_one_hop += u64::from(m.within_one_hop);
     }
+    agg.group_neighbor_called
+        .add(g.split_label(|m| m.neighbor_low_line));
+    agg.common_neighbor_all_a_prime += u64::from(
+        g.common_neighbor() == "all share one neighbor"
+            && g.members.iter().all(|m| m.neighbor_low_line),
+    );
     agg.group_accept.add(g.split_label(|m| m.verdict.is_ok()));
     agg.group_composition.add(g.composition());
     agg.group_self_callable
@@ -1764,9 +1865,15 @@ fn report_banks(agg: &Agg) {
         pct(agg.member_within_one_hop, agg.members_n)
     );
     println!(
-        "- groups where all / some / none of the members are callable from Low: {} · have a Low line on their own face: {}",
+        "- members called from a two-sided neighbor standing at their own low (A′): {} ({})",
+        agg.member_neighbor_low_line,
+        pct(agg.member_neighbor_low_line, agg.members_n)
+    );
+    println!(
+        "- groups where all / some / none of the members are callable from Low: {} · have a Low line on their own face: {} · are neighbor-called (A′): {}",
         agg.group_callable_low.all(),
-        agg.group_self_callable.all()
+        agg.group_self_callable.all(),
+        agg.group_neighbor_called.all()
     );
     println!(
         "- lift lines by reach to the group: {}",
@@ -1793,11 +1900,16 @@ fn report_banks(agg: &Agg) {
         agg.uniform_neighbors,
         pct(agg.uniform_neighbors, agg.groups_n)
     );
-    println!("- common outside neighbor: {}", agg.common_neighbor.all());
+    println!(
+        "- common outside neighbor: {} · of the \"all share one neighbor\" groups, all members neighbor-called (A′): {}",
+        agg.common_neighbor.all(),
+        agg.common_neighbor_all_a_prime
+    );
     println!(
         "\n**Yield.** Line axis unchanged at {} ({}). Per column: honest all-axes maps, \
 `SharedTag` platform refusals recovered, groups accepted. A = every member passes alone and \
-has a Low-activator lift line on its own face; B = every member passes alone (callers ignored, \
+has a Low-activator lift line on its own face; A′ = every member passes alone and is called from \
+a two-sided neighbor standing at its own low; B = every member passes alone (callers ignored, \
 the floor recognizer's rule); split = a one-floor, mutually adjacent group read as one lift.\n",
         agg.line_today,
         pct(agg.line_today, agg.maps)
@@ -1845,7 +1957,7 @@ fn report_resolution(agg: &Agg) {
         agg.start_tag_sectors.all()
     );
     println!(
-        "- perpetual plats (sectors a 53/87 tag names): {} · maps with ≥1: {} ({})",
+        "- perpetual plats (sectors named by a 53/87 tag): {} · maps with ≥1: {} ({})",
         agg.perpetual_n,
         agg.maps_with_perpetual,
         pct(agg.maps_with_perpetual, agg.maps)
@@ -1973,7 +2085,21 @@ fn report_concurrency(agg: &Agg) {
         agg.moving_max
     );
     println!(
-        "- maps with ≥1 perpetual plat where perpetual + moving plats > {}: {} · > {}: {} · max combined among them: {}",
+        "- most sectors one 53/87 tag names, per map with such a tag (0-15 / 16-30 / 31+): {} · max: {} · maps with a single 53/87 tag naming > {}: {}",
+        agg.perpetual_tag_max.all(),
+        agg.perpetual_tag_max_n,
+        MAX_PLATS,
+        agg.maps_perpetual_tag_over_30
+    );
+    println!(
+        "- most sectors one DWUS/blaze tag names, per map with such a tag: {} · max: {} · maps with a single lift tag naming > {}: {}",
+        agg.lift_tag_max.all(),
+        agg.lift_tag_max_n,
+        MAX_PLATS,
+        agg.maps_lift_tag_over_30
+    );
+    println!(
+        "- maps with ≥1 perpetual plat where perpetual ∪ moving plats (an upper bound on concurrency) > {}: {} · > {}: {} · max combined among them: {}",
         MAX_PLATS / 2,
         agg.combined_over_15,
         MAX_PLATS,
@@ -2088,12 +2214,7 @@ mod tests {
     fn var_ctx<'a>(f: &'a Fixture, tables: &'a Tables) -> VarCtx<'a> {
         let ctx = map_ctx(&f.map, &f.scene, tables);
         VarCtx {
-            p1_sector: f
-                .scene
-                .things
-                .iter()
-                .find(|t| t.type_id == 1)
-                .and_then(|t| t.sector),
+            p1_sector: player1_sector(&f.scene, tables),
             ctx,
             tables,
         }
@@ -2766,11 +2887,31 @@ mod tests {
         let mut agg = Agg::default();
         let plats = perpetual_plats(&v.ctx);
         assert_eq!(plats.len(), 1);
-        let moving = survey_concurrency(&v, plats.len(), &mut agg);
+        let sectors: BTreeSet<usize> = plats.iter().map(|p| p.sector).collect();
+        let moving = survey_concurrency(&v, &sectors, &mut agg);
         assert_eq!(moving, 1);
         assert_eq!(agg.perpetual_per_map.all(), "1: 1");
         assert_eq!(agg.moving_per_map.all(), "1: 1");
         assert_eq!((agg.combined_max, agg.combined_over_15), (2, 0));
+        assert_eq!(agg.perpetual_tag_max.all(), "0-15: 1");
+        assert_eq!(agg.lift_tag_max.all(), "0-15: 1");
+        assert_eq!((agg.perpetual_tag_max_n, agg.lift_tag_max_n), (1, 1));
+
+        // A sector whose tag carries both an 87 and a 62 line is one
+        // thinker slot, not two: the union counts it once.
+        let f = fixture(&chain(
+            &[0, 128, 128],
+            &[0, 7, 0],
+            &[(87, 7, false), (62, 7, false)],
+            "",
+        ));
+        let v = var_ctx(&f, &tables);
+        let mut agg = Agg::default();
+        let sectors: BTreeSet<usize> = perpetual_plats(&v.ctx).iter().map(|p| p.sector).collect();
+        assert_eq!(survey_concurrency(&v, &sectors, &mut agg), 1);
+        assert_eq!(agg.combined_max, 1, "the shared sector counts once");
+        assert_eq!(tag_size_bucket(16), "16-30");
+        assert_eq!(tag_size_bucket(31), "31+");
 
         // §A's tag resolution: a tag-0 and a dangling start line.
         let mut text = chain(
@@ -2906,9 +3047,13 @@ mod tests {
             (2, 0, 0)
         );
         let recovered: Vec<u64> = agg.bank_columns.iter().map(|c| c.recovered).collect();
-        assert_eq!(recovered, vec![0, 2, 2, 0]);
+        assert_eq!(recovered, vec![0, 2, 2, 2, 0]);
         let groups: Vec<u64> = agg.bank_columns.iter().map(|c| c.groups).collect();
-        assert_eq!(groups, vec![0, 1, 1, 0]);
+        assert_eq!(groups, vec![0, 1, 1, 1, 0]);
+        assert!(
+            verdict.a_prime,
+            "each riser switch fires from the member's own low room"
+        );
     }
 
     #[test]
@@ -2949,7 +3094,12 @@ mod tests {
         // T2 sees C and D.
         assert_eq!(agg.common_neighbor.all(), "none in common: 1");
         let groups: Vec<u64> = agg.bank_columns.iter().map(|c| c.groups).collect();
-        assert_eq!(groups, vec![0, 0, 1, 0]);
+        assert_eq!(groups, vec![0, 0, 0, 1, 0]);
+        // C is at both members' low (0) but is a neighbor of T2 only, and
+        // T1's low room A fires nothing: A′ fails for T1.
+        assert!(!verdict.a_prime);
+        assert_eq!(agg.member_neighbor_low_line, 1);
+        assert_eq!(agg.group_neighbor_called.all(), "some: 1");
     }
 
     #[test]
@@ -3024,7 +3174,7 @@ mod tests {
         // `SharedTag` refusal to recover.
         assert_eq!(agg.shared_tag_refusals, 1);
         let recovered: Vec<u64> = agg.bank_columns.iter().map(|c| c.recovered).collect();
-        assert_eq!(recovered, vec![0, 0, 0, 1]);
+        assert_eq!(recovered, vec![0, 0, 0, 0, 1]);
         let resolved = resolve_plats(&f.scene, &tables);
         let plats: Vec<&ScenePlat> = resolved.iter().collect();
         assert_eq!(
@@ -3095,6 +3245,7 @@ mod tests {
             own_line: own_low_line,
             callable_low: true,
             own_low_line,
+            neighbor_low_line: own_low_line,
             within_one_hop: true,
             rest: PlatRest::Top,
             travel: 128,
@@ -3117,7 +3268,7 @@ mod tests {
             vec![Reach::OnFace, Reach::Remote],
         );
         assert_eq!(g.composition(), "all Pedestal");
-        assert!(g.gate_b() && !g.gate_a() && !g.gate_split());
+        assert!(g.gate_b() && !g.gate_a() && !g.gate_a_prime() && !g.gate_split());
         assert_eq!(g.split_label(|m| m.own_low_line), "some");
         assert_eq!(g.line_reach_label(), "mixed");
         assert_eq!(g.common_neighbor(), "all share one neighbor");
@@ -3152,5 +3303,50 @@ mod tests {
         let g = group(vec![], vec![]);
         assert_eq!(g.common_neighbor(), "none in common");
         assert_eq!(speed_of(&[]), Speed::Normal);
+    }
+
+    #[test]
+    fn a_row_of_pedestals_in_one_room_is_neighbor_called_but_not_self_called() {
+        let tables = Tables::load().expect("tables");
+        // P1(96) | H(0) | P2(96): two pedestals on tag 7 in one host room,
+        // the switch on P1's face fronted by H. P2 has no line of its own,
+        // but H — its neighbor, at its low — fires the switch.
+        let f = fixture(&chain(
+            &[96, 0, 96],
+            &[7, 0, 7],
+            &[(62, 7, true), (0, 0, false)],
+            "",
+        ));
+        let (verdict, agg) = banks_of(&f, &tables);
+        assert_eq!(agg.member_verdict.all(), "Pedestal: 2");
+        assert_eq!(agg.group_composition.all(), "all Pedestal: 1");
+        assert!(!verdict.a && verdict.a_prime && verdict.b && !verdict.split);
+        assert_eq!(
+            (agg.member_own_low_line, agg.member_neighbor_low_line),
+            (1, 2)
+        );
+        assert_eq!(agg.group_self_callable.all(), "some: 1");
+        assert_eq!(agg.group_neighbor_called.all(), "all: 1");
+        assert_eq!(agg.common_neighbor.all(), "all share one neighbor: 1");
+        assert_eq!(agg.common_neighbor_all_a_prime, 1);
+        let groups: Vec<u64> = agg.bank_columns.iter().map(|c| c.groups).collect();
+        assert_eq!(groups, vec![0, 0, 1, 1, 0]);
+
+        // P1(96) | H(0) | X(0) | P2(96): P2's only caller is H, two rooms
+        // away. It passes alone (H is Low for it) but no neighbor at its low
+        // fires anything: A′ fails, B passes.
+        let f = fixture(&chain(
+            &[96, 0, 0, 96],
+            &[7, 0, 0, 7],
+            &[(62, 7, true), (0, 0, false), (0, 0, false)],
+            "",
+        ));
+        let (verdict, agg) = banks_of(&f, &tables);
+        assert_eq!(agg.member_verdict.all(), "Pedestal: 2");
+        assert!(!verdict.a && !verdict.a_prime && verdict.b);
+        assert_eq!(agg.member_neighbor_low_line, 1);
+        assert_eq!(agg.group_neighbor_called.all(), "some: 1");
+        assert_eq!(agg.common_neighbor.all(), "none in common: 1");
+        assert_eq!(agg.common_neighbor_all_a_prime, 0);
     }
 }

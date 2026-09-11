@@ -118,8 +118,12 @@ Limits the numbers carry (also the probe's §J):
   floor disconnected, several floors, as `shapes.rs` and `lift::plat` define them. **Outside
   neighbors** — a member's two-sided neighbors that are not themselves members.
 - **§I gates** — **A**: every member passes alone *and* has a Low-activator line on its own face
-  (the shipped construct's "called from its own face", per member); **B**: every member passes
-  alone, wherever its callers are (the floor recognizer's rule, `src/lift/floor.rs:63-67`);
+  (the shipped construct's "called from its own face", per member); **A′ (neighbor-called)**: every
+  member passes alone *and* some lift line naming the tag fires — per `activator_sides` /
+  `Dispatch` semantics, Use from the front side only, Cross from either side that can cross at
+  rest — from a sector that is **both** a two-sided neighbor of that member **and** stands at the
+  member's own `low`: adjacency plus height, the line itself anywhere (another member's face, the
+  host room's wall); **B**: every member passes alone, wherever its callers are (the floor recognizer's rule, `src/lift/floor.rs:63-67`);
   **split as one lift**: a split group read as one platform — the union of the members' outside
   neighbors, the least member `low`, the shared line set with an activator that is itself a member
   counted as the platform — passing the same eight refusals. A column's lift axis holds when no
@@ -268,14 +272,22 @@ candles, Final Doom's is 25 monsters.
 | perpetual plats per map 0 / 1 / 2 / 3–5 / 6–10 / 11+ | 63 / 2 / 0 / 0 / 1 / 2 | 59 / 3 / 0 / 1 / 0 / 1 | 1,192 / 26 / 12 / 21 / 15 / 16 |
 | — max | 12 | 14 | **360** |
 | moving DWUS/blaze plats per map 0 / 1 / 2 / 3–5 / 6–10 / 11+ · max | 16 / 7 / 12 / 15 / 13 / 5 · 21 | 6 / 6 / 8 / 20 / 15 / 9 · 57 | 503 / 183 / 149 / 228 / 147 / 72 · 50 |
-| maps with a perpetual plat where perpetual + moving plats > 15 / > 30 | 0 / 0 | 0 / 0 | **20 / 5** |
+| most sectors **one 53/87 tag** names, per map with such a tag: 0–15 / 16–30 / 31+ · max | 5 / 0 / 0 · 12 | 5 / 0 / 0 · 13 | 82 / 6 / **2** · 360 |
+| most sectors **one DWUS/blaze tag** names, per map with such a tag: 0–15 / 16–30 / 31+ · max | 53 / 0 / 0 · 4 | 58 / 1 / 0 · 19 | 779 / 7 / **1** · 46 |
+| maps with a single tag naming > 30 sectors: 53/87 · lift | 0 · 0 | 0 · 0 | **2 · 1** |
+| maps with a perpetual plat where perpetual ∪ moving plats (an upper bound) > 15 / > 30 | 0 / 0 | 0 / 0 | 19 / 5 |
 | — max combined among them | 14 | 15 | 360 |
 
-**Read:** `MAXPLATS` is 30 and a perpetual plat holds a slot for the rest of the level. No retail
-map comes within half of it; five sample maps carry more perpetual and moving plats than the table
-holds (one names 360 sectors from its start lines) and twenty carry more than fifteen — those maps
-depend on not every plat being active at once. Half the maps with a perpetual plat have several
-(64 of 90 in the sample have two or more).
+**Read:** `MAXPLATS` is 30 and a perpetual plat holds a slot for the rest of the level. The
+per-map union of perpetual and moving plats is an **upper bound** on concurrency, not a proof of
+it: five sample maps exceed 30 that way and nineteen exceed 15, but several smaller banks need
+never be active together. What `EV_DoPlat` allocates in one call is one `plat_t` per sector
+matching **one** line's tag (`p_plats.c:164-181`), so the figure that can overflow the table at
+once is the largest single tag — and that is rare: two sample maps have a 53/87 tag naming more
+than 30 sectors (the largest 360) and one has a lift tag naming 46; no retail tag names more
+than 19. Those three maps fail on the first press of that line in vanilla; the other 21 maps
+above the bound depend only on timing. Half the maps with a perpetual plat have several (64 of 90
+in the sample have two or more).
 
 ## G. One-shot lift breakouts
 
@@ -378,9 +390,11 @@ and 134 Pedestal verdicts are exactly the shared-tag probe shapes it cites.
 | members with a lift line on their own boundary | 40 (62.5 %) | 60 (42.6 %) | 387 (35.7 %) |
 | — callable from Low by any line naming the tag | 52 (81.2 %) | 114 (80.9 %) | 853 (78.6 %) |
 | — with a Low-activator line on their **own face** | 33 (51.6 %) | 50 (35.5 %) | **275 (25.3 %)** |
+| — called from a two-sided neighbor standing at their own `low` (**A′**) | 42 (65.6 %) | 84 (59.6 %) | **465 (42.9 %)** |
 | — with a lift line within one hop | 47 (73.4 %) | 100 (70.9 %) | 557 (51.3 %) |
 | groups: all / some / none of the members callable from Low | 21 / 6 / 2 | 32 / 11 / 4 | 239 / 47 / 42 |
 | groups: all / some / none with a Low line on their own face | 13 / 5 / 11 | 11 / 8 / 28 | **67 / 82 / 179** |
+| groups: all / some / none neighbor-called (A′) | 16 / 7 / 6 | 16 / 21 / 10 | **121 / 100 / 107** |
 | lift lines by reach: on a member face / adjacent / remote from every member | 95 / 17 / 19 | 86 / 59 / 14 | 948 / 125 / 244 |
 | groups by line reach: all on member faces / mixed / all remote | 13 / 13 / 3 | 13 / 27 / 7 | 142 / 102 / 84 |
 | distinct lift lines per group 1 / 2 / 3+ | 5 / 5 / 19 | 14 / 16 / 17 | 98 / 85 / 145 |
@@ -395,6 +409,7 @@ and 134 Pedestal verdicts are exactly the shared-tag probe shapes it cites.
 | — one low floor | 22 (75.9 %) | 32 (68.1 %) | 217 (66.2 %) |
 | — one outside-neighbor count | 20 (69.0 %) | 20 (42.6 %) | 169 (51.5 %) |
 | common outside neighbor: all share one / some share / none in common | 17 / 1 / 11 | 25 / 1 / 21 | **140 / 47 / 141** |
+| — of the "all share one" groups, every member neighbor-called (A′) | 12 of 17 | 13 of 25 | **84 of 140** |
 
 **Yield** (line axis unchanged: 1 / 0 / 187):
 
@@ -402,6 +417,7 @@ and 134 Pedestal verdicts are exactly the shared-tag probe shapes it cites.
 |---|---|---|---|
 | today | 0 · 0 · 0 | 0 · 0 · 0 | **119 (9.3 %)** · 0 · 0 |
 | +A (bank-A gate) | 0 · 20 · 9 | 0 · 35 · 8 | **119 (9.3 %)** · 121 · 43 |
+| +A′ (neighbor-called) | 0 · 23 · 10 | 0 · 44 · 12 | **119 (9.3 %)** · 204 · 69 |
 | +B (bank-B ceiling) | 0 · 28 · 12 | 0 · 62 · 18 | **121 (9.4 %)** · **351** · **113** |
 | +split as one lift | 0 · 2 · 1 | 0 · 9 · 4 | **120 (9.4 %)** · 28 · 11 |
 
@@ -411,9 +427,12 @@ and 134 Pedestal verdicts are exactly the shared-tag probe shapes it cites.
 *not* called from their own faces: only a quarter have a Low-activator line on their own boundary,
 and in 179 of 328 groups no member does — the bank's switch is on one member, or beside the bank,
 or elsewhere, while every member is still callable from Low by *some* line in 239 groups. That
-gap is the whole difference between the two gates: gate A (own face per member) accepts 43 sample
-groups and recovers 121 of the 923 refusals for **+0 maps** on all axes; gate B (callers ignored)
-accepts 113 groups, recovers 351 refusals and lifts the honest figure **119 → 121**. The split
+gap is the whole difference between the gates: gate A (own face per member) accepts 43 sample
+groups and recovers 121 of the 923 refusals for **+0 maps** on all axes; gate A′ (a caller that
+touches the member at its low, wherever the line is) accepts 69 groups and recovers 204 — 43 % of
+members are neighbor-called, and 84 of the 140 one-room rows are neighbor-called throughout — still
+for **+0 maps**; gate B (callers ignored) accepts 113 groups, recovers 351 refusals and lifts the
+honest figure **119 → 121**. The split
 reading recovers 28 platforms in 11 of the 25 split groups for +1 map. Banks are moderately
 uniform — two thirds share one rest class and one low floor, half share travel — and they divide
 evenly between a row inside one host room (140 groups whose members all touch one common sector)
