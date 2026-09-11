@@ -554,7 +554,7 @@ fn classify_activator(
 
 /// Where a trigger line sits relative to `target`. A dangling front side is
 /// simply not the target and not a neighbor.
-fn placement_of(
+pub(crate) fn placement_of(
     target: usize,
     neighbors: &BTreeSet<usize>,
     front: Option<usize>,
@@ -610,7 +610,7 @@ impl Dispatch {
 /// The sides of a trigger line that can fire it, per the engine's dispatch
 /// rules, as `(sector, class)` pairs. `dispatch` selects the rule — see
 /// [`Dispatch`].
-fn activator_sides(
+pub(crate) fn activator_sides(
     map: &UdmfMap,
     scene: &Scene,
     target: usize,
@@ -664,7 +664,7 @@ fn activator_sides(
 
 /// The activator classes of a lift line, deduplicated; `None` when no side
 /// can fire it.
-fn activators(sides: &[(usize, Activator)]) -> Vec<Activator> {
+pub(crate) fn activators(sides: &[(usize, Activator)]) -> Vec<Activator> {
     let mut out: Vec<Activator> = sides.iter().map(|&(_, a)| a).collect();
     if out.is_empty() {
         out.push(Activator::None);
