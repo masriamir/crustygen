@@ -12,7 +12,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crustygen::check::plats::{
+    Activator as SceneActivator, ScenePlat, SceneTrigger, resolve_plats,
+};
 use crustygen::check::scene::{Scene, SceneThing};
+use crustygen::lift::plat::{Refusal, Rest as PlatRest, Shape as PlatShape, Speed};
 use crustygen::lift::{self, vocabulary::Vocabulary};
 use crustygen::tables::Tables;
 use crustywad::map::udmf::UdmfMap;
@@ -736,7 +740,55 @@ struct Agg {
     columns: Vec<ArbiterColumn>,
     maps_with_bad_start: u64,
     provisional_plats: u64,
+    // I
+    groups_n: u64,
+    groups_size: Hist,
+    groups_floor_class: Hist,
+    members_n: u64,
+    member_verdict: Hist,
+    group_accept: Hist,
+    group_composition: Hist,
+    member_own_line: u64,
+    member_callable_low: u64,
+    member_own_low_line: u64,
+    member_within_one_hop: u64,
+    group_self_callable: Hist,
+    group_callable_low: Hist,
+    line_reach: Hist,
+    group_line_reach: Hist,
+    group_lines_n: Hist,
+    group_one_form: u64,
+    group_one_speed: u64,
+    uniform_rest: u64,
+    uniform_travel: u64,
+    uniform_low: u64,
+    uniform_neighbors: u64,
+    common_neighbor: Hist,
+    shared_tag_refusals: u64,
+    recognizer_split: u64,
+    unshared_mismatch: u64,
+    bank_columns: Vec<BankColumn>,
 }
+
+/// One §I yield column's counts.
+#[derive(Default)]
+struct BankColumn {
+    /// Maps expressible on all six axes with this column's lift axis.
+    all_honest: u64,
+    /// Platforms the recognizer refuses `SharedTag` today whose group this
+    /// column accepts.
+    recovered: u64,
+    /// Groups this column accepts.
+    groups: u64,
+}
+
+/// The §I column labels, in report order.
+const BANK_COLUMNS: [&str; 4] = [
+    "today",
+    "+A (bank-A gate)",
+    "+B (bank-B ceiling)",
+    "+split as one lift",
+];
 
 /// The arbiter facts of one map.
 #[expect(
@@ -819,6 +871,9 @@ pub(crate) fn run(label: &str, dirs: &[String]) {
         columns: (0..COLUMNS.len())
             .map(|_| ArbiterColumn::default())
             .collect(),
+        bank_columns: (0..BANK_COLUMNS.len())
+            .map(|_| BankColumn::default())
+            .collect(),
         ..Agg::default()
     };
     let maps = common::sweep(dirs, |name, map| {
@@ -853,7 +908,8 @@ fn survey_map(name: &str, map: &UdmfMap, tables: &Tables, vocab: &Vocabulary, ag
     }
     survey_concurrency(&v, plats.len(), agg);
     survey_one_shot(&v, agg);
-    record_arbiter(&arbiter, &plats, bad_start, agg);
+    let banks = survey_banks(&v, agg);
+    record_arbiter(&arbiter, &plats, bad_start, banks, agg);
 }
 
 /// §A — every 53/87 line's tag resolution. Returns whether some start line
@@ -1137,8 +1193,21 @@ fn record_one_shot(f: &OneShotFacts, agg: &mut Agg) {
     }
 }
 
-fn record_arbiter(a: &MapArbiter, plats: &[PerpetualFacts], bad_start: bool, agg: &mut Agg) {
+fn record_arbiter(
+    a: &MapArbiter,
+    plats: &[PerpetualFacts],
+    bad_start: bool,
+    banks: BankVerdict,
+    agg: &mut Agg,
+) {
     let line_today = a.unknown.is_empty();
+    let base = line_today && a.others_ok && a.floors_ok;
+    for (i, lifts) in [a.lifts_today, banks.a, banks.b, banks.split]
+        .into_iter()
+        .enumerate()
+    {
+        agg.bank_columns[i].all_honest += u64::from(base && lifts);
+    }
     agg.line_today += u64::from(line_today);
     agg.all_floors_ignored += u64::from(line_today && a.others_ok && a.lifts_today);
     agg.all_honest += u64::from(line_today && a.others_ok && a.lifts_today && a.floors_ok);
@@ -1162,6 +1231,592 @@ fn record_arbiter(a: &MapArbiter, plats: &[PerpetualFacts], bad_start: bool, agg
 }
 
 // ---------------------------------------------------------------------------
+// §I — lift tag groups (banks)
+//
+// One line drives every sector carrying its tag: `EV_DoPlat` loops
+// `while ((secnum = P_FindSectorFromLineTag(line,secnum)) >= 0)`
+// (`p_plats.c:164-169`), and each sector gets its own `plat_t` whose `low` is
+// `P_FindLowestFloorSurrounding(sec)` over ITS neighbors (`p_plats.c:207-212`
+// for `downWaitUpStay`). A bank is one tag, several thinkers, each judged
+// from its own neighborhood — which is why every member below is judged
+// alone before the group is.
+// ---------------------------------------------------------------------------
+
+/// `lift::plat`'s per-platform verdict re-derived on a platform judged **as
+/// if its tag were unshared**: the same eight refusals in the same order as
+/// `src/lift/plat.rs:418-442`, with the `SharedTag` arm skipped, and the
+/// same shape rule (`:449-456`). `lift::plat` is not changed; its refusal
+/// function is private and takes the resolved `shared_tag` as read, so the
+/// order is re-derived here and checked against the recognizer on every
+/// single-tag platform (`Agg::unshared_mismatch`).
+fn unshared_verdict(p: &ScenePlat) -> Result<PlatShape, Refusal> {
+    let speed = speed_of(&p.triggers);
+    let one_floor = p.distinct_neighbor_floors == 1;
+    if p.rest == PlatRest::Dead {
+        Err(Refusal::Dead)
+    } else if !p.triggers.iter().all(|t| t.repeatable) {
+        Err(Refusal::OneShot)
+    } else if speed == Speed::Mixed {
+        Err(Refusal::MixedSpeed)
+    } else if p.rest == PlatRest::Intermediate || (p.rest == PlatRest::AboveAll && !one_floor) {
+        Err(Refusal::UnsupportedRest)
+    } else if !p.callable_low() {
+        Err(Refusal::TopOnly)
+    } else if p.rest == PlatRest::AboveAll
+        && p.neighbors.len() >= 2
+        && p.low_activator_neighbors().len() < p.neighbors.len()
+    {
+        Err(Refusal::OneWayBarrier)
+    } else if !p.other_actions.is_empty() {
+        Err(Refusal::ConflictingAction)
+    } else {
+        Ok(shape_of(p.rest, p.neighbors.len()))
+    }
+}
+
+/// `lift::plat`'s speed rule (`src/lift/plat.rs:385-395`).
+fn speed_of(triggers: &[SceneTrigger]) -> Speed {
+    let fasts = triggers.iter().filter(|t| t.fast).count();
+    if fasts == 0 {
+        Speed::Normal
+    } else if fasts == triggers.len() {
+        Speed::Fast
+    } else {
+        Speed::Mixed
+    }
+}
+
+/// `lift::plat`'s shape rule for an unrefused platform
+/// (`src/lift/plat.rs:449-456`).
+fn shape_of(rest: PlatRest, neighbors: usize) -> PlatShape {
+    match (rest, neighbors) {
+        (PlatRest::Top, _) => PlatShape::Lift,
+        (_, 1) => PlatShape::Pedestal,
+        _ => PlatShape::Barrier,
+    }
+}
+
+/// The label a member verdict prints.
+fn verdict_label(v: Result<PlatShape, Refusal>) -> String {
+    match v {
+        Ok(shape) => format!("{shape:?}"),
+        Err(r) => format!("refused: {r:?}"),
+    }
+}
+
+/// Where a lift line sits relative to one member.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum Reach {
+    /// A side of the line is the member (any face).
+    OnFace,
+    /// A side of the line is a neighbor of the member.
+    Adjacent,
+    /// Neither.
+    Remote,
+}
+
+impl Reach {
+    fn of(t: &SceneTrigger, sector: usize, neighbors: &BTreeSet<usize>) -> Self {
+        if t.front == sector || t.back == Some(sector) {
+            Self::OnFace
+        } else if neighbors.contains(&t.front) || t.back.is_some_and(|b| neighbors.contains(&b)) {
+            Self::Adjacent
+        } else {
+            Self::Remote
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::OnFace => "on a member face",
+            Self::Adjacent => "adjacent to a member",
+            Self::Remote => "remote from every member",
+        }
+    }
+}
+
+/// One member of a bank, judged alone.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each bool is an independent measured fact about who calls the member; they \
+              encode no joint state"
+)]
+struct Member {
+    verdict: Result<PlatShape, Refusal>,
+    /// Some lift line lies on the member's own boundary.
+    own_line: bool,
+    /// Some lift line fires from a `Low` activator relative to the member
+    /// (`ScenePlat::callable_low`, `src/check/plats.rs:149`).
+    callable_low: bool,
+    /// Some lift line on the member's own boundary fires from `Low` — the
+    /// shipped construct's "called from its own face".
+    own_low_line: bool,
+    /// Some lift line is on the member's face or adjacent to it.
+    within_one_hop: bool,
+    rest: PlatRest,
+    travel: i32,
+    low: i32,
+    /// Two-sided neighbors that are not themselves members.
+    outside_neighbors: BTreeSet<usize>,
+}
+
+/// How a group's members sit.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+enum FloorClass {
+    /// One floor and mutually adjacent — one platform split by trim.
+    Split,
+    /// One floor, not mutually adjacent — several lifts on one trigger.
+    OneFloorDisconnected,
+    /// Members at several floors.
+    SeveralFloors,
+}
+
+impl FloorClass {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Split => "one floor, mutually adjacent (split)",
+            Self::OneFloorDisconnected => "one floor, disconnected",
+            Self::SeveralFloors => "several floors",
+        }
+    }
+}
+
+/// One lift tag naming two or more sectors.
+struct Group {
+    members: Vec<Member>,
+    /// Every distinct lift line naming the tag, with its nearest reach to
+    /// any member.
+    line_reach: Vec<Reach>,
+    one_form: bool,
+    one_speed: bool,
+    floor_class: FloorClass,
+    /// The verdict on the split group read as one lift, when it is one.
+    merged: Option<Result<PlatShape, Refusal>>,
+}
+
+impl Group {
+    /// Every member passes alone.
+    fn gate_b(&self) -> bool {
+        self.members.iter().all(|m| m.verdict.is_ok())
+    }
+
+    /// Gate B, and every member has a `Low`-activator line on its own face.
+    fn gate_a(&self) -> bool {
+        self.gate_b() && self.members.iter().all(|m| m.own_low_line)
+    }
+
+    /// A split group whose merged reading is a shape.
+    fn gate_split(&self) -> bool {
+        self.merged.is_some_and(|v| v.is_ok())
+    }
+
+    /// `all / some / none` of the members satisfy `pred`.
+    fn split_label(&self, pred: impl Fn(&Member) -> bool) -> &'static str {
+        let n = self.members.iter().filter(|m| pred(m)).count();
+        if n == self.members.len() {
+            "all"
+        } else if n == 0 {
+            "none"
+        } else {
+            "some"
+        }
+    }
+
+    fn composition(&self) -> &'static str {
+        if self.members.iter().any(|m| m.verdict.is_err()) {
+            return "any refused";
+        }
+        let first = self.members[0].verdict.ok();
+        if self.members.iter().any(|m| m.verdict.ok() != first) {
+            return "mixed shapes";
+        }
+        match first {
+            Some(PlatShape::Lift) => "all Lift",
+            Some(PlatShape::Pedestal) => "all Pedestal",
+            Some(PlatShape::Barrier) => "all Barrier",
+            None => "any refused",
+        }
+    }
+
+    fn line_reach_label(&self) -> &'static str {
+        if self.line_reach.iter().all(|&r| r == Reach::OnFace) {
+            "all on member faces"
+        } else if self.line_reach.iter().all(|&r| r == Reach::Remote) {
+            "all remote"
+        } else {
+            "mixed"
+        }
+    }
+
+    /// `all share one / some share / none in common` over the members'
+    /// outside neighbors.
+    fn common_neighbor(&self) -> &'static str {
+        let mut sets = self.members.iter().map(|m| &m.outside_neighbors);
+        let Some(first) = sets.next() else {
+            return "none in common";
+        };
+        let all: BTreeSet<usize> = sets.fold(first.clone(), |acc, s| &acc & s);
+        if !all.is_empty() {
+            return "all share one neighbor";
+        }
+        let any_pair = self.members.iter().enumerate().any(|(i, a)| {
+            self.members[i + 1..]
+                .iter()
+                .any(|b| !(&a.outside_neighbors & &b.outside_neighbors).is_empty())
+        });
+        if any_pair {
+            "some share"
+        } else {
+            "none in common"
+        }
+    }
+}
+
+/// Whether `members` all sit at one floor and are mutually adjacent over
+/// two-sided boundaries — `shapes.rs`'s and `lift::plat`'s split test.
+fn floor_class(scene: &Scene, members: &BTreeSet<usize>) -> FloorClass {
+    let floors: BTreeSet<i32> = members.iter().map(|&s| scene.sectors[s].floor).collect();
+    if floors.len() > 1 {
+        return FloorClass::SeveralFloors;
+    }
+    let seed = *members.iter().next().expect("a group has members");
+    let mut reached: BTreeSet<usize> = BTreeSet::new();
+    let mut stack = vec![seed];
+    while let Some(s) = stack.pop() {
+        if !reached.insert(s) {
+            continue;
+        }
+        stack.extend(
+            scene.sectors[s]
+                .boundary
+                .iter()
+                .filter_map(|b| b.neighbor)
+                .filter(|n| members.contains(n) && !reached.contains(n)),
+        );
+    }
+    if reached.len() == members.len() {
+        FloorClass::Split
+    } else {
+        FloorClass::OneFloorDisconnected
+    }
+}
+
+/// A split group read as one lift: the union of the members' outside
+/// neighbors is the merged platform's neighborhood, the members' shared line
+/// set its triggers, and an activator that is itself a member is the
+/// platform. `low` is the least member `low` (a sibling member at the same
+/// floor never lowers it), and the rest classes follow `check::plats`'
+/// definitions. The eight refusals then run in `lift::plat`'s order.
+fn merged_verdict(scene: &Scene, plats: &[&ScenePlat], step: i32) -> Result<PlatShape, Refusal> {
+    let members: BTreeSet<usize> = plats.iter().map(|p| p.sector).collect();
+    let floor = scene.sectors[plats[0].sector].floor;
+    let outside: BTreeSet<usize> = plats
+        .iter()
+        .flat_map(|p| p.neighbors.iter().copied())
+        .filter(|n| !members.contains(n))
+        .collect();
+    let low = plats.iter().map(|p| p.low).min().unwrap_or(floor);
+    let nb_floors: BTreeSet<i32> = outside.iter().map(|&n| scene.sectors[n].floor).collect();
+    let max_nb = nb_floors.iter().copied().max().unwrap_or(floor);
+    let rest = if low == floor {
+        PlatRest::Dead
+    } else if max_nb > floor + step {
+        PlatRest::Intermediate
+    } else if max_nb >= floor - step {
+        PlatRest::Top
+    } else {
+        PlatRest::AboveAll
+    };
+    // Every member's trigger list is the same set of lines (they name one
+    // tag); only the activator classes differ per member.
+    let triggers = &plats[0].triggers;
+    let low_from: BTreeSet<usize> = plats
+        .iter()
+        .flat_map(|p| p.triggers.iter())
+        .flat_map(|t| t.activators.iter())
+        .filter(|&&(s, a)| a == SceneActivator::Low && !members.contains(&s))
+        .map(|&(s, _)| s)
+        .collect();
+    let one_floor = nb_floors.len() == 1;
+    if rest == PlatRest::Dead {
+        Err(Refusal::Dead)
+    } else if !triggers.iter().all(|t| t.repeatable) {
+        Err(Refusal::OneShot)
+    } else if speed_of(triggers) == Speed::Mixed {
+        Err(Refusal::MixedSpeed)
+    } else if rest == PlatRest::Intermediate || (rest == PlatRest::AboveAll && !one_floor) {
+        Err(Refusal::UnsupportedRest)
+    } else if low_from.is_empty() {
+        Err(Refusal::TopOnly)
+    } else if rest == PlatRest::AboveAll
+        && outside.len() >= 2
+        && low_from.iter().filter(|s| outside.contains(s)).count() < outside.len()
+    {
+        Err(Refusal::OneWayBarrier)
+    } else if !plats[0].other_actions.is_empty() {
+        Err(Refusal::ConflictingAction)
+    } else {
+        Ok(shape_of(rest, outside.len()))
+    }
+}
+
+/// The map-level lift axis under each §I column.
+#[derive(Clone, Copy, Default)]
+struct BankVerdict {
+    /// No broken lift line, every single-tag platform accepted by the
+    /// recognizer, every group passing gate A.
+    a: bool,
+    /// The same with gate B.
+    b: bool,
+    /// The same with the split reading.
+    split: bool,
+}
+
+/// Builds one group's facts from its resolved members.
+fn analyze_group(scene: &Scene, plats: &[&ScenePlat], step: i32) -> Group {
+    let members_set: BTreeSet<usize> = plats.iter().map(|p| p.sector).collect();
+    let members: Vec<Member> = plats
+        .iter()
+        .map(|p| {
+            let reach = |t: &SceneTrigger| Reach::of(t, p.sector, &p.neighbors);
+            Member {
+                verdict: unshared_verdict(p),
+                own_line: p.triggers.iter().any(|t| reach(t) == Reach::OnFace),
+                callable_low: p.callable_low(),
+                own_low_line: p.triggers.iter().any(|t| {
+                    reach(t) == Reach::OnFace
+                        && t.activators.iter().any(|&(_, a)| a == SceneActivator::Low)
+                }),
+                within_one_hop: p.triggers.iter().any(|t| reach(t) != Reach::Remote),
+                rest: p.rest,
+                travel: p.travel,
+                low: p.low,
+                outside_neighbors: p
+                    .neighbors
+                    .iter()
+                    .copied()
+                    .filter(|n| !members_set.contains(n))
+                    .collect(),
+            }
+        })
+        .collect();
+    let triggers = &plats[0].triggers;
+    let line_reach: Vec<Reach> = triggers
+        .iter()
+        .map(|t| {
+            plats
+                .iter()
+                .map(|p| Reach::of(t, p.sector, &p.neighbors))
+                .min()
+                .unwrap_or(Reach::Remote)
+        })
+        .collect();
+    let floor_class = floor_class(scene, &members_set);
+    Group {
+        members,
+        line_reach,
+        one_form: triggers.iter().all(|t| t.use_line == triggers[0].use_line),
+        one_speed: triggers.iter().all(|t| t.fast == triggers[0].fast),
+        floor_class,
+        merged: (floor_class == FloorClass::Split).then(|| merged_verdict(scene, plats, step)),
+    }
+}
+
+/// §I — every lift tag group of the map, and the map's bank verdicts.
+fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
+    let (scene, tables) = (v.ctx.scene, v.tables);
+    let report = lift::plat::recognize(scene, tables);
+    let resolved = resolve_plats(scene, tables);
+    agg.shared_tag_refusals += report.counts.shared_tag;
+    agg.recognizer_split += report.counts.shared_split;
+    let recognizer_refusal = |sector: usize| {
+        report
+            .plats
+            .iter()
+            .find(|r| r.sector == sector)
+            .and_then(|r| r.refusal)
+    };
+    // The re-derivation must agree with the recognizer wherever the tag is
+    // unshared; a disagreement here would mean the eight refusals drifted.
+    for p in &resolved {
+        if p.shared_tag == 1 {
+            agg.unshared_mismatch +=
+                u64::from(unshared_verdict(p).err() != recognizer_refusal(p.sector));
+        }
+    }
+    // A group member's own refusal is the group gate's business: a member
+    // refused `Dead` (precedence 1, ahead of `SharedTag`) is still a trim
+    // piece the split reading can absorb.
+    let singles_ok = report.broken_lines.is_empty()
+        && resolved
+            .iter()
+            .filter(|p| p.shared_tag == 1)
+            .all(|p| recognizer_refusal(p.sector).is_none());
+    let mut by_tag: BTreeMap<i32, Vec<&ScenePlat>> = BTreeMap::new();
+    for p in &resolved {
+        if p.shared_tag >= 2 {
+            by_tag.entry(p.tag).or_default().push(p);
+        }
+    }
+    let mut verdict = BankVerdict {
+        a: singles_ok,
+        b: singles_ok,
+        split: singles_ok,
+    };
+    for plats in by_tag.values() {
+        let g = analyze_group(scene, plats, v.ctx.step);
+        let shared_refused = plats
+            .iter()
+            .filter(|p| recognizer_refusal(p.sector) == Some(Refusal::SharedTag))
+            .count();
+        let gates = [false, g.gate_a(), g.gate_b(), g.gate_split()];
+        for (i, pass) in gates.into_iter().enumerate() {
+            if pass {
+                agg.bank_columns[i].groups += 1;
+                agg.bank_columns[i].recovered += count_len(shared_refused);
+            }
+        }
+        verdict.a &= gates[1];
+        verdict.b &= gates[2];
+        verdict.split &= gates[3];
+        record_group(&g, agg);
+    }
+    verdict
+}
+
+fn record_group(g: &Group, agg: &mut Agg) {
+    agg.groups_n += 1;
+    agg.groups_size.add(match g.members.len() {
+        2 => "2",
+        3 => "3",
+        4 => "4",
+        _ => "5+",
+    });
+    agg.groups_floor_class.add(g.floor_class.label());
+    for m in &g.members {
+        agg.members_n += 1;
+        agg.member_verdict.add(verdict_label(m.verdict));
+        agg.member_own_line += u64::from(m.own_line);
+        agg.member_callable_low += u64::from(m.callable_low);
+        agg.member_own_low_line += u64::from(m.own_low_line);
+        agg.member_within_one_hop += u64::from(m.within_one_hop);
+    }
+    agg.group_accept.add(g.split_label(|m| m.verdict.is_ok()));
+    agg.group_composition.add(g.composition());
+    agg.group_self_callable
+        .add(g.split_label(|m| m.own_low_line));
+    agg.group_callable_low
+        .add(g.split_label(|m| m.callable_low));
+    for &r in &g.line_reach {
+        agg.line_reach.add(r.label());
+    }
+    agg.group_line_reach.add(g.line_reach_label());
+    agg.group_lines_n.add(match g.line_reach.len() {
+        1 => "1",
+        2 => "2",
+        _ => "3+",
+    });
+    agg.group_one_form += u64::from(g.one_form);
+    agg.group_one_speed += u64::from(g.one_speed);
+    let uniform =
+        |key: &dyn Fn(&Member) -> i64| g.members.iter().all(|m| key(m) == key(&g.members[0]));
+    agg.uniform_rest += u64::from(uniform(&|m| m.rest as i64));
+    agg.uniform_travel += u64::from(uniform(&|m| i64::from(m.travel)));
+    agg.uniform_low += u64::from(uniform(&|m| i64::from(m.low)));
+    agg.uniform_neighbors += u64::from(uniform(&|m| {
+        i64::try_from(m.outside_neighbors.len()).expect("a count fits i64")
+    }));
+    agg.common_neighbor.add(g.common_neighbor());
+}
+
+fn report_banks(agg: &Agg) {
+    println!("\n## I. Lift tag groups (banks)\n");
+    println!(
+        "- groups (a lift tag naming ≥2 sectors): {} · size: {}",
+        agg.groups_n,
+        agg.groups_size.all()
+    );
+    println!("- floor class: {}", agg.groups_floor_class.all());
+    println!(
+        "- arbiters: `SharedTag` platform refusals (recognizer): {} · `shared_split` groups (recognizer): {} · single-tag platforms where the re-derived verdict disagrees with the recognizer: {}",
+        agg.shared_tag_refusals, agg.recognizer_split, agg.unshared_mismatch
+    );
+    println!(
+        "\n**Members judged as if the tag were unshared** ({} members).\n",
+        agg.members_n
+    );
+    println!("- member verdict: {}", agg.member_verdict.all());
+    println!(
+        "- groups with all / some / none of their members accepted: {}",
+        agg.group_accept.all()
+    );
+    println!("- group composition: {}", agg.group_composition.all());
+    println!("\n**Who calls the members.**\n");
+    println!(
+        "- members with a lift line on their own boundary: {} ({}) · callable from Low by any line: {} ({}) · with a Low-activator line on their own face: {} ({}) · with a lift line within one hop: {} ({})",
+        agg.member_own_line,
+        pct(agg.member_own_line, agg.members_n),
+        agg.member_callable_low,
+        pct(agg.member_callable_low, agg.members_n),
+        agg.member_own_low_line,
+        pct(agg.member_own_low_line, agg.members_n),
+        agg.member_within_one_hop,
+        pct(agg.member_within_one_hop, agg.members_n)
+    );
+    println!(
+        "- groups where all / some / none of the members are callable from Low: {} · have a Low line on their own face: {}",
+        agg.group_callable_low.all(),
+        agg.group_self_callable.all()
+    );
+    println!(
+        "- lift lines by reach to the group: {}",
+        agg.line_reach.all()
+    );
+    println!("- groups by line reach: {}", agg.group_line_reach.all());
+    println!(
+        "- distinct lift lines per group: {} · all lines one form (use or walkover): {} ({}) · one speed: {} ({})",
+        agg.group_lines_n.all(),
+        agg.group_one_form,
+        pct(agg.group_one_form, agg.groups_n),
+        agg.group_one_speed,
+        pct(agg.group_one_speed, agg.groups_n)
+    );
+    println!("\n**Uniformity.**\n");
+    println!(
+        "- groups whose members all share one rest class: {} ({}) · one travel: {} ({}) · one low floor: {} ({}) · one outside-neighbor count: {} ({})",
+        agg.uniform_rest,
+        pct(agg.uniform_rest, agg.groups_n),
+        agg.uniform_travel,
+        pct(agg.uniform_travel, agg.groups_n),
+        agg.uniform_low,
+        pct(agg.uniform_low, agg.groups_n),
+        agg.uniform_neighbors,
+        pct(agg.uniform_neighbors, agg.groups_n)
+    );
+    println!("- common outside neighbor: {}", agg.common_neighbor.all());
+    println!(
+        "\n**Yield.** Line axis unchanged at {} ({}). Per column: honest all-axes maps, \
+`SharedTag` platform refusals recovered, groups accepted. A = every member passes alone and \
+has a Low-activator lift line on its own face; B = every member passes alone (callers ignored, \
+the floor recognizer's rule); split = a one-floor, mutually adjacent group read as one lift.\n",
+        agg.line_today,
+        pct(agg.line_today, agg.maps)
+    );
+    for (i, name) in BANK_COLUMNS.iter().enumerate() {
+        let c = &agg.bank_columns[i];
+        println!(
+            "- {name}: all axes {} ({}) · recovered {} of {} · groups {} of {}",
+            c.all_honest,
+            pct(c.all_honest, agg.maps),
+            c.recovered,
+            agg.shared_tag_refusals,
+            c.groups,
+            agg.groups_n
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------
 
@@ -1175,6 +1830,7 @@ fn report(label: &str, agg: &Agg) {
     report_concurrency(agg);
     report_one_shot(agg);
     report_arbiter(agg);
+    report_banks(agg);
     report_limits();
 }
 
@@ -1403,7 +2059,7 @@ line). The provisional gate is a ceiling, not the design.\n"
 }
 
 fn report_limits() {
-    println!("\n## I. Not measured\n");
+    println!("\n## J. Not measured\n");
     println!(
         "- **Load-time heights.** `low` and `high` are the bounds `EV_DoPlat` would compute when the start line first fires at the heights the map loads with; a neighbor that has moved by then is not modeled."
     );
@@ -1981,18 +2637,26 @@ mod tests {
         assert_eq!(thing_class(&tables, &unnamed), ThingClass::Other);
     }
 
+    /// An `Agg` with its column vectors sized, as `run` builds it.
+    fn agg_with_columns() -> Agg {
+        Agg {
+            columns: (0..COLUMNS.len())
+                .map(|_| ArbiterColumn::default())
+                .collect(),
+            bank_columns: (0..BANK_COLUMNS.len())
+                .map(|_| BankColumn::default())
+                .collect(),
+            ..Agg::default()
+        }
+    }
+
     #[test]
     fn the_arbiter_columns_admit_exactly_their_specials() {
         // A map whose only out-of-set special is 87 clears the two
         // perpetual columns and the all-eight column, but not the one-shot
         // one; with a stop line it needs the four-special column.
         let plats: Vec<PerpetualFacts> = Vec::new();
-        let mut agg = Agg {
-            columns: (0..COLUMNS.len())
-                .map(|_| ArbiterColumn::default())
-                .collect(),
-            ..Agg::default()
-        };
+        let mut agg = agg_with_columns();
         let a = MapArbiter {
             unknown: vec![87],
             others_ok: true,
@@ -2000,7 +2664,7 @@ mod tests {
             lifts_today: true,
             lifts_twin: true,
         };
-        record_arbiter(&a, &plats, false, &mut agg);
+        record_arbiter(&a, &plats, false, BankVerdict::default(), &mut agg);
         let lines: Vec<u64> = agg.columns.iter().map(|c| c.line).collect();
         assert_eq!(lines, vec![0, 1, 1, 0, 1]);
         assert_eq!(agg.line_today, 0);
@@ -2009,13 +2673,8 @@ mod tests {
 
         // The same map with a tag-0 start line fails the provisional gate
         // on every perpetual column but keeps the line axis.
-        let mut agg = Agg {
-            columns: (0..COLUMNS.len())
-                .map(|_| ArbiterColumn::default())
-                .collect(),
-            ..Agg::default()
-        };
-        record_arbiter(&a, &plats, true, &mut agg);
+        let mut agg = agg_with_columns();
+        record_arbiter(&a, &plats, true, BankVerdict::default(), &mut agg);
         let provisional: Vec<u64> = agg.columns.iter().map(|c| c.provisional).collect();
         assert_eq!(provisional, vec![0, 0, 0, 0, 0]);
         let all_today: Vec<u64> = agg.columns.iter().map(|c| c.all_today).collect();
@@ -2023,12 +2682,7 @@ mod tests {
 
         // A one-shot map: the recognizer refuses it today and accepts the
         // twin, so only the one-shot columns' provisional count moves.
-        let mut agg = Agg {
-            columns: (0..COLUMNS.len())
-                .map(|_| ArbiterColumn::default())
-                .collect(),
-            ..Agg::default()
-        };
+        let mut agg = agg_with_columns();
         let a = MapArbiter {
             unknown: vec![21, 54],
             others_ok: true,
@@ -2036,7 +2690,7 @@ mod tests {
             lifts_today: false,
             lifts_twin: true,
         };
-        record_arbiter(&a, &plats, false, &mut agg);
+        record_arbiter(&a, &plats, false, BankVerdict::default(), &mut agg);
         let lines: Vec<u64> = agg.columns.iter().map(|c| c.line).collect();
         assert_eq!(lines, vec![0, 0, 0, 0, 1]);
         let all_today: Vec<u64> = agg.columns.iter().map(|c| c.all_today).collect();
@@ -2045,12 +2699,7 @@ mod tests {
         assert_eq!(provisional, vec![0, 0, 0, 0, 1]);
 
         // An expressible map today counts on every row and column.
-        let mut agg = Agg {
-            columns: (0..COLUMNS.len())
-                .map(|_| ArbiterColumn::default())
-                .collect(),
-            ..Agg::default()
-        };
+        let mut agg = agg_with_columns();
         let a = MapArbiter {
             unknown: vec![],
             others_ok: true,
@@ -2058,7 +2707,7 @@ mod tests {
             lifts_today: true,
             lifts_twin: true,
         };
-        record_arbiter(&a, &plats, false, &mut agg);
+        record_arbiter(&a, &plats, false, BankVerdict::default(), &mut agg);
         assert_eq!(
             (agg.line_today, agg.all_floors_ignored, agg.all_honest),
             (1, 1, 0)
@@ -2140,5 +2789,368 @@ mod tests {
             (3, 1, 1)
         );
         assert_eq!(agg.start_tag_sectors.all(), "1: 1");
+    }
+
+    /// The bank verdict and the aggregate of one fixture's tag groups.
+    fn banks_of(f: &Fixture, tables: &Tables) -> (BankVerdict, Agg) {
+        let v = var_ctx(f, tables);
+        let mut agg = agg_with_columns();
+        let verdict = survey_banks(&v, &mut agg);
+        (verdict, agg)
+    }
+
+    // Two Core lifts on one tag, each with its riser switch on its own low
+    // face: A(0)|T1(128)|B(128)|C(0)|T2(128)|D(128).
+    const BANK_FLOORS: [i32; 6] = [0, 128, 128, 0, 128, 128];
+    const BANK_TAGS: [i32; 6] = [0, 7, 0, 0, 7, 0];
+
+    #[test]
+    fn the_unshared_verdict_agrees_with_the_recognizer_on_a_single_tag() {
+        let tables = Tables::load().expect("tables");
+        for (links, expected) in [
+            ([(62, 7, false), (0, 0, false)], Ok(PlatShape::Lift)),
+            ([(62, 7, true), (0, 0, false)], Err(Refusal::TopOnly)),
+            ([(21, 7, false), (0, 0, false)], Err(Refusal::OneShot)),
+            ([(62, 7, false), (120, 7, false)], Err(Refusal::MixedSpeed)),
+        ] {
+            let f = fixture(&chain(&[0, 128, 128], &[0, 7, 0], &links, ""));
+            let resolved = resolve_plats(&f.scene, &tables);
+            assert_eq!(resolved.len(), 1);
+            assert_eq!(unshared_verdict(&resolved[0]), expected, "{links:?}");
+            let report = lift::plat::recognize(&f.scene, &tables);
+            assert_eq!(report.plats[0].refusal, expected.err());
+            assert_eq!(report.plats[0].shape, expected.ok());
+        }
+        // The dead and the intermediate rests, and the shape rule.
+        let f = fixture(&chain(
+            &[0, 0, 0],
+            &[0, 7, 0],
+            &[(62, 7, false), (0, 0, false)],
+            "",
+        ));
+        assert_eq!(
+            unshared_verdict(&resolve_plats(&f.scene, &tables)[0]),
+            Err(Refusal::Dead)
+        );
+        let f = fixture(&chain(&[0, 128], &[0, 7], &[(62, 7, false)], ""));
+        assert_eq!(
+            unshared_verdict(&resolve_plats(&f.scene, &tables)[0]),
+            Ok(PlatShape::Pedestal)
+        );
+        assert_eq!(shape_of(PlatRest::AboveAll, 3), PlatShape::Barrier);
+        assert_eq!(verdict_label(Ok(PlatShape::Lift)), "Lift");
+        assert_eq!(verdict_label(Err(Refusal::Dead)), "refused: Dead");
+    }
+
+    #[test]
+    fn a_bank_of_two_self_called_lifts_passes_every_gate_but_split() {
+        let tables = Tables::load().expect("tables");
+        let f = fixture(&chain(
+            &BANK_FLOORS,
+            &BANK_TAGS,
+            &[
+                (62, 7, false),
+                (0, 0, false),
+                (0, 0, false),
+                (62, 7, false),
+                (0, 0, false),
+            ],
+            "",
+        ));
+        // The recognizer refuses both members `SharedTag` today.
+        let report = lift::plat::recognize(&f.scene, &tables);
+        assert!(
+            report
+                .plats
+                .iter()
+                .all(|p| p.refusal == Some(Refusal::SharedTag))
+        );
+        let (verdict, agg) = banks_of(&f, &tables);
+        assert!(verdict.a && verdict.b && !verdict.split);
+        assert_eq!(agg.groups_n, 1);
+        assert_eq!(agg.groups_size.all(), "2: 1");
+        assert_eq!(agg.groups_floor_class.all(), "one floor, disconnected: 1");
+        assert_eq!(agg.member_verdict.all(), "Lift: 2");
+        assert_eq!(agg.group_composition.all(), "all Lift: 1");
+        assert_eq!(agg.group_accept.all(), "all: 1");
+        assert_eq!(
+            (
+                agg.member_own_line,
+                agg.member_callable_low,
+                agg.member_own_low_line,
+                agg.member_within_one_hop
+            ),
+            (2, 2, 2, 2)
+        );
+        assert_eq!(agg.group_self_callable.all(), "all: 1");
+        assert_eq!(agg.line_reach.all(), "on a member face: 2");
+        assert_eq!(agg.group_line_reach.all(), "all on member faces: 1");
+        assert_eq!(agg.group_lines_n.all(), "2: 1");
+        assert_eq!((agg.group_one_form, agg.group_one_speed), (1, 1));
+        assert_eq!(
+            (
+                agg.uniform_rest,
+                agg.uniform_travel,
+                agg.uniform_low,
+                agg.uniform_neighbors
+            ),
+            (1, 1, 1, 1)
+        );
+        assert_eq!(agg.common_neighbor.all(), "none in common: 1");
+        assert_eq!(
+            (
+                agg.shared_tag_refusals,
+                agg.recognizer_split,
+                agg.unshared_mismatch
+            ),
+            (2, 0, 0)
+        );
+        let recovered: Vec<u64> = agg.bank_columns.iter().map(|c| c.recovered).collect();
+        assert_eq!(recovered, vec![0, 2, 2, 0]);
+        let groups: Vec<u64> = agg.bank_columns.iter().map(|c| c.groups).collect();
+        assert_eq!(groups, vec![0, 1, 1, 0]);
+    }
+
+    #[test]
+    fn a_bank_called_from_beside_its_members_passes_b_but_not_a() {
+        let tables = Tables::load().expect("tables");
+        // One switch across the B|C threshold, fronted by C (floor 0): Low
+        // for both members and adjacent to both, on neither's face.
+        let f = fixture(&chain(
+            &BANK_FLOORS,
+            &BANK_TAGS,
+            &[
+                (0, 0, false),
+                (0, 0, false),
+                (62, 7, true),
+                (0, 0, false),
+                (0, 0, false),
+            ],
+            "",
+        ));
+        let (verdict, agg) = banks_of(&f, &tables);
+        assert!(!verdict.a && verdict.b);
+        assert_eq!(agg.member_verdict.all(), "Lift: 2");
+        assert_eq!(
+            (
+                agg.member_own_line,
+                agg.member_callable_low,
+                agg.member_own_low_line
+            ),
+            (0, 2, 0)
+        );
+        assert_eq!(agg.member_within_one_hop, 2);
+        assert_eq!(agg.group_callable_low.all(), "all: 1");
+        assert_eq!(agg.group_self_callable.all(), "none: 1");
+        assert_eq!(agg.line_reach.all(), "adjacent to a member: 1");
+        assert_eq!(agg.group_line_reach.all(), "mixed: 1");
+        assert_eq!(agg.group_lines_n.all(), "1: 1");
+        // B and C are shared outside neighbors of nobody: T1 sees A and B,
+        // T2 sees C and D.
+        assert_eq!(agg.common_neighbor.all(), "none in common: 1");
+        let groups: Vec<u64> = agg.bank_columns.iter().map(|c| c.groups).collect();
+        assert_eq!(groups, vec![0, 0, 1, 0]);
+    }
+
+    #[test]
+    fn a_member_refused_alone_refuses_the_group_and_names_its_reason() {
+        let tables = Tables::load().expect("tables");
+        // The second lift's switch faces the plat: use from C hits its back.
+        let f = fixture(&chain(
+            &BANK_FLOORS,
+            &BANK_TAGS,
+            &[
+                (62, 7, false),
+                (0, 0, false),
+                (0, 0, false),
+                (62, 7, true),
+                (0, 0, false),
+            ],
+            "",
+        ));
+        let (verdict, agg) = banks_of(&f, &tables);
+        // Every line names the tag, so T2 is still callable from Low by
+        // T1's riser switch (A is Low for T2 too) and passes alone; but its
+        // own face line fires only from the plat, so gate A refuses it.
+        assert!(!verdict.a && verdict.b && !verdict.split);
+        assert_eq!(agg.member_verdict.all(), "Lift: 2");
+        assert_eq!(agg.group_self_callable.all(), "some: 1");
+        assert_eq!(agg.line_reach.all(), "on a member face: 2");
+
+        // Flip T1's switch as well: no line fires from Low for anyone, and
+        // both members are refused `TopOnly` alone.
+        let f = fixture(&chain(
+            &BANK_FLOORS,
+            &BANK_TAGS,
+            &[
+                (62, 7, true),
+                (0, 0, false),
+                (0, 0, false),
+                (62, 7, true),
+                (0, 0, false),
+            ],
+            "",
+        ));
+        let (verdict, agg) = banks_of(&f, &tables);
+        assert!(!verdict.a && !verdict.b && !verdict.split);
+        assert_eq!(agg.member_verdict.all(), "refused: TopOnly: 2");
+        assert_eq!(agg.group_accept.all(), "none: 1");
+        assert_eq!(agg.group_composition.all(), "any refused: 1");
+    }
+
+    #[test]
+    fn a_split_group_reads_as_one_lift_where_its_members_do_not() {
+        let tables = Tables::load().expect("tables");
+        // A(0)|T1(128)|T2(128)|B(128), one tag on T1 and T2, the riser
+        // switch on A|T1. T2 alone has nothing below it: dead. Merged, the
+        // pair is a plain Core lift called from A.
+        let f = fixture(&chain(
+            &[0, 128, 128, 128],
+            &[0, 7, 7, 0],
+            &[(62, 7, false), (0, 0, false), (0, 0, false)],
+            "",
+        ));
+        let (verdict, agg) = banks_of(&f, &tables);
+        assert!(!verdict.a && !verdict.b && verdict.split);
+        assert_eq!(
+            agg.groups_floor_class.all(),
+            "one floor, mutually adjacent (split): 1"
+        );
+        assert_eq!(agg.recognizer_split, 1);
+        assert_eq!(agg.member_verdict.all(), "Lift: 1 · refused: Dead: 1");
+        assert_eq!(agg.group_accept.all(), "some: 1");
+        assert_eq!(agg.group_composition.all(), "any refused: 1");
+        // The dead member reports `Dead`, not `SharedTag`, so only T1 is a
+        // `SharedTag` refusal to recover.
+        assert_eq!(agg.shared_tag_refusals, 1);
+        let recovered: Vec<u64> = agg.bank_columns.iter().map(|c| c.recovered).collect();
+        assert_eq!(recovered, vec![0, 0, 0, 1]);
+        let resolved = resolve_plats(&f.scene, &tables);
+        let plats: Vec<&ScenePlat> = resolved.iter().collect();
+        assert_eq!(
+            merged_verdict(&f.scene, &plats, f.step),
+            Ok(PlatShape::Lift)
+        );
+
+        // The same pair with the switch facing the plat: merged, nobody
+        // outside can call it.
+        let f = fixture(&chain(
+            &[0, 128, 128, 128],
+            &[0, 7, 7, 0],
+            &[(62, 7, true), (0, 0, false), (0, 0, false)],
+            "",
+        ));
+        let resolved = resolve_plats(&f.scene, &tables);
+        let plats: Vec<&ScenePlat> = resolved.iter().collect();
+        assert_eq!(
+            merged_verdict(&f.scene, &plats, f.step),
+            Err(Refusal::TopOnly)
+        );
+    }
+
+    #[test]
+    fn several_floors_and_reach_are_classified_as_shapes_rs_does() {
+        let tables = Tables::load().expect("tables");
+        let f = fixture(&chain(
+            &[0, 128, 64, 128],
+            &[0, 7, 7, 0],
+            &[(62, 7, false), (0, 0, false), (0, 0, false)],
+            "",
+        ));
+        assert_eq!(
+            floor_class(&f.scene, &BTreeSet::from([1, 2])),
+            FloorClass::SeveralFloors
+        );
+        let f = fixture(&chain(
+            &[0, 128, 128, 128],
+            &[0, 7, 7, 0],
+            &[(62, 7, false), (0, 0, false), (0, 0, false)],
+            "",
+        ));
+        assert_eq!(
+            floor_class(&f.scene, &BTreeSet::from([1, 2])),
+            FloorClass::Split
+        );
+        assert_eq!(
+            floor_class(&f.scene, &BTreeSet::from([1, 3])),
+            FloorClass::OneFloorDisconnected
+        );
+        let resolved = resolve_plats(&f.scene, &tables);
+        let t = &resolved[0].triggers[0];
+        assert_eq!(Reach::of(t, 1, &BTreeSet::from([0, 2])), Reach::OnFace);
+        assert_eq!(Reach::of(t, 2, &BTreeSet::from([1, 3])), Reach::Adjacent);
+        assert_eq!(Reach::of(t, 3, &BTreeSet::from([2])), Reach::Remote);
+        assert_eq!(Reach::Remote.label(), "remote from every member");
+        assert_eq!(
+            FloorClass::Split.label(),
+            "one floor, mutually adjacent (split)"
+        );
+        let _ = tables;
+    }
+
+    #[test]
+    fn group_labels_are_pure_functions_of_their_members() {
+        let member = |verdict, own_low_line, nbs: &[usize]| Member {
+            verdict,
+            own_line: own_low_line,
+            callable_low: true,
+            own_low_line,
+            within_one_hop: true,
+            rest: PlatRest::Top,
+            travel: 128,
+            low: 0,
+            outside_neighbors: nbs.iter().copied().collect(),
+        };
+        let group = |members: Vec<Member>, reach: Vec<Reach>| Group {
+            members,
+            line_reach: reach,
+            one_form: true,
+            one_speed: true,
+            floor_class: FloorClass::OneFloorDisconnected,
+            merged: None,
+        };
+        let g = group(
+            vec![
+                member(Ok(PlatShape::Pedestal), true, &[5]),
+                member(Ok(PlatShape::Pedestal), false, &[5]),
+            ],
+            vec![Reach::OnFace, Reach::Remote],
+        );
+        assert_eq!(g.composition(), "all Pedestal");
+        assert!(g.gate_b() && !g.gate_a() && !g.gate_split());
+        assert_eq!(g.split_label(|m| m.own_low_line), "some");
+        assert_eq!(g.line_reach_label(), "mixed");
+        assert_eq!(g.common_neighbor(), "all share one neighbor");
+
+        let g = group(
+            vec![
+                member(Ok(PlatShape::Lift), true, &[1, 2]),
+                member(Ok(PlatShape::Barrier), true, &[2, 3]),
+                member(Ok(PlatShape::Lift), true, &[9]),
+            ],
+            vec![Reach::Remote],
+        );
+        assert_eq!(g.composition(), "mixed shapes");
+        assert!(g.gate_a());
+        assert_eq!(g.line_reach_label(), "all remote");
+        assert_eq!(g.common_neighbor(), "some share");
+
+        let g = group(
+            vec![
+                member(Err(Refusal::TopOnly), false, &[1]),
+                member(Ok(PlatShape::Lift), true, &[2]),
+            ],
+            vec![Reach::OnFace],
+        );
+        assert_eq!(g.composition(), "any refused");
+        assert!(!g.gate_b());
+        assert_eq!(g.split_label(|m| m.verdict.is_ok()), "some");
+        assert_eq!(g.split_label(|_| false), "none");
+        assert_eq!(g.line_reach_label(), "all on member faces");
+        assert_eq!(g.common_neighbor(), "none in common");
+
+        let g = group(vec![], vec![]);
+        assert_eq!(g.common_neighbor(), "none in common");
+        assert_eq!(speed_of(&[]), Speed::Normal);
     }
 }

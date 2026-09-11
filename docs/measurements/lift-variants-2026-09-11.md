@@ -38,6 +38,11 @@ recorded, on the same code paths (`floors.rs`'s §I helpers, now shared rather t
 | idgames line axis after 4a ([floors-2026-09-03](floors-2026-09-03.md) "Before and after") | 187 (14.6 %) | **187 (14.6 %)** |
 | idgames all axes, floors ignored (the naïve figure) | 122 (9.5 %) | **122 (9.5 %)** |
 | idgames all axes, six axes (the **honest** figure) | 119 (9.3 %) | **119 (9.3 %)** |
+| lift tag groups, DOOM+DOOM2 / Final Doom / idgames ([lift-shapes](lift-shapes-2026-08-29.md) §L, `shapes.rs`) | 29 / 47 / 328 | **29 / 47 / 328** |
+| — split / one floor disconnected / several floors | 1·16·12, 4·19·24, 25·158·145 | **1·16·12, 4·19·24, 25·158·145** |
+| idgames `SharedTag` platform refusals ([lifts-2026-08-30](lifts-2026-08-30.md)) | 923 | **923** |
+| idgames `shared_split` groups (recognizer) | 25 | **25** |
+| single-tag platforms where §I's re-derived verdict disagrees with `lift::plat` | 0 | **0 / 0 / 0** |
 
 Every one reproduces to the unit. The honest 119 is obtained the way `crustygen-corpus` obtains it
 (`src/lift/corpus.rs`): the teleport, plat *and floor* recognizers each run when their specials are
@@ -47,7 +52,7 @@ both are printed so neither can be mistaken for the other.
 Every special value below was transcribed from the fetched source, not recalled; the engine layer of
 the probe cites `file:line` beside each constant (see "Engine facts" below).
 
-Limits the numbers carry (also the probe's §I):
+Limits the numbers carry (also the probe's §J):
 
 - **Load-time heights.** `low` and `high` are the bounds `EV_DoPlat` would compute when the start
   line first fires at the heights the map loads with; a neighbor that has moved by then is not
@@ -99,6 +104,29 @@ Limits the numbers carry (also the probe's §I):
   graph with the plat's sector removed. **Barrier faces**: the distinct neighbor sides of the lift
   lines on the plat's own boundary; **Low-firing neighbors**: neighbors from which some trigger
   fires with a Low activator.
+- **Lift tag group (bank)** — a DWUS/blaze lift tag (`is_lift`) naming two or more sectors; its
+  **members** are those sectors, each a `ScenePlat` of its own (`p_plats.c:164-169` makes one
+  `plat_t` per tagged sector, with its own `low` from its own neighbors, `:207-212`). **Judged as
+  if unshared** — `lift::plat`'s eight refusals re-derived in its order (`src/lift/plat.rs:418-442`)
+  with the `SharedTag` arm skipped; the probe checks its re-derivation against the recognizer on
+  every single-tag platform and reports the disagreements (0). **Own line** — a lift line with the
+  member as a side; **own Low line** — one that also fires from a `Low` activator relative to the
+  member; **callable from Low** — `ScenePlat::callable_low` (`src/check/plats.rs:149`) over every
+  line naming the tag, wherever it sits; **within one hop** — a line on the member's face or with
+  a side among its neighbors. **Reach** of a line to the group — on a member face / adjacent to a
+  member / remote from every member. **Floor class** — split (one floor, mutually adjacent), one
+  floor disconnected, several floors, as `shapes.rs` and `lift::plat` define them. **Outside
+  neighbors** — a member's two-sided neighbors that are not themselves members.
+- **§I gates** — **A**: every member passes alone *and* has a Low-activator line on its own face
+  (the shipped construct's "called from its own face", per member); **B**: every member passes
+  alone, wherever its callers are (the floor recognizer's rule, `src/lift/floor.rs:63-67`);
+  **split as one lift**: a split group read as one platform — the union of the members' outside
+  neighbors, the least member `low`, the shared line set with an activator that is itself a member
+  counted as the platform — passing the same eight refusals. A column's lift axis holds when no
+  lift line is broken, every single-tag platform passes the recognizer as today, and every group
+  passes the column's gate; the line axis is unchanged. **Recovered** counts the platforms the
+  recognizer refuses `SharedTag` today whose group the column accepts (a group member refused
+  `Dead` — precedence 1 — is not among the 923 and is not counted).
 - **§H columns** — *line axis*: every out-of-set special the map uses is in the column; *all axes
   as today*: that, and the six axes as shipped (a one-shot plat is still refused by the plat
   recognizer, a perpetual plat is not judged at all); *provisional*: one-shot triggers read as
@@ -108,7 +136,8 @@ Limits the numbers carry (also the probe's §I):
   tag-0 or dangling start line in the map. **The provisional gate is a ceiling, not the design.**
 
 Denominators: **U** = unique maps (68 / 64 / 1,282); **plats** = perpetual plats 35 / 20 / 936;
-(start line, plat) pairs 84 / 53 / 1,480; (stop line, plat) pairs 133 / 0 / 265.
+(start line, plat) pairs 84 / 53 / 1,480; (stop line, plat) pairs 133 / 0 / 265; lift tag
+**groups** 29 / 47 / 328 with **members** 64 / 141 / 1,085.
 
 ---
 
@@ -321,6 +350,76 @@ between, and 16 % carry a stop line; the maps that hold the 45 clean ones mostly
 before the plats are asked. The largest number in this section
 is the smallest: the two lift variants together lift the honest figure from 119 to 120.
 
+## I. Lift tag groups (banks)
+
+One line drives every sector carrying its tag (`p_plats.c:164-169`), each with its own thinker and
+its own `low` (`:207-212`); the recognizer refuses every such member `SharedTag` today (923 in the
+sample, the binding refusal of [lifts-2026-08-30](lifts-2026-08-30.md)). This section judges the
+members alone and the groups as wholes.
+
+| | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| groups · size 2 / 3 / 4 / 5+ | 29 · 24 / 4 / 1 / 0 | 47 · 28 / 8 / 9 / 2 | **328** · 199 / 58 / 24 / 47 |
+| floor class split / one floor disconnected / several floors | 1 / 16 / 12 | 4 / 19 / 24 | 25 / 158 / 145 |
+| members | 64 | 141 | 1,085 |
+| member verdict, judged alone: Lift / Pedestal / Barrier | 25 / 8 / 2 | 65 / 10 / 5 | **310 / 134 / 39** |
+| — refused: Dead / OneShot / MixedSpeed / UnsupportedRest / TopOnly / OneWayBarrier / ConflictingAction | 6 / 0 / 2 / 9 / 7 / 3 / 2 | 6 / 4 / 0 / 13 / 22 / 11 / 5 | 162 / 125 / 44 / 106 / 52 / 55 / 58 |
+| groups with all / some / none of their members accepted | 12 / 7 / 10 | 18 / 16 / 13 | **113 / 59 / 156** |
+| composition: all Lift / all Pedestal / all Barrier / mixed shapes / any refused | 9 / 2 / 0 / 1 / 17 | 11 / 1 / 1 / 5 / 29 | 63 / 29 / 3 / 18 / 215 |
+
+The 1,085 sample members are the 923 `SharedTag` refusals plus the 162 members refused `Dead`
+ahead of it — the reconciliation [lifts-2026-08-30](lifts-2026-08-30.md) predicted; the 310 Lift
+and 134 Pedestal verdicts are exactly the shared-tag probe shapes it cites.
+
+**Who calls the members** (per member, then per group):
+
+| | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| members with a lift line on their own boundary | 40 (62.5 %) | 60 (42.6 %) | 387 (35.7 %) |
+| — callable from Low by any line naming the tag | 52 (81.2 %) | 114 (80.9 %) | 853 (78.6 %) |
+| — with a Low-activator line on their **own face** | 33 (51.6 %) | 50 (35.5 %) | **275 (25.3 %)** |
+| — with a lift line within one hop | 47 (73.4 %) | 100 (70.9 %) | 557 (51.3 %) |
+| groups: all / some / none of the members callable from Low | 21 / 6 / 2 | 32 / 11 / 4 | 239 / 47 / 42 |
+| groups: all / some / none with a Low line on their own face | 13 / 5 / 11 | 11 / 8 / 28 | **67 / 82 / 179** |
+| lift lines by reach: on a member face / adjacent / remote from every member | 95 / 17 / 19 | 86 / 59 / 14 | 948 / 125 / 244 |
+| groups by line reach: all on member faces / mixed / all remote | 13 / 13 / 3 | 13 / 27 / 7 | 142 / 102 / 84 |
+| distinct lift lines per group 1 / 2 / 3+ | 5 / 5 / 19 | 14 / 16 / 17 | 98 / 85 / 145 |
+| all lines one form (use or walkover) · one speed | 21 (72.4 %) · 28 (96.6 %) | 33 (70.2 %) · 47 (100 %) | 280 (85.4 %) · 315 (96.0 %) |
+
+**Uniformity** (per group):
+
+| | DOOM+DOOM2 | Final Doom | idgames |
+|---|---|---|---|
+| members all share one rest class | 19 (65.5 %) | 24 (51.1 %) | 216 (65.9 %) |
+| — one travel | 15 (51.7 %) | 23 (48.9 %) | 191 (58.2 %) |
+| — one low floor | 22 (75.9 %) | 32 (68.1 %) | 217 (66.2 %) |
+| — one outside-neighbor count | 20 (69.0 %) | 20 (42.6 %) | 169 (51.5 %) |
+| common outside neighbor: all share one / some share / none in common | 17 / 1 / 11 | 25 / 1 / 21 | **140 / 47 / 141** |
+
+**Yield** (line axis unchanged: 1 / 0 / 187):
+
+| column | DOOM+DOOM2 all axes · recovered of 58 · groups of 29 | Final Doom all axes · recovered of 135 · groups of 47 | idgames all axes · recovered of 923 · groups of 328 |
+|---|---|---|---|
+| today | 0 · 0 · 0 | 0 · 0 · 0 | **119 (9.3 %)** · 0 · 0 |
+| +A (bank-A gate) | 0 · 20 · 9 | 0 · 35 · 8 | **119 (9.3 %)** · 121 · 43 |
+| +B (bank-B ceiling) | 0 · 28 · 12 | 0 · 62 · 18 | **121 (9.4 %)** · **351** · **113** |
+| +split as one lift | 0 · 2 · 1 | 0 · 9 · 4 | **120 (9.4 %)** · 28 · 11 |
+
+**Read:** judged alone, **45 % of sample bank members are a shape the IR already states** (483 of
+1,085: 310 lifts, 134 pedestals, 39 barriers) and 113 of 328 groups (34 %) are clean throughout —
+63 banks of lifts, 29 rows of pedestals, 3 of barriers, 18 mixing shapes. The members are usually
+*not* called from their own faces: only a quarter have a Low-activator line on their own boundary,
+and in 179 of 328 groups no member does — the bank's switch is on one member, or beside the bank,
+or elsewhere, while every member is still callable from Low by *some* line in 239 groups. That
+gap is the whole difference between the two gates: gate A (own face per member) accepts 43 sample
+groups and recovers 121 of the 923 refusals for **+0 maps** on all axes; gate B (callers ignored)
+accepts 113 groups, recovers 351 refusals and lifts the honest figure **119 → 121**. The split
+reading recovers 28 platforms in 11 of the 25 split groups for +1 map. Banks are moderately
+uniform — two thirds share one rest class and one low floor, half share travel — and they divide
+evenly between a row inside one host room (140 groups whose members all touch one common sector)
+and members with no neighbor in common (141). Lines are one form in 85 % of sample groups and one
+speed in 96 %.
+
 ## Engine facts (fetched, pinned)
 
 From `linuxdoom-1.10` at `a77dfb96cb91780ca334d0d4cfd86957558007e0`, read for this probe.
@@ -365,7 +464,10 @@ From `linuxdoom-1.10` at `a77dfb96cb91780ca334d0d4cfd86957558007e0`, read for th
   runs first (`:156-158`), then `while ((secnum = P_FindSectorFromLineTag(line,secnum)) >= 0)` with
   `if (sec->specialdata) continue;` (`:164-169`): a sector already carrying a thinker ignores a
   re-trigger, so a running perpetual plat cannot be started twice, but a stopped one is woken by
-  the same line.
+  the same line. The same loop is why **one line drives every sector with its tag** (§I): each
+  iteration allocates its own `plat_t` (`:173-181`), and for `downWaitUpStay` each gets
+  `plat->low = P_FindLowestFloorSurrounding(sec)` from **its own** neighbors, clamped to its own
+  floor (`:207-212`) — a bank is several thinkers on one tag, not one platform.
 
 - **`p_plats.c:52-131`, `T_PlatRaise`** — at `pastdest` going up, only `blazeDWUS`,
   `downWaitUpStay`, `raiseAndChange` and `raiseToNearestAndChange` are removed
@@ -426,10 +528,14 @@ From `linuxdoom-1.10` at `a77dfb96cb91780ca334d0d4cfd86957558007e0`, read for th
 - Sound: a perpetual plat plays `sfx_pstart`/`sfx_pstop` at every reversal (`T_PlatRaise`).
 - Texture *names* on perpetual faces (only presence and pegging are counted).
 - Whole-map reachability; the strand test is a local hop-graph fact.
+- Bank timing: whether a bank's members, each with its own `low`, arrive and return together
+  (§I judges each member's geometry at load, not the thinkers' phase).
+- The merged reading of a split group is an approximation (union of outside neighbors, least
+  `low`); it does not rebuild the sector.
 
 ## Method — the exact commands
 
-From the crustygen checkout on branch `feature/72-lift-variants`, with the sample already fetched in
+From the crustygen checkout on branch `feature/50-lift-banks`, with the sample already fetched in
 the crustywad checkout (`just harvest-sample 20260828 400`). Below, `$SAMPLE` is that checkout's
 `xtask/data/samples/20260828-400`, `$RETAIL` its `RETAIL/`, and `$SCRATCH` a throwaway directory
 outside both repositories:
