@@ -797,6 +797,12 @@ struct Agg {
     uniform_neighbors: u64,
     common_neighbor: Hist,
     bank_caller_refusals: u64,
+    /// The historical `SharedTag` population: every member of a multi-sector
+    /// lift tag that is not refused `Dead` — what `lift::plat` refused on
+    /// sight before the bank construct (`Dead` was precedence 1 and took
+    /// those members first). Unchanged by the construct, and the denominator
+    /// every §I "recovered of N" is measured against.
+    historical_shared_members: u64,
     recognizer_split: u64,
     unshared_mismatch: u64,
     bank_columns: Vec<BankColumn>,
@@ -807,8 +813,8 @@ struct Agg {
 struct BankColumn {
     /// Maps expressible on all six axes with this column's lift axis.
     all_honest: u64,
-    /// Platforms the recognizer refuses `bank_caller` today whose group this
-    /// column accepts.
+    /// Platforms of the historical `SharedTag` population
+    /// ([`Agg::historical_shared_members`]) whose group this column accepts.
     recovered: u64,
     /// Groups this column accepts.
     groups: u64,
@@ -1729,6 +1735,12 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
     let report = lift::plat::recognize(scene, tables);
     let resolved = resolve_plats(scene, tables);
     agg.bank_caller_refusals += report.counts.bank_caller;
+    agg.historical_shared_members += count_len(
+        resolved
+            .iter()
+            .filter(|p| p.shared_tag >= 2 && p.rest != PlatRest::Dead)
+            .count(),
+    );
     agg.recognizer_split += report.counts.shared_split;
     let recognizer_refusal = |sector: usize| {
         report
@@ -1767,10 +1779,14 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
     };
     for plats in by_tag.values() {
         let g = analyze_group(scene, plats, v.ctx.step);
-        let shared_refused = plats
-            .iter()
-            .filter(|p| recognizer_refusal(p.sector) == Some(Refusal::BankCaller))
-            .count();
+        // Recovery is counted against the *historical* population — every
+        // non-`Dead` member of the group, which is what `Refusal::SharedTag`
+        // refused on sight before the bank construct — not against the
+        // shipped recognizer's much smaller `bank_caller` count. The two
+        // measure different things: what a gate would win back from the
+        // pre-construct recognizer, and what this branch's recognizer still
+        // refuses.
+        let historical_members = plats.iter().filter(|p| p.rest != PlatRest::Dead).count();
         let gates = [
             false,
             g.gate_a(),
@@ -1781,7 +1797,7 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
         for (i, pass) in gates.into_iter().enumerate() {
             if pass {
                 agg.bank_columns[i].groups += 1;
-                agg.bank_columns[i].recovered += count_len(shared_refused);
+                agg.bank_columns[i].recovered += count_len(historical_members);
             }
         }
         verdict.a &= gates[1];
@@ -1922,7 +1938,9 @@ fn report_banks(agg: &Agg) {
     );
     println!(
         "\n**Yield.** Line axis unchanged at {} ({}). Per column: honest all-axes maps, \
-`bank_caller` refusals recovered, groups accepted. A = every member passes alone and \
+historical `SharedTag` refusals recovered (every non-`Dead` bank member, the population the \
+recognizer refused on sight before the bank construct — not its `bank_caller` count), groups \
+accepted. A = every member passes alone and \
 has a Low-activator lift line on its own face; A′ = every member passes alone and is called from \
 a two-sided neighbor standing at its own low; B = every member passes alone (callers ignored, \
 the floor recognizer's rule); split = a one-floor, mutually adjacent group read as one lift.\n",
@@ -1936,7 +1954,7 @@ the floor recognizer's rule); split = a one-floor, mutually adjacent group read 
             c.all_honest,
             pct(c.all_honest, agg.maps),
             c.recovered,
-            agg.bank_caller_refusals,
+            agg.historical_shared_members,
             c.groups,
             agg.groups_n
         );
@@ -3050,18 +3068,22 @@ mod tests {
         );
         assert_eq!(agg.common_neighbor.all(), "none in common: 1");
         // Each member's own line calls it, so the recognizer refuses
-        // neither `BankCaller`: `bank_caller_refusals` is 0, not the pair
-        // the old blanket `SharedTag` refusal counted.
+        // neither `BankCaller`: `bank_caller_refusals` is 0, where the old
+        // blanket `SharedTag` refusal counted the pair. That pair is still
+        // the historical population every column's recovery is measured
+        // against, so both members are recovered by every column that
+        // accepts the group.
         assert_eq!(
             (
                 agg.bank_caller_refusals,
+                agg.historical_shared_members,
                 agg.recognizer_split,
                 agg.unshared_mismatch
             ),
-            (0, 0, 0)
+            (0, 2, 0, 0)
         );
         let recovered: Vec<u64> = agg.bank_columns.iter().map(|c| c.recovered).collect();
-        assert_eq!(recovered, vec![0, 0, 0, 0, 0]);
+        assert_eq!(recovered, vec![0, 2, 2, 2, 0]);
         let groups: Vec<u64> = agg.bank_columns.iter().map(|c| c.groups).collect();
         assert_eq!(groups, vec![0, 1, 1, 1, 0]);
         assert!(
@@ -3185,10 +3207,15 @@ mod tests {
         assert_eq!(agg.group_accept.all(), "some: 1");
         assert_eq!(agg.group_composition.all(), "any refused: 1");
         // The dead member reports `Dead`; T1's own neighbor (A) calls it, so
-        // neither member is `BankCaller` and there is nothing to recover.
-        assert_eq!(agg.bank_caller_refusals, 0);
+        // neither member is `BankCaller`. `Dead` took precedence over the old
+        // `SharedTag` too, so the historical population is T1 alone — the one
+        // platform the split column recovers.
+        assert_eq!(
+            (agg.bank_caller_refusals, agg.historical_shared_members),
+            (0, 1)
+        );
         let recovered: Vec<u64> = agg.bank_columns.iter().map(|c| c.recovered).collect();
-        assert_eq!(recovered, vec![0, 0, 0, 0, 0]);
+        assert_eq!(recovered, vec![0, 0, 0, 0, 1]);
         let resolved = resolve_plats(&f.scene, &tables);
         let plats: Vec<&ScenePlat> = resolved.iter().collect();
         assert_eq!(
