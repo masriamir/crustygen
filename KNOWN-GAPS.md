@@ -271,26 +271,47 @@ lifts. The recognizer does **not** refuse such a platform, since a `Low`
 activator is a `Low` activator wherever it stands — so the gap is on the
 writing side: the IR would have to move that switch onto the riser.
 
-**A bank member no adjacent line calls is refused by the compiler and credited
-by the verifier.** One IR lift portal or pedestal no longer has to be one
-platform: `Portal::bank`/`Pedestal::bank` let two or more members share one
-allocated tag, so any line naming the bank moves every member, and a member
-may carry `trigger: none` to place no line of its own. `lift::plat`'s old
-blanket `Refusal::SharedTag` — every member of a multi-sector tag refused on
-sight — is retired; each member is now judged alone against the same seven
-other tests a single-tag platform faces, refused only for a fact about
-itself. The one that replaces it, `Refusal::BankCaller`, and the compiler's
-own `rules::check_lift_return` agree that a member no line on its own tag
-fires from an adjacent low-floor neighbor is unplayable, and both refuse it —
-a hard error, since a bank member nothing adjacent calls is a trap. The
-verifier does not enforce the same gate: `V-P5` runs per platform, stays
-height-only, and stays a Warning — any line on the bank's tag firing from the
-low floor counts, wherever it sits — because the verifier judges any WAD and
-the remote-switch idiom is legitimate there; `check::flood`'s bank edges
-likewise give a `None` member an edge from whichever low neighbor any line on
-the tag fires from, crediting a caller the compiler would refuse. The
-asymmetry is deliberate — the same one-directional optimism the flood already
-takes for a lone remote-switch lift (above) — and is recorded, not closed.
+**A bank member no adjacent line calls is refused by the compiler and
+credited by the verifier.** One IR lift portal or pedestal no longer has to
+be one platform: `Portal::bank`/`Pedestal::bank` let two or more members
+share one allocated tag, so any line naming the bank moves every member, and
+a member may carry `trigger: none` to place no line of its own.
+`lift::plat`'s old blanket `Refusal::SharedTag` — every member of a
+multi-sector tag refused on sight — is retired; each member is now judged
+alone against the same seven other tests a single-tag platform faces,
+refused only for a fact about itself. The one that replaces it,
+`Refusal::BankCaller`, and the compiler's own `rules::check_lift_return`
+agree that a member no line on its own tag fires from an adjacent low-floor
+neighbor is unplayable, and both refuse it — a hard error, since a bank
+member nothing adjacent calls is a trap. The verifier does not enforce the
+same gate: `V-P5` runs per platform, stays height-only, and stays a Warning
+— any line on the bank's tag firing from the low floor counts, wherever it
+sits, and it has no equivalent of P5's barrier-both-sides clause either (the
+recognizer's `Refusal::OneWayBarrier` does) — because the verifier judges
+any WAD and the remote-switch idiom is legitimate there; and `check::flood`
+is looser still. Where an activator *is* adjacent it wires exactly those
+neighbors, but where none is — the remote-only case — its fallback credits
+**every** low neighbor of the platform with a lift edge, ungated by whether
+that neighbor fires anything at all: the only condition is that some line on
+the tag fires from somewhere below (`src/check/flood.rs:841-849`). That is
+the branch `a_remote_only_bank_line_is_credited_by_the_flood_not_refused`
+exercises — a bank member called only from a foyer two rooms away keeps its
+edge from the room it actually touches. The asymmetry is deliberate — the
+same one-directional optimism the flood already takes for a lone
+remote-switch lift (above) — and is recorded, not closed. Two further
+deviations belong here. The design spec has `reach::node_label` naming a
+bank member by its member id; that is **not** built, because `node_label`
+labels a node from the IR and the graph alone (`src/reach.rs:934-960`) and
+never sees the compiled `LiftOut`s a member id would come from, so a bank
+member still reads as "the passage between `a` and `b`" like any other
+compiler-made sector. And the neighbor-called gate credits a caller
+**sector**, not a caller position: a bank whose members are spread across
+one large host room is accepted although `wait_tics` — 105 tics, three
+seconds, `data/engine.toml [plat]` from `p_spec.h`'s `PLATWAIT` — may not
+leave the player time to walk from the line they pressed to the member they
+meant to board. That is the cost of A′ over the stricter own-face gate A,
+taken knowingly rather than falling back to gate B, which credits a caller
+anywhere at all.
 
 **A split platform reads as several lifts.** One platform split by trim —
 every member at one floor and mutually adjacent, the benign 3.4 % / 8.5 % /
@@ -303,19 +324,23 @@ reports each member's own shape or refusal rather than the one platform the
 corpus map has. Merging a split group into a single IR lift is a follow-up,
 not built here.
 
-**Remote callers are the deferred construct.** `Refusal::BankCaller`'s gate is
-"neighbor-called": some line on the bank's tag fires from a sector that is a
-two-sided neighbor of the member at its own low floor, wherever that line
-sits. A line calling a member from anywhere else on the tag —
+**Remote callers are the deferred construct.** `Refusal::BankCaller`'s gate
+is "neighbor-called": some line on the bank's tag fires from a sector that
+is a two-sided neighbor of the member standing more than a step below it —
+an `Activator::Low` neighbor — wherever that line sits. That is a class, not
+a height: the compiler's own P5 is stricter on the same axis and requires
+its callers to stand exactly at the platform's low floor, the floor
+`EV_DoPlat` brings it down to, since a caller the platform never reaches
+cannot board it. A line calling a member from anywhere else on the tag —
 `switches.remote_allowed` in the lift measurement's words — is not credited,
 and is not built. The measurement priced both: the neighbor-called gate
 recovers 204 of the 923 historical `Refusal::SharedTag` refusals across 69
-fully-qualifying groups for +0 honest maps; admitting any caller recovers 351
-across 113 groups for +2, crediting a three-second timing puzzle as reachable
-(`docs/measurements/lift-variants-2026-09-11.md` §I). The shipped recognizer,
-judging each member rather than each group, does still better on the
-accepted side: of the 923, 285 platforms are now accepted judged alone, 407
-are re-attributed to a defect of their own that an earlier refusal test
+fully-qualifying groups for +0 honest maps; admitting any caller recovers
+351 across 113 groups for +2, crediting a three-second timing puzzle as
+reachable (`docs/measurements/lift-variants-2026-09-11.md` §I). The shipped
+recognizer, judging each member rather than each group, does still better on
+the accepted side: of the 923, 285 platforms are now accepted judged alone,
+407 are re-attributed to a defect of their own that an earlier refusal test
 catches first, and 231 are `bank_caller`
 (`docs/measurements/lifts-banks-2026-09-12.md`).
 

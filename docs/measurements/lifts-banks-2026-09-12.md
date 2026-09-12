@@ -21,17 +21,19 @@ this document consumes its Method arbiter row and §I Yield table directly
 ## Purpose
 
 Project G grows crustygen's vocabulary one construct at a time and re-measures the corpus after
-each. Sub-project 4b (issue #72) is shaped differently from every predecessor: it adds no line
-special and no axis. A lift bank — one repeatable lift tag naming several sectors — already used
-specials 62/88/120/123, which construct 4 made emittable; what changed is `lift::plat`'s judgment
-of a shared tag. Before this branch, every member of a multi-sector tag was refused outright as
-`Refusal::SharedTag` (precedence 2, immediately after `Dead`, applied regardless of anything else
-true about the member). After it, each member is judged alone against the same seven other tests a
-single-tag platform gets, and refused only if it passes all of them but no adjacent line calls it
-(`Refusal::BankCaller`, precedence 7, immediately before `ConflictingAction`). The matching
-authoring capability — `trigger: none` bank members, `Portal::bank`/`Pedestal::bank`, validated and
-playtested as `hilera` — is Tasks 1–8's own work; this document measures only the recognizer half,
-the half `crustygen-corpus` exercises by reading foreign maps rather than authoring new ones.
+each. Sub-project 4b (issue #50 — the lift-bank construct; its sibling 4b issue #72, the one-shot
+and perpetual lift variants, closed 2026-09-11 as measured rather than built) is shaped differently
+from every predecessor: it adds no line special and no axis. A lift bank — one repeatable lift tag
+naming several sectors — already used specials 62/88/120/123, which construct 4 made emittable; what
+changed is `lift::plat`'s judgment of a shared tag. Before this branch, every member of a
+multi-sector tag was refused outright as `Refusal::SharedTag` (precedence 2, immediately after
+`Dead`, applied regardless of anything else true about the member). After it, each member is judged
+alone against the same seven other tests a single-tag platform gets, and refused only if it passes
+all of them but no adjacent line calls it (`Refusal::BankCaller`, precedence 7, immediately before
+`ConflictingAction`). The matching authoring capability — `trigger: none` bank members,
+`Portal::bank`/`Pedestal::bank`, validated and playtested as `hilera` — is Tasks 1–8's own work;
+this document measures only the recognizer half, the half `crustygen-corpus` exercises by reading
+foreign maps rather than authoring new ones.
 
 This is the roadmap item [`floors-2026-09-03.md`](floors-2026-09-03.md) named and left open: "the
 two recognizers now disagree about the same corpus feature" — the floor recognizer already judged
@@ -120,7 +122,7 @@ difference of zero.
 | — cannot move (`dead`) | 244 | 244 |
 | accepted: lifts / pedestals / barriers | 1,498 / 364 / 137 (1,999 = 51.6 % of plats) | **1,679 / 429 / 176 (2,284 = 58.9 % of plats)** |
 | maps carrying a lift / pedestal / barrier | 563 / 216 / 85 | 577 / 238 / 90 |
-| broken lift lines | 304, in 42 maps | 304, in 42 maps (unchanged — broken-line detection does not read tag sharing) |
+| broken lift lines | 304, in 42 maps | 304 (unchanged — broken-line detection does not read tag sharing; the report prints no map count, so the *before* column's "in 42 maps" is carried from [`lifts-2026-08-30.md`](lifts-2026-08-30.md) and was not re-measured) |
 | callable from below | 3,421 (88.3 % of plats) | 3,421 (88.3 % of plats) (unchanged) |
 | with a top trigger | 1,361 | 1,361 (unchanged) |
 | holding ≥ 1 thing | 1,433 | 1,433 (unchanged) |

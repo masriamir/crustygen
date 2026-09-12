@@ -521,11 +521,13 @@ or Pedestal lift (≤ 2.7 % of DOOM+DOOM2 lift jambs overall, and concentrated o
 shape).
 
 **A pedestal is that same platform with no portal under it**: a raised island cut inside one room,
-carried in its own `pedestals` list as `{ id, room, at, size, rise, speed, things }`. `at` is the
+carried in its own `pedestals` list as
+`{ id, room, at, size, rise, speed, trigger, bank, things }`. `at` is the
 rectangle's low corner (minimum x, minimum y) and `size` its width and height, each a positive
 multiple of 8, defaulting to `Ir::PEDESTAL_DEFAULT_SIZE` (64) square; the rectangle must lie
 strictly inside its room. The host room is the platform's only neighbor, so the travel is exactly
-`rise`. All four edges carry the use special, so the platform can be called down from whichever
+`rise`. Under `trigger: switch` — the default, and a pedestal's only other option is `none` inside
+a bank — all four edges carry the use special, so the platform can be called down from whichever
 side the player walks up to, and `things` are the things that ride it — placed at the raised
 floor, each strictly inside the rectangle. A room's own `things` may not stand on a pedestal
 (they would spawn in the platform's sector rather than on the room floor the author gave them);
@@ -544,6 +546,14 @@ before P5 has to. `Ir::from_json` validates every bank: two or more members
 (`p_plats.c:164-181`, pinned `a77dfb96`), so a fast switch on one member would blaze the whole
 bank whatever the others say. Each member keeps its own geometry, rest, travel and low floor
 unchanged, because each tagged sector is still its own thinker with its own `low`.
+
+Two consequences worth stating. One press activates every member at once (`p_plats.c:164-181`), so
+the compiler's whole-map count against `MAXPLATS` is **exact** for a bank rather than merely
+conservative: a bank of N members spends N of the engine's 30 active plats on a single use, whatever
+the player does next. And a `trigger: none` member must not put an alcove between itself and its
+caller: an alcove *becomes* that neighbor, so it is then the member's only default caller — and no
+bank line fires from another portal's private alcove, so P5 refuses the member. Declare the alcove
+on the member that carries the trigger.
 
 **Floor actions are a fourth mechanism: one trigger, fired once, moving one or more floors.** A
 platform rests, travels and comes back under the player's own use; a floor action goes once and
@@ -669,7 +679,11 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
   is front-side only), or a walkover from whichever side can cross the line at rest. A trigger on
   top is optional — the descent is free — but a lift callable only from above is a trap for the
   player below. A bank member is called only by a bank line whose activator sector is one of its
-  own neighbors at its low floor; a member no adjacent line calls is refused.
+  own neighbors at its low floor; a member no adjacent line calls is refused. A barrier member is
+  held to both of its sides: it stands above two rooms and lowers for both, so a bank whose lines
+  reach only one of them — leaving the other facing a wall it cannot call — is refused too. This is
+  the invariant `lift::plat`'s `Refusal::OneWayBarrier` states about a WAD being read, enforced here
+  on the geometry the compiler itself emits.
 - **P6 — Monster mobility.** A monster's roaming region must not be split by a drop exceeding
   the engine's step height, unless the drop is deliberately one-way.
 - **P7 — No softlock.** Every region the player can enter must retain a path back to the

@@ -89,8 +89,10 @@ mover, which rule P30 refuses because the destination would then depend on
 when the trigger was pulled). A floor line that names no target — tag 0, or a
 tag no sector answers to — is not a refused target but a broken line, counted
 alongside the refusals. Like `lift::plat`, a **shared tag is accepted** when
-every member sector qualifies on its own — both recognizers now judge a
-shared-tag member by itself rather than refusing the whole group. The chain refusal and the
+every member sector qualifies on its own — and, for `lift::plat`, is
+neighbor-called (`bank_caller` otherwise), a gate a floor target has no
+equivalent of — both recognizers now judge a shared-tag member by itself
+rather than refusing the whole group. The chain refusal and the
 `LedgeLower` refusal are gates the shape probe behind
 `docs/measurements/floor-shapes-2026-09-02.md` never applied;
 `docs/measurements/floors-2026-09-03.md` reconciles the two, map for map.

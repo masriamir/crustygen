@@ -145,13 +145,15 @@ Limits the numbers carry (also the probe's §J):
   lift line is broken, every single-tag platform passes the recognizer as today, and every group
   passes the column's gate; the line axis is unchanged. **Recovered** counts the platforms the
   recognizer refused `SharedTag` *before the bank construct on this branch* whose group the column
-  accepts (a group member refused `Dead` — precedence 1 — is not among the 923/135/58 and is not
-  counted). That 923/135/58 population — every non-`Dead` bank member — is historical, unchanged by
+  accepts (a group member refused `Dead` — precedence 1 — is not among the 58 / 135 / 923 and is
+  not counted). The probe counts that population under its own counter,
+  `Agg::historical_shared_members` — every resolved member of a multi-sector tag whose rest is not
+  `Dead` — and every "recovered of N" below is measured against it. It is historical, unchanged by
   the bank construct, and is what `unshared_verdict` still re-derives member by member (above); the
   shipped recognizer on this branch instead refuses the much smaller `bank_caller` population
-  (231/22/7 — Method, above), a subset of the same 923/135/58 holding only the members no adjacent
-  line calls (the rest of the 923/135/58 are accepted, or refused for an earlier reason, by the
-  bank-aware recognizer).
+  (7 / 22 / 231 — Method, above, kept under its own `Agg::bank_caller_refusals`), a subset of the
+  same 58 / 135 / 923 holding only the members no adjacent line calls (the rest of the
+  58 / 135 / 923 are accepted, or refused for an earlier reason, by the bank-aware recognizer).
 - **§H columns** — *line axis*: every out-of-set special the map uses is in the column; *all axes
   as today*: that, and the six axes as shipped (a one-shot plat is still refused by the plat
   recognizer, a perpetual plat is not judged at all); *provisional*: one-shot triggers read as
