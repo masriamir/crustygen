@@ -60,6 +60,15 @@
 //! order judges movement and reachability before this tag's identity, so
 //! the members of one group need not all carry the same refusal.
 //!
+//! A sharper consequence of the same order: [`Refusal::OneWayBarrier`]
+//! *preempts* [`Refusal::BankCaller`] for every [`Rest::AboveAll`] platform
+//! with two or more neighbors. `BankCaller`'s gate is that no neighbor is a
+//! Low activator, which always satisfies `OneWayBarrier`'s "fewer Low
+//! activator neighbors than neighbors" — so an uncalled barrier-shaped member
+//! reports `OneWayBarrier`, and `bank_caller` can only ever fire for a
+//! [`Rest::Top`] platform or a single-neighbor [`Rest::AboveAll`]
+//! (pedestal-shaped) one.
+//!
 //! A lift line that names no platform at all — tag 0, or a tag no sector
 //! answers to — is not a refused platform but a broken line, listed in
 //! [`PlatReport::broken_lines`] as [`broken_lift_lines`] reports it and
@@ -131,10 +140,19 @@ pub enum Refusal {
     /// it lowers for one side only, where an IR barrier lowers for both.
     OneWayBarrier,
     /// The tag names more than one sector ([`ScenePlat::shared_tag`]) and no
-    /// trigger fires from a neighbor of *this* member at its low floor
-    /// ([`ScenePlat::low_activator_neighbors`]): the bank's lines are on
+    /// trigger fires from a neighbor of *this* member standing more than a
+    /// step below it ([`ScenePlat::low_activator_neighbors`], an
+    /// [`Activator::Low`] that is also a neighbor): the bank's lines are on
     /// another member or somewhere else, and the IR calls a bank member only
     /// from a sector that touches it (`compile::lifts::resolve_bank_callers`).
+    /// The gate here is a *class*, deliberately looser than the compiler's:
+    /// `rules::check_lift_return` requires the caller to stand exactly at the
+    /// platform's low floor, since a caller the platform does not come down to
+    /// cannot board it, while a WAD being read only has to be recognizable.
+    ///
+    /// Reachable for a [`Rest::Top`] platform and a single-neighbor
+    /// [`Rest::AboveAll`] one only: [`Self::OneWayBarrier`] takes every other
+    /// uncalled `AboveAll` member first (see the module doc's precedence).
     BankCaller,
     /// A non-lift special names the platform's tag too
     /// ([`ScenePlat::other_actions`]), so something besides the lift drives
@@ -218,7 +236,8 @@ pub struct PlatCounts {
     /// one floor and all of them mutually adjacent. A count of groups the
     /// resolver found sharing a tag, not of platforms — and not a sub-count
     /// of [`Self::bank_caller`] at all: a split group's members may each be
-    /// accepted, or refused for an earlier reason. The shape a
+    /// accepted, refused for an earlier reason, or refused
+    /// [`Refusal::BankCaller`] itself. The shape a
     /// geometry-aware lifter could still recognize as a single lift. Judged
     /// member by member, a split platform reads as several lifts; merging it
     /// is a follow-up.
@@ -546,11 +565,17 @@ mod tests {
     }
 
     /// Two lifts on tag 7, each `Rest::Top` (a landing neighbor at its own
-    /// floor, a low neighbor at the far end). The only trigger is a switch
-    /// on room 6 — adjacent to neither lift — so neither lift's own
+    /// floor, a low neighbor at the far end). The only lift trigger is a
+    /// switch on room 6 — adjacent to neither lift — so neither lift's own
     /// neighbors call it: both are `BankCaller` although both are
     /// `callable_low` (room 6 fires Low for both), so `TopOnly` never
     /// claims them first.
+    ///
+    /// A second far-wall line carries a *non-lift* special on the same tag
+    /// (23, `S1 Floor Lower to Lowest`), so `ConflictingAction` applies to
+    /// both members as well. That is deliberate: it pins the precedence, since
+    /// `BankCaller` comes first and the expected refusal must stay
+    /// `BankCaller` rather than drift to the later arm.
     fn bank_caller_case() -> String {
         let mut text = chain(
             &[0, 128, 128, 0, 128, 128, 0],
@@ -566,6 +591,7 @@ mod tests {
             "",
         );
         far_wall(&mut text, 7, 62, 7);
+        far_wall(&mut text, 7, 23, 7);
         text
     }
 
@@ -984,5 +1010,12 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
         let json = serde_json::to_value(&r).expect("serializes");
         assert_eq!(json["plats"][0]["refusal"], "dead");
         assert_eq!(json["counts"]["dead"], 1);
+
+        // The bank refusal's own wire name, which the corpus report row and
+        // the JSON record both key on.
+        let r = report_of(&bank_caller_case());
+        let json = serde_json::to_value(&r).expect("serializes");
+        assert_eq!(json["plats"][0]["refusal"], "bank_caller");
+        assert_eq!(json["counts"]["bank_caller"], 2);
     }
 }

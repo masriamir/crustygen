@@ -1031,7 +1031,7 @@ fn render_teleports(s: &mut String, a: &Aggregate) {
 /// dozen lifts from a dozen maps with one each. The shared-tag row is the
 /// one count that is neither: it tallies tag *groups* that are one platform
 /// split by trim, a sub-count of the shared-tag *groups*, which are no
-/// longer refused as such, rather than of its platforms, so it gets a row of
+/// longer refused as such, rather than of their platforms, so it gets a row of
 /// its own instead of a slot in the refusal list.
 fn render_lifts(s: &mut String, a: &Aggregate) {
     use std::fmt::Write as _;
