@@ -511,7 +511,9 @@ fn check_sealed_monster_rooms(
 /// [`lowest_floor_surrounding`], the same `P_FindLowestFloorSurrounding` walk
 /// P28 runs over a floor target, and a use special fires from its front
 /// sector only (`P_UseSpecialLine`) while a walkover fires from whichever
-/// side can cross at rest (`P_TryMove`'s step rule).
+/// side can cross at rest (`P_TryMove`'s step rule). A bank member is judged
+/// by its resolved callers rather than by the line scan; a lone lift's
+/// placed lines are adjacent by construction, so the scan is exact for it.
 fn check_lift_return(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>) {
     let step = tables.step_height();
     let use_specials = tables.lift_use_specials();
@@ -551,6 +553,22 @@ fn check_lift_return(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>
                     ),
                 });
             }
+        }
+        if let Some(bank) = &lift.bank {
+            // A bank member's callers were resolved from the bank's lines
+            // and the member's own neighbors (`compile::lifts::resolve_bank_callers`);
+            // the height-only scan below would credit any member's line at
+            // the right floor, wherever it is.
+            if lift.callable_from.is_empty() {
+                v.push(RuleViolation {
+                    rule: "P5",
+                    subject,
+                    detail: format!(
+                        "bank `{bank}`: no line on the bank's tag fires from a neighbor of the platform at its low floor {low}; a member nothing adjacent calls is a trap"
+                    ),
+                });
+            }
+            continue;
         }
         let callable_from_low = out.data.linedefs.iter().any(|line| {
             if line.tag != lift.tag {
@@ -2086,6 +2104,64 @@ mod tests {
             "{v:?}"
         );
     }
+
+    /// The bank fixture Task 2 compiles: the hall (sector 0), the ledge (1),
+    /// then the two lifts and the two pedestals.
+    const BANKS: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"hall", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"ledge", "footprint":[[576,0],[576,512],[1088,512],[1088,0]], "floor":128, "ceiling":320, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"hall", "b":"ledge", "kind":"lift", "width":128, "at":[512,128], "bank":"pair" },
+        { "a":"hall", "b":"ledge", "kind":"lift", "width":128, "at":[512,384], "bank":"pair", "trigger":"none" }
+      ],
+      "pedestals":[
+        { "id":"left",  "room":"hall", "at":[128,128], "rise":64, "bank":"prizes" },
+        { "id":"right", "room":"hall", "at":[320,128], "rise":64, "bank":"prizes", "trigger":"none" }
+      ],
+      "exits":[ { "room":"ledge", "trigger":"switch", "at":[1088,256], "width":64 } ]
+    }"#;
+
+    fn banks_compiled() -> (Tables, crate::compile::Compiled) {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(BANKS).expect("ir");
+        let out = compile(&ir, &tables).expect("compiles");
+        (tables, out)
+    }
+
+    #[test]
+    fn p5_passes_on_a_bank_whose_none_members_are_neighbor_called() {
+        let (tables, out) = banks_compiled();
+        let mut v = Vec::new();
+        check_lift_return(&tables, &out, &mut v);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn p5_catches_a_bank_member_no_adjacent_line_calls() {
+        let (tables, mut out) = banks_compiled();
+        // Damage the compiled output the way a remote-only bank would look:
+        // the second lift keeps its tag but loses its caller.
+        let member = out
+            .lifts
+            .iter_mut()
+            .find(|l| l.bank.as_deref() == Some("pair") && l.activators.is_empty())
+            .expect("the none member");
+        member.callable_from.clear();
+        let mut v = Vec::new();
+        check_lift_return(&tables, &out, &mut v);
+        assert!(
+            v.iter().any(|x| x.rule == "P5"
+                && x.detail.contains("bank `pair`")
+                && x.detail.contains("fires from a neighbor")),
+            "{v:?}"
+        );
+    }
+
     /// Two rooms 64 units apart, sealed by a 16-deep drop wall that one
     /// switch on room `a`'s far wall lowers — a verbatim copy of
     /// `compile::floors`'s own `WALL` fixture, which lives in that module's
