@@ -1030,9 +1030,9 @@ fn render_teleports(s: &mut String, a: &Aggregate) {
 /// they sit in, because a corpus total alone cannot tell one map with a
 /// dozen lifts from a dozen maps with one each. The shared-tag row is the
 /// one count that is neither: it tallies tag *groups* that are one platform
-/// split by trim, a sub-count of the shared-tag refusal's groups rather than
-/// of its platforms, so it gets a row of its own instead of a slot in the
-/// refusal list.
+/// split by trim, a sub-count of the shared-tag *groups*, which are no
+/// longer refused as such, rather than of its platforms, so it gets a row of
+/// its own instead of a slot in the refusal list.
 fn render_lifts(s: &mut String, a: &Aggregate) {
     use std::fmt::Write as _;
 
@@ -1063,15 +1063,15 @@ fn render_lifts(s: &mut String, a: &Aggregate) {
     );
     let _ = writeln!(
         s,
-        "| refused: dead / shared tag / one-shot / mixed speed / unsupported rest / top-only / \
-         one-way barrier / conflicting action | {} / {} / {} / {} / {} / {} / {} / {} |",
+        "| refused: dead / one-shot / mixed speed / unsupported rest / top-only / one-way barrier / \
+         bank caller / conflicting action | {} / {} / {} / {} / {} / {} / {} / {} |",
         c.dead,
-        c.shared_tag,
         c.one_shot,
         c.mixed_speed,
         c.unsupported_rest,
         c.top_only,
         c.one_way_barrier,
+        c.bank_caller,
         c.conflicting
     );
     let _ = writeln!(
@@ -1636,8 +1636,8 @@ mod tests {
         );
         assert!(
             md.contains(
-                "| refused: dead / shared tag / one-shot / mixed speed / unsupported \
-                         rest / top-only / one-way barrier / conflicting action | 1 / 0 / 0 / 0 \
+                "| refused: dead / one-shot / mixed speed / unsupported rest / top-only / \
+                         one-way barrier / bank caller / conflicting action | 1 / 0 / 0 / 0 \
                          / 0 / 0 / 0 / 0 |"
             ),
             "{md}"

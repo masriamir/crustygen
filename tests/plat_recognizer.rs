@@ -73,3 +73,33 @@ fn every_compiled_plat_round_trips_through_the_recognizer() {
         "a lift or a barrier fills a gap cut through two rooms' walls"
     );
 }
+
+const BANKS: &str = include_str!("golden/banks.json");
+
+#[test]
+fn every_compiled_bank_member_round_trips_accepted() {
+    let tables = Tables::load().expect("tables");
+    let ir = Ir::from_json(BANKS).expect("ir");
+    let out = compile(&ir, &tables).expect("compiles");
+    let map = parse_udmf(&emit_textmap(&out.data, &out.things), Limits::default()).expect("parses");
+    let scene = Scene::build(&map, &tables, &mut Vec::new());
+    let r = recognize(&scene, &tables);
+    assert_eq!(r.counts.refusals(), 0, "{:?}", r.plats);
+    assert_eq!(
+        (
+            r.counts.plats,
+            r.counts.lifts,
+            r.counts.pedestals,
+            r.counts.bank_caller
+        ),
+        (4, 2, 2, 0)
+    );
+    for lift in &out.lifts {
+        let plat = r
+            .plats
+            .iter()
+            .find(|p| p.sector == lift.sector)
+            .expect("recognized");
+        assert_eq!(plat.tag, i32::from(lift.tag));
+    }
+}

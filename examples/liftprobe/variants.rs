@@ -1722,7 +1722,7 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
     let (scene, tables) = (v.ctx.scene, v.tables);
     let report = lift::plat::recognize(scene, tables);
     let resolved = resolve_plats(scene, tables);
-    agg.shared_tag_refusals += report.counts.shared_tag;
+    agg.shared_tag_refusals += report.counts.bank_caller;
     agg.recognizer_split += report.counts.shared_split;
     let recognizer_refusal = |sector: usize| {
         report
@@ -1763,7 +1763,7 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
         let g = analyze_group(scene, plats, v.ctx.step);
         let shared_refused = plats
             .iter()
-            .filter(|p| recognizer_refusal(p.sector) == Some(Refusal::SharedTag))
+            .filter(|p| recognizer_refusal(p.sector) == Some(Refusal::BankCaller))
             .count();
         let gates = [
             false,
@@ -3007,14 +3007,10 @@ mod tests {
             ],
             "",
         ));
-        // The recognizer refuses both members `SharedTag` today.
-        let report = lift::plat::recognize(&f.scene, &tables);
-        assert!(
-            report
-                .plats
-                .iter()
-                .all(|p| p.refusal == Some(Refusal::SharedTag))
-        );
+        // Both members carry the tag; the recognizer no longer refuses a
+        // member for that alone.
+        let resolved = resolve_plats(&f.scene, &tables);
+        assert!(resolved.iter().all(|p| p.shared_tag >= 2));
         let (verdict, agg) = banks_of(&f, &tables);
         assert!(verdict.a && verdict.b && !verdict.split);
         assert_eq!(agg.groups_n, 1);
@@ -3047,16 +3043,19 @@ mod tests {
             (1, 1, 1, 1)
         );
         assert_eq!(agg.common_neighbor.all(), "none in common: 1");
+        // Each member's own line calls it, so the recognizer refuses
+        // neither `BankCaller`: `shared_tag_refusals` is 0, not the pair the
+        // old blanket `SharedTag` refusal counted.
         assert_eq!(
             (
                 agg.shared_tag_refusals,
                 agg.recognizer_split,
                 agg.unshared_mismatch
             ),
-            (2, 0, 0)
+            (0, 0, 0)
         );
         let recovered: Vec<u64> = agg.bank_columns.iter().map(|c| c.recovered).collect();
-        assert_eq!(recovered, vec![0, 2, 2, 2, 0]);
+        assert_eq!(recovered, vec![0, 0, 0, 0, 0]);
         let groups: Vec<u64> = agg.bank_columns.iter().map(|c| c.groups).collect();
         assert_eq!(groups, vec![0, 1, 1, 1, 0]);
         assert!(
@@ -3179,11 +3178,11 @@ mod tests {
         assert_eq!(agg.member_verdict.all(), "Lift: 1 · refused: Dead: 1");
         assert_eq!(agg.group_accept.all(), "some: 1");
         assert_eq!(agg.group_composition.all(), "any refused: 1");
-        // The dead member reports `Dead`, not `SharedTag`, so only T1 is a
-        // `SharedTag` refusal to recover.
-        assert_eq!(agg.shared_tag_refusals, 1);
+        // The dead member reports `Dead`; T1's own neighbor (A) calls it, so
+        // neither member is `BankCaller` and there is nothing to recover.
+        assert_eq!(agg.shared_tag_refusals, 0);
         let recovered: Vec<u64> = agg.bank_columns.iter().map(|c| c.recovered).collect();
-        assert_eq!(recovered, vec![0, 0, 0, 0, 1]);
+        assert_eq!(recovered, vec![0, 0, 0, 0, 0]);
         let resolved = resolve_plats(&f.scene, &tables);
         let plats: Vec<&ScenePlat> = resolved.iter().collect();
         assert_eq!(
