@@ -216,9 +216,9 @@ pub struct PlatCounts {
     pub bank_caller: u64,
     /// Shared-tag groups that are one platform split by trim: every member at
     /// one floor and all of them mutually adjacent. A count of groups the
-    /// resolver found sharing a tag, not of platforms — and not strictly a
-    /// sub-count of [`Self::bank_caller`], whose members report
-    /// [`Refusal::Dead`] instead when they cannot move. The shape a
+    /// resolver found sharing a tag, not of platforms — and not a sub-count
+    /// of [`Self::bank_caller`] at all: a split group's members may each be
+    /// accepted, or refused for an earlier reason. The shape a
     /// geometry-aware lifter could still recognize as a single lift. Judged
     /// member by member, a split platform reads as several lifts; merging it
     /// is a follow-up.
