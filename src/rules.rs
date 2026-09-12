@@ -2624,6 +2624,8 @@ mod tests {
             shape: crate::compile::lifts::LiftShape::Lift,
             travel: 64,
             callable_from: Vec::new(),
+            activators: Vec::new(),
+            bank: None,
             tag: 99,
             portal: None,
             pedestal: None,

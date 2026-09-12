@@ -68,6 +68,8 @@
 //! lift portal but leaves the void between them empty, exactly as it does
 //! for a door — the platform is a sector, not a line.
 
+use std::collections::{BTreeSet, HashMap};
+
 use crate::compile::portals::{
     Cut, emit_jambs, emit_opening, emit_segment, mark_secret_thresholds, resolve_portal,
     sector_like,
@@ -75,7 +77,7 @@ use crate::compile::portals::{
 use crate::compile::tags::TagAllocator;
 use crate::compile::teleports::emit_island_edges;
 use crate::compile::{CompileError, MapData};
-use crate::ir::{Ir, LiftSpeed, LiftTrigger, Portal, PortalKind};
+use crate::ir::{Ir, LiftSpeed, LiftTrigger, PedestalTrigger, Portal, PortalKind};
 use crate::tables::{Tables, ThingDims};
 
 /// What a platform joins.
@@ -103,6 +105,15 @@ pub struct LiftOut {
     /// low-face neighbor (a room or its alcove), both neighbors of a
     /// barrier (each a room or its alcove), a pedestal's host.
     pub callable_from: Vec<usize>,
+    /// Sectors the platform's *own* trigger lines fire from: a switch's
+    /// front sector (`P_UseSpecialLine`, front side only), both sides of a
+    /// walkover (`P_CrossSpecialLine`), a pedestal's host. Empty for a bank
+    /// member that placed no line. What `resolve_bank_callers` pools per
+    /// bank.
+    pub activators: Vec<usize>,
+    /// The bank the platform belongs to, if any; members of one bank share
+    /// [`Self::tag`].
+    pub bank: Option<String>,
     /// The sector tag the platform's specials act on.
     pub tag: u16,
     /// Index into [`Ir::portals`], for a lift or barrier.
@@ -185,6 +196,12 @@ fn unpeg_landing_upper(data: &mut MapData, line: usize, plat: usize) {
 /// # Panics
 /// Panics if a pedestal names a room that does not exist, which
 /// [`crate::ir::Ir::from_json`] rejects before this pass ever runs.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one pass over the portals and one over the pedestals, each allocating its own or \
+              its bank's tag before pushing its platform — the same per-map-loop shape as every \
+              other `compile/` pass, just with two kinds of platform instead of one"
+)]
 pub fn emit_lifts(
     ir: &Ir,
     tables: &Tables,
@@ -205,13 +222,28 @@ pub fn emit_lifts(
     let step = tables.step_height();
     let player = tables.player();
 
+    // Tag per bank, allocated by the first member emitted and reused by the
+    // rest — the manifest names the first member's sector, and the purpose
+    // names the bank.
+    let mut bank_tags: HashMap<String, u16> = HashMap::new();
+
     let mut out = Vec::new();
     for (pi, portal) in ir.portals.iter().enumerate() {
         if portal.kind != PortalKind::Lift {
             continue;
         }
         out.push(emit_portal_lift(
-            ir, tables, data, tags, pi, portal, &riser, &trim, step, player,
+            ir,
+            tables,
+            data,
+            tags,
+            &mut bank_tags,
+            pi,
+            portal,
+            &riser,
+            &trim,
+            step,
+            player,
         )?);
     }
     for (i, p) in ir.pedestals.iter().enumerate() {
@@ -267,19 +299,30 @@ pub fn emit_lifts(
         // what `sectors::check_no_sector_overlaps` exempts from the overlap
         // test — a pedestal lies inside its host by construction.
         let sector = data.sectors.len();
-        let tag = tags.allocate(sector, &format!("pedestal {}", p.id));
+        let tag = match &p.bank {
+            Some(bank) => *bank_tags.entry(bank.clone()).or_insert_with(|| {
+                tags.allocate(
+                    sector,
+                    &format!("bank {bank}: {} members", ir.bank_size(bank)),
+                )
+            }),
+            None => tags.allocate(sector, &format!("pedestal {}", p.id)),
+        };
         let mut s = sector_like(room, floor, room.ceiling, &riser, tag);
         s.host = Some(host);
         data.sectors.push(s);
 
-        // Every edge is a low face, so every edge is a switch: the host
-        // surrounds the island, and `P_UseSpecialLine` fires from the front
-        // side, which the island winding binds to the host. The riser goes
-        // on that same sidedef, the lower-floored one `r_segs.c` draws.
+        // Every edge is a low face, so every edge would be a switch — unless
+        // this pedestal is a `none` bank member, in which case another
+        // member's line carries the tag this sector shares and these edges
+        // stay special-free. Either way every edge still gets the riser
+        // texture: the rise is real regardless of who calls it.
         let special = tables.lift_special(true, p.speed == LiftSpeed::Fast);
         for line in emit_island_edges(data, lo, hi, host, sector) {
-            data.linedefs[line].special = special;
-            data.linedefs[line].tag = tag;
+            if p.trigger == PedestalTrigger::Switch {
+                data.linedefs[line].special = special;
+                data.linedefs[line].tag = tag;
+            }
             let front = data.linedefs[line].front;
             riser.clone_into(&mut data.sidedefs[front].lower);
             // A pedestal keeps its host's ceiling, so this never fires
@@ -293,6 +336,12 @@ pub fn emit_lifts(
             shape: LiftShape::Pedestal,
             travel: p.rise,
             callable_from: vec![host],
+            activators: if p.trigger == PedestalTrigger::Switch {
+                vec![host]
+            } else {
+                Vec::new()
+            },
+            bank: p.bank.clone(),
             tag,
             portal: None,
             pedestal: Some(i),
@@ -300,6 +349,8 @@ pub fn emit_lifts(
             top_line: None,
         });
     }
+
+    resolve_bank_callers(&mut out);
 
     // `MAXPLATS` bounds how many plats the engine can have *active* at
     // once, and `P_AddActivePlat` calls `I_Error` past it (the citation on
@@ -322,7 +373,7 @@ pub fn emit_lifts(
 /// the trigger specials and the two risers.
 #[expect(
     clippy::too_many_arguments,
-    reason = "each parameter names an independent input — the IR, the tables, the two \
+    reason = "each parameter names an independent input — the IR, the tables, the three \
               accumulators, the portal and its index, and the four values hoisted out of the \
               per-map loop; bundling them would just move the same count into a throwaway struct"
 )]
@@ -338,6 +389,7 @@ fn emit_portal_lift(
     tables: &Tables,
     data: &mut MapData,
     tags: &mut TagAllocator,
+    bank_tags: &mut HashMap<String, u16>,
     pi: usize,
     portal: &Portal,
     riser: &str,
@@ -495,13 +547,23 @@ fn emit_portal_lift(
         room_a
     };
     let plat = data.sectors.len();
-    let purpose = format!(
-        "{} {} <-> {}",
-        if barrier { "barrier" } else { "lift" },
-        portal.a,
-        portal.b
-    );
-    let tag = tags.allocate(plat, &purpose);
+    let tag = match &portal.bank {
+        Some(bank) => *bank_tags.entry(bank.clone()).or_insert_with(|| {
+            tags.allocate(
+                plat,
+                &format!("bank {bank}: {} members", ir.bank_size(bank)),
+            )
+        }),
+        None => tags.allocate(
+            plat,
+            &format!(
+                "{} {} <-> {}",
+                if barrier { "barrier" } else { "lift" },
+                portal.a,
+                portal.b
+            ),
+        ),
+    };
     data.sectors.push(sector_like(
         level_room,
         rest,
@@ -648,10 +710,29 @@ fn emit_portal_lift(
     };
     riser.clone_into(&mut data.sidedefs[top_side].lower);
 
-    let callable_from = if barrier {
+    // The sectors a player calls this platform from and steps onto it from,
+    // by shape. What it actually gets *fired* from — `activators` — differs
+    // only for a bank member with no line of its own, whose callers
+    // `resolve_bank_callers` narrows to whichever of these its bank's lines
+    // do reach.
+    let default_callers = if barrier {
         vec![near_neighbor, far_neighbor]
     } else {
         vec![low_neighbor]
+    };
+    let activators: Vec<usize> = match portal.trigger {
+        LiftTrigger::Switch | LiftTrigger::BothEnds => default_callers.clone(),
+        LiftTrigger::Walkover => {
+            let outer = low_outer
+                .expect("Ir::from_json requires the low room's alcove for a walkover lift");
+            let l = &data.linedefs[outer];
+            let mut v = vec![data.sidedefs[l.front].sector];
+            if let Some(b) = l.back {
+                v.push(data.sidedefs[b].sector);
+            }
+            v
+        }
+        LiftTrigger::None => Vec::new(),
     };
     Ok(LiftOut {
         sector: plat,
@@ -661,13 +742,45 @@ fn emit_portal_lift(
             LiftShape::Lift
         },
         travel,
-        callable_from,
+        callable_from: default_callers,
+        activators,
+        bank: portal.bank.clone(),
         tag,
         portal: Some(pi),
         pedestal: None,
         low_line: Some(low_line),
         top_line: Some(top_line),
     })
+}
+
+/// Resolves the callers of every bank member that placed no line of its
+/// own: the sectors its bank's lines fire from that are also its own
+/// default callers — a neighbor standing at its low floor. The engine
+/// moves every sector on the tag from any line naming it
+/// (`p_plats.c:164-181`, pinned `a77dfb96`); what this keeps is the subset a
+/// player can step onto after pressing, which is what P5 and the flood ask.
+/// A member with its own line keeps the callers it had.
+fn resolve_bank_callers(out: &mut [LiftOut]) {
+    let mut fired_from: HashMap<&str, BTreeSet<usize>> = HashMap::new();
+    for l in out.iter() {
+        if let Some(b) = &l.bank {
+            fired_from
+                .entry(b.as_str())
+                .or_default()
+                .extend(l.activators.iter().copied());
+        }
+    }
+    let fired_from: HashMap<String, BTreeSet<usize>> = fired_from
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect();
+    for l in out.iter_mut() {
+        let Some(b) = &l.bank else { continue };
+        if l.activators.is_empty() {
+            let from = &fired_from[b];
+            l.callable_from.retain(|s| from.contains(s));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1800,5 +1913,158 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    /// A hall with a two-pedestal bank and a lift pair to a ledge, the
+    /// second member of each bank carrying no line of its own.
+    const BANKS: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"hall", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"ledge", "footprint":[[576,0],[576,512],[1088,512],[1088,0]], "floor":128, "ceiling":320, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"hall", "b":"ledge", "kind":"lift", "width":128, "at":[512,128], "bank":"pair" },
+        { "a":"hall", "b":"ledge", "kind":"lift", "width":128, "at":[512,384], "bank":"pair", "trigger":"none" }
+      ],
+      "pedestals":[
+        { "id":"left",  "room":"hall", "at":[128,128], "rise":64, "bank":"prizes" },
+        { "id":"right", "room":"hall", "at":[320,128], "rise":64, "bank":"prizes", "trigger":"none" }
+      ]
+    }"#;
+
+    #[test]
+    fn a_bank_shares_one_tag_and_its_none_member_places_no_line() {
+        let Built {
+            tables,
+            data,
+            tags,
+            lifts,
+        } = compile_data(BANKS);
+        assert_eq!(lifts.len(), 4, "two lifts, two pedestals");
+        let (l1, l2, p1, p2) = (&lifts[0], &lifts[1], &lifts[2], &lifts[3]);
+        assert_eq!(l1.bank.as_deref(), Some("pair"));
+        assert_eq!(l1.tag, l2.tag, "the pair shares its tag");
+        assert_eq!(p1.tag, p2.tag, "the prizes share theirs");
+        assert_ne!(l1.tag, p1.tag);
+        let purpose = |tag: u16| {
+            tags.manifest()
+                .iter()
+                .filter(|e| e.tag == tag)
+                .map(|e| e.purpose.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            purpose(l1.tag),
+            vec!["bank pair: 2 members".to_owned()],
+            "one manifest row per bank"
+        );
+        assert_eq!(purpose(p1.tag), vec!["bank prizes: 2 members".to_owned()]);
+        let lines_on = |tag: u16| {
+            data.linedefs
+                .iter()
+                .filter(|l| l.tag == tag && l.special != 0)
+                .count()
+        };
+        assert_eq!(lines_on(l1.tag), 1, "only the first lift placed a switch");
+        assert_eq!(
+            lines_on(p1.tag),
+            4,
+            "only the first pedestal's four faces are switches"
+        );
+        assert_eq!(data.linedefs[l2.low_line.unwrap()].special, 0);
+        assert_eq!(
+            data.linedefs[l1.low_line.unwrap()].special,
+            tables.lift_special(true, false)
+        );
+    }
+
+    #[test]
+    fn a_none_member_is_called_from_the_neighbor_the_banks_lines_fire_from() {
+        let Built { lifts, .. } = compile_data(BANKS);
+        let (l1, l2, p1, p2) = (&lifts[0], &lifts[1], &lifts[2], &lifts[3]);
+        assert_eq!(
+            l1.activators,
+            vec![0],
+            "the switch on the low face fires from the hall"
+        );
+        assert!(l2.activators.is_empty());
+        assert_eq!(
+            l2.callable_from,
+            vec![0],
+            "the hall touches the second lift at its low floor"
+        );
+        assert_eq!(p1.activators, vec![0]);
+        assert_eq!(p2.callable_from, vec![0], "the host is the caller");
+    }
+
+    /// The bank's only line is the first lift's switch, which fires from the
+    /// hall; the second member is a lift from the ledge up to a far room,
+    /// so its low neighbor is the ledge — a sector no bank line fires from.
+    const BANK_FAR: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"hall", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"ledge", "footprint":[[576,0],[576,512],[1088,512],[1088,0]], "floor":128, "ceiling":320, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"far", "footprint":[[1152,0],[1152,512],[1664,512],[1664,0]], "floor":256, "ceiling":448, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"hall", "b":"ledge", "kind":"lift", "width":128, "at":[512,256], "bank":"pair" },
+        { "a":"ledge", "b":"far", "kind":"lift", "width":128, "at":[1088,256], "bank":"pair", "trigger":"none" }
+      ]
+    }"#;
+
+    #[test]
+    fn a_none_member_no_bank_line_reaches_has_no_caller() {
+        let Built { lifts, .. } = compile_data(BANK_FAR);
+        let (l1, l2) = (&lifts[0], &lifts[1]);
+        assert_eq!(l1.activators, vec![0], "the switch fires from the hall");
+        assert_eq!(l2.bank.as_deref(), Some("pair"));
+        assert!(
+            l2.callable_from.is_empty(),
+            "the ledge is the second lift's low neighbor, but no bank line fires from the ledge"
+        );
+    }
+
+    #[test]
+    fn a_walkover_member_fires_from_the_low_room_and_its_alcove() {
+        // 32, not the 64 that would eat the whole 64-unit hall<->ledge gap
+        // (`LiftTooShallow`, `need` 32): the same boundary depth the
+        // sibling `a_walkover_lift_puts_the_special_on_the_low_alcoves_outer_threshold`
+        // fixture uses on an identical 64-unit gap.
+        let json = BANKS.replace(
+            r#""at":[512,128], "bank":"pair" }"#,
+            r#""at":[512,128], "bank":"pair", "trigger":"walkover", "alcove_near":32 }"#,
+        );
+        let Built { data, lifts, .. } = compile_data(&json);
+        let l1 = &lifts[0];
+        let mut fired = l1.activators.clone();
+        fired.sort_unstable();
+        let alcove = l1.callable_from[0];
+        assert_ne!(alcove, 0, "the low neighbor is the alcove, not the hall");
+        assert_eq!(fired, {
+            let mut v = vec![0, alcove];
+            v.sort_unstable();
+            v
+        });
+        assert_eq!(
+            lifts[1].callable_from,
+            vec![0],
+            "the hall still calls the second lift"
+        );
+        let _ = data;
+    }
+
+    #[test]
+    fn existing_lift_fixtures_get_no_bank_and_the_same_callers() {
+        let Built { lifts, .. } = compile_data(LIFT);
+        assert_eq!(lifts[0].bank, None);
+        assert_eq!(lifts[0].activators, vec![0]);
+        assert_eq!(lifts[0].callable_from, vec![0]);
     }
 }
