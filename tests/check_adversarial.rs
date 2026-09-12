@@ -1340,6 +1340,9 @@ fn the_hilera_playtest_map_is_modeled_not_warned_about() {
 fn a_compiled_bank_is_modeled_not_warned_about() {
     let (map, tables, _) = banks_udmf();
     let report = run(&map, "MAP01", &tables, None);
+    // Assert exactly the way `the_muralla_playtest_map_is_modeled_not_warned_about`
+    // does (read it first): no Error, no Warning, whatever Info rows the
+    // checker prints for every map.
     let noisy: Vec<_> = report
         .findings
         .iter()

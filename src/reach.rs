@@ -2053,5 +2053,10 @@ mod tests {
             "{:?}",
             findings.unreachable
         );
+        assert!(
+            findings.stranded.is_empty(),
+            "a bank strands nobody: every member returns to its caller {:?}",
+            findings.stranded
+        );
     }
 }
