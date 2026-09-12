@@ -62,9 +62,13 @@ Limits the numbers carry (also the probe's §J):
 - **Stasis semantics.** `EV_StopPlat` freezes every active plat carrying the tag, of any type.
   Whether a stop line ever fires before its start line, or freezes a DWUS lift on a shared tag, is
   not modeled.
-- **The walking model is a pure height test.** `ML_BLOCKING` fences, monsters, the player's radius
-  and use-reach all read as passable; hop distances and the strand test are pure two-sided
-  adjacency.
+- **The probe's own walking model is a pure height test.** For the descriptive rows (§A–§G:
+  placement, activators, hops, the strand test) `ML_BLOCKING` fences, monsters, the player's
+  radius and use-reach all read as passable, and hops are pure two-sided adjacency. The §H arbiter
+  and the §I bank gates are the exception: they run the shipped recognizers over the verifier's
+  scene (`check::plats::resolve_plats`), whose activators honor `Boundary::passable` and the
+  dead-end-pocket rule, so those yields and A / A′ / B counts carry the verifier's geometry, not
+  the probe's.
 - **UDMF-origin maps** (66 in the sample) are read with Doom special numbers.
 
 ## Definitions the numbers depend on
@@ -540,8 +544,9 @@ From `linuxdoom-1.10` at `a77dfb96cb91780ca334d0d4cfd86957558007e0`, read for th
 - Which way a plat goes first (`P_Random()&1`), and therefore where a rider finds it.
 - Stasis interactions: a stop line firing before its start, a stop freezing a DWUS lift on a shared
   tag, a start line waking a plat another line stopped.
-- `ML_BLOCKING`, monsters, the player's radius and use-reach — hops, activators and the strand test
-  are pure adjacency and height tests.
+- `ML_BLOCKING`, monsters, the player's radius and use-reach in the descriptive rows — the probe's
+  hops, activators and strand test are pure adjacency and height tests (the §H arbiter and the §I
+  gates use the verifier's resolver instead; see Method).
 - Which sector a rider *boards* a two-room bounce from, and whether a start line's activator sector
   is on the rider's route (only distance and player-start adjacency are counted).
 - Sound: a perpetual plat plays `sfx_pstart`/`sfx_pstop` at every reversal (`T_PlatRaise`).
