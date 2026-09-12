@@ -341,8 +341,8 @@ as today** = that, and the six axes as shipped (a one-shot plat is refused by `l
 `OneShot`; a perpetual plat is not judged at all, so the column overstates what a recognizer would
 pass). **Provisional** = the plat recognizer re-run on the twin-rewritten map, and every perpetual
 plat passing the loose provisional gate (Definitions). **The provisional gate is a ceiling, not the
-design**: it takes any two-room or island plat with a clean tag, any rest but *between*, and asks
-nothing about where the start line is.
+design**: it takes any plat of any shape class — two-room, island or residual — with a clean tag and
+a rest at low or at high (never *between* or dead), and asks nothing about where the start line is.
 
 | column (sample, U = 1,282) | line axis | all axes as today | provisional |
 |---|---:|---:|---:|
