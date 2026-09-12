@@ -72,7 +72,10 @@ floor with the platform risen between them) and a **pedestal** (a raised island 
 in the IR's own `pedestals` list). P5 is re-derived from the emitted geometry in
 `rules::check_lift_return`, and again at layer 4 as `V-P5`. Shapes, triggers, rest positions and
 riser rendering were measured over DOOM/DOOM2, Final Doom and an idgames sample before any of it
-was designed: `docs/measurements/lift-shapes-2026-08-29.md`.
+was designed: `docs/measurements/lift-shapes-2026-08-29.md`. **Sub-project 4b (2026-09-12) added
+banks:** `Portal::bank`/`Pedestal::bank` let several members share one tag, and `lift::plat`
+judges each member alone instead of refusing the whole tag on sight, moving the idgames lift axis
+from 783 to 798 of 1,282 sample maps (`docs/measurements/lifts-banks-2026-09-12.md`).
 
 **Phase 4 — floor actions. Shipped.** A floor moves **once** and stays: `lowerFloorToLowest`
 carrying **23** (S1 switch) or **38** (W1 walkover), and `raiseFloorToNearest` carrying **18**/

@@ -531,6 +531,20 @@ floor, each strictly inside the rectangle. A room's own `things` may not stand o
 (they would spawn in the platform's sector rather than on the room floor the author gave them);
 they belong in the pedestal's own list instead.
 
+**A bank is a name shared by lift portals and pedestals, not a new list.** `bank: Option<String>`
+on `Portal` (legal only when `kind == lift`; refused on any other kind, `IrError::BankOnNonLiftPortal`)
+and on `Pedestal` lets two or more members share one allocated tag, so any line naming the bank
+moves every member. A member may set `trigger: none` (`LiftTrigger::None` on a portal,
+`PedestalTrigger::None` on a pedestal) to place no line of its own — legal only inside a bank
+(`IrError::TriggerNoneOutsideBank`), since a lone lift with no trigger is a trap the IR refuses
+before P5 has to. `Ir::from_json` validates every bank: two or more members
+(`IrError::BankOfOne`), at least one member with a trigger other than `none`
+(`IrError::BankUncalled`), and one `speed` across the whole bank (`IrError::BankMixedSpeed`) —
+`EV_DoPlat` takes the plat type from the line pressed and applies it to every sector on the tag
+(`p_plats.c:164-181`, pinned `a77dfb96`), so a fast switch on one member would blaze the whole
+bank whatever the others say. Each member keeps its own geometry, rest, travel and low floor
+unchanged, because each tagged sector is still its own thinker with its own `low`.
+
 **Floor actions are a fourth mechanism: one trigger, fired once, moving one or more floors.** A
 platform rests, travels and comes back under the player's own use; a floor action goes once and
 stays. The corpus authors it that way — 77 % of the floor lines in the sample of record are the
@@ -654,7 +668,8 @@ threshold below is read from the engine constants table (§7.4); no rule hardcod
   some trigger must fire from that floor: a use special from its front sector (`P_UseSpecialLine`
   is front-side only), or a walkover from whichever side can cross the line at rest. A trigger on
   top is optional — the descent is free — but a lift callable only from above is a trap for the
-  player below.
+  player below. A bank member is called only by a bank line whose activator sector is one of its
+  own neighbors at its low floor; a member no adjacent line calls is refused.
 - **P6 — Monster mobility.** A monster's roaming region must not be split by a drop exceeding
   the engine's step height, unless the drop is deliberately one-way.
 - **P7 — No softlock.** Every region the player can enter must retain a path back to the

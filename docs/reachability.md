@@ -128,7 +128,9 @@ Derives the graph from what was actually emitted — never from authored intent,
 cannot drift from the geometry the way an IR-level re-derivation could, and phase-2
 stair chains and phase-3 lift sectors will appear in it automatically when they exist
 (lifts will need a new edge kind for "traversable by riding"; that extension point is
-the enum, not speculative support now):
+the enum, not speculative support now); the shipped `EdgeKind::Lift` gives a bank member
+with `trigger: none` its edge from whichever low neighbor another member's line on the
+shared tag fires from, never from itself:
 
 - **Nodes** from `MapData.sectors` (floor, ceiling); **edges** from every linedef with
   a `back` sidedef, connecting the front and back sectors.
