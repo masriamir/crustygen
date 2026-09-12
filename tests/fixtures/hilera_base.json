@@ -1,0 +1,30 @@
+{
+  "seed": 20260912, "grid": 64, "theme": "tech_base",
+  "rooms": [
+    { "id": "hall", "footprint": [[0,0],[0,640],[640,640],[640,0]], "floor": 0, "ceiling": 256, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
+      "things": [ { "kind": "player1_start", "at": [320, 512], "angle": 270 },
+                  { "kind": "shotgun", "at": [128, 512], "angle": 0 } ] },
+    { "id": "ledge", "footprint": [[704,0],[704,640],[1216,640],[1216,0]], "floor": 128, "ceiling": 320, "light": 144,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
+      "things": [ { "kind": "imp", "at": [960, 320], "angle": 180 }, { "kind": "imp", "at": [1088, 128], "angle": 180 } ] },
+    { "id": "gate", "footprint": [[1280,0],[1280,640],[1792,640],[1792,0]], "floor": 128, "ceiling": 320, "light": 160,
+      "floor_tex": "FLOOR4_8", "ceil_tex": "CEIL3_5", "wall_tex": "STARTAN3",
+      "things": [ { "kind": "stimpack", "at": [1536, 320], "angle": 0 } ] }
+  ],
+  "portals": [
+    { "a": "hall", "b": "ledge", "kind": "lift", "width": 128, "at": [640, 160], "bank": "pair" },
+    { "a": "hall", "b": "ledge", "kind": "lift", "width": 128, "at": [640, 480], "bank": "pair", "trigger": "none" },
+    { "a": "ledge", "b": "gate", "kind": "lift", "width": 64, "at": [1216, 160], "rise": 96, "bank": "bars" },
+    { "a": "ledge", "b": "gate", "kind": "lift", "width": 64, "at": [1216, 480], "rise": 96, "bank": "bars", "trigger": "none" }
+  ],
+  "pedestals": [
+    { "id": "p1", "room": "hall", "at": [128, 128], "rise": 64, "bank": "prizes",
+      "things": [ { "kind": "shells", "at": [160, 160], "angle": 0 } ] },
+    { "id": "p2", "room": "hall", "at": [288, 128], "rise": 64, "bank": "prizes", "trigger": "none",
+      "things": [ { "kind": "medikit", "at": [320, 160], "angle": 0 } ] },
+    { "id": "p3", "room": "hall", "at": [448, 128], "rise": 64, "bank": "prizes", "trigger": "none",
+      "things": [ { "kind": "soulsphere", "at": [480, 160], "angle": 0 } ] }
+  ],
+  "exits": [ { "room": "gate", "trigger": "switch", "at": [1792, 320], "width": 64 } ]
+}

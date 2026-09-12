@@ -55,20 +55,23 @@ same bytes: `crustygen-build tests/fixtures/entrada_base.json out.wad` writes
 a file byte-identical to the committed `maps/entrada.wad`,
 `crustygen-build tests/fixtures/salto_base.json out.wad` to `maps/salto.wad`,
 `crustygen-build tests/fixtures/ascensor_base.json out.wad` to
-`maps/ascensor.wad`, and `crustygen-build tests/fixtures/muralla_base.json
-out.wad` to `maps/muralla.wad`. `tests/build_cli.rs` pins all four. The binary
-Doom-format twins are not produced here — they are `cwad convert`
-downconverts. `maps/entrada_doom.wad` is the
-one described in `tests/first_map.rs` (`cwad convert --to doom --nodes` on the
-un-noded twin `pack::pack_udmf` writes); `maps/salto_doom.wad` was produced by
-running that downconvert against the committed UDMF build itself,
-`cwad convert maps/salto.wad --to doom --nodes --lenient -o maps/salto_doom.wad`,
-which drops the `ZNODES` lump with a warning rather than refusing and rebuilds
-the node lumps for the Doom format regardless. `maps/ascensor_doom.wad` came
-the same way, `cwad convert maps/ascensor.wad --to doom --nodes --lenient -o
-maps/ascensor_doom.wad`, and `maps/muralla_doom.wad` likewise,
-`cwad convert maps/muralla.wad --to doom --nodes --lenient -o
-maps/muralla_doom.wad`. The two routes agree: the same command over
+`maps/ascensor.wad`, `crustygen-build tests/fixtures/muralla_base.json
+out.wad` to `maps/muralla.wad`, and `crustygen-build
+tests/fixtures/hilera_base.json out.wad` to `maps/hilera.wad`.
+`tests/build_cli.rs` pins all five. The binary Doom-format twins are not
+produced here — they are `cwad convert` downconverts. `maps/entrada_doom.wad`
+is the one described in `tests/first_map.rs` (`cwad convert --to doom
+--nodes` on the un-noded twin `pack::pack_udmf` writes); `maps/salto_doom.wad`
+was produced by running that downconvert against the committed UDMF build
+itself, `cwad convert maps/salto.wad --to doom --nodes --lenient -o
+maps/salto_doom.wad`, which drops the `ZNODES` lump with a warning rather than
+refusing and rebuilds the node lumps for the Doom format regardless.
+`maps/ascensor_doom.wad` came the same way, `cwad convert maps/ascensor.wad
+--to doom --nodes --lenient -o maps/ascensor_doom.wad`,
+`maps/muralla_doom.wad` likewise, `cwad convert maps/muralla.wad --to doom
+--nodes --lenient -o maps/muralla_doom.wad`, and `maps/hilera_doom.wad`
+likewise, `cwad convert maps/hilera.wad --to doom --nodes --lenient -o
+maps/hilera_doom.wad`. The two routes agree: the same command over
 `maps/entrada.wad` reproduces the committed `maps/entrada_doom.wad`
 byte-for-byte.
 

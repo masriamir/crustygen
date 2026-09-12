@@ -1,6 +1,7 @@
 //! CLI tests for `crustygen-build`: exit codes per pipeline stage, the
 //! stdout summary, and byte-identity with the committed `maps/entrada.wad`,
-//! `maps/salto.wad`, `maps/ascensor.wad` and `maps/muralla.wad`.
+//! `maps/salto.wad`, `maps/ascensor.wad`, `maps/muralla.wad` and
+//! `maps/hilera.wad`.
 
 use std::path::PathBuf;
 use std::process::{Command, Output};
@@ -9,7 +10,7 @@ use crustywad::Wad;
 
 mod common;
 
-use common::{ASCENSOR, ENTRADA, MURALLA, SALTO};
+use common::{ASCENSOR, ENTRADA, HILERA, MURALLA, SALTO};
 
 fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_crustygen-build"))
@@ -202,6 +203,28 @@ fn the_muralla_fixture_builds_byte_identical_to_the_committed_wad() {
         "got: {stdout}"
     );
     assert!(stdout.contains("14 sectors"), "got: {stdout}");
+    assert!(out.stderr.is_empty(), "stderr: {}", stderr(&out));
+}
+
+/// Hilera, the lift-bank playtest map: the same drift guard entrada, salto,
+/// ascensor and muralla carry, over the fixture that exercises every bank
+/// shape the construct offers. 10 sectors = 3 rooms + 2 `pair`-bank lift
+/// platforms + 2 `bars`-bank barrier platforms + 3 `prizes`-bank pedestal
+/// islands.
+#[test]
+fn the_hilera_fixture_builds_byte_identical_to_the_committed_wad() {
+    let (out, wad) = build(HILERA, "hilera", &[]);
+    assert_eq!(out.status.code(), Some(0), "stderr: {}", stderr(&out));
+    let committed =
+        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("maps/hilera.wad"))
+            .expect("read maps/hilera.wad");
+    assert_eq!(wad.expect("a WAD was written"), committed);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.starts_with("MAP01: 3 rooms, 4 portals"),
+        "got: {stdout}"
+    );
+    assert!(stdout.contains("10 sectors"), "got: {stdout}");
     assert!(out.stderr.is_empty(), "stderr: {}", stderr(&out));
 }
 

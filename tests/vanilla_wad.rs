@@ -1,6 +1,7 @@
 //! Library-level tests for `crustygen::ingest` (issue #21): the binary
 //! round-trip path, exercised against binary re-emissions of entrada, of
-//! ascensor (the lift playtest map) and of muralla (the floor one).
+//! ascensor (the lift playtest map), of muralla (the floor one) and of
+//! hilera (the lift-bank one).
 
 mod common;
 
@@ -97,6 +98,46 @@ fn binary_muralla_loads_via_assembly() {
             .count(),
         2,
         "the bridge's rise is written on both of the pit's thresholds"
+    );
+    assert!(
+        loaded.notes.is_empty(),
+        "unexpected notes: {:?}",
+        loaded.notes
+    );
+}
+
+/// Hilera, the lift-bank playtest map, through the same binary round trip:
+/// every bank's tag and its switch specials survive the downconvert and come
+/// back through assembly.
+#[test]
+fn binary_hilera_loads_via_assembly() {
+    let (wad, group) = first_group(common::binary_hilera_wad());
+    let loaded = ingest::load_map(&wad, &group).expect("binary map loads");
+    assert_eq!(loaded.origin, MapOrigin::AssembledFromBinary);
+    assert!(!loaded.map.sectors.is_empty(), "assembled map has sectors");
+    assert!(!loaded.map.things.is_empty(), "assembled map has things");
+    // Every trigger on this map is a use line: 62 (the lift/barrier/pedestal
+    // switch, on the `pair`, `bars` and `prizes` banks' own members) and 11
+    // (the exit switch). No bank's `none` member places a line of its own.
+    let specials: std::collections::BTreeSet<i32> =
+        loaded.map.linedefs.iter().map(|l| l.special).collect();
+    for special in [11, 62] {
+        assert!(
+            specials.contains(&special),
+            "special {special} lost in the round trip; present: {specials:?}"
+        );
+    }
+    // Seven use lines carry special 62: 1 on `pair`'s member, 2 on `bars`'s
+    // (both faces of its barrier), 4 on `prizes`'s (every edge of `p1`).
+    assert_eq!(
+        loaded
+            .map
+            .linedefs
+            .iter()
+            .filter(|l| l.special == 62)
+            .count(),
+        7,
+        "one pair switch + two barrier faces + four pedestal faces"
     );
     assert!(
         loaded.notes.is_empty(),
