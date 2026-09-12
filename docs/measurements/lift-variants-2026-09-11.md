@@ -40,7 +40,7 @@ recorded, on the same code paths (`floors.rs`'s §I helpers, now shared rather t
 | idgames all axes, six axes (the **honest** figure) | 119 (9.3 %) | **119 (9.3 %)** |
 | lift tag groups, DOOM+DOOM2 / Final Doom / idgames ([lift-shapes](lift-shapes-2026-08-29.md) §L, `shapes.rs`) | 29 / 47 / 328 | **29 / 47 / 328** |
 | — split / one floor disconnected / several floors | 1·16·12, 4·19·24, 25·158·145 | **1·16·12, 4·19·24, 25·158·145** |
-| idgames `SharedTag` platform refusals ([lifts-2026-08-30](lifts-2026-08-30.md)) | 923 | **923** |
+| idgames platforms refused `bank_caller` by the shipped recognizer (this branch) | — | **231** |
 | idgames `shared_split` groups (recognizer) | 25 | **25** |
 | single-tag platforms where §I's re-derived verdict disagrees with `lift::plat` | 0 | **0 / 0 / 0** |
 
@@ -48,6 +48,10 @@ Every one reproduces to the unit. The honest 119 is obtained the way `crustygen-
 (`src/lift/corpus.rs`): the teleport, plat *and floor* recognizers each run when their specials are
 present. The floor pass's own arbiter row omits the floor recognizer, which is why it reads 122;
 both are printed so neither can be mistaken for the other.
+
+*Re-baselined 2026-09-12 with the bank construct (this branch): the recognizer no longer refuses a
+shared tag as such; §I's "judged alone" rows are now its own verdicts, and the historical 923
+`shared_tag` figure is the count of platforms it once refused for that reason.*
 
 Every special value below was transcribed from the fetched source, not recalled; the engine layer of
 the probe cites `file:line` beside each constant (see "Engine facts" below).

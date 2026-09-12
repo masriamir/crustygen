@@ -796,7 +796,7 @@ struct Agg {
     uniform_low: u64,
     uniform_neighbors: u64,
     common_neighbor: Hist,
-    shared_tag_refusals: u64,
+    bank_caller_refusals: u64,
     recognizer_split: u64,
     unshared_mismatch: u64,
     bank_columns: Vec<BankColumn>,
@@ -807,7 +807,7 @@ struct Agg {
 struct BankColumn {
     /// Maps expressible on all six axes with this column's lift axis.
     all_honest: u64,
-    /// Platforms the recognizer refuses `SharedTag` today whose group this
+    /// Platforms the recognizer refuses `bank_caller` today whose group this
     /// column accepts.
     recovered: u64,
     /// Groups this column accepts.
@@ -1317,11 +1317,17 @@ fn record_arbiter(
 
 /// `lift::plat`'s per-platform verdict re-derived on a platform judged **as
 /// if its tag were unshared**: the same eight refusals in the same order as
-/// `src/lift/plat.rs:418-442`, with the `SharedTag` arm skipped, and the
-/// same shape rule (`:449-456`). `lift::plat` is not changed; its refusal
-/// function is private and takes the resolved `shared_tag` as read, so the
-/// order is re-derived here and checked against the recognizer on every
-/// single-tag platform (`Agg::unshared_mismatch`).
+/// `src/lift/plat.rs:432-456`, with the `BankCaller` arm skipped, and the
+/// same shape rule (`:462-469`). Skipping that one arm, rather than reading
+/// the recognizer's own `Some(Refusal::BankCaller)` back as accepted,
+/// matters for a bank member: a platform the recognizer stops at
+/// `BankCaller` has not yet been checked against `ConflictingAction`, the
+/// arm that follows it, and this function still runs that check before
+/// accepting. `lift::plat` is not changed; its refusal function is private
+/// and takes the resolved `shared_tag` as read, so the order is re-derived
+/// here — checked against the recognizer on every single-tag platform,
+/// where the skipped arm can never fire either way (`Agg::unshared_mismatch`),
+/// and used unchanged as a bank member's own verdict (`analyze_group`).
 fn unshared_verdict(p: &ScenePlat) -> Result<PlatShape, Refusal> {
     let speed = speed_of(&p.triggers);
     let one_floor = p.distinct_neighbor_floors == 1;
@@ -1360,7 +1366,7 @@ fn speed_of(triggers: &[SceneTrigger]) -> Speed {
 }
 
 /// `lift::plat`'s shape rule for an unrefused platform
-/// (`src/lift/plat.rs:449-456`).
+/// (`src/lift/plat.rs:462-469`).
 fn shape_of(rest: PlatRest, neighbors: usize) -> PlatShape {
     match (rest, neighbors) {
         (PlatRest::Top, _) => PlatShape::Lift,
@@ -1722,7 +1728,7 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
     let (scene, tables) = (v.ctx.scene, v.tables);
     let report = lift::plat::recognize(scene, tables);
     let resolved = resolve_plats(scene, tables);
-    agg.shared_tag_refusals += report.counts.bank_caller;
+    agg.bank_caller_refusals += report.counts.bank_caller;
     agg.recognizer_split += report.counts.shared_split;
     let recognizer_refusal = |sector: usize| {
         report
@@ -1740,7 +1746,7 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
         }
     }
     // A group member's own refusal is the group gate's business: a member
-    // refused `Dead` (precedence 1, ahead of `SharedTag`) is still a trim
+    // refused `Dead` (precedence 1, ahead of `BankCaller`) is still a trim
     // piece the split reading can absorb.
     let singles_ok = report.broken_lines.is_empty()
         && resolved
@@ -1848,8 +1854,8 @@ fn report_banks(agg: &Agg) {
     );
     println!("- floor class: {}", agg.groups_floor_class.all());
     println!(
-        "- arbiters: `SharedTag` platform refusals (recognizer): {} · `shared_split` groups (recognizer): {} · single-tag platforms where the re-derived verdict disagrees with the recognizer: {}",
-        agg.shared_tag_refusals, agg.recognizer_split, agg.unshared_mismatch
+        "- arbiters: `bank_caller` refusals (recognizer): {} · `shared_split` groups (recognizer): {} · single-tag platforms where the re-derived verdict disagrees with the recognizer: {}",
+        agg.bank_caller_refusals, agg.recognizer_split, agg.unshared_mismatch
     );
     println!(
         "\n**Members judged as if the tag were unshared** ({} members).\n",
@@ -1916,7 +1922,7 @@ fn report_banks(agg: &Agg) {
     );
     println!(
         "\n**Yield.** Line axis unchanged at {} ({}). Per column: honest all-axes maps, \
-`SharedTag` platform refusals recovered, groups accepted. A = every member passes alone and \
+`bank_caller` refusals recovered, groups accepted. A = every member passes alone and \
 has a Low-activator lift line on its own face; A′ = every member passes alone and is called from \
 a two-sided neighbor standing at its own low; B = every member passes alone (callers ignored, \
 the floor recognizer's rule); split = a one-floor, mutually adjacent group read as one lift.\n",
@@ -1930,7 +1936,7 @@ the floor recognizer's rule); split = a one-floor, mutually adjacent group read 
             c.all_honest,
             pct(c.all_honest, agg.maps),
             c.recovered,
-            agg.shared_tag_refusals,
+            agg.bank_caller_refusals,
             c.groups,
             agg.groups_n
         );
@@ -3044,11 +3050,11 @@ mod tests {
         );
         assert_eq!(agg.common_neighbor.all(), "none in common: 1");
         // Each member's own line calls it, so the recognizer refuses
-        // neither `BankCaller`: `shared_tag_refusals` is 0, not the pair the
-        // old blanket `SharedTag` refusal counted.
+        // neither `BankCaller`: `bank_caller_refusals` is 0, not the pair
+        // the old blanket `SharedTag` refusal counted.
         assert_eq!(
             (
-                agg.shared_tag_refusals,
+                agg.bank_caller_refusals,
                 agg.recognizer_split,
                 agg.unshared_mismatch
             ),
@@ -3180,7 +3186,7 @@ mod tests {
         assert_eq!(agg.group_composition.all(), "any refused: 1");
         // The dead member reports `Dead`; T1's own neighbor (A) calls it, so
         // neither member is `BankCaller` and there is nothing to recover.
-        assert_eq!(agg.shared_tag_refusals, 0);
+        assert_eq!(agg.bank_caller_refusals, 0);
         let recovered: Vec<u64> = agg.bank_columns.iter().map(|c| c.recovered).collect();
         assert_eq!(recovered, vec![0, 0, 0, 0, 0]);
         let resolved = resolve_plats(&f.scene, &tables);
