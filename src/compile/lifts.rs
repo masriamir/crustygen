@@ -357,7 +357,10 @@ pub fn emit_lifts(
     // `data/engine.toml`'s `[plat]` entry, which is where `max_active` comes
     // from). Counting every emitted platform is the conservative reading:
     // nothing here can prove a player will not have them all moving at the
-    // same moment.
+    // same moment. For a bank it is not even conservative but exact — one
+    // press activates every member on the tag at once
+    // (`p_plats.c:164-181`, pinned `a77dfb96`), so a bank of N members is N
+    // active plats from a single use, whatever the player does next.
     let max = tables.plat().max_active;
     if out.len() > max {
         return Err(CompileError::TooManyPlats {
@@ -721,7 +724,23 @@ fn emit_portal_lift(
         vec![low_neighbor]
     };
     let activators: Vec<usize> = match portal.trigger {
-        LiftTrigger::Switch | LiftTrigger::BothEnds => default_callers.clone(),
+        LiftTrigger::Switch => default_callers.clone(),
+        // The switch below fires from the low neighbor, and the walkover on
+        // the top face fires from either side that can cross it at rest
+        // (`P_TryMove`'s step rule). Its non-platform side is the level
+        // room — `emit_segment` puts the neighbor on each threshold's front
+        // and the platform on its back — and `Ir::from_json` refuses `rise`
+        // on anything but a barrier (`IrError::LiftRiseOnUnequalFloors`),
+        // while `BarrierTrigger` refuses `both_ends` on a barrier, so the
+        // platform here always rests exactly level with that room and the
+        // crossing is always within the step. A bank member stacked on this
+        // one is called from it.
+        LiftTrigger::BothEnds => {
+            let level = data.sidedefs[data.linedefs[top_line].front].sector;
+            let mut v = default_callers.clone();
+            v.push(level);
+            v
+        }
         LiftTrigger::Walkover => {
             let outer = low_outer
                 .expect("Ir::from_json requires the low room's alcove for a walkover lift");
@@ -1936,7 +1955,7 @@ mod tests {
     }"#;
 
     #[test]
-    fn a_bank_shares_one_tag_and_its_none_member_places_no_line() {
+    fn a_bank_shares_one_tag_and_its_none_member_places_no_special() {
         let Built {
             tables,
             data,
@@ -2028,6 +2047,120 @@ mod tests {
         assert!(
             l2.callable_from.is_empty(),
             "the ledge is the second lift's low neighbor, but no bank line fires from the ledge"
+        );
+    }
+
+    /// The same three rooms stacked, with the first member's trigger on
+    /// `both_ends`: its switch fires from the hall below and its top-face
+    /// walkover from the ledge above, which is the *second* member's low
+    /// neighbor. The bank therefore does reach the second member — the one
+    /// thing `BANK_FAR`'s plain switch does not — so the map is playable
+    /// and `compile` must accept it.
+    const BANK_STACK: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"hall", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"ledge", "footprint":[[576,0],[576,512],[1088,512],[1088,0]], "floor":128, "ceiling":320, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"far", "footprint":[[1152,0],[1152,512],[1664,512],[1664,0]], "floor":256, "ceiling":448, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"hall", "b":"ledge", "kind":"lift", "width":128, "at":[512,256], "bank":"pair", "trigger":"both_ends" },
+        { "a":"ledge", "b":"far", "kind":"lift", "width":128, "at":[1088,256], "bank":"pair", "trigger":"none" }
+      ],
+      "exits":[ { "room":"far", "trigger":"switch", "at":[1664,256], "width":64 } ]
+    }"#;
+
+    #[test]
+    fn a_top_face_walkover_calls_the_member_stacked_above_it() {
+        let Built { lifts, .. } = compile_data(BANK_STACK);
+        let (l1, l2) = (&lifts[0], &lifts[1]);
+        // Rooms are the first sectors, in IR order: hall 0, ledge 1, far 2.
+        let mut fired = l1.activators.clone();
+        fired.sort_unstable();
+        assert_eq!(
+            fired,
+            vec![0, 1],
+            "the switch fires from the hall, the top-face walkover from the ledge"
+        );
+        assert_eq!(
+            l2.callable_from,
+            vec![1],
+            "the ledge calls the stacked member, across the platform it stands level with"
+        );
+        let ir = Ir::from_json(BANK_STACK).expect("ir");
+        let tables = Tables::load().expect("tables");
+        compile(&ir, &tables).expect("the stacked bank is playable: P5 and P7 pass");
+    }
+
+    /// A barrier bank: two risen walls across the same 64-unit gap between
+    /// `west` and `mid`, the second placing no line of its own, with a plain
+    /// passage on to `east` and the exit. A barrier stands above both its
+    /// rooms, so both are its default callers — and the first member carries
+    /// a switch on each of its two faces, which fire from both.
+    const BARRIER_BANK: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"west", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"mid", "footprint":[[576,0],[576,512],[1088,512],[1088,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"east", "footprint":[[1152,0],[1152,512],[1664,512],[1664,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"west", "b":"mid", "kind":"lift", "width":128, "at":[512,128], "rise":96, "bank":"bars" },
+        { "a":"west", "b":"mid", "kind":"lift", "width":128, "at":[512,384], "rise":96, "bank":"bars", "trigger":"none" },
+        { "a":"mid", "b":"east", "kind":"plain", "width":128, "at":[1088,384] }
+      ],
+      "exits":[ { "room":"east", "trigger":"switch", "at":[1664,256], "width":64 } ]
+    }"#;
+
+    /// [`BARRIER_BANK`] with its second member moved onto the `mid` <-> `east`
+    /// wall: the bank's only lines are still the first member's, which fire
+    /// from `west` and `mid`, so `east` — the second member's far room — is
+    /// a default caller the bank never reaches.
+    fn barrier_chain() -> String {
+        BARRIER_BANK.replace(
+            r#""a":"west", "b":"mid", "kind":"lift", "width":128, "at":[512,384]"#,
+            r#""a":"mid", "b":"east", "kind":"lift", "width":128, "at":[1088,128]"#,
+        )
+    }
+
+    #[test]
+    fn a_none_barrier_member_keeps_both_of_its_callers() {
+        let Built { lifts, .. } = compile_data(BARRIER_BANK);
+        let (l1, l2) = (&lifts[0], &lifts[1]);
+        // Rooms are the first sectors, in IR order: west 0, mid 1, east 2.
+        assert_eq!(
+            (l1.shape, l2.shape),
+            (LiftShape::Barrier, LiftShape::Barrier)
+        );
+        let mut fired = l1.activators.clone();
+        fired.sort_unstable();
+        assert_eq!(
+            fired,
+            vec![0, 1],
+            "a barrier's switch sits on both faces, so it fires from both rooms"
+        );
+        assert_eq!(
+            l2.callable_from,
+            vec![0, 1],
+            "the bank lowers the second wall for both of its sides"
+        );
+    }
+
+    #[test]
+    fn a_none_barrier_member_beyond_the_banks_lines_keeps_one_caller() {
+        let Built { lifts, .. } = compile_data(&barrier_chain());
+        let l2 = &lifts[1];
+        assert_eq!(
+            l2.callable_from,
+            vec![1],
+            "`mid` fires the bank's switch; `east` fires nothing, so the wall \
+             lowers for one side only"
         );
     }
 
