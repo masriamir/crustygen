@@ -40,7 +40,7 @@ recorded, on the same code paths (`floors.rs`'s §I helpers, now shared rather t
 | idgames all axes, six axes (the **honest** figure) | 119 (9.3 %) | **119 (9.3 %)** |
 | lift tag groups, DOOM+DOOM2 / Final Doom / idgames ([lift-shapes](lift-shapes-2026-08-29.md) §L, `shapes.rs`) | 29 / 47 / 328 | **29 / 47 / 328** |
 | — split / one floor disconnected / several floors | 1·16·12, 4·19·24, 25·158·145 | **1·16·12, 4·19·24, 25·158·145** |
-| idgames platforms refused `bank_caller` by the shipped recognizer (this branch) | — | **231** |
+| platforms refused `bank_caller` by the shipped recognizer, DOOM+DOOM2 / Final Doom / idgames (this branch) | — | **7 / 22 / 231** |
 | idgames `shared_split` groups (recognizer) | 25 | **25** |
 | single-tag platforms where §I's re-derived verdict disagrees with `lift::plat` | 0 | **0 / 0 / 0** |
 
@@ -50,8 +50,12 @@ present. The floor pass's own arbiter row omits the floor recognizer, which is w
 both are printed so neither can be mistaken for the other.
 
 *Re-baselined 2026-09-12 with the bank construct (this branch): the recognizer no longer refuses a
-shared tag as such; §I's "judged alone" rows are now its own verdicts, and the historical 923
-`shared_tag` figure is the count of platforms it once refused for that reason.*
+shared tag as such. §I's per-member "judged alone" verdicts are still this probe's own
+re-derivation of `lift::plat`'s refusal order with the `BankCaller` arm skipped, unchanged by the
+bank construct; what the recognizer supplies directly is each single-tag platform's acceptance —
+the floor every §I gate, including A′, starts from — and the `bank_caller` arbiter count above, a
+different, smaller population than the historical `SharedTag` figures §I still reports (see
+"Recovered" under Definitions).*
 
 Every special value below was transcribed from the fetched source, not recalled; the engine layer of
 the probe cites `file:line` beside each constant (see "Engine facts" below).
@@ -115,9 +119,12 @@ Limits the numbers carry (also the probe's §J):
 - **Lift tag group (bank)** — a DWUS/blaze lift tag (`is_lift`) naming two or more sectors; its
   **members** are those sectors, each a `ScenePlat` of its own (`p_plats.c:164-169` makes one
   `plat_t` per tagged sector, with its own `low` from its own neighbors, `:207-212`). **Judged as
-  if unshared** — `lift::plat`'s eight refusals re-derived in its order (`src/lift/plat.rs:418-442`)
-  with the `SharedTag` arm skipped; the probe checks its re-derivation against the recognizer on
-  every single-tag platform and reports the disagreements (0). **Own line** — a lift line with the
+  if unshared** — `lift::plat`'s eight refusals re-derived in its order (`src/lift/plat.rs:432-456`)
+  with the `BankCaller` arm skipped — it precedes `ConflictingAction`, so a platform the recognizer
+  stops at `BankCaller` may never be judged against that later arm, and skipping the check (rather
+  than reading a `BankCaller` refusal back as accepted) still runs it; the probe checks its
+  re-derivation against the recognizer on every single-tag platform, where the skipped arm can
+  never fire either way, and reports the disagreements (0). **Own line** — a lift line with the
   member as a side; **own Low line** — one that also fires from a `Low` activator relative to the
   member; **callable from Low** — `ScenePlat::callable_low` (`src/check/plats.rs:149`) over every
   line naming the tag, wherever it sits; **within one hop** — a line on the member's face or with
@@ -137,8 +144,14 @@ Limits the numbers carry (also the probe's §J):
   counted as the platform — passing the same eight refusals. A column's lift axis holds when no
   lift line is broken, every single-tag platform passes the recognizer as today, and every group
   passes the column's gate; the line axis is unchanged. **Recovered** counts the platforms the
-  recognizer refuses `SharedTag` today whose group the column accepts (a group member refused
-  `Dead` — precedence 1 — is not among the 923 and is not counted).
+  recognizer refused `SharedTag` *before the bank construct on this branch* whose group the column
+  accepts (a group member refused `Dead` — precedence 1 — is not among the 923/135/58 and is not
+  counted). That 923/135/58 population — every non-`Dead` bank member — is historical, unchanged by
+  the bank construct, and is what `unshared_verdict` still re-derives member by member (above); the
+  shipped recognizer on this branch instead refuses the much smaller `bank_caller` population
+  (231/22/7 — Method, above), a subset of the same 923/135/58 holding only the members no adjacent
+  line calls (the rest of the 923/135/58 are accepted, or refused for an earlier reason, by the
+  bank-aware recognizer).
 - **§H columns** — *line axis*: every out-of-set special the map uses is in the column; *all axes
   as today*: that, and the six axes as shipped (a one-shot plat is still refused by the plat
   recognizer, a perpetual plat is not judged at all); *provisional*: one-shot triggers read as
@@ -373,9 +386,10 @@ is the smallest: the two lift variants together lift the honest figure from 119 
 ## I. Lift tag groups (banks)
 
 One line drives every sector carrying its tag (`p_plats.c:164-169`), each with its own thinker and
-its own `low` (`:207-212`); the recognizer refuses every such member `SharedTag` today (923 in the
-sample, the binding refusal of [lifts-2026-08-30](lifts-2026-08-30.md)). This section judges the
-members alone and the groups as wholes.
+its own `low` (`:207-212`); the recognizer refused every such member `SharedTag` before the bank
+construct on this branch (923 in the sample, the binding refusal of
+[lifts-2026-08-30](lifts-2026-08-30.md)) — see the Method note above for what it refuses instead.
+This section judges the members alone and the groups as wholes.
 
 | | DOOM+DOOM2 | Final Doom | idgames |
 |---|---|---|---|
@@ -419,7 +433,10 @@ and 134 Pedestal verdicts are exactly the shared-tag probe shapes it cites.
 | common outside neighbor: all share one / some share / none in common | 17 / 1 / 11 | 25 / 1 / 21 | **140 / 47 / 141** |
 | — of the "all share one" groups, every member neighbor-called (A′) | 12 of 17 | 13 of 25 | **84 of 140** |
 
-**Yield** (line axis unchanged: 1 / 0 / 187):
+**Yield** (line axis unchanged: 1 / 0 / 187). The "recovered of N" denominators below (58 / 135 /
+923) are the historical `SharedTag` population defined under "Recovered" above — refused before the
+bank construct, unchanged by it — not the shipped recognizer's `bank_caller` count (7 / 22 / 231,
+Method); the two are different, differently sized populations:
 
 | column | DOOM+DOOM2 all axes · recovered of 58 · groups of 29 | Final Doom all axes · recovered of 135 · groups of 47 | idgames all axes · recovered of 923 · groups of 328 |
 |---|---|---|---|
