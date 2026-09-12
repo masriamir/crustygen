@@ -30,6 +30,7 @@ const LIFTS: &str = include_str!("golden/lifts.json");
 const ASCENSOR: &str = include_str!("fixtures/ascensor_base.json");
 const MURALLA: &str = include_str!("fixtures/muralla_base.json");
 const FLOORS: &str = include_str!("golden/floors.json");
+const BANKS: &str = include_str!("golden/banks.json");
 
 /// Compiles entrada, emits its TEXTMAP, and parses it back — the same
 /// compile -> emit -> parse round trip `tests/check_conformance.rs` uses, so
@@ -742,6 +743,18 @@ fn floors_udmf() -> (UdmfMap, Tables, Compiled) {
     (map, tables, compiled)
 }
 
+/// The bank golden through the same compile → TEXTMAP → parse path
+/// `floors_udmf` takes, with the compiler's own output alongside so a test
+/// can name a member by its bank.
+fn banks_udmf() -> (UdmfMap, Tables, Compiled) {
+    let tables = Tables::load().expect("tables");
+    let ir = Ir::from_json(BANKS).expect("ir");
+    let compiled = compile(&ir, &tables).expect("compiles");
+    let text = emit_textmap(&compiled.data, &compiled.things);
+    let map = parse_udmf(&text, Limits::default()).expect("parses");
+    (map, tables, compiled)
+}
+
 /// The declaration index of the golden's floor target of `shape`. Panics if
 /// the golden ever stops emitting exactly one of that shape, which the
 /// golden test in `tests/golden_textmap.rs` would have caught first.
@@ -1256,6 +1269,79 @@ fn the_muralla_playtest_map_is_modeled_not_warned_about() {
     assert!(
         report.findings.is_empty(),
         "expected zero findings of any severity on muralla: {:?}",
+        report.findings
+    );
+}
+
+/// A compiled bank is modeled, not warned about: V-P5 judges each member
+/// on its own travel and callers, and a tag naming several sectors is not
+/// a V-P13/V-P14 finding.
+#[test]
+fn a_compiled_bank_is_modeled_not_warned_about() {
+    let (map, tables, _) = banks_udmf();
+    let report = run(&map, "MAP01", &tables, None);
+    let noisy: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.severity != Severity::Info)
+        .collect();
+    assert!(noisy.is_empty(), "{noisy:?}");
+}
+
+/// The asymmetry KNOWN-GAPS records: a bank member whose only caller is
+/// remote is refused by the compiler (P5) and by the recognizer
+/// (`bank_caller`), but the verifier's flood credits it optimistically —
+/// every low neighbor gets the edge when no activator is adjacent.
+#[test]
+fn a_remote_only_bank_line_is_credited_by_the_flood_not_refused() {
+    let (mut map, tables, out) = banks_udmf();
+    let pair_tag = out
+        .lifts
+        .iter()
+        .find(|l| l.bank.as_deref() == Some("pair"))
+        .expect("the pair")
+        .tag;
+    let switch = i32::from(tables.lift_special(true, false));
+    // Silence the first lift's own switch...
+    let silenced = map
+        .linedefs
+        .iter_mut()
+        .filter(|l| l.special == switch && l.args[0] == i32::from(pair_tag))
+        .map(|l| {
+            l.special = 0;
+            l.args[0] = 0;
+        })
+        .count();
+    assert_eq!(silenced, 1, "the pair had one switch");
+    // ...and put one on a foyer wall, two rooms from the lifts.
+    let foyer = 0; // rooms are the first sectors, in IR order
+    let wall = map
+        .linedefs
+        .iter()
+        .position(|l| {
+            l.sideback.is_none()
+                && map.sidedefs[usize::try_from(l.sidefront).expect("index")].sector == foyer
+        })
+        .expect("a one-sided foyer wall");
+    map.linedefs[wall].special = switch;
+    map.linedefs[wall].args[0] = i32::from(pair_tag);
+
+    let report = run(&map, "MAP01", &tables, None);
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|f| f.check == "V-P7" && f.severity == Severity::Error),
+        "the flood still reaches the ledge through the optimistic edge: {:?}",
+        report.findings
+    );
+    // The verifier's V-P5 is height-only by design (spec §5): the foyer
+    // wall's front sector stands at the lifts' low floor, so it raises no
+    // finding either. The compiler (P5) and the recognizer (`bank_caller`)
+    // are where this member is refused.
+    assert!(
+        !report.findings.iter().any(|f| f.check == "V-P5"),
+        "V-P5 is height-only and sees a caller at the low floor: {:?}",
         report.findings
     );
 }
