@@ -625,6 +625,10 @@ fn emit_portal_lift(
             set(data, low_line, use_special);
             set(data, top_line, walk_special);
         }
+        // A bank member with no line of its own: `Ir::from_json` already
+        // requires `bank` to be set here, so another member's line carries
+        // the tag this platform shares.
+        LiftTrigger::None => {}
     }
 
     // Risers, on the one sidedef `r_segs.c` draws each from: the lower

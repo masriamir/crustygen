@@ -1,6 +1,6 @@
 //! The room-graph intermediate representation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::Deserialize;
 
@@ -73,6 +73,22 @@ pub enum LiftTrigger {
     Walkover,
     /// `Switch` plus a walkover special on the top face.
     BothEnds,
+    /// No line of its own: the member of a bank another member's line
+    /// calls. Legal only inside a bank ([`IrError::TriggerNoneOutsideBank`]).
+    None,
+}
+
+/// Where a pedestal's trigger lines go. A pedestal has no alcove, so only
+/// the switch on its faces and the bank member's "none" apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PedestalTrigger {
+    /// A use special on every face of the island; the riser is the switch.
+    #[default]
+    Switch,
+    /// No line of its own: called by another member of its bank. Legal only
+    /// inside a bank ([`IrError::TriggerNoneOutsideBank`]).
+    None,
 }
 
 /// Returns `true`, for use as a serde field default so an absent
@@ -318,6 +334,11 @@ pub struct Portal {
     /// [`Self::door_thickness`] already takes on a plain or locked portal.
     #[serde(default)]
     pub rise: Option<i32>,
+    /// The bank this lift portal belongs to: members naming one bank share
+    /// one sector tag, so any member's line moves them all. Rejected on any
+    /// kind but [`PortalKind::Lift`] ([`IrError::BankOnNonLiftPortal`]).
+    #[serde(default)]
+    pub bank: Option<String>,
     /// Drop wall only: the wall's own depth along the gap, one of
     /// [`Ir::DROP_WALL_THICKNESS`]. Required on a [`PortalKind::DropWall`]
     /// ([`IrError::MissingDropWallThickness`]), rejected on every other kind
@@ -479,6 +500,12 @@ pub struct Pedestal {
     /// Lift speed the pedestal rides at.
     #[serde(default)]
     pub speed: LiftSpeed,
+    /// Where the pedestal's trigger lines go.
+    #[serde(default)]
+    pub trigger: PedestalTrigger,
+    /// The bank this pedestal belongs to (see [`Portal::bank`]).
+    #[serde(default)]
+    pub bank: Option<String>,
     /// Things placed on the platform, at the raised floor; each `at` must
     /// fall strictly inside the rectangle.
     #[serde(default)]
@@ -1093,6 +1120,42 @@ pub enum IrError {
         /// The rejected trigger: `"walkover"` or `"both_ends"`.
         trigger: &'static str,
     },
+    /// A [`Portal::bank`] on a portal that is not a lift.
+    #[error("portal `{a}` <-> `{b}` sets `bank`, which only a lift portal has")]
+    BankOnNonLiftPortal {
+        /// The portal's first room.
+        a: String,
+        /// The portal's second room.
+        b: String,
+    },
+    /// `trigger: none` on a lift portal or pedestal that names no bank: a
+    /// platform with no line of its own that nothing else calls.
+    #[error("{member} sets `trigger: none` but names no bank, so nothing could call it")]
+    TriggerNoneOutsideBank {
+        /// `portal `a` <-> `b`` or `pedestal `id``.
+        member: String,
+    },
+    /// A bank with a single member is a lift with an alias, not a bank.
+    #[error("bank `{bank}` has one member; a bank needs two or more")]
+    BankOfOne {
+        /// The bank's name.
+        bank: String,
+    },
+    /// Every member of the bank says `trigger: none`, so no line names its tag.
+    #[error("bank `{bank}` has no member with a trigger, so nothing calls it")]
+    BankUncalled {
+        /// The bank's name.
+        bank: String,
+    },
+    /// Members of one bank disagree on `speed`. `EV_DoPlat` takes the plat
+    /// type from the line pressed and applies it to every sector on the tag
+    /// (`p_plats.c:164-181`, pinned `a77dfb96`), so one speed is every
+    /// member's speed.
+    #[error("bank `{bank}` mixes `normal` and `fast` members; one line's speed is every member's")]
+    BankMixedSpeed {
+        /// The bank's name.
+        bank: String,
+    },
     /// Two pedestals share an id.
     #[error("pedestal `{id}` is declared twice")]
     DuplicatePedestal {
@@ -1636,6 +1699,20 @@ impl Ir {
             && self.room(&portal.a).map(|r| r.floor) == self.room(&portal.b).map(|r| r.floor)
     }
 
+    /// How many lift portals and pedestals name `bank`.
+    #[must_use]
+    pub fn bank_size(&self, bank: &str) -> usize {
+        self.portals
+            .iter()
+            .filter(|p| p.bank.as_deref() == Some(bank))
+            .count()
+            + self
+                .pedestals
+                .iter()
+                .filter(|p| p.bank.as_deref() == Some(bank))
+                .count()
+    }
+
     /// The index of the lower room of a lift portal, `None` for a barrier
     /// or a non-lift portal.
     #[must_use]
@@ -1715,7 +1792,11 @@ impl Ir {
     /// one floor but that names no `rise`, [`IrError::LiftWalkoverNeedsAlcove`]
     /// for a walkover lift whose low room names no alcove to carry the
     /// trigger line, [`IrError::BarrierTrigger`] for a barrier that sets
-    /// a trigger other than `switch`, [`IrError::DuplicatePedestal`] for a
+    /// a trigger other than `switch` or `none`,
+    /// [`IrError::BankOnNonLiftPortal`] for a portal that is not a lift but
+    /// sets `bank`, [`IrError::TriggerNoneOutsideBank`] for a lift portal or
+    /// pedestal that sets `trigger: none` but names no bank,
+    /// [`IrError::DuplicatePedestal`] for a
     /// repeated pedestal id, [`IrError::PedestalUnknownRoom`] for a pedestal
     /// naming a room that does not exist, [`IrError::PedestalRiseNotPositive`]
     /// for a pedestal with a zero or negative `rise`,
@@ -1725,9 +1806,13 @@ impl Ir {
     /// not lie strictly inside its room, [`IrError::PedestalThingOutside`]
     /// for a thing placed on a pedestal but outside its rectangle,
     /// [`IrError::PedestalsOverlap`] for two pedestals, or a pedestal and a
-    /// teleport pad, in one room that overlap or touch, and
+    /// teleport pad, in one room that overlap or touch,
     /// [`IrError::TeleportDestinationOnPedestal`] for a teleport whose
-    /// destination point lies inside or on a pedestal's rectangle.
+    /// destination point lies inside or on a pedestal's rectangle,
+    /// [`IrError::BankOfOne`] for a bank with fewer than two members,
+    /// [`IrError::BankUncalled`] for a bank whose every member sets
+    /// `trigger: none`, and [`IrError::BankMixedSpeed`] for a bank whose
+    /// members disagree on `speed`.
     ///
     /// The floor actions add [`IrError::DuplicateTrigger`] for a repeated
     /// trigger id, [`IrError::TriggerOffWall`] for a trigger that is not
@@ -1774,6 +1859,7 @@ impl Ir {
         Self::validate_teleports(&ir, &seen)?;
         Self::validate_lifts(&ir)?;
         Self::validate_pedestals(&ir, &seen)?;
+        Self::validate_banks(&ir)?;
         Self::validate_triggers(&ir, &seen)?;
         Self::validate_floors(&ir, &seen)?;
 
@@ -2316,6 +2402,12 @@ impl Ir {
                     b: portal.b.clone(),
                 });
             }
+            if portal.kind != PortalKind::Lift && portal.bank.is_some() {
+                return Err(IrError::BankOnNonLiftPortal {
+                    a: portal.a.clone(),
+                    b: portal.b.clone(),
+                });
+            }
         }
         for portal in ir.portals.iter().filter(|p| p.kind == PortalKind::Lift) {
             let barrier = ir.is_barrier(portal);
@@ -2334,15 +2426,20 @@ impl Ir {
                 }
                 _ => {}
             }
-            if barrier && portal.trigger != LiftTrigger::Switch {
+            if barrier && !matches!(portal.trigger, LiftTrigger::Switch | LiftTrigger::None) {
                 return Err(IrError::BarrierTrigger {
                     a: portal.a.clone(),
                     b: portal.b.clone(),
                     trigger: match portal.trigger {
                         LiftTrigger::Walkover => "walkover",
                         LiftTrigger::BothEnds => "both_ends",
-                        LiftTrigger::Switch => unreachable!("filtered above"),
+                        LiftTrigger::Switch | LiftTrigger::None => unreachable!("filtered above"),
                     },
+                });
+            }
+            if portal.trigger == LiftTrigger::None && portal.bank.is_none() {
+                return Err(IrError::TriggerNoneOutsideBank {
+                    member: format!("portal `{}` <-> `{}`", portal.a, portal.b),
                 });
             }
             if portal.trigger == LiftTrigger::Walkover {
@@ -2384,6 +2481,11 @@ impl Ir {
                 return Err(IrError::PedestalRiseNotPositive {
                     id: p.id.clone(),
                     rise: p.rise,
+                });
+            }
+            if p.trigger == PedestalTrigger::None && p.bank.is_none() {
+                return Err(IrError::TriggerNoneOutsideBank {
+                    member: format!("pedestal `{}`", p.id),
                 });
             }
             let room = ir.room(&p.room).expect("checked above");
@@ -2430,6 +2532,47 @@ impl Ir {
                         pedestal: p.id.clone(),
                     });
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validates every bank: two or more members, at least one with a
+    /// trigger, and one speed throughout.
+    fn validate_banks(ir: &Self) -> Result<(), IrError> {
+        // (speed, has a trigger) per member, keyed by bank.
+        let mut banks: BTreeMap<&str, Vec<(LiftSpeed, bool)>> = BTreeMap::new();
+        for p in ir.portals.iter().filter(|p| p.kind == PortalKind::Lift) {
+            if let Some(b) = &p.bank {
+                banks
+                    .entry(b.as_str())
+                    .or_default()
+                    .push((p.speed, p.trigger != LiftTrigger::None));
+            }
+        }
+        for p in &ir.pedestals {
+            if let Some(b) = &p.bank {
+                banks
+                    .entry(b.as_str())
+                    .or_default()
+                    .push((p.speed, p.trigger != PedestalTrigger::None));
+            }
+        }
+        for (bank, members) in banks {
+            if members.len() < 2 {
+                return Err(IrError::BankOfOne {
+                    bank: bank.to_owned(),
+                });
+            }
+            if !members.iter().any(|&(_, called)| called) {
+                return Err(IrError::BankUncalled {
+                    bank: bank.to_owned(),
+                });
+            }
+            if members.iter().any(|&(s, _)| s != members[0].0) {
+                return Err(IrError::BankMixedSpeed {
+                    bank: bank.to_owned(),
+                });
             }
         }
         Ok(())
@@ -3087,8 +3230,8 @@ pub(crate) fn destination_sector_key(ir: &Ir, to: &Destination) -> Option<(usize
 #[cfg(test)]
 mod tests {
     use super::{
-        ExitTrigger, FloorFamilyIr, Ir, IrError, LiftSpeed, LiftTrigger, PortalKind, Pt,
-        RevealKind, TriggerKind, destination_sector_key, pad_square,
+        ExitTrigger, FloorFamilyIr, Ir, IrError, LiftSpeed, LiftTrigger, PedestalTrigger,
+        PortalKind, Pt, RevealKind, TriggerKind, destination_sector_key, pad_square,
     };
 
     // Room `b` sits a full grid step (64 units, a clean multiple of
@@ -4298,6 +4441,141 @@ mod tests {
                 "{trigger}"
             );
         }
+    }
+
+    /// A hall holding two pedestals on one bank, and a lift pair from the
+    /// hall to a ledge on another. The hall is 512 wide so both portals fit
+    /// its east wall.
+    const BANK_BASE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"hall", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"ledge", "footprint":[[576,0],[576,512],[1088,512],[1088,0]], "floor":128, "ceiling":320, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"hall", "b":"ledge", "kind":"lift", "width":128, "at":[512,128], "bank":"pair" },
+        { "a":"hall", "b":"ledge", "kind":"lift", "width":128, "at":[512,384], "bank":"pair", "trigger":"none" }
+      ],
+      "pedestals":[
+        { "id":"left",  "room":"hall", "at":[128,128], "rise":64, "bank":"prizes" },
+        { "id":"right", "room":"hall", "at":[320,128], "rise":64, "bank":"prizes", "trigger":"none" }
+      ]
+    }"#;
+
+    #[test]
+    fn a_bank_parses_with_its_members_and_none_triggers() {
+        let ir = Ir::from_json(BANK_BASE).expect("parses");
+        assert_eq!(ir.portals[0].bank.as_deref(), Some("pair"));
+        assert_eq!(ir.portals[1].trigger, LiftTrigger::None);
+        assert_eq!(
+            ir.pedestals[0].trigger,
+            PedestalTrigger::Switch,
+            "the default"
+        );
+        assert_eq!(ir.pedestals[1].trigger, PedestalTrigger::None);
+        assert_eq!(ir.bank_size("pair"), 2);
+        assert_eq!(ir.bank_size("prizes"), 2);
+        assert_eq!(ir.bank_size("nobody"), 0);
+    }
+
+    #[test]
+    fn bank_on_a_non_lift_portal_is_refused() {
+        // A door needs its own valid `door_thickness`/alcoves to clear
+        // `validate_door_dimensions`/`validate_door_gap` (both run before
+        // `validate_lifts`), so the fixture supplies a combination the
+        // hall-ledge gap (64) actually admits — otherwise a door-shape error
+        // would fire first and the test would not isolate `bank`.
+        let json = with(
+            BANK_BASE,
+            r#""kind":"lift", "width":128, "at":[512,128], "bank":"pair""#,
+            r#""kind":"door", "width":128, "at":[512,128], "door_thickness":32, "alcove_near":16, "alcove_far":16, "bank":"pair""#,
+        );
+        assert!(matches!(
+            Ir::from_json(&json),
+            Err(IrError::BankOnNonLiftPortal { .. })
+        ));
+    }
+
+    #[test]
+    fn trigger_none_outside_a_bank_is_refused_on_portals_and_pedestals() {
+        let portal = with(
+            BANK_BASE,
+            r#""at":[512,384], "bank":"pair", "trigger":"none""#,
+            r#""at":[512,384], "trigger":"none""#,
+        );
+        assert!(matches!(
+            Ir::from_json(&portal),
+            Err(IrError::TriggerNoneOutsideBank { .. })
+        ));
+        let pedestal = with(
+            BANK_BASE,
+            r#""rise":64, "bank":"prizes", "trigger":"none""#,
+            r#""rise":64, "trigger":"none""#,
+        );
+        assert!(matches!(
+            Ir::from_json(&pedestal),
+            Err(IrError::TriggerNoneOutsideBank { .. })
+        ));
+    }
+
+    #[test]
+    fn a_bank_of_one_is_refused() {
+        let json = with(
+            BANK_BASE,
+            r#""at":[128,128], "rise":64, "bank":"prizes""#,
+            r#""at":[128,128], "rise":64, "bank":"alone""#,
+        );
+        // `right` still says `prizes` with `trigger: none`, so `prizes` is a
+        // bank of one *and* uncalled; the size check runs first.
+        assert!(matches!(
+            Ir::from_json(&json),
+            Err(IrError::BankOfOne { .. })
+        ));
+    }
+
+    #[test]
+    fn a_bank_nobody_calls_is_refused() {
+        let json = with(
+            BANK_BASE,
+            r#""at":[512,128], "bank":"pair" }"#,
+            r#""at":[512,128], "bank":"pair", "trigger":"none" }"#,
+        );
+        assert!(
+            matches!(Ir::from_json(&json), Err(IrError::BankUncalled { bank }) if bank == "pair")
+        );
+    }
+
+    #[test]
+    fn a_bank_mixing_speeds_is_refused() {
+        let json = with(
+            BANK_BASE,
+            r#""at":[512,128], "bank":"pair" }"#,
+            r#""at":[512,128], "bank":"pair", "speed":"fast" }"#,
+        );
+        assert!(
+            matches!(Ir::from_json(&json), Err(IrError::BankMixedSpeed { bank }) if bank == "pair")
+        );
+    }
+
+    #[test]
+    fn a_barrier_may_be_a_bank_member_with_trigger_none() {
+        // Level the ledge with the hall so both portals are barriers.
+        let json = with(
+            BANK_BASE,
+            r#""floor":128, "ceiling":320"#,
+            r#""floor":0, "ceiling":320"#,
+        )
+        .replace(
+            r#""at":[512,128], "bank":"pair""#,
+            r#""at":[512,128], "rise":96, "bank":"pair""#,
+        )
+        .replace(
+            r#""at":[512,384], "bank":"pair", "trigger":"none""#,
+            r#""at":[512,384], "rise":96, "bank":"pair", "trigger":"none""#,
+        );
+        let ir = Ir::from_json(&json).expect("a barrier bank parses");
+        assert!(ir.is_barrier(&ir.portals[1]));
     }
 
     const PEDESTAL_BASE: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
