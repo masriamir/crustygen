@@ -52,11 +52,16 @@ const ONE_SHOT_LIFT: [i32; 4] = [21, 10, 122, 121];
 /// The use-activated half of [`ONE_SHOT_LIFT`].
 const ONE_SHOT_USE: [i32; 2] = [21, 122];
 
-/// `MAXPLATS` (`p_spec.h:306`): `P_AddActivePlat` `I_Error`s once the table
-/// is full (`p_plats.c:288-299`). A perpetual plat is never removed
-/// (`T_PlatRaise`, `p_plats.c:89-103`: only the four one-way types are), so
-/// it holds a slot for the rest of the level, in stasis or not.
-const MAX_PLATS: usize = 30;
+/// `MAXPLATS` (`p_spec.h:306`), read from the sourced table
+/// ([`Tables::plat`]`().max_active`) rather than restated here:
+/// `P_AddActivePlat` `I_Error`s once the table is full (`p_plats.c:288-299`).
+/// A perpetual plat is never removed (`T_PlatRaise`, `p_plats.c:89-103`: only
+/// the four one-way types are), so it holds a slot for the rest of the level,
+/// in stasis or not. The `tag_size_bucket` labels spell the same bound out;
+/// `tables::tests::plat_constants_are_the_pinned_engines` pins it.
+fn max_plats(tables: &Tables) -> usize {
+    tables.plat().max_active
+}
 
 /// The §H columns: a label and the specials the line axis admits beyond
 /// today's set.
@@ -740,6 +745,8 @@ struct Agg {
     maps_lift_tag_over_30: u64,
     combined_over_15: u64,
     combined_over_30: u64,
+    /// `MAXPLATS` as the table reports it, carried for the report's labels.
+    max_plats: usize,
     combined_max: u64,
     // G
     one_shot_n: u64,
@@ -1114,6 +1121,8 @@ fn tag_size_bucket(n: usize) -> &'static str {
 /// can overflow `MAXPLATS` at once; several smaller banks need never be
 /// active together.
 fn survey_concurrency(v: &VarCtx<'_>, perpetual: &BTreeSet<usize>, agg: &mut Agg) -> usize {
+    let max_plats = max_plats(v.tables);
+    agg.max_plats = max_plats;
     let moving_set: BTreeSet<usize> = v
         .ctx
         .index
@@ -1128,12 +1137,12 @@ fn survey_concurrency(v: &VarCtx<'_>, perpetual: &BTreeSet<usize>, agg: &mut Agg
     if let Some(n) = max_sectors_per_tag(v, |s| START.contains(&s)) {
         agg.perpetual_tag_max.add(tag_size_bucket(n));
         agg.perpetual_tag_max_n = agg.perpetual_tag_max_n.max(count_len(n));
-        agg.maps_perpetual_tag_over_30 += u64::from(n > MAX_PLATS);
+        agg.maps_perpetual_tag_over_30 += u64::from(n > max_plats);
     }
     if let Some(n) = max_sectors_per_tag(v, is_lift) {
         agg.lift_tag_max.add(tag_size_bucket(n));
         agg.lift_tag_max_n = agg.lift_tag_max_n.max(count_len(n));
-        agg.maps_lift_tag_over_30 += u64::from(n > MAX_PLATS);
+        agg.maps_lift_tag_over_30 += u64::from(n > max_plats);
     }
     let perpetual_n = perpetual.len();
     let bucket = |n: usize| match n {
@@ -1153,8 +1162,8 @@ fn survey_concurrency(v: &VarCtx<'_>, perpetual: &BTreeSet<usize>, agg: &mut Agg
     if perpetual_n > 0 {
         let combined = perpetual.union(&moving_set).count();
         agg.combined_max = agg.combined_max.max(count_len(combined));
-        agg.combined_over_15 += u64::from(combined > MAX_PLATS / 2);
-        agg.combined_over_30 += u64::from(combined > MAX_PLATS);
+        agg.combined_over_15 += u64::from(combined > max_plats / 2);
+        agg.combined_over_30 += u64::from(combined > max_plats);
     }
     moving
 }
@@ -2088,21 +2097,21 @@ fn report_concurrency(agg: &Agg) {
         "- most sectors one 53/87 tag names, per map with such a tag (0-15 / 16-30 / 31+): {} · max: {} · maps with a single 53/87 tag naming > {}: {}",
         agg.perpetual_tag_max.all(),
         agg.perpetual_tag_max_n,
-        MAX_PLATS,
+        agg.max_plats,
         agg.maps_perpetual_tag_over_30
     );
     println!(
         "- most sectors one DWUS/blaze tag names, per map with such a tag: {} · max: {} · maps with a single lift tag naming > {}: {}",
         agg.lift_tag_max.all(),
         agg.lift_tag_max_n,
-        MAX_PLATS,
+        agg.max_plats,
         agg.maps_lift_tag_over_30
     );
     println!(
         "- maps with ≥1 perpetual plat where perpetual ∪ moving plats (an upper bound on concurrency) > {}: {} · > {}: {} · max combined among them: {}",
-        MAX_PLATS / 2,
+        agg.max_plats / 2,
         agg.combined_over_15,
-        MAX_PLATS,
+        agg.max_plats,
         agg.combined_over_30,
         agg.combined_max
     );
