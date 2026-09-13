@@ -496,7 +496,8 @@ outright on any other kind. `speed` picks `normal` (62/88) or `fast` (123/120, `
 `trigger` places the lines: `switch` puts a use special on the platform's low face, so the riser
 itself is the switch; `walkover` puts a walkover special on the outer threshold of the low room's
 alcove, which that room must therefore declare; `both_ends` is the switch plus a walkover on the
-platform's top face. A barrier has no low room and so offers only `switch`. A lift names no
+platform's top face. A barrier has no low room and so offers only `switch` (or `none` as a bank
+member, §6's bank paragraph). A lift names no
 `door_thickness` — its own platform sector is what fills the gap.
 
 **A walkover lift's alcove must be deeper than the player's radius.** `P_TryMove` fires a

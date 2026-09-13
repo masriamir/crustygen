@@ -919,8 +919,8 @@ one-shot four give +0 honest maps even read as repeatable, the perpetual
 pair alone +1 — and issue #72 closed on that measurement without shipping
 them.
 
-**A barrier offers only `switch`, and that is geometry rather than policy.**
-`Ir::from_json` refuses `walkover` and `both_ends` on a lift portal whose two
+**A barrier offers only `switch` (or `none` as a bank member), and that is geometry rather than
+policy.** `Ir::from_json` refuses `walkover` and `both_ends` on a lift portal whose two
 rooms sit at one floor (`IrError::BarrierTrigger`). A walkover trigger goes on
 the outer threshold of the **low room's** alcove, and a barrier has no low
 room — its two rooms are level by definition, so there is no side to put the

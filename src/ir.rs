@@ -1109,9 +1109,12 @@ pub enum IrError {
         field: &'static str,
     },
     /// A barrier (a lift portal whose rooms sit at one floor) sets a
-    /// [`Portal::trigger`] other than [`LiftTrigger::Switch`] — a barrier has
-    /// no low room for a walkover line to sit in front of.
-    #[error("portal `{a}` <-> `{b}` is a barrier, which offers only `switch`, not `{trigger}`")]
+    /// [`Portal::trigger`] other than [`LiftTrigger::Switch`] or, as a bank
+    /// member, [`LiftTrigger::None`] — a barrier has no low room for a
+    /// walkover line to sit in front of.
+    #[error(
+        "portal `{a}` <-> `{b}` is a barrier, which offers only `switch` (or `none` in a bank), not `{trigger}`"
+    )]
     BarrierTrigger {
         /// The first room.
         a: String,
@@ -4424,7 +4427,7 @@ mod tests {
     }
 
     #[test]
-    fn a_barrier_offers_only_the_switch_trigger() {
+    fn a_barrier_offers_only_the_switch_trigger_or_none_in_a_bank() {
         let equal = with(
             LIFT_BASE,
             r#""floor":128, "ceiling":256"#,
