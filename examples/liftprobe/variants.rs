@@ -22,35 +22,37 @@ use crustygen::tables::Tables;
 use crustywad::map::udmf::UdmfMap;
 
 use crate::common::{
-    self, Activator, Dispatch, Hist, PERPETUAL, Placement, PlatFacts, REPEATABLE_LIFT, Shape,
-    is_lift, pct, percentiles,
+    self, Activator, BLAZE, DWUS, Dispatch, Hist, PERPETUAL, Placement, PlatFacts, REPEATABLE_LIFT,
+    Shape, USE_LIFT, is_lift, pct, percentiles,
 };
 use crate::floors::{
     MapCtx, PerpetualPlat, PerpetualRest, bucket_count, count_len, hop_bucket, map_ctx,
     neighbor_side, neighbors_of, one_shot_split, perpetual_plats, repeatable_twin_map,
 };
 
-/// The perpetual start specials: `p_spec.c:682-686` (53, W1 — the case ends
+/// The perpetual start specials, the first half of [`PERPETUAL`] (the one
+/// place the probe spells these numbers): `p_spec.c:682-686` (53, W1 — the case ends
 /// `line->special = 0`) and `:852-855` (87, WR). Both are in
 /// `P_CrossSpecialLine`, so a perpetual plat is walkover-started from either
 /// side; no use or gun form dispatches `perpetualRaise`.
-const START: [i32; 2] = [53, 87];
+const START: [i32; 2] = [PERPETUAL[0], PERPETUAL[1]];
 
-/// The stop specials: `p_spec.c:688-692` (54, W1) and `:862-865` (89, WR),
+/// The stop specials, the second half of [`PERPETUAL`]: `p_spec.c:688-692` (54, W1) and `:862-865` (89, WR),
 /// both calling `EV_StopPlat` (`p_plats.c:273-286`), which puts **every**
 /// active plat carrying the line's tag — of any type — into `in_stasis`.
-const STOP: [i32; 2] = [54, 89];
+const STOP: [i32; 2] = [PERPETUAL[2], PERPETUAL[3]];
 
-/// The one-shot `downWaitUpStay` / `blazeDWUS` forms: 21 (S1,
+/// The one-shot `downWaitUpStay` / `blazeDWUS` forms, the S1/W1 entries of
+/// [`DWUS`] and [`BLAZE`]: 21 (S1,
 /// `p_switch.c:389-393`), 122 (S1 blazing, `:479-483`), 10 (W1,
 /// `p_spec.c:579-583`), 121 (W1 blazing, `:754-758`). The two S1 forms call
 /// `P_ChangeSwitchTexture(line, 0)`, whose `useAgain == 0` arm clears the
 /// special and swaps the front texture for good (`p_switch.c:211-212`,
 /// `:229`, `:241`, `:253`).
-const ONE_SHOT_LIFT: [i32; 4] = [21, 10, 122, 121];
+const ONE_SHOT_LIFT: [i32; 4] = [DWUS[1], DWUS[3], BLAZE[1], BLAZE[3]];
 
-/// The use-activated half of [`ONE_SHOT_LIFT`].
-const ONE_SHOT_USE: [i32; 2] = [21, 122];
+/// The use-activated half of [`ONE_SHOT_LIFT`], the S1 entries of [`USE_LIFT`].
+const ONE_SHOT_USE: [i32; 2] = [USE_LIFT[1], USE_LIFT[3]];
 
 /// `MAXPLATS` (`p_spec.h:306`), read from the sourced table
 /// ([`Tables::plat`]`().max_active`) rather than restated here:
