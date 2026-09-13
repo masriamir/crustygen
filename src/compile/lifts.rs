@@ -736,9 +736,17 @@ fn emit_portal_lift(
         // crossing is always within the step. A bank member stacked on this
         // one is called from it.
         LiftTrigger::BothEnds => {
-            let level = data.sidedefs[data.linedefs[top_line].front].sector;
+            // `P_CrossSpecialLine` has no side gate, so the top-face walkover
+            // fires from both its sides: the level room in front and the
+            // platform itself behind. A rider crossing it from the platform
+            // calls the bank too, so both sectors join the pool, even though
+            // no other member can have this platform as a low neighbor.
+            let top = &data.linedefs[top_line];
             let mut v = default_callers.clone();
-            v.push(level);
+            v.push(data.sidedefs[top.front].sector);
+            if let Some(back) = top.back {
+                v.push(data.sidedefs[back].sector);
+            }
             v
         }
         LiftTrigger::Walkover => {
@@ -2082,8 +2090,8 @@ mod tests {
         fired.sort_unstable();
         assert_eq!(
             fired,
-            vec![0, 1],
-            "the switch fires from the hall, the top-face walkover from the ledge"
+            vec![0, 1, l1.sector],
+            "the switch fires from the hall, the top-face walkover from the ledge and from the platform itself"
         );
         assert_eq!(
             l2.callable_from,
