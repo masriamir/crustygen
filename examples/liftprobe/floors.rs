@@ -936,6 +936,10 @@ pub(crate) fn one_shot_split(ctx: &MapCtx<'_>, step: i32) -> (BTreeSet<usize>, B
         let Some(facts) = common::analyze_plat(ctx.map, ctx.scene, &ctx.index, plat, step) else {
             continue;
         };
+        // `analyze_plat` already returned `None` for a plat whose every lift
+        // line was dropped (a dangling front sidedef fires from nowhere), so
+        // `facts.triggers` is never empty here and `repeatable == 0` means
+        // every trigger is one-shot.
         let repeatable = facts
             .triggers
             .iter()
