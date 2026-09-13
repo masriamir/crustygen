@@ -249,6 +249,10 @@ impl PerpetualFacts {
     /// the tag resolves to exactly one sector, the plat is not dead, no stop
     /// line names the tag, no other family shares it, and it rests at `low`
     /// or at `high`.
+    ///
+    /// These are the gate's five **per-plat** clauses. It has a sixth,
+    /// map-level one — no tag-0 or dangling start line anywhere in the map —
+    /// which `record_arbiter` applies to both the column and the plat count.
     fn provisional(&self) -> bool {
         self.shared_tag_n == 1
             && matches!(self.plat.rest, PerpetualRest::AtLow | PerpetualRest::AtHigh)
@@ -623,7 +627,11 @@ fn analyze_one_shot(
     let forms = match (s1, w1) {
         (true, true) => OneShotForms::Both,
         (false, true) => OneShotForms::W1Only,
-        // `one_shot_split` only yields a plat with some one-shot trigger.
+        // `(false, false)` is unreachable: `common::analyze_plat` returns
+        // `None` for a plat with no trigger at all — a lift line whose front
+        // sidedef dangles contributes none — so every plat `one_shot_split`
+        // yields has at least one non-repeatable trigger, which sets `s1` or
+        // `w1` above.
         _ => OneShotForms::S1Only,
     };
     let things = v
@@ -813,16 +821,25 @@ struct Agg {
 /// One §I yield column's counts.
 #[derive(Default)]
 struct BankColumn {
-    /// Maps expressible on all six axes with this column's lift axis.
+    /// Maps expressible on all six axes with this column's lift axis: every
+    /// bank group accepted by this column's gate **or** by the shipped
+    /// recognizer ([`BankVerdict::fold_group`]).
     all_honest: u64,
     /// Platforms of the historical `SharedTag` population
-    /// ([`Agg::historical_shared_members`]) whose group this column accepts.
+    /// ([`Agg::historical_shared_members`]) whose group this column's **gate**
+    /// accepts (the relaxation clause is map-level and does not enter this
+    /// count).
     recovered: u64,
-    /// Groups this column accepts.
+    /// Groups this column's **gate** accepts.
     groups: u64,
 }
 
 /// The §I column labels, in report order.
+///
+/// Each label after `today` names the gate the column *adds*: a map counts
+/// when every bank group is accepted by that gate **or** by the shipped
+/// recognizer, so every column is a superset of `today`
+/// ([`BankVerdict::fold_group`]).
 const BANK_COLUMNS: [&str; 5] = [
     "today",
     "+A (bank-A gate)",
@@ -1293,7 +1310,14 @@ fn record_arbiter(
     agg.all_floors_ignored += u64::from(line_today && a.others_ok && a.lifts_today);
     agg.all_honest += u64::from(line_today && a.others_ok && a.lifts_today && a.floors_ok);
     let perpetual_ok = !bad_start && plats.iter().all(PerpetualFacts::provisional);
-    agg.provisional_plats += count_len(plats.iter().filter(|p| p.provisional()).count());
+    // The gate has a map-level clause as well as the five per-plat ones: a
+    // tag-0 or dangling start line anywhere in the map fails it, so no plat
+    // of that map passes it either (`perpetual_ok` above, and the legend).
+    agg.provisional_plats += if bad_start {
+        0
+    } else {
+        count_len(plats.iter().filter(|p| p.provisional()).count())
+    };
     for (i, (_, extra)) in COLUMNS.iter().enumerate() {
         let line = a.unknown.iter().all(|s| extra.contains(s));
         let admits_one_shot = extra.iter().any(|s| ONE_SHOT_LIFT.contains(s));
@@ -1658,6 +1682,15 @@ fn merged_verdict(scene: &Scene, plats: &[&ScenePlat], step: i32) -> Result<Plat
 }
 
 /// The map-level lift axis under each §I column.
+///
+/// Every column is a **relaxation** of *today*, never a replacement for it:
+/// a group counts when the column's gate accepts it **or** when the shipped
+/// recognizer already does ([`BankVerdict::fold_group`]). The gates are not
+/// each a superset of the recognizer on their own — gate A wants a Low line
+/// on every member's own face where the recognizer needs only some adjacent
+/// Low activator, and the split reading is false for a group that is not
+/// split — so without that clause a column could *drop* a map the `today`
+/// column counts, and the §I yield would not be a yield.
 #[derive(Clone, Copy, Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -1666,7 +1699,7 @@ fn merged_verdict(scene: &Scene, plats: &[&ScenePlat], step: i32) -> Result<Plat
 )]
 struct BankVerdict {
     /// No broken lift line, every single-tag platform accepted by the
-    /// recognizer, every group passing gate A.
+    /// recognizer, every group accepted by gate A or by the recognizer.
     a: bool,
     /// The same with gate A′.
     a_prime: bool,
@@ -1674,6 +1707,24 @@ struct BankVerdict {
     b: bool,
     /// The same with the split reading.
     split: bool,
+}
+
+impl BankVerdict {
+    /// Folds one group into the verdict, `gates` being the five §I columns'
+    /// verdicts on it (index 0 unused — the `today` column reads the
+    /// recognizer directly) and `accepted_today` whether the shipped
+    /// recognizer accepts every member of the group.
+    ///
+    /// Each column keeps the map only while every group clears its gate *or*
+    /// is already accepted today, which makes the columns supersets of
+    /// `today` by construction. Gate B is monotone on its own; the clause is
+    /// applied to it too so that the four fold alike.
+    fn fold_group(&mut self, gates: [bool; 5], accepted_today: bool) {
+        self.a &= gates[1] || accepted_today;
+        self.a_prime &= gates[2] || accepted_today;
+        self.b &= gates[3] || accepted_today;
+        self.split &= gates[4] || accepted_today;
+    }
 }
 
 /// Builds one group's facts from its resolved members.
@@ -1796,16 +1847,16 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
             g.gate_b(),
             g.gate_split(),
         ];
+        // `groups` and `recovered` count what the gate itself accepts, as §I's
+        // definitions read them; only the map-level axis is relaxed.
         for (i, pass) in gates.into_iter().enumerate() {
             if pass {
                 agg.bank_columns[i].groups += 1;
                 agg.bank_columns[i].recovered += count_len(historical_members);
             }
         }
-        verdict.a &= gates[1];
-        verdict.a_prime &= gates[2];
-        verdict.b &= gates[3];
-        verdict.split &= gates[4];
+        let accepted_today = plats.iter().all(|p| recognizer_refusal(p.sector).is_none());
+        verdict.fold_group(gates, accepted_today);
         record_group(&g, agg);
     }
     verdict
@@ -1945,7 +1996,10 @@ recognizer refused on sight before the bank construct — not its `bank_caller` 
 accepted. A = every member passes alone and \
 has a Low-activator lift line on its own face; A′ = every member passes alone and is called from \
 a two-sided neighbor standing at its own low; B = every member passes alone (callers ignored, \
-the floor recognizer's rule); split = a one-floor, mutually adjacent group read as one lift.\n",
+the floor recognizer's rule); split = a one-floor, mutually adjacent group read as one lift. \
+A column counts a map when every bank group is accepted by its gate **or** by the shipped \
+recognizer, so each column is a superset of today; recovered and groups count what the gate \
+itself accepts.\n",
         agg.line_today,
         pct(agg.line_today, agg.maps)
     );
@@ -2192,7 +2246,8 @@ fn report_arbiter(agg: &Agg) {
         pct(agg.all_honest, agg.maps)
     );
     println!(
-        "- perpetual plats passing the provisional gate: {} of {} ({})",
+        "- perpetual plats passing the provisional gate (its map-level clause included, so \
+none in a map with a tag-0 or dangling start line): {} of {} ({})",
         agg.provisional_plats,
         agg.perpetual_n,
         pct(agg.provisional_plats, agg.perpetual_n)
@@ -2872,6 +2927,58 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_start_line_fails_the_provisional_gate_for_every_plat_of_the_map() {
+        let tables = Tables::load().expect("tables");
+        // One gate-clean perpetual plat (tag 7 on sector 1, resting at high,
+        // no stop line, no other family) and, elsewhere in the map, a 53 line
+        // naming tag 99 — dangling. The gate's map-level clause fails, so no
+        // plat of this map passes it.
+        let mut text = chain(
+            &[0, 128, 128],
+            &[0, 7, 0],
+            &[(87, 7, false), (0, 0, false)],
+            "",
+        );
+        far_wall(&mut text, 3, 53, 99);
+        let f = fixture(&text);
+        let v = var_ctx(&f, &tables);
+        let mut agg = agg_with_columns();
+        let bad_start = survey_start_lines(&v, &mut agg);
+        assert!(bad_start);
+        assert_eq!(agg.start_dangling, 1);
+        let plats: Vec<PerpetualFacts> = perpetual_plats(&v.ctx)
+            .into_iter()
+            .map(|p| analyze_perpetual(&v, p))
+            .collect();
+        assert_eq!(plats.len(), 1);
+        assert!(
+            plats[0].provisional(),
+            "the plat clears all five per-plat clauses"
+        );
+        let a = MapArbiter {
+            unknown: vec![53, 87],
+            others_ok: true,
+            floors_ok: true,
+            lifts_today: true,
+            lifts_twin: true,
+        };
+        record_arbiter(&a, &plats, bad_start, BankVerdict::default(), &mut agg);
+        assert_eq!(
+            agg.provisional_plats, 0,
+            "the map-level clause is part of the gate the plat count reports"
+        );
+        let provisional: Vec<u64> = agg.columns.iter().map(|c| c.provisional).collect();
+        assert_eq!(provisional, vec![0, 0, 0, 0, 0]);
+
+        // The same plat in a map with no broken start line does pass.
+        let mut agg = agg_with_columns();
+        record_arbiter(&a, &plats, false, BankVerdict::default(), &mut agg);
+        assert_eq!(agg.provisional_plats, 1);
+        let provisional: Vec<u64> = agg.columns.iter().map(|c| c.provisional).collect();
+        assert_eq!(provisional, vec![0, 1, 1, 0, 1]);
+    }
+
+    #[test]
     fn the_honest_verdict_folds_in_all_three_recognizers() {
         let tables = Tables::load().expect("tables");
         let vocab = Vocabulary::from_tables(&tables);
@@ -3038,7 +3145,13 @@ mod tests {
         let resolved = resolve_plats(&f.scene, &tables);
         assert!(resolved.iter().all(|p| p.shared_tag >= 2));
         let (verdict, agg) = banks_of(&f, &tables);
-        assert!(verdict.a && verdict.b && !verdict.split);
+        // Which gates accept this group is pinned by `bank_columns[..].groups`
+        // below: A, A′ and B do, `split` does not (the members do not touch).
+        // The map-level verdict is a *relaxation* of today rather than a
+        // replacement for it, so the split column keeps the map anyway — the
+        // bank-aware recognizer accepts both members, and an accepted group
+        // carries its map past the gate it fails.
+        assert!(verdict.a && verdict.a_prime && verdict.b && verdict.split);
         assert_eq!(agg.groups_n, 1);
         assert_eq!(agg.groups_size.all(), "2: 1");
         assert_eq!(agg.groups_floor_class.all(), "one floor, disconnected: 1");
@@ -3088,10 +3201,111 @@ mod tests {
         assert_eq!(recovered, vec![0, 2, 2, 2, 0]);
         let groups: Vec<u64> = agg.bank_columns.iter().map(|c| c.groups).collect();
         assert_eq!(groups, vec![0, 1, 1, 1, 0]);
-        assert!(
-            verdict.a_prime,
-            "each riser switch fires from the member's own low room"
+        assert_eq!(
+            groups[2], 1,
+            "each riser switch fires from the member's own low room, so gate A′ accepts"
         );
+    }
+
+    #[test]
+    fn the_bank_columns_relax_today_rather_than_replacing_it() {
+        let tables = Tables::load().expect("tables");
+        let step = tables.step_height();
+        // The row-of-pedestals witness: P1(96) | H(0) | P2(96) on tag 7, the
+        // only switch on P1's face. Gate A wants a Low line on every member's
+        // own face and the group is not split, so A and split refuse it while
+        // A′ and B accept — the recognizer, which asks only for some adjacent
+        // Low activator, is stricter on neither count.
+        let f = fixture(&chain(
+            &[96, 0, 96],
+            &[7, 0, 7],
+            &[(62, 7, true), (0, 0, false)],
+            "",
+        ));
+        let resolved = resolve_plats(&f.scene, &tables);
+        let members: Vec<&ScenePlat> = resolved.iter().filter(|p| p.shared_tag >= 2).collect();
+        assert_eq!(members.len(), 2);
+        let g = analyze_group(&f.scene, &members, step);
+        let gates = [
+            false,
+            g.gate_a(),
+            g.gate_a_prime(),
+            g.gate_b(),
+            g.gate_split(),
+        ];
+        assert_eq!(gates, [false, false, true, true, false]);
+
+        // A group the recognizer accepts stays in every column, gates or no
+        // gates: the columns are relaxations of today, not replacements.
+        let mut verdict = BankVerdict {
+            a: true,
+            a_prime: true,
+            b: true,
+            split: true,
+        };
+        verdict.fold_group(gates, true);
+        assert!(verdict.a && verdict.a_prime && verdict.b && verdict.split);
+        let a = MapArbiter {
+            unknown: Vec::new(),
+            others_ok: true,
+            floors_ok: true,
+            lifts_today: true,
+            lifts_twin: true,
+        };
+        let mut agg = agg_with_columns();
+        record_arbiter(&a, &[], false, verdict, &mut agg);
+        let all_honest: Vec<u64> = agg.bank_columns.iter().map(|c| c.all_honest).collect();
+        assert_eq!(
+            all_honest,
+            vec![1, 1, 1, 1, 1],
+            "+A and +split count the map exactly as today does"
+        );
+
+        // Only a group today refuses is judged by the gate, and only then may
+        // a column withhold the map.
+        let mut verdict = BankVerdict {
+            a: true,
+            a_prime: true,
+            b: true,
+            split: true,
+        };
+        verdict.fold_group(gates, false);
+        assert!(!verdict.a && verdict.a_prime && verdict.b && !verdict.split);
+
+        // The self-called bank witness (two Core lifts, each with its riser
+        // switch on its own low face) clears A, A′ and B and fails split; the
+        // relaxation keeps it in the split column when today accepts it.
+        let f = fixture(&chain(
+            &BANK_FLOORS,
+            &BANK_TAGS,
+            &[
+                (62, 7, false),
+                (0, 0, false),
+                (0, 0, false),
+                (62, 7, false),
+                (0, 0, false),
+            ],
+            "",
+        ));
+        let resolved = resolve_plats(&f.scene, &tables);
+        let members: Vec<&ScenePlat> = resolved.iter().filter(|p| p.shared_tag >= 2).collect();
+        let g = analyze_group(&f.scene, &members, step);
+        let gates = [
+            false,
+            g.gate_a(),
+            g.gate_a_prime(),
+            g.gate_b(),
+            g.gate_split(),
+        ];
+        assert_eq!(gates, [false, true, true, true, false]);
+        let mut verdict = BankVerdict {
+            a: true,
+            a_prime: true,
+            b: true,
+            split: true,
+        };
+        verdict.fold_group(gates, true);
+        assert!(verdict.split, "today's acceptance carries the split column");
     }
 
     #[test]
@@ -3363,7 +3577,12 @@ mod tests {
         let (verdict, agg) = banks_of(&f, &tables);
         assert_eq!(agg.member_verdict.all(), "Pedestal: 2");
         assert_eq!(agg.group_composition.all(), "all Pedestal: 1");
-        assert!(!verdict.a && verdict.a_prime && verdict.b && !verdict.split);
+        // Gate A refuses this group (P2 has no Low line on its own face) and
+        // so does split (the pedestals do not touch) — `bank_columns[..].groups`
+        // below pins that. The map still counts in every column: the
+        // bank-aware recognizer accepts both pedestals, which the columns'
+        // relaxation clause carries past the gates they fail.
+        assert!(verdict.a && verdict.a_prime && verdict.b && verdict.split);
         assert_eq!(
             (agg.member_own_low_line, agg.member_neighbor_low_line),
             (1, 2)
