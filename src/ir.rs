@@ -1135,7 +1135,7 @@ pub enum IrError {
     /// platform with no line of its own that nothing else calls.
     #[error("{member} sets `trigger: none` but names no bank, so nothing could call it")]
     TriggerNoneOutsideBank {
-        /// `portal `a` <-> `b`` or `pedestal `id``.
+        /// The member, as `portal a <-> b` or `pedestal id`.
         member: String,
     },
     /// A bank with a single member is a lift with an alias, not a bank.
