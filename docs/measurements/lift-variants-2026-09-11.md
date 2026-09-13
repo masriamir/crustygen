@@ -130,18 +130,27 @@ Limits the numbers carry (also the probe's §J):
   host room's wall); **B**: every member passes alone, wherever its callers are (the floor recognizer's rule, `src/lift/floor.rs:63-67`);
   **split as one lift**: a split group read as one platform — the union of the members' outside
   neighbors, the least member `low`, the shared line set with an activator that is itself a member
-  counted as the platform — passing the same eight refusals. A column's lift axis holds when no
-  lift line is broken, every single-tag platform passes the recognizer as today, and every group
-  passes the column's gate; the line axis is unchanged. **Recovered** counts the platforms the
-  recognizer refuses `SharedTag` today whose group the column accepts (a group member refused
-  `Dead` — precedence 1 — is not among the 923 and is not counted).
+  counted as the platform — passing the same eight refusals. **§I columns** — a column's lift axis
+  holds when no lift line is broken, every single-tag platform passes the recognizer as today, and
+  every group is accepted **either by the column's gate or by the shipped recognizer**; the line
+  axis is unchanged. That second clause is what makes each column a *relaxation* of `today` rather
+  than a replacement for it, and so a superset of it by construction: the gates are not each
+  stricter-or-equal than the recognizer on their own — A wants a Low line on every member's own face
+  where the recognizer needs only some adjacent Low activator, and `split` is false for a group that
+  is not split — so without it a column could withhold a map the `today` column counts, and the
+  yield would not be a yield. **Recovered** and **groups** count what the **gate** itself accepts,
+  the relaxation being map-level: recovered is the platforms the recognizer refuses `SharedTag`
+  today whose group the gate accepts (a group member refused `Dead` — precedence 1 — is not among
+  the 923 and is not counted).
 - **§H columns** — *line axis*: every out-of-set special the map uses is in the column; *all axes
   as today*: that, and the six axes as shipped (a one-shot plat is still refused by the plat
   recognizer, a perpetual plat is not judged at all); *provisional*: one-shot triggers read as
   repeatable (the recognizer re-run on the twin-rewritten map), and every perpetual plat passing a
   **loose provisional gate** — tag resolves to exactly one sector, not dead, no stop line on the
   tag, no other family (lift, floor or anything else) on the tag, rest at low or at high, and no
-  tag-0 or dangling start line in the map. **The provisional gate is a ceiling, not the design.**
+  tag-0 or dangling start line in the map. That last clause is map-level and governs the *per-plat*
+  count as well as the column: no plat of a map with a broken start line passes the gate. **The
+  provisional gate is a ceiling, not the design.**
 
 Denominators: **U** = unique maps (68 / 64 / 1,282); **plats** = perpetual plats 35 / 20 / 936;
 (start line, plat) pairs 84 / 53 / 1,480; (stop line, plat) pairs 133 / 0 / 265; lift tag
@@ -352,7 +361,8 @@ a rest at low or at high (never *between* or dead), and asks nothing about where
 | +{21, 10, 122, 121} | 188 (14.7 %) | 119 (9.3 %) | 119 (9.3 %) |
 | +all eight | 195 (15.2 %) | 122 (9.5 %) | **120 (9.4 %)** |
 
-Perpetual plats passing the provisional gate: **45 of 936 (4.8 %)** in the sample, 3 of 20 in Final
+Perpetual plats passing the provisional gate — its map-level clause included, so no plat of a map
+with a tag-0 or dangling start line counts: **45 of 936 (4.8 %)** in the sample, 3 of 20 in Final
 Doom, 0 of 35 in DOOM+DOOM2 (every retail plat has a stop line). Retail on all axes stays at 0 under
 every column (DOOM+DOOM2's line axis is 1 map throughout, Final Doom's 0).
 
@@ -415,7 +425,9 @@ and 134 Pedestal verdicts are exactly the shared-tag probe shapes it cites.
 | common outside neighbor: all share one / some share / none in common | 17 / 1 / 11 | 25 / 1 / 21 | **140 / 47 / 141** |
 | — of the "all share one" groups, every member neighbor-called (A′) | 12 of 17 | 13 of 25 | **84 of 140** |
 
-**Yield** (line axis unchanged: 1 / 0 / 187):
+**Yield** (line axis unchanged: 1 / 0 / 187). Each column counts a map when every bank group is
+accepted by its gate **or** by the shipped recognizer — a relaxation of `today`, never a replacement
+for it (Definitions); `recovered` and `groups` count what the gate itself accepts:
 
 | column | DOOM+DOOM2 all axes · recovered of 58 · groups of 29 | Final Doom all axes · recovered of 135 · groups of 47 | idgames all axes · recovered of 923 · groups of 328 |
 |---|---|---|---|
@@ -552,6 +564,9 @@ From `linuxdoom-1.10` at `a77dfb96cb91780ca334d0d4cfd86957558007e0`, read for th
 - Sound: a perpetual plat plays `sfx_pstart`/`sfx_pstop` at every reversal (`T_PlatRaise`).
 - Texture *names* on perpetual faces (only presence and pegging are counted).
 - Whole-map reachability; the strand test is a local hop-graph fact.
+- Broken **stop** lines: §A resolves every 53/87 start line's tag and counts the tag-0 and the
+  dangling ones, but the 54/89 lines get no such tally, and the provisional gate's map-level clause
+  reads start lines only — a map whose only broken perpetual line is a stop line still passes it.
 - Bank timing: whether a bank's members, each with its own `low`, arrive and return together
   (§I judges each member's geometry at load, not the thinkers' phase).
 - The merged reading of a split group is an approximation (union of outside neighbors, least
@@ -590,3 +605,11 @@ Markdown to stdout, load failures to stderr. A path may name a directory (swept 
 outputs merged by hand; every number is traceable to a printed line. The refactor that let this
 pass share `floors.rs`'s §I helpers was checked by re-running `census`, `shapes` and `floors` over
 all three populations before and after it: all nine outputs are byte-identical.
+
+Two map-level aggregation fixes landed after that run — the §I columns now relax `today` instead of
+replacing it, and the provisional plat count applies the gate's map-level clause — and the three
+`variants` outputs were regenerated to price them. Neither moved a number in this document: the §I
+relaxation is inert on this corpus because the shipped recognizer refuses every bank member
+(`SharedTag`, or `Dead` ahead of it), so no group is "accepted today" for the clause to carry; and
+no map here holds both a gate-clean perpetual plat and a broken start line. The nine `census` /
+`shapes` / `floors` outputs are byte-identical across the fixes as well.
