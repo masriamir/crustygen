@@ -565,7 +565,7 @@ fn check_lift_return(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>
                     rule: "P5",
                     subject,
                     detail: format!(
-                        "bank `{bank}`: no line on the bank's tag fires from a neighbor of the platform at its low floor {low}; a member nothing adjacent calls is a trap"
+                        "bank `{bank}`: no line on the bank's tag fires from a neighbor of the platform at its low floor {low}, so no adjacent line calls this member — a trap for a player below"
                     ),
                 });
             } else if lift.shape == LiftShape::Barrier {

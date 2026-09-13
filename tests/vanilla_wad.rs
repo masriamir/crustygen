@@ -139,6 +139,47 @@ fn binary_hilera_loads_via_assembly() {
         7,
         "one pair switch + two barrier faces + four pedestal faces"
     );
+    // The bank contract proper: every platform sector's tag and every
+    // switch line's (special, tag) pair survive the downconvert. Compare
+    // the assembled binary map with the directly loaded UDMF build, as
+    // multisets, so a conversion that dropped or rewrote a tag or a line's
+    // target could not pass on counts alone.
+    let (udmf_wad, udmf_group) = first_group(common::udmf_hilera_wad());
+    let udmf = ingest::load_map(&udmf_wad, &udmf_group).expect("udmf map loads");
+    let sector_tags = |m: &crustywad::map::udmf::UdmfMap| {
+        let mut v: Vec<i32> = m.sectors.iter().map(|s| s.id).filter(|&t| t != 0).collect();
+        v.sort_unstable();
+        v
+    };
+    let line_targets = |m: &crustywad::map::udmf::UdmfMap| {
+        let mut v: Vec<(i32, i32)> = m
+            .linedefs
+            .iter()
+            .filter(|l| l.special != 0)
+            .map(|l| (l.special, l.args[0]))
+            .collect();
+        v.sort_unstable();
+        v
+    };
+    assert_eq!(
+        sector_tags(&loaded.map),
+        sector_tags(&udmf.map),
+        "the platform sectors' tags changed in the round trip"
+    );
+    assert_eq!(
+        line_targets(&loaded.map),
+        line_targets(&udmf.map),
+        "a switch line's special or target tag changed in the round trip"
+    );
+    let mut banks: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
+    for tag in sector_tags(&loaded.map) {
+        *banks.entry(tag).or_default() += 1;
+    }
+    assert_eq!(
+        banks.values().copied().collect::<Vec<_>>(),
+        vec![2, 2, 3],
+        "three banks: the pair, the bars and the three prizes, each on one tag: {banks:?}"
+    );
     assert!(
         loaded.notes.is_empty(),
         "unexpected notes: {:?}",
