@@ -22,6 +22,14 @@ use crustywad::archive::Archive;
 use crustywad::map::udmf::UdmfMap;
 use crustywad::{Limits, ParseOptions, Strictness, Wad};
 
+// The lift-special arrays below mirror `data/vocabulary.toml [specials.lift]`,
+// the crate's sourced table (`Tables::lift_specials` and its siblings). The
+// probe keeps its own copy because its passes read them in `const` context
+// and because the committed measurements must not silently change under a
+// table edit; the test `the_lift_arrays_mirror_the_sourced_tables` pins the
+// two to each other so the numbers are still spelled in one place of record.
+// `PERPETUAL` and the change families have no table entry: the crate neither
+// emits nor recognizes them, so the engine citation beside each is its source.
 /// `downWaitUpStay`: `p_switch.c` case 62 (SR, `EV_DoPlat(line,downWaitUpStay,1)`)
 /// and case 21 (S1); `p_spec.c` case 88 (WR, RETRIGGERS block) and case 10 (W1).
 pub(crate) const DWUS: [i32; 4] = [62, 21, 88, 10];
@@ -2270,6 +2278,28 @@ pub(crate) mod tests {
         pub(crate) scene: Scene,
         /// The tables' step height, so a test never spells `24` itself.
         pub(crate) step: i32,
+    }
+
+    /// The probe's lift-special arrays and the crate's sourced table are the
+    /// same numbers: `DWUS` ∪ `BLAZE` is every lift special the table names,
+    /// and the use / walkover / repeatable / fast subsets agree as sets. A
+    /// table edit that drifts from the probe fails here rather than in a
+    /// measurement nobody re-runs.
+    #[test]
+    fn the_lift_arrays_mirror_the_sourced_tables() {
+        use std::collections::BTreeSet;
+        let tables = Tables::load().expect("tables");
+        let set = |v: &[i32]| v.iter().copied().collect::<BTreeSet<i32>>();
+        let table = |v: &[u16]| v.iter().map(|&s| i32::from(s)).collect::<BTreeSet<i32>>();
+        let all: Vec<i32> = DWUS.iter().chain(BLAZE.iter()).copied().collect();
+        assert_eq!(set(&all), table(&tables.lift_specials()));
+        assert_eq!(set(&USE_LIFT), table(&tables.lift_use_specials()));
+        assert_eq!(set(&WALK_LIFT), table(&tables.lift_walkover_specials()));
+        assert_eq!(
+            set(&REPEATABLE_LIFT),
+            table(&tables.lift_repeatable_specials())
+        );
+        assert_eq!(set(&BLAZE), table(&tables.lift_fast_specials()));
     }
 
     /// Parses `text` as UDMF and builds its scene under the shipped tables.
