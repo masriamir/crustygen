@@ -65,14 +65,28 @@ fn max_plats(tables: &Tables) -> usize {
     tables.plat().max_active
 }
 
+/// Every variant special at once, [`PERPETUAL`] then [`ONE_SHOT_LIFT`], for
+/// the last §H column — built from the named arrays so the admitted set can
+/// never drift from the cited engine definitions.
+const ALL_VARIANTS: [i32; 8] = [
+    PERPETUAL[0],
+    PERPETUAL[1],
+    PERPETUAL[2],
+    PERPETUAL[3],
+    ONE_SHOT_LIFT[0],
+    ONE_SHOT_LIFT[1],
+    ONE_SHOT_LIFT[2],
+    ONE_SHOT_LIFT[3],
+];
+
 /// The §H columns: a label and the specials the line axis admits beyond
-/// today's set.
+/// today's set — slices of the named arrays, never literals.
 const COLUMNS: [(&str, &[i32]); 5] = [
     ("today", &[]),
-    ("+{53,87}", &[53, 87]),
-    ("+{53,87,54,89}", &[53, 87, 54, 89]),
-    ("+{21,10,122,121}", &[21, 10, 122, 121]),
-    ("+all eight", &[53, 87, 54, 89, 21, 10, 122, 121]),
+    ("+{53,87}", &START),
+    ("+{53,87,54,89}", &PERPETUAL),
+    ("+{21,10,122,121}", &ONE_SHOT_LIFT),
+    ("+all eight", &ALL_VARIANTS),
 ];
 
 // ---------------------------------------------------------------------------
@@ -2354,6 +2368,22 @@ mod tests {
         assert_eq!(walk_form(87), "WR");
         assert_eq!(walk_form(54), "W1");
         assert_eq!(walk_form(89), "WR");
+    }
+
+    /// The §H columns admit exactly the named arrays: no column carries a
+    /// literal that could drift from `START`, `PERPETUAL` or `ONE_SHOT_LIFT`.
+    #[test]
+    fn the_arbiter_columns_are_slices_of_the_named_arrays() {
+        assert_eq!(COLUMNS[0].1, &[] as &[i32]);
+        assert_eq!(COLUMNS[1].1, &START[..]);
+        assert_eq!(COLUMNS[2].1, &PERPETUAL[..]);
+        assert_eq!(COLUMNS[3].1, &ONE_SHOT_LIFT[..]);
+        let all: Vec<i32> = PERPETUAL
+            .iter()
+            .chain(ONE_SHOT_LIFT.iter())
+            .copied()
+            .collect();
+        assert_eq!(COLUMNS[4].1, &all[..]);
     }
 
     #[test]
