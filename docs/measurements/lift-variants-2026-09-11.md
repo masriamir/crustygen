@@ -121,7 +121,7 @@ Limits the numbers carry (also the probe's §J):
 - **Lift tag group (bank)** — a DWUS/blaze lift tag (`is_lift`) naming two or more sectors; its
   **members** are those sectors, each a `ScenePlat` of its own (`p_plats.c:164-169` makes one
   `plat_t` per tagged sector, with its own `low` from its own neighbors, `:207-212`). **Judged as
-  if unshared** — `lift::plat`'s eight refusals re-derived in its order (`src/lift/plat.rs:432-456`)
+  if unshared** — `lift::plat`'s eight refusals re-derived in its order (`src/lift/plat.rs:451-475`)
   with the `BankCaller` arm skipped — it precedes `ConflictingAction`, so a platform the recognizer
   stops at `BankCaller` may never be judged against that later arm, and skipping the check (rather
   than reading a `BankCaller` refusal back as accepted) still runs it; the probe checks its

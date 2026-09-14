@@ -1368,7 +1368,7 @@ fn record_arbiter(
 
 /// `lift::plat`'s per-platform verdict re-derived on a platform judged **as
 /// if its tag were unshared**: the same eight refusals in the same order as
-/// `src/lift/plat.rs:432-456`, with the `BankCaller` arm skipped, and the
+/// `src/lift/plat.rs:451-475`, with the `BankCaller` arm skipped, and the
 /// same shape rule (`:462-469`). Skipping that one arm, rather than reading
 /// the recognizer's own `Some(Refusal::BankCaller)` back as accepted,
 /// matters for a bank member: a platform the recognizer stops at
@@ -1417,7 +1417,7 @@ fn speed_of(triggers: &[SceneTrigger]) -> Speed {
 }
 
 /// `lift::plat`'s shape rule for an unrefused platform
-/// (`src/lift/plat.rs:462-469`).
+/// (`src/lift/plat.rs:481-488`).
 fn shape_of(rest: PlatRest, neighbors: usize) -> PlatShape {
     match (rest, neighbors) {
         (PlatRest::Top, _) => PlatShape::Lift,
