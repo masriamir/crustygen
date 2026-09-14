@@ -1141,11 +1141,16 @@ fn max_sectors_per_tag(v: &VarCtx<'_>, is_special: impl Fn(i32) -> bool) -> Opti
 }
 
 /// The bucket for the most sectors one tag names.
-fn tag_size_bucket(n: usize) -> &'static str {
-    match n {
-        0..=15 => "0-15",
-        16..=30 => "16-30",
-        _ => "31+",
+fn tag_size_bucket(n: usize, max_plats: usize) -> &'static str {
+    // The bounds are the sourced `MAXPLATS` and its half; the labels spell
+    // the shipped value (30) out and `the_tag_size_labels_match_the_plat_limit`
+    // fails the moment the table and the labels disagree.
+    if n <= max_plats / 2 {
+        "0-15"
+    } else if n <= max_plats {
+        "16-30"
+    } else {
+        "31+"
     }
 }
 
@@ -1174,12 +1179,12 @@ fn survey_concurrency(v: &VarCtx<'_>, perpetual: &BTreeSet<usize>, agg: &mut Agg
         .collect();
     let moving = moving_set.len();
     if let Some(n) = max_sectors_per_tag(v, |s| START.contains(&s)) {
-        agg.perpetual_tag_max.add(tag_size_bucket(n));
+        agg.perpetual_tag_max.add(tag_size_bucket(n, max_plats));
         agg.perpetual_tag_max_n = agg.perpetual_tag_max_n.max(count_len(n));
         agg.maps_perpetual_tag_over_30 += u64::from(n > max_plats);
     }
     if let Some(n) = max_sectors_per_tag(v, is_lift) {
-        agg.lift_tag_max.add(tag_size_bucket(n));
+        agg.lift_tag_max.add(tag_size_bucket(n, max_plats));
         agg.lift_tag_max_n = agg.lift_tag_max_n.max(count_len(n));
         agg.maps_lift_tag_over_30 += u64::from(n > max_plats);
     }
@@ -2370,6 +2375,19 @@ mod tests {
         assert_eq!(walk_form(89), "WR");
     }
 
+    /// The tag-size histogram's labels name the shipped `MAXPLATS` (30) and
+    /// its half; the bounds come from the table, so a table edit that moved
+    /// them would leave these labels wrong — this pins the two together.
+    #[test]
+    fn the_tag_size_labels_match_the_plat_limit() {
+        let max = max_plats(&Tables::load().expect("tables"));
+        assert_eq!(max, 30, "the labels below spell this value out");
+        assert_eq!(tag_size_bucket(max / 2, max), "0-15");
+        assert_eq!(tag_size_bucket(max / 2 + 1, max), "16-30");
+        assert_eq!(tag_size_bucket(max, max), "16-30");
+        assert_eq!(tag_size_bucket(max + 1, max), "31+");
+    }
+
     /// The §H columns admit exactly the named arrays: no column carries a
     /// literal that could drift from `START`, `PERPETUAL` or `ONE_SHOT_LIFT`.
     #[test]
@@ -3082,8 +3100,9 @@ mod tests {
         let sectors: BTreeSet<usize> = perpetual_plats(&v.ctx).iter().map(|p| p.sector).collect();
         assert_eq!(survey_concurrency(&v, &sectors, &mut agg), 1);
         assert_eq!(agg.combined_max, 1, "the shared sector counts once");
-        assert_eq!(tag_size_bucket(16), "16-30");
-        assert_eq!(tag_size_bucket(31), "31+");
+        let max = max_plats(&tables);
+        assert_eq!(tag_size_bucket(16, max), "16-30");
+        assert_eq!(tag_size_bucket(31, max), "31+");
 
         // §A's tag resolution: a tag-0 and a dangling start line.
         let mut text = chain(
