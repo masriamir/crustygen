@@ -143,22 +143,24 @@ fn has_activator(t: &FloorTrigger) -> bool {
 }
 
 /// Per-map lookups the target analysis needs beyond [`common::MapIndex`].
-struct MapCtx<'a> {
-    map: &'a UdmfMap,
-    scene: &'a Scene,
-    index: common::MapIndex<'a>,
-    step: i32,
-    player_height: i32,
+/// The `variants` pass shares it, so a perpetual or one-shot plat is looked
+/// up against exactly the sets a floor target is.
+pub(crate) struct MapCtx<'a> {
+    pub(crate) map: &'a UdmfMap,
+    pub(crate) scene: &'a Scene,
+    pub(crate) index: common::MapIndex<'a>,
+    pub(crate) step: i32,
+    pub(crate) player_height: i32,
     /// Sectors some floor line names by tag.
-    floor_targets: BTreeSet<usize>,
+    pub(crate) floor_targets: BTreeSet<usize>,
     /// Sectors some lift line names by tag.
-    lift_plats: BTreeSet<usize>,
+    pub(crate) lift_plats: BTreeSet<usize>,
     /// Sectors an emittable door special names by tag.
-    door_sectors: BTreeSet<usize>,
+    pub(crate) door_sectors: BTreeSet<usize>,
     /// The eight lift specials.
-    lift_specials: BTreeSet<i32>,
+    pub(crate) lift_specials: BTreeSet<i32>,
     /// Every special crustygen can emit that is neither a lift nor a floor.
-    other_emittable: BTreeSet<i32>,
+    pub(crate) other_emittable: BTreeSet<i32>,
 }
 
 /// The neighbors whose own height defines `ty`'s destination for `target`.
@@ -219,7 +221,7 @@ fn destination_neighbors(
 }
 
 /// The two-sided neighbors of `sec`, itself excluded.
-fn neighbors_of(scene: &Scene, sec: usize) -> BTreeSet<usize> {
+pub(crate) fn neighbors_of(scene: &Scene, sec: usize) -> BTreeSet<usize> {
     scene.sectors[sec]
         .boundary
         .iter()
@@ -596,7 +598,7 @@ fn map_verdict(
 }
 
 /// The per-map lookups the target analysis needs.
-fn map_ctx<'a>(map: &'a UdmfMap, scene: &'a Scene, tables: &Tables) -> MapCtx<'a> {
+pub(crate) fn map_ctx<'a>(map: &'a UdmfMap, scene: &'a Scene, tables: &Tables) -> MapCtx<'a> {
     let index = common::MapIndex::build(map, scene);
     let lift_specials: BTreeSet<i32> = tables.lift_specials().into_iter().map(i32::from).collect();
     let door_specials: BTreeSet<i32> = std::iter::once(tables.door_special())
@@ -789,9 +791,67 @@ fn survey_tag_groups(ctx: &MapCtx<'_>, agg: &mut Agg) {
     }
 }
 
-/// §I — what sub-project 4b inherits: the perpetual plats and the one-shot
-/// lift plats the lift work deliberately left out.
-fn survey_lift_carryover(ctx: &MapCtx<'_>, tables: &Tables, agg: &mut Agg) {
+/// Where a perpetual plat rests at load, against the bounds `EV_DoPlat`
+/// gives it: `low` is `P_FindLowestFloorSurrounding` clamped up to the
+/// sector's own floor and `high` is `P_FindHighestFloorSurrounding` clamped
+/// down to it (`p_plats.c:233-247`). These are load-time rest positions
+/// only: the first direction is `plat->status = P_Random()&1` (`:243`), so
+/// a plat at a bound may spend one wait there before it leaves it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub(crate) enum PerpetualRest {
+    /// `floor == low < high`: the plat loads resting at its low bound.
+    AtLow,
+    /// `low < high == floor`: the plat loads resting at its high bound.
+    AtHigh,
+    /// `low < floor < high`: the plat loads between its bounds.
+    Between,
+    /// `low == high`: no neighbor is above or below, and the plat cannot
+    /// move at all.
+    Dead,
+}
+
+impl PerpetualRest {
+    /// The rest class of a plat whose floor is `floor` and whose clamped
+    /// bounds are `low` and `high`.
+    pub(crate) fn of(floor: i32, low: i32, high: i32) -> Self {
+        match (floor == low, floor == high) {
+            (true, true) => Self::Dead,
+            (true, false) => Self::AtLow,
+            (false, true) => Self::AtHigh,
+            (false, false) => Self::Between,
+        }
+    }
+
+    /// The label the reports print.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::AtLow => "at low",
+            Self::AtHigh => "at high",
+            Self::Between => "between",
+            Self::Dead => "dead (low == high)",
+        }
+    }
+}
+
+/// One sector a 53/87 line names, with the bounds `EV_DoPlat` would give
+/// its `perpetualRaise` thinker.
+pub(crate) struct PerpetualPlat {
+    /// The tag the start line carries.
+    pub(crate) tag: i32,
+    /// Declaration index of the sector.
+    pub(crate) sector: usize,
+    /// `plat->low`, clamped (`p_plats.c:235-238`).
+    pub(crate) low: i32,
+    /// `plat->high`, clamped (`p_plats.c:240-243`).
+    pub(crate) high: i32,
+    /// Where the plat rests at load.
+    pub(crate) rest: PerpetualRest,
+}
+
+/// Every sector a 53/87 line names by tag — ascending by tag, and within a
+/// tag in declaration order — with its clamped bounds. A tag-0 start line
+/// names nothing here.
+pub(crate) fn perpetual_plats(ctx: &MapCtx<'_>) -> Vec<PerpetualPlat> {
     let perpetual_tags: BTreeSet<i32> = ctx
         .map
         .linedefs
@@ -799,44 +859,60 @@ fn survey_lift_carryover(ctx: &MapCtx<'_>, tables: &Tables, agg: &mut Agg) {
         .filter(|l| PERPETUAL[..2].contains(&l.special) && l.args[0] != 0)
         .map(|l| l.args[0])
         .collect();
-    let stop_tags: BTreeSet<i32> = ctx
-        .map
+    let mut plats = Vec::new();
+    for tag in perpetual_tags {
+        for &sector in ctx.index.by_tag.get(&tag).map_or(&[][..], Vec::as_slice) {
+            let floor = ctx.scene.sectors[sector].floor;
+            // `p_plats.c:233-247`: both bounds are clamped back to the
+            // sector's own floor when the search overshoots it.
+            let low = lowest_floor_surrounding(ctx.scene, sector).min(floor);
+            let high = highest_floor_surrounding(ctx.scene, sector).max(floor);
+            plats.push(PerpetualPlat {
+                tag,
+                sector,
+                low,
+                high,
+                rest: PerpetualRest::of(floor, low, high),
+            });
+        }
+    }
+    plats
+}
+
+/// The tags some 54/89 stop line names (tag 0 excluded).
+pub(crate) fn stop_tags(ctx: &MapCtx<'_>) -> BTreeSet<i32> {
+    ctx.map
         .linedefs
         .iter()
         .filter(|l| PERPETUAL[2..].contains(&l.special) && l.args[0] != 0)
         .map(|l| l.args[0])
-        .collect();
-    for tag in &perpetual_tags {
-        for &sec in ctx.index.by_tag.get(tag).map_or(&[][..], Vec::as_slice) {
-            let floor = ctx.scene.sectors[sec].floor;
-            // `p_plats.c:233-247`: both bounds are clamped back to the
-            // sector's own floor when the search overshoots it.
-            let low = lowest_floor_surrounding(ctx.scene, sec).min(floor);
-            let high = highest_floor_surrounding(ctx.scene, sec).max(floor);
-            let p = &mut agg.perpetual;
-            p.n += 1;
-            p.travel.push(high - low);
-            p.rest.add(match (floor == low, floor == high) {
-                (true, true) => "dead (low == high)",
-                (true, false) => "at low",
-                (false, true) => "at high",
-                (false, false) => "between",
-            });
-            let neighbors = neighbors_of(ctx.scene, sec);
-            p.neighbor_count.add(bucket_count(neighbors.len()));
-            p.has_stop += u64::from(stop_tags.contains(tag));
-            p.things_any += u64::from(ctx.index.things_in.contains_key(&sec));
-            let hops = common::hop_distances(ctx.scene, sec);
-            for (i, l) in ctx.map.linedefs.iter().enumerate() {
-                if l.args[0] != *tag || !PERPETUAL.contains(&l.special) {
-                    continue;
-                }
-                let sides =
-                    common::trigger_sides(ctx.map, ctx.scene, sec, i, ctx.step, Dispatch::Cross);
-                p.hops.add(hop_bucket(
-                    sides.iter().filter_map(|s| hops.get(s).copied()).min(),
-                ));
+        .collect()
+}
+
+/// §I — what sub-project 4b inherits: the perpetual plats and the one-shot
+/// lift plats the lift work deliberately left out.
+fn survey_lift_carryover(ctx: &MapCtx<'_>, tables: &Tables, agg: &mut Agg) {
+    let stop_tags = stop_tags(ctx);
+    for plat in perpetual_plats(ctx) {
+        let (tag, sec) = (plat.tag, plat.sector);
+        let p = &mut agg.perpetual;
+        p.n += 1;
+        p.travel.push(plat.high - plat.low);
+        p.rest.add(plat.rest.label());
+        let neighbors = neighbors_of(ctx.scene, sec);
+        p.neighbor_count.add(bucket_count(neighbors.len()));
+        p.has_stop += u64::from(stop_tags.contains(&tag));
+        p.things_any += u64::from(ctx.index.things_in.contains_key(&sec));
+        let hops = common::hop_distances(ctx.scene, sec);
+        for (i, l) in ctx.map.linedefs.iter().enumerate() {
+            if l.args[0] != tag || !PERPETUAL.contains(&l.special) {
+                continue;
             }
+            let sides =
+                common::trigger_sides(ctx.map, ctx.scene, sec, i, ctx.step, Dispatch::Cross);
+            p.hops.add(hop_bucket(
+                sides.iter().filter_map(|s| hops.get(s).copied()).min(),
+            ));
         }
     }
 
@@ -849,7 +925,46 @@ fn survey_lift_carryover(ctx: &MapCtx<'_>, tables: &Tables, agg: &mut Agg) {
 /// (121) against `:929-931` (120). Each pair dispatches the same
 /// `EV_DoPlat` type at the same speed from the same side; only
 /// `useAgain` / the `RETRIGGERS` block differ.
-const ONE_SHOT_TWIN: [(i32, i32); 4] = [(21, 62), (10, 88), (122, 123), (121, 120)];
+pub(crate) const ONE_SHOT_TWIN: [(i32, i32); 4] = [(21, 62), (10, 88), (122, 123), (121, 120)];
+
+/// The lift plats whose triggers are all one-shot, and those mixing one-shot
+/// and repeatable triggers, as two sets of sector indices.
+pub(crate) fn one_shot_split(ctx: &MapCtx<'_>, step: i32) -> (BTreeSet<usize>, BTreeSet<usize>) {
+    let mut all_one_shot: BTreeSet<usize> = BTreeSet::new();
+    let mut mixed: BTreeSet<usize> = BTreeSet::new();
+    for plat in ctx.index.plat_sectors(ctx.map) {
+        let Some(facts) = common::analyze_plat(ctx.map, ctx.scene, &ctx.index, plat, step) else {
+            continue;
+        };
+        // `analyze_plat` already returned `None` for a plat whose every lift
+        // line was dropped (a dangling front sidedef fires from nowhere), so
+        // `facts.triggers` is never empty here and `repeatable == 0` means
+        // every trigger is one-shot.
+        let repeatable = facts
+            .triggers
+            .iter()
+            .filter(|t| REPEATABLE_LIFT.contains(&t.special))
+            .count();
+        if repeatable == 0 {
+            all_one_shot.insert(plat);
+        } else if repeatable < facts.triggers.len() {
+            mixed.insert(plat);
+        }
+    }
+    (all_one_shot, mixed)
+}
+
+/// `map` with every one-shot lift special rewritten to its repeatable twin
+/// ([`ONE_SHOT_TWIN`]) — the what-if the one-shot rows are derived on.
+pub(crate) fn repeatable_twin_map(map: &UdmfMap) -> UdmfMap {
+    let mut what_if = map.clone();
+    for l in &mut what_if.linedefs {
+        if let Some(&(_, twin)) = ONE_SHOT_TWIN.iter().find(|&&(one, _)| one == l.special) {
+            l.special = twin;
+        }
+    }
+    what_if
+}
 
 /// §I(ii) — the shapes of the lift plats the lift work left out.
 ///
@@ -864,35 +979,14 @@ const ONE_SHOT_TWIN: [(i32, i32); 4] = [(21, 62), (10, 88), (122, 123), (121, 12
 /// about their shape, never about their behavior.
 fn survey_one_shot_lifts(ctx: &MapCtx<'_>, tables: &Tables, agg: &mut Agg) {
     let step = tables.step_height();
-    let mut all_one_shot: BTreeSet<usize> = BTreeSet::new();
-    let mut mixed: BTreeSet<usize> = BTreeSet::new();
-    for plat in ctx.index.plat_sectors(ctx.map) {
-        let Some(facts) = common::analyze_plat(ctx.map, ctx.scene, &ctx.index, plat, step) else {
-            continue;
-        };
-        let repeatable = facts
-            .triggers
-            .iter()
-            .filter(|t| REPEATABLE_LIFT.contains(&t.special))
-            .count();
-        if repeatable == 0 {
-            all_one_shot.insert(plat);
-        } else if repeatable < facts.triggers.len() {
-            mixed.insert(plat);
-        }
-    }
+    let (all_one_shot, mixed) = one_shot_split(ctx, step);
     if all_one_shot.is_empty() && mixed.is_empty() {
         return;
     }
     agg.one_shot_lift_n += count_len(all_one_shot.len());
     agg.mixed_lift_n += count_len(mixed.len());
 
-    let mut what_if = ctx.map.clone();
-    for l in &mut what_if.linedefs {
-        if let Some(&(_, twin)) = ONE_SHOT_TWIN.iter().find(|&&(one, _)| one == l.special) {
-            l.special = twin;
-        }
-    }
+    let what_if = repeatable_twin_map(ctx.map);
     let scene = Scene::build(&what_if, tables, &mut Vec::new());
     let index = common::MapIndex::build(&what_if, &scene);
     for &plat in &all_one_shot {
@@ -908,7 +1002,7 @@ fn survey_one_shot_lifts(ctx: &MapCtx<'_>, tables: &Tables, agg: &mut Agg) {
 }
 
 /// `n` as a `u64`, for a count that came from a container's length.
-fn count_len(n: usize) -> u64 {
+pub(crate) fn count_len(n: usize) -> u64 {
     u64::try_from(n).expect("a count fits u64")
 }
 
@@ -925,7 +1019,7 @@ fn activator_label(a: Activator) -> &'static str {
     }
 }
 
-fn bucket_count(n: usize) -> &'static str {
+pub(crate) fn bucket_count(n: usize) -> &'static str {
     match n {
         0 => "0",
         1 => "1",
@@ -936,7 +1030,7 @@ fn bucket_count(n: usize) -> &'static str {
     }
 }
 
-fn hop_bucket(h: Option<usize>) -> &'static str {
+pub(crate) fn hop_bucket(h: Option<usize>) -> &'static str {
     match h {
         // A trigger on the target's own edge fires from the target itself.
         Some(0) => "0",
@@ -961,7 +1055,7 @@ fn min_side_bucket(lo: i32) -> &'static str {
 /// The sidedef on the *neighbor's* side of a boundary the target holds.
 /// `fronts_this` says which mirror this is (`src/check/scene.rs:33-67`), so
 /// the other side is the one the engine draws for the neighbor.
-fn neighbor_side<'a>(map: &'a UdmfMap, b: &Boundary) -> Option<&'a UdmfSidedef> {
+pub(crate) fn neighbor_side<'a>(map: &'a UdmfMap, b: &Boundary) -> Option<&'a UdmfSidedef> {
     let l = &map.linedefs[b.linedef];
     if b.fronts_this {
         l.sideback.and_then(|s| common::sidedef(map, s))
