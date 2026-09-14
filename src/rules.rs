@@ -29,6 +29,7 @@ use std::collections::BTreeSet;
 
 use crate::compile::floors::FloorShape;
 use crate::compile::heights::{visible_lower_side, visible_upper_side};
+use crate::compile::lifts::LiftShape;
 use crate::compile::{Compiled, MapData};
 use crate::ir::{ExitTrigger, Ir, PortalKind};
 use crate::reach;
@@ -511,7 +512,9 @@ fn check_sealed_monster_rooms(
 /// [`lowest_floor_surrounding`], the same `P_FindLowestFloorSurrounding` walk
 /// P28 runs over a floor target, and a use special fires from its front
 /// sector only (`P_UseSpecialLine`) while a walkover fires from whichever
-/// side can cross at rest (`P_TryMove`'s step rule).
+/// side can cross at rest (`P_TryMove`'s step rule). A bank member is judged
+/// by its resolved callers rather than by the line scan; a lone lift's
+/// placed lines are adjacent by construction, so the scan is exact for it.
 fn check_lift_return(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>) {
     let step = tables.step_height();
     let use_specials = tables.lift_use_specials();
@@ -551,6 +554,43 @@ fn check_lift_return(tables: &Tables, out: &Compiled, v: &mut Vec<RuleViolation>
                     ),
                 });
             }
+        }
+        if let Some(bank) = &lift.bank {
+            // A bank member's callers were resolved from the bank's lines
+            // and the member's own neighbors (`compile::lifts::resolve_bank_callers`);
+            // the height-only scan below would credit any member's line at
+            // the right floor, wherever it is.
+            if lift.callable_from.is_empty() {
+                v.push(RuleViolation {
+                    rule: "P5",
+                    subject,
+                    detail: format!(
+                        "bank `{bank}`: no line on the bank's tag fires from a neighbor of the platform at its low floor {low}, so no adjacent line calls this member — a trap for a player below"
+                    ),
+                });
+            } else if lift.shape == LiftShape::Barrier {
+                // A barrier lowers for *both* its rooms — the invariant
+                // `lift::plat`'s `Refusal::OneWayBarrier` states for a WAD
+                // being read, and one the compiler's own output has to hold
+                // too. Both rooms are default callers, so a member the
+                // resolution narrowed to one side is a wall the player can
+                // only ever cross one way. Each face's non-platform side is
+                // its front sector (`compile::portals::emit_segment` puts the
+                // neighbor there and the platform on the back).
+                for line in [lift.low_line, lift.top_line].into_iter().flatten() {
+                    let side = out.data.sidedefs[out.data.linedefs[line].front].sector;
+                    if !lift.callable_from.contains(&side) {
+                        v.push(RuleViolation {
+                            rule: "P5",
+                            subject: subject.clone(),
+                            detail: format!(
+                                "bank `{bank}`: barrier member lowers for one side only — no line on the bank's tag fires from {side} at its floor"
+                            ),
+                        });
+                    }
+                }
+            }
+            continue;
         }
         let callable_from_low = out.data.linedefs.iter().any(|line| {
             if line.tag != lift.tag {
@@ -2086,6 +2126,122 @@ mod tests {
             "{v:?}"
         );
     }
+
+    /// The bank fixture Task 2 compiles: the hall (sector 0), the ledge (1),
+    /// then the two lifts and the two pedestals.
+    const BANKS: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"hall", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"ledge", "footprint":[[576,0],[576,512],[1088,512],[1088,0]], "floor":128, "ceiling":320, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"hall", "b":"ledge", "kind":"lift", "width":128, "at":[512,128], "bank":"pair" },
+        { "a":"hall", "b":"ledge", "kind":"lift", "width":128, "at":[512,384], "bank":"pair", "trigger":"none" }
+      ],
+      "pedestals":[
+        { "id":"left",  "room":"hall", "at":[128,128], "rise":64, "bank":"prizes" },
+        { "id":"right", "room":"hall", "at":[320,128], "rise":64, "bank":"prizes", "trigger":"none" }
+      ],
+      "exits":[ { "room":"ledge", "trigger":"switch", "at":[1088,256], "width":64 } ]
+    }"#;
+
+    fn banks_compiled() -> (Tables, crate::compile::Compiled) {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(BANKS).expect("ir");
+        let out = compile(&ir, &tables).expect("compiles");
+        (tables, out)
+    }
+
+    #[test]
+    fn p5_passes_on_a_bank_whose_none_members_are_neighbor_called() {
+        let (tables, out) = banks_compiled();
+        let mut v = Vec::new();
+        check_lift_return(&tables, &out, &mut v);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn p5_catches_a_bank_member_no_adjacent_line_calls() {
+        let (tables, mut out) = banks_compiled();
+        // Damage the compiled output the way a remote-only bank would look:
+        // the second lift keeps its tag but loses its caller.
+        let member = out
+            .lifts
+            .iter_mut()
+            .find(|l| l.bank.as_deref() == Some("pair") && l.activators.is_empty())
+            .expect("the none member");
+        member.callable_from.clear();
+        let mut v = Vec::new();
+        check_lift_return(&tables, &out, &mut v);
+        assert!(
+            v.iter().any(|x| x.rule == "P5"
+                && x.detail.contains("bank `pair`")
+                && x.detail.contains("fires from a neighbor")),
+            "{v:?}"
+        );
+    }
+
+    /// A barrier bank: two risen walls across the same gap between `west`
+    /// and `mid`, the second placing no line of its own, with a plain
+    /// passage on to `east` and the exit. A barrier stands above both its
+    /// rooms and carries a switch on each face, so the bank's lines fire
+    /// from both of the `none` member's two default callers.
+    const BARRIER_BANK: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"west", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"mid", "footprint":[[576,0],[576,512],[1088,512],[1088,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" },
+        { "id":"east", "footprint":[[1152,0],[1152,512],[1664,512],[1664,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"west", "b":"mid", "kind":"lift", "width":128, "at":[512,128], "rise":96, "bank":"bars" },
+        { "a":"west", "b":"mid", "kind":"lift", "width":128, "at":[512,384], "rise":96, "bank":"bars", "trigger":"none" },
+        { "a":"mid", "b":"east", "kind":"plain", "width":128, "at":[1088,384] }
+      ],
+      "exits":[ { "room":"east", "trigger":"switch", "at":[1664,256], "width":64 } ]
+    }"#;
+
+    #[test]
+    fn p5_passes_on_a_barrier_bank_whose_none_member_lowers_for_both_sides() {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(BARRIER_BANK).expect("ir");
+        let out = compile(&ir, &tables).expect("a barrier bank is a clean map");
+        let mut v = Vec::new();
+        check_lift_return(&tables, &out, &mut v);
+        assert!(v.is_empty(), "{v:?}");
+    }
+
+    #[test]
+    fn p5_catches_a_barrier_bank_member_that_lowers_for_one_side_only() {
+        // The second member moved onto the `mid` <-> `east` wall: the bank's
+        // only lines are the first member's, which fire from `west` and
+        // `mid`, so `east` stands against a wall it cannot lower.
+        let json = BARRIER_BANK.replace(
+            r#""a":"west", "b":"mid", "kind":"lift", "width":128, "at":[512,384]"#,
+            r#""a":"mid", "b":"east", "kind":"lift", "width":128, "at":[1088,128]"#,
+        );
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(&json).expect("ir");
+        let (out, _) = compile_reporting(&ir, &tables).expect("the geometry is sound");
+        let mut v = Vec::new();
+        check_lift_return(&tables, &out, &mut v);
+        let east = 2; // rooms are the first sectors, in IR order
+        assert!(
+            v.iter().any(|x| x.rule == "P5"
+                && x.detail
+                    == format!(
+                        "bank `bars`: barrier member lowers for one side only — no line on the bank's tag fires from {east} at its floor"
+                    )),
+            "{v:?}"
+        );
+    }
+
     /// Two rooms 64 units apart, sealed by a 16-deep drop wall that one
     /// switch on room `a`'s far wall lowers — a verbatim copy of
     /// `compile::floors`'s own `WALL` fixture, which lives in that module's
@@ -2624,6 +2780,8 @@ mod tests {
             shape: crate::compile::lifts::LiftShape::Lift,
             travel: 64,
             callable_from: Vec::new(),
+            activators: Vec::new(),
+            bank: None,
             tag: 99,
             portal: None,
             pedestal: None,

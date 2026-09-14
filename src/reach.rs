@@ -2017,4 +2017,46 @@ mod tests {
         );
         assert!(findings.stranded.is_empty());
     }
+
+    #[test]
+    fn a_bank_gives_its_none_members_an_edge_from_the_shared_host() {
+        let tables = Tables::load().expect("tables");
+        let ir = Ir::from_json(include_str!("../tests/golden/banks.json")).expect("ir");
+        let out = crate::compile::compile(&ir, &tables).expect("compiles");
+        let built = graph_from_compiled(&ir, &tables, &out).expect("start and exit");
+        let lifts: Vec<&Edge> = built
+            .graph
+            .edges
+            .iter()
+            .filter(|e| e.kind == EdgeKind::Lift)
+            .collect();
+        assert_eq!(
+            lifts.len(),
+            4,
+            "two lifts and two pedestals, each called from the hall"
+        );
+        let hall = ir.rooms.iter().position(|r| r.id == "hall").expect("hall");
+        assert!(
+            lifts.iter().all(|e| e.a == hall),
+            "every caller is the hall: {lifts:?}"
+        );
+        let findings = check(
+            &built.graph,
+            &Limits {
+                player_height: tables.player().height,
+                max_step: tables.step_height(),
+            },
+        );
+        assert!(!findings.unfinishable);
+        assert!(
+            findings.unreachable.is_empty(),
+            "{:?}",
+            findings.unreachable
+        );
+        assert!(
+            findings.stranded.is_empty(),
+            "a bank strands nobody: every member returns to its caller {:?}",
+            findings.stranded
+        );
+    }
 }

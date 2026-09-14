@@ -48,13 +48,14 @@ its one neighbor) and a **barrier** (at rest above two or more neighbors that
 share a floor). Eight refusals name what cannot be stated, judged in a fixed
 precedence so a platform wrong in several ways reports its most fundamental
 reason rather than an order-of-evaluation accident: `dead` (it travels 0, so
-there is no movement to state), `shared_tag` (more than one sector answers to
-the tag, where one IR lift is one platform), `one_shot`, `mixed_speed`,
+there is no movement to state), `one_shot`, `mixed_speed`,
 `unsupported_rest`, `top_only` (no trigger fires from below — the lift a
 player underneath cannot call), `one_way_barrier` (it lowers for one side
-only) and `conflicting_action` (a non-lift special names the tag too). A lift
+only), `bank_caller` (a member of a tag shared with other sectors that no
+adjacent line calls, `docs/measurements/lift-variants-2026-09-11.md` §I gate
+A′) and `conflicting_action` (a non-lift special names the tag too). A lift
 line that names no platform — tag 0, or a tag no sector answers to — is not a refused platform but a broken
-line, counted alongside the refusals. `shared_tag` and `one_way_barrier` are
+line, counted alongside the refusals. `bank_caller` and `one_way_barrier` are
 gates the shape probe behind `docs/measurements/lift-shapes-2026-08-29.md`
 never applied, so these shape counts are subsets of that measurement's rather
 than the same numbers.
@@ -87,8 +88,11 @@ but no IR construct names it) and `neighbors_mover` (a neighbor is itself a
 mover, which rule P30 refuses because the destination would then depend on
 when the trigger was pulled). A floor line that names no target — tag 0, or a
 tag no sector answers to — is not a refused target but a broken line, counted
-alongside the refusals. Unlike `lift::plat`, a **shared tag is accepted** when
-every member sector qualifies on its own. The chain refusal and the
+alongside the refusals. Like `lift::plat`, a **shared tag is accepted** when
+every member sector qualifies on its own — and, for `lift::plat`, is
+neighbor-called (`bank_caller` otherwise), a gate a floor target has no
+equivalent of — both recognizers now judge a shared-tag member by itself
+rather than refusing the whole group. The chain refusal and the
 `LedgeLower` refusal are gates the shape probe behind
 `docs/measurements/floor-shapes-2026-09-02.md` never applied;
 `docs/measurements/floors-2026-09-03.md` reconciles the two, map for map.
