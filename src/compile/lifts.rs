@@ -2103,6 +2103,69 @@ mod tests {
         compile(&ir, &tables).expect("the stacked bank is playable: P5 and P7 pass");
     }
 
+    /// One bank spanning both kinds: a lift portal placed in the portal pass
+    /// and a pedestal placed in the pedestal pass share the tag the first
+    /// allocated, and the hall — the lift's low neighbor, which its switch
+    /// fires from, and the pedestal's host — calls the `none` pedestal.
+    const BANK_MIXED: &str = r#"{ "seed":1, "grid":64, "theme":"tech_base",
+      "rooms":[
+        { "id":"hall", "footprint":[[0,0],[0,512],[512,512],[512,0]], "floor":0, "ceiling":256, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3",
+          "things":[ { "kind":"player1_start", "at":[64,64], "angle":0 } ] },
+        { "id":"ledge", "footprint":[[576,0],[576,512],[1088,512],[1088,0]], "floor":128, "ceiling":320, "light":160,
+          "floor_tex":"FLOOR4_8", "ceil_tex":"CEIL3_5", "wall_tex":"STARTAN3" }
+      ],
+      "portals":[
+        { "a":"hall", "b":"ledge", "kind":"lift", "width":128, "at":[512,256], "bank":"mixed" }
+      ],
+      "pedestals":[
+        { "id":"prize", "room":"hall", "at":[128,128], "rise":64, "bank":"mixed", "trigger":"none",
+          "things":[ { "kind":"medikit", "at":[160,160], "angle":0 } ] }
+      ],
+      "exits":[ { "room":"ledge", "trigger":"switch", "at":[1088,256], "width":64 } ]
+    }"#;
+
+    #[test]
+    fn a_bank_spanning_a_lift_and_a_pedestal_shares_one_tag_across_the_two_passes() {
+        let Built {
+            tags, lifts, data, ..
+        } = compile_data(BANK_MIXED);
+        assert_eq!(lifts.len(), 2, "the lift, then the pedestal");
+        let (lift, pedestal) = (&lifts[0], &lifts[1]);
+        assert_eq!(lift.shape, LiftShape::Lift);
+        assert_eq!(pedestal.shape, LiftShape::Pedestal);
+        assert_eq!(
+            lift.tag, pedestal.tag,
+            "one tag, allocated by the lift and reused by the pedestal"
+        );
+        assert_eq!(
+            tags.manifest().iter().filter(|e| e.tag == lift.tag).count(),
+            1,
+            "one manifest row for the bank"
+        );
+        assert_eq!(lift.activators, vec![0], "the switch fires from the hall");
+        assert!(
+            pedestal.activators.is_empty(),
+            "the pedestal placed no line"
+        );
+        assert_eq!(
+            pedestal.callable_from,
+            vec![0],
+            "the hall, the pedestal's host, calls it"
+        );
+        assert_eq!(
+            data.linedefs
+                .iter()
+                .filter(|l| l.tag == lift.tag && l.special != 0)
+                .count(),
+            1,
+            "only the lift's switch names the bank"
+        );
+        let ir = Ir::from_json(BANK_MIXED).expect("ir");
+        let tables = Tables::load().expect("tables");
+        compile(&ir, &tables).expect("the mixed bank is playable: P5 and P7 pass");
+    }
+
     /// A barrier bank: two risen walls across the same 64-unit gap between
     /// `west` and `mid`, the second placing no line of its own, with a plain
     /// passage on to `east` and the exit. A barrier stands above both its
