@@ -125,10 +125,13 @@ report-everything convention; `rules.rs` formats the core's typed findings into
 ### 3. The builder, `graph_from_compiled`
 
 Derives the graph from what was actually emitted — never from authored intent, so it
-cannot drift from the geometry the way an IR-level re-derivation could, and phase-2
-stair chains and phase-3 lift sectors will appear in it automatically when they exist
-(lifts will need a new edge kind for "traversable by riding"; that extension point is
-the enum, not speculative support now):
+cannot drift from the geometry the way an IR-level re-derivation could. A construct's sectors
+appear in it as soon as the compiler emits them: phase-3's platforms did, and the "traversable
+by riding" edge kind they needed is `EdgeKind::Lift`, added to the enum this section once named
+as the extension point for exactly that (phase-2 stair chains are still to come).
+That shipped `EdgeKind::Lift` gives a bank member
+with `trigger: none` its edge from whichever low neighbor another member's line on the
+shared tag fires from, never from itself:
 
 - **Nodes** from `MapData.sectors` (floor, ceiling); **edges** from every linedef with
   a `back` sidedef, connecting the front and back sectors.

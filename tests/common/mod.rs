@@ -1,8 +1,8 @@
 //! Shared fixture builders for the integration tests: entrada (and
-//! ascensor, the lift map, and muralla, the floor map) compiled to a UDMF
-//! PWAD, the same map round-tripped into a classic binary-format PWAD (with
-//! real nodes, via crustywad's one-shot builder), and a raw TEXTMAP-wrapping
-//! helper.
+//! ascensor, the lift map, muralla, the floor map, and hilera, the
+//! lift-bank map) compiled to a UDMF PWAD, the same map round-tripped into a
+//! classic binary-format PWAD (with real nodes, via crustywad's one-shot
+//! builder), and a raw TEXTMAP-wrapping helper.
 
 // Each `tests/*.rs` file that does `mod common;` compiles this module into
 // its own independent integration-test crate, and no single consumer uses
@@ -35,6 +35,10 @@ pub const ASCENSOR: &str = include_str!("../fixtures/ascensor_base.json");
 /// The muralla base IR fixture — the floor playtest map, paired with the
 /// committed `maps/muralla.wad`.
 pub const MURALLA: &str = include_str!("../fixtures/muralla_base.json");
+
+/// The hilera base IR fixture — the lift-bank playtest map, paired with the
+/// committed `maps/hilera.wad`.
+pub const HILERA: &str = include_str!("../fixtures/hilera_base.json");
 
 /// The lift golden IR — one lift, one barrier, one walkover lift and a
 /// pedestal — for the CLI tests that need a map every platform of which the
@@ -111,6 +115,18 @@ pub fn udmf_muralla_wad() -> Vec<u8> {
 /// binary-format PWAD with real nodes — the floor map's vanilla twin.
 pub fn binary_muralla_wad() -> Vec<u8> {
     binary_wad(udmf_muralla_wad())
+}
+
+/// Compiles hilera — the lift-bank playtest map — and packs it as a minimal
+/// un-noded UDMF PWAD.
+pub fn udmf_hilera_wad() -> Vec<u8> {
+    udmf_wad(HILERA)
+}
+
+/// Compiles hilera, assembles it, and re-emits it as a classic Doom
+/// binary-format PWAD with real nodes — the lift-bank map's vanilla twin.
+pub fn binary_hilera_wad() -> Vec<u8> {
+    binary_wad(udmf_hilera_wad())
 }
 
 /// Compiles the lift golden and packs it as a minimal un-noded UDMF PWAD.

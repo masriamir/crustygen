@@ -3,7 +3,8 @@
 //! salto (the teleport playtest map) against
 //! `tests/fixtures/salto.spec.md`, ascensor (the lift playtest map) against
 //! `tests/fixtures/ascensor.spec.md`, muralla (the floor playtest map)
-//! against `tests/fixtures/muralla.spec.md`. Every derivable frontmatter
+//! against `tests/fixtures/muralla.spec.md`, hilera (the lift-bank playtest
+//! map) against `tests/fixtures/hilera.spec.md`. Every derivable frontmatter
 //! number in those specs was hand-set to that map's own compiled actuals, so
 //! a clean run must show zero `Fail` rows (ascensor's lift-trigger row is the
 //! one deliberate exception, documented on its own test) — proving
@@ -33,6 +34,8 @@ const ASCENSOR_SPEC: &str = include_str!("fixtures/ascensor.spec.md");
 const ASCENSOR_BOTH_ENDS_SPEC: &str = include_str!("fixtures/ascensor_both_ends.spec.md");
 const MURALLA: &str = include_str!("fixtures/muralla_base.json");
 const MURALLA_SPEC: &str = include_str!("fixtures/muralla.spec.md");
+const HILERA: &str = include_str!("fixtures/hilera_base.json");
+const HILERA_SPEC: &str = include_str!("fixtures/hilera.spec.md");
 const FLOORS: &str = include_str!("golden/floors.json");
 /// The filled, parseable example authors copy — used here only for its
 /// *shape*, so the floor golden gets a conformance report without a paired
@@ -425,6 +428,63 @@ fn muralla_conforms_to_its_paired_spec() {
             .find(|r| r.parameter == parameter)
             .expect(parameter);
         assert_eq!(row.verdict, Verdict::Pass, "{row:?}");
+    }
+}
+
+/// Hilera's own conformance run: the lift-bank playtest map judged against
+/// `tests/fixtures/hilera.spec.md`. Every derivable number in that spec was
+/// set from hilera's own compiled output, and like muralla none is left
+/// deliberately failing — every row is `Pass`, `Info` or `NotDerivable`, and
+/// no row is `NotRun`.
+///
+/// The rows the lift-bank construct itself produces are named so a
+/// regression in one fails here by name: seven platforms across the three
+/// banks (`progression.lifts.count`), a 128 travel ceiling
+/// (`progression.lifts.max_travel`), the eight switch lines the three banks'
+/// own members and the exit add up to (`progression.switches.count`), and no
+/// walkover trigger anywhere on the map
+/// (`progression.walkover_triggers.count`).
+#[test]
+fn hilera_conforms_to_its_paired_spec() {
+    let rows = conformance_rows_for(HILERA, HILERA_SPEC);
+
+    let failed: Vec<_> = rows.iter().filter(|r| r.verdict == Verdict::Fail).collect();
+    assert!(failed.is_empty(), "unexpected Fail rows: {failed:?}");
+
+    let not_run: Vec<_> = rows
+        .iter()
+        .filter(|r| r.verdict == Verdict::NotRun)
+        .collect();
+    assert!(
+        not_run.is_empty(),
+        "unexpected NotRun rows (broken scene): {not_run:?}"
+    );
+
+    let lifts_trigger = rows
+        .iter()
+        .find(|r| r.parameter == "progression.lifts.trigger")
+        .expect("the lift-trigger row is always emitted");
+    assert_eq!(lifts_trigger.verdict, Verdict::Pass, "{lifts_trigger:?}");
+    assert_eq!(
+        lifts_trigger.actual, "switch ×2, walkover ×0, both_ends ×0",
+        "{lifts_trigger:?}"
+    );
+
+    for (parameter, actual) in [
+        ("progression.lifts.count", "7"),
+        ("progression.lifts.max_travel", "128"),
+        ("progression.switches.count", "8"),
+        ("progression.walkover_triggers.count", "0"),
+        ("progression.keys", "none"),
+        ("progression.locked_doors", "0"),
+        ("progression.exit.trigger", "switch"),
+    ] {
+        let row = rows
+            .iter()
+            .find(|r| r.parameter == parameter)
+            .expect(parameter);
+        assert_eq!(row.verdict, Verdict::Pass, "{row:?}");
+        assert_eq!(row.actual, actual, "{row:?}");
     }
 }
 

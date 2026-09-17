@@ -1,10 +1,10 @@
 //! Layer-4 proof: a compiled fixture, broken one property at a time, is
 //! caught each time.
 //!
-//! Six fixtures, each with its own `*_udmf()` builder: entrada (the base
-//! map), the teleport golden, the lift golden, ascensor, the floor golden
-//! and muralla. Each test compiles one of them clean, mutates exactly one
-//! property on the *parsed* `UdmfMap` (or, for V-P9, the emitted text before
+//! Seven fixtures, each with its own `*_udmf()` builder: entrada (the base
+//! map), the teleport golden, the lift golden, ascensor, the floor golden,
+//! muralla and hilera. Each test compiles one of them clean, mutates exactly
+//! one property on the *parsed* `UdmfMap` (or, for V-P9, the emitted text before
 //! parsing — that field has no `UdmfSidedef` to set, see the test), and
 //! asserts the specific finding [`crustygen::check::run`] raises in
 //! response. Every test also re-establishes the 0 baseline for the check id
@@ -29,7 +29,9 @@ const TELEPORTS: &str = include_str!("golden/teleports.json");
 const LIFTS: &str = include_str!("golden/lifts.json");
 const ASCENSOR: &str = include_str!("fixtures/ascensor_base.json");
 const MURALLA: &str = include_str!("fixtures/muralla_base.json");
+const HILERA: &str = include_str!("fixtures/hilera_base.json");
 const FLOORS: &str = include_str!("golden/floors.json");
+const BANKS: &str = include_str!("golden/banks.json");
 
 /// Compiles entrada, emits its TEXTMAP, and parses it back — the same
 /// compile -> emit -> parse round trip `tests/check_conformance.rs` uses, so
@@ -742,6 +744,18 @@ fn floors_udmf() -> (UdmfMap, Tables, Compiled) {
     (map, tables, compiled)
 }
 
+/// The bank golden through the same compile → TEXTMAP → parse path
+/// `floors_udmf` takes, with the compiler's own output alongside so a test
+/// can name a member by its bank.
+fn banks_udmf() -> (UdmfMap, Tables, Compiled) {
+    let tables = Tables::load().expect("tables");
+    let ir = Ir::from_json(BANKS).expect("ir");
+    let compiled = compile(&ir, &tables).expect("compiles");
+    let text = emit_textmap(&compiled.data, &compiled.things);
+    let map = parse_udmf(&text, Limits::default()).expect("parses");
+    (map, tables, compiled)
+}
+
 /// The declaration index of the golden's floor target of `shape`. Panics if
 /// the golden ever stops emitting exactly one of that shape, which the
 /// golden test in `tests/golden_textmap.rs` would have caught first.
@@ -1256,6 +1270,141 @@ fn the_muralla_playtest_map_is_modeled_not_warned_about() {
     assert!(
         report.findings.is_empty(),
         "expected zero findings of any severity on muralla: {:?}",
+        report.findings
+    );
+}
+
+/// Compiles hilera — the lift-bank playtest map paired with the committed
+/// `maps/hilera.wad` — emits its TEXTMAP, and parses it back, the same
+/// round trip `entrada_udmf` uses.
+fn hilera_udmf() -> (UdmfMap, Tables) {
+    let tables = Tables::load().expect("tables");
+    let ir = Ir::from_json(HILERA).expect("ir");
+    let compiled = compile(&ir, &tables).expect("compiles");
+    let text = emit_textmap(&compiled.data, &compiled.things);
+    (
+        parse_udmf(&text, Limits::default()).expect("parses"),
+        tables,
+    )
+}
+
+/// The same cross-examination on hilera, the lift-bank playtest map that
+/// `maps/hilera.wad` is built from — what `the_muralla_playtest_map_is_
+/// modeled_not_warned_about` is to the floor toolchain.
+///
+/// Not a restatement of the bank golden (`tests/golden/banks.json`). The
+/// golden has one lift pair and one pedestal pair off a single foyer;
+/// hilera chains three rooms behind three full banks — a lift pair, a
+/// barrier pair and a three-member pedestal row — so V-P5's neighbor-called
+/// caller resolution and the flood's tag-shared crediting both have to hold
+/// across every bank shape the construct offers, not just two of them.
+#[test]
+fn the_hilera_playtest_map_is_modeled_not_warned_about() {
+    let (map, tables) = hilera_udmf();
+    let report = run(&map, "MAP01", &tables, None);
+    let unmodeled: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.check == "V-S" && f.message.contains("does not model"))
+        .collect();
+    assert!(
+        unmodeled.is_empty(),
+        "every special hilera emits is one the checker models: {unmodeled:?}"
+    );
+    assert_eq!(
+        count(&report.findings, "V-P7"),
+        0,
+        "the flood calls each bank from its own member and reaches the exit: {:?}",
+        report.findings
+    );
+    assert_eq!(
+        count(&report.findings, "V-P5"),
+        0,
+        "every bank member is judged by its own travel and callers: {:?}",
+        report.findings
+    );
+    // Not merely error-free but finding-free, the bar `the_muralla_playtest_
+    // map_is_modeled_not_warned_about` sets: this is the map the playtest is
+    // run on, so a warning must not start firing on it unnoticed.
+    assert!(
+        report.findings.is_empty(),
+        "expected zero findings of any severity on hilera: {:?}",
+        report.findings
+    );
+}
+
+/// A compiled bank is modeled, not warned about: V-P5 judges each member
+/// on its own travel and callers, and a tag naming several sectors is not
+/// a V-P13/V-P14 finding.
+#[test]
+fn a_compiled_bank_is_modeled_not_warned_about() {
+    let (map, tables, _) = banks_udmf();
+    let report = run(&map, "MAP01", &tables, None);
+    // Assert exactly the way `the_muralla_playtest_map_is_modeled_not_warned_about`
+    // does (read it first): no Error, no Warning, whatever Info rows the
+    // checker prints for every map.
+    let noisy: Vec<_> = report
+        .findings
+        .iter()
+        .filter(|f| f.severity != Severity::Info)
+        .collect();
+    assert!(noisy.is_empty(), "{noisy:?}");
+}
+
+/// The asymmetry KNOWN-GAPS records: a bank member whose only caller is
+/// remote is refused by the compiler (P5) and by the recognizer
+/// (`bank_caller`), but the verifier's flood credits it optimistically —
+/// every low neighbor gets the edge when no activator is adjacent.
+#[test]
+fn a_remote_only_bank_line_is_credited_by_the_flood_not_refused() {
+    let (mut map, tables, out) = banks_udmf();
+    let pair_tag = out
+        .lifts
+        .iter()
+        .find(|l| l.bank.as_deref() == Some("pair"))
+        .expect("the pair")
+        .tag;
+    let switch = i32::from(tables.lift_special(true, false));
+    // Silence the first lift's own switch...
+    let silenced = map
+        .linedefs
+        .iter_mut()
+        .filter(|l| l.special == switch && l.args[0] == i32::from(pair_tag))
+        .map(|l| {
+            l.special = 0;
+            l.args[0] = 0;
+        })
+        .count();
+    assert_eq!(silenced, 1, "the pair had one switch");
+    // ...and put one on a foyer wall, two rooms from the lifts.
+    let foyer = 0; // rooms are the first sectors, in IR order
+    let wall = map
+        .linedefs
+        .iter()
+        .position(|l| {
+            l.sideback.is_none()
+                && map.sidedefs[usize::try_from(l.sidefront).expect("index")].sector == foyer
+        })
+        .expect("a one-sided foyer wall");
+    map.linedefs[wall].special = switch;
+    map.linedefs[wall].args[0] = i32::from(pair_tag);
+
+    let report = run(&map, "MAP01", &tables, None);
+    assert!(
+        !report
+            .findings
+            .iter()
+            .any(|f| f.check == "V-P7" && f.severity == Severity::Error),
+        "the flood still reaches the ledge through the optimistic edge: {:?}",
+        report.findings
+    );
+    // The verifier's V-P5 is height-only by design (spec §5): the foyer
+    // wall's front sector stands at the lifts' low floor, so it raises no
+    // finding either. The compiler (P5) and the recognizer (`bank_caller`)
+    // are where this member is refused.
+    assert!(
+        !report.findings.iter().any(|f| f.check == "V-P5"),
+        "V-P5 is height-only and sees a caller at the low floor: {:?}",
         report.findings
     );
 }

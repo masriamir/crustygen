@@ -18,14 +18,16 @@
 //! [`Shape::Barrier`] when there are two or more. Those are the lift shape
 //! probe's rules (`examples/liftprobe/common.rs`,
 //! `docs/measurements/lift-shapes-2026-08-29.md`), which measured them across
-//! the idgames corpus — with two gates the probe's `clean` test never had:
-//! [`Refusal::SharedTag`] and [`Refusal::OneWayBarrier`]. A shared-tag
-//! platform or a barrier callable from one side scores a shape in the probe
-//! and is refused here, so this module's shape buckets are subsets of the
-//! measurement's, not the same counts. The probe names refusal reasons only
-//! as a corpus histogram (its `why Other` row); this module attaches one to
-//! each platform and adds [`Refusal::Dead`], [`Refusal::SharedTag`] and
-//! [`Refusal::OneWayBarrier`] to that vocabulary.
+//! the idgames corpus — with a gate the probe's `clean` test never had:
+//! [`Refusal::OneWayBarrier`]. A barrier callable from one side scores a
+//! shape in the probe and is refused here, so this module's shape buckets
+//! are subsets of the measurement's, not the same counts. A shared-tag
+//! member the probe also shapes is refused here only when no adjacent line
+//! calls it ([`Refusal::BankCaller`]); every other member's shape stands.
+//! The probe names refusal reasons only as a corpus histogram (its `why
+//! Other` row); this module attaches one to each platform and adds
+//! [`Refusal::Dead`], [`Refusal::BankCaller`] and [`Refusal::OneWayBarrier`]
+//! to that vocabulary.
 //!
 //! **Refusal precedence.** A platform is judged against the eight
 //! [`Refusal`]s in one fixed order and the first that applies wins, so a
@@ -34,22 +36,38 @@
 //!
 //! 1. [`Refusal::Dead`] — it cannot move at all, so nothing else about it
 //!    matters.
-//! 2. [`Refusal::SharedTag`] — it is not one platform, so per-platform
-//!    judgments do not apply to it.
-//! 3. [`Refusal::OneShot`] and 4. [`Refusal::MixedSpeed`] — how its triggers
+//! 2. [`Refusal::OneShot`] and 3. [`Refusal::MixedSpeed`] — how its triggers
 //!    fire, which is a fact about the lines and holds whatever the geometry.
-//! 5. [`Refusal::UnsupportedRest`] — where it rests, which decides whether a
+//! 4. [`Refusal::UnsupportedRest`] — where it rests, which decides whether a
 //!    shape exists to name at all.
-//! 6. [`Refusal::TopOnly`] and 7. [`Refusal::OneWayBarrier`] — who can call
+//! 5. [`Refusal::TopOnly`] and 6. [`Refusal::OneWayBarrier`] — who can call
 //!    it, judged only once its rest is one a shape names.
+//! 7. [`Refusal::BankCaller`] — a shared-tag member no adjacent line calls,
+//!    judged only once it is known to be callable from Low by *something*
+//!    ([`Refusal::TopOnly`] having already caught the ones that are not).
 //! 8. [`Refusal::ConflictingAction`] — last, because a platform this module
 //!    would otherwise accept is the only one for which "something else drives
 //!    it too" is the whole story.
 //!
-//! One consequence worth naming: a member of a shared-tag group that cannot
-//! move reports [`Refusal::Dead`] rather than [`Refusal::SharedTag`], because
-//! the order judges movement before identity — the members of one group need
-//! not all carry the same refusal.
+//! A shared tag is not itself a refusal. Every member is judged alone, the
+//! way the floor recognizer judges a shared-tag target, and only a member no
+//! adjacent line calls is refused
+//! (`docs/measurements/lift-variants-2026-09-11.md` §I, gate A′).
+//!
+//! One consequence worth naming: a member of a shared tag that cannot move
+//! reports [`Refusal::Dead`] rather than [`Refusal::BankCaller`], and one no
+//! trigger calls from Low at all reports [`Refusal::TopOnly`] first — the
+//! order judges movement and reachability before this tag's identity, so
+//! the members of one group need not all carry the same refusal.
+//!
+//! A sharper consequence of the same order: [`Refusal::OneWayBarrier`]
+//! *preempts* [`Refusal::BankCaller`] for every [`Rest::AboveAll`] platform
+//! with two or more neighbors. `BankCaller`'s gate is that no neighbor is a
+//! Low activator, which always satisfies `OneWayBarrier`'s "fewer Low
+//! activator neighbors than neighbors" — so an uncalled barrier-shaped member
+//! reports `OneWayBarrier`, and `bank_caller` can only ever fire for a
+//! [`Rest::Top`] platform or a single-neighbor [`Rest::AboveAll`]
+//! (pedestal-shaped) one.
 //!
 //! A lift line that names no platform at all — tag 0, or a tag no sector
 //! answers to — is not a refused platform but a broken line, listed in
@@ -100,9 +118,6 @@ pub enum Refusal {
     /// own floor, so it travels 0 and `EV_DoPlat`'s `downWaitUpStay` is a
     /// no-op on it — there is no movement to state.
     Dead,
-    /// More than one sector carries the tag ([`ScenePlat::shared_tag`]), so
-    /// every line naming it drives them all; one IR lift is one platform.
-    SharedTag,
     /// Some trigger is a one-shot (S1/W1) form rather than a repeatable
     /// (SR/WR) one ([`SceneTrigger::repeatable`]) — a platform the player can
     /// call at most once, which no IR lift states.
@@ -124,6 +139,21 @@ pub enum Refusal {
     /// fires no trigger from below ([`ScenePlat::low_activator_neighbors`]):
     /// it lowers for one side only, where an IR barrier lowers for both.
     OneWayBarrier,
+    /// The tag names more than one sector ([`ScenePlat::shared_tag`]) and no
+    /// trigger fires from a neighbor of *this* member standing more than a
+    /// step below it ([`ScenePlat::low_activator_neighbors`], an
+    /// [`Activator::Low`] that is also a neighbor): the bank's lines are on
+    /// another member or somewhere else, and the IR calls a bank member only
+    /// from a sector that touches it (`compile::lifts::resolve_bank_callers`).
+    /// The gate here is a *class*, deliberately looser than the compiler's:
+    /// `rules::check_lift_return` requires the caller to stand exactly at the
+    /// platform's low floor, since a caller the platform does not come down to
+    /// cannot board it, while a WAD being read only has to be recognizable.
+    ///
+    /// Reachable for a [`Rest::Top`] platform and a single-neighbor
+    /// [`Rest::AboveAll`] one only: [`Self::OneWayBarrier`] takes every other
+    /// uncalled `AboveAll` member first (see the module doc's precedence).
+    BankCaller,
     /// A non-lift special names the platform's tag too
     /// ([`ScenePlat::other_actions`]), so something besides the lift drives
     /// this sector.
@@ -200,14 +230,17 @@ pub struct PlatCounts {
     pub refused: u64,
     /// Platforms refused [`Refusal::Dead`].
     pub dead: u64,
-    /// Platforms refused [`Refusal::SharedTag`].
-    pub shared_tag: u64,
+    /// Platforms refused [`Refusal::BankCaller`].
+    pub bank_caller: u64,
     /// Shared-tag groups that are one platform split by trim: every member at
     /// one floor and all of them mutually adjacent. A count of groups the
-    /// resolver found sharing a tag, not of platforms — and not strictly a
-    /// sub-count of [`Self::shared_tag`], whose members report
-    /// [`Refusal::Dead`] instead when they cannot move. The shape a
-    /// geometry-aware lifter could still recognize as a single lift.
+    /// resolver found sharing a tag, not of platforms — and not a sub-count
+    /// of [`Self::bank_caller`] at all: a split group's members may each be
+    /// accepted, refused for an earlier reason, or refused
+    /// [`Refusal::BankCaller`] itself. The shape a
+    /// geometry-aware lifter could still recognize as a single lift. Judged
+    /// member by member, a split platform reads as several lifts; merging it
+    /// is a follow-up.
     pub shared_split: u64,
     /// Platforms refused [`Refusal::OneShot`].
     pub one_shot: u64,
@@ -258,7 +291,7 @@ impl PlatCounts {
             barriers: self.barriers.saturating_add(other.barriers),
             refused: self.refused.saturating_add(other.refused),
             dead: self.dead.saturating_add(other.dead),
-            shared_tag: self.shared_tag.saturating_add(other.shared_tag),
+            bank_caller: self.bank_caller.saturating_add(other.bank_caller),
             shared_split: self.shared_split.saturating_add(other.shared_split),
             one_shot: self.one_shot.saturating_add(other.one_shot),
             mixed_speed: self.mixed_speed.saturating_add(other.mixed_speed),
@@ -419,8 +452,6 @@ fn refusal_of(p: &ScenePlat, callable: Callable, speed: Speed) -> Option<Refusal
     let one_floor = p.distinct_neighbor_floors == 1;
     if p.rest == Rest::Dead {
         Some(Refusal::Dead)
-    } else if p.shared_tag >= 2 {
-        Some(Refusal::SharedTag)
     } else if !p.triggers.iter().all(|t| t.repeatable) {
         Some(Refusal::OneShot)
     } else if speed == Speed::Mixed {
@@ -434,6 +465,8 @@ fn refusal_of(p: &ScenePlat, callable: Callable, speed: Speed) -> Option<Refusal
         && p.low_activator_neighbors().len() < p.neighbors.len()
     {
         Some(Refusal::OneWayBarrier)
+    } else if p.shared_tag >= 2 && p.low_activator_neighbors().is_empty() {
+        Some(Refusal::BankCaller)
     } else if !p.other_actions.is_empty() {
         Some(Refusal::ConflictingAction)
     } else {
@@ -472,12 +505,12 @@ fn count(plats: &[Plat], broken_lines: &[usize], shared_split: u64) -> PlatCount
         }
         match p.refusal {
             Some(Refusal::Dead) => c.dead += 1,
-            Some(Refusal::SharedTag) => c.shared_tag += 1,
             Some(Refusal::OneShot) => c.one_shot += 1,
             Some(Refusal::MixedSpeed) => c.mixed_speed += 1,
             Some(Refusal::UnsupportedRest) => c.unsupported_rest += 1,
             Some(Refusal::TopOnly) => c.top_only += 1,
             Some(Refusal::OneWayBarrier) => c.one_way_barrier += 1,
+            Some(Refusal::BankCaller) => c.bank_caller += 1,
             Some(Refusal::ConflictingAction) => c.conflicting += 1,
             None => {}
         }
@@ -493,7 +526,7 @@ fn count(plats: &[Plat], broken_lines: &[usize], shared_split: u64) -> PlatCount
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::check::fixtures::{chain, scene_of};
+    use crate::check::fixtures::{chain, far_wall, scene_of};
 
     /// Parses `text`, builds its [`Scene`] and recognizes its platforms.
     fn report_of(text: &str) -> PlatReport {
@@ -531,21 +564,43 @@ mod tests {
         );
     }
 
+    /// Two lifts on tag 7, each `Rest::Top` (a landing neighbor at its own
+    /// floor, a low neighbor at the far end). The only lift trigger is a
+    /// switch on room 6 — adjacent to neither lift — so neither lift's own
+    /// neighbors call it: both are `BankCaller` although both are
+    /// `callable_low` (room 6 fires Low for both), so `TopOnly` never
+    /// claims them first.
+    ///
+    /// A second far-wall line carries a *non-lift* special on the same tag
+    /// (23, `S1 Floor Lower to Lowest`), so `ConflictingAction` applies to
+    /// both members as well. That is deliberate: it pins the precedence, since
+    /// `BankCaller` comes first and the expected refusal must stay
+    /// `BankCaller` rather than drift to the later arm.
+    fn bank_caller_case() -> String {
+        let mut text = chain(
+            &[0, 128, 128, 0, 128, 128, 0],
+            &[0, 7, 0, 0, 7, 0, 0],
+            &[
+                (0, 0, false),
+                (0, 0, false),
+                (0, 0, false),
+                (0, 0, false),
+                (0, 0, false),
+                (0, 0, false),
+            ],
+            "",
+        );
+        far_wall(&mut text, 7, 62, 7);
+        far_wall(&mut text, 7, 23, 7);
+        text
+    }
+
     #[test]
     fn refusals_in_order() {
         let cases: [(String, Refusal); 8] = [
             (
                 chain(&[0, 0, 0], &[0, 7, 0], &[(62, 7, false), (0, 0, false)], ""),
                 Refusal::Dead,
-            ),
-            (
-                chain(
-                    &[0, 128, 128, 0],
-                    &[0, 7, 7, 0],
-                    &[(62, 7, false), (0, 0, false), (0, 0, false)],
-                    "",
-                ),
-                Refusal::SharedTag,
             ),
             (
                 chain(
@@ -592,6 +647,7 @@ mod tests {
                 ),
                 Refusal::OneWayBarrier,
             ),
+            (bank_caller_case(), Refusal::BankCaller),
             (
                 chain(
                     &[0, 128, 128],
@@ -629,38 +685,114 @@ mod tests {
         assert_eq!(r.counts.refusals(), 2);
     }
 
+    /// Two lifts on one tag in a row of rooms `0 | 1 | 2 | 3 | 4` with floors
+    /// `0, 128, 128, 128, 0`: each lift rests level with room 2 and above an
+    /// outer room, so both are `Rest::Top`. The only switch is on lift 1's
+    /// west face, fired from room 0: lift 1 is neighbor-called; lift 3's low
+    /// neighbor is room 4, which fires nothing, so it is `BankCaller` — it
+    /// is still `callable_low` (room 0 is a Low activator), so `TopOnly`
+    /// does not claim it first.
+    #[test]
+    fn a_bank_member_is_judged_alone_and_refused_only_when_no_adjacent_line_calls_it() {
+        let r = report_of(&chain(
+            &[0, 128, 128, 128, 0],
+            &[0, 7, 0, 7, 0],
+            &[(62, 7, false), (0, 0, false), (0, 0, false), (0, 0, false)],
+            "",
+        ));
+        let first = r.plats.iter().find(|p| p.sector == 1).expect("plat 1");
+        let second = r.plats.iter().find(|p| p.sector == 3).expect("plat 3");
+        assert_eq!((first.shape, first.refusal), (Some(Shape::Lift), None));
+        assert_eq!(
+            (second.shape, second.refusal),
+            (None, Some(Refusal::BankCaller))
+        );
+        assert_eq!(
+            (r.counts.bank_caller, r.counts.refused, r.counts.lifts),
+            (1, 1, 1)
+        );
+    }
+
+    /// Two platforms on one tag both bordering room 2 at floor 0, in a row
+    /// `0 | 1 | 2 | 3` with floors `0, 128, 0, 128`: plat 1 has two low
+    /// neighbors (a barrier), plat 3 one (a pedestal). Switches on the
+    /// 0–1 line and the 2–3 line fire from rooms 0 and 2, so every neighbor
+    /// of plat 1 calls it and plat 3's one neighbor calls it: both accepted.
+    #[test]
+    fn a_shared_tag_whose_members_are_all_neighbor_called_is_accepted_member_by_member() {
+        let r = report_of(&chain(
+            &[0, 128, 0, 128],
+            &[0, 7, 0, 7],
+            &[(62, 7, false), (0, 0, false), (62, 7, false)],
+            "",
+        ));
+        assert!(r.plats.iter().all(|p| p.refusal.is_none()), "{:?}", r.plats);
+        assert_eq!(
+            (r.counts.barriers, r.counts.pedestals, r.counts.bank_caller),
+            (1, 1, 0)
+        );
+    }
+
     #[test]
     fn a_shared_tag_group_is_split_only_when_it_is_one_floor_and_connected() {
-        // Both members at 128 and adjacent: one platform the trim split. A
-        // low room at each end, so neither member is `Dead` — `travel == 0`
-        // is judged before the shared tag is.
+        // Both members at 128 and adjacent: one platform the trim split. The
+        // switch is on the 0–1 line, fired from room 0: room 0 is member 1's
+        // own neighbor, so member 1 is accepted, but it is not member 2's —
+        // member 2's own neighbors (1 and 3) call nothing, so it is
+        // `BankCaller` even though the group is one split platform.
         let r = report_of(&chain(
             &[0, 128, 128, 0],
             &[0, 7, 7, 0],
             &[(62, 7, false), (0, 0, false), (0, 0, false)],
             "",
         ));
-        assert_eq!((r.counts.shared_tag, r.counts.shared_split), (2, 1));
+        let refusals: Vec<Option<Refusal>> = r.plats.iter().map(|p| p.refusal).collect();
+        assert_eq!(refusals, vec![None, Some(Refusal::BankCaller)]);
+        assert_eq!((r.counts.bank_caller, r.counts.shared_split), (1, 1));
 
         // Two members at one floor with an untagged room between them: one
         // floor, but the walk over two-sided boundaries never leaves a member
-        // to reach the other.
+        // to reach the other, so `shared_split` is 0. Neither member is
+        // `BankCaller` either, but for a different reason: the switch is on
+        // the 0–1 line, front room 0. Member 0 *is* room 0, so its own
+        // trigger fires from itself (`Activator::Plat`, a rider's call, not
+        // a caller's); member 2 sits at member 0's own floor, so the same
+        // trigger classifies as `Level` against it, not `Low`. Both are
+        // `TopOnly` — refused for want of any caller, before the shared tag
+        // is ever judged.
         let r = report_of(&chain(
             &[128, 0, 128],
             &[7, 0, 7],
             &[(62, 7, false), (0, 0, false)],
             "",
         ));
-        assert_eq!((r.counts.shared_tag, r.counts.shared_split), (2, 0));
+        let refusals: Vec<Option<Refusal>> = r.plats.iter().map(|p| p.refusal).collect();
+        assert_eq!(
+            refusals,
+            vec![Some(Refusal::TopOnly), Some(Refusal::TopOnly)]
+        );
+        assert_eq!((r.counts.bank_caller, r.counts.shared_split), (0, 0));
 
-        // Adjacent, but at two floors.
+        // Adjacent, but at two floors, so `shared_split` is 0 — and each
+        // member's rest disqualifies it before the shared tag would: member
+        // 1 (128) neighbors 0 and 96, two distinct floors, `AboveAll`, so
+        // `UnsupportedRest`; member 2 (96) neighbors 128, more than a step
+        // above it, `Intermediate`, `UnsupportedRest` too.
         let r = report_of(&chain(
             &[0, 128, 96, 0],
             &[0, 7, 7, 0],
             &[(62, 7, false), (0, 0, false), (0, 0, false)],
             "",
         ));
-        assert_eq!((r.counts.shared_tag, r.counts.shared_split), (2, 0));
+        let refusals: Vec<Option<Refusal>> = r.plats.iter().map(|p| p.refusal).collect();
+        assert_eq!(
+            refusals,
+            vec![
+                Some(Refusal::UnsupportedRest),
+                Some(Refusal::UnsupportedRest)
+            ]
+        );
+        assert_eq!((r.counts.bank_caller, r.counts.shared_split), (0, 0));
     }
 
     /// Three tagged platforms at one floor, each adjacent to the other two:
@@ -741,11 +873,18 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
         // and popped twice; the second pop must be dropped rather than
         // walked again. All three members still count as one split group,
         // and none is `Dead` — each has a low room under it.
+        //
+        // The riser switch is on `L`'s edge with `A`, so `L` is a Low
+        // activator of every member (none is `TopOnly`), but `L` is a
+        // two-sided neighbor of `A` and `C` only — `B` touches `L2` and the
+        // other two members, none of which fires anything — so `A` and `C`
+        // are accepted (`Rest::Top`, level with each other) and `B` alone is
+        // `BankCaller`.
         let r = report_of(TRIANGLE);
         assert_eq!(r.plats.len(), 3);
-        assert_eq!((r.counts.shared_tag, r.counts.shared_split), (3, 1));
+        assert_eq!((r.counts.bank_caller, r.counts.shared_split), (1, 1));
         let refusals: Vec<Option<Refusal>> = r.plats.iter().map(|p| p.refusal).collect();
-        assert_eq!(refusals, vec![Some(Refusal::SharedTag); 3]);
+        assert_eq!(refusals, vec![None, Some(Refusal::BankCaller), None]);
     }
 
     #[test]
@@ -871,5 +1010,12 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
         let json = serde_json::to_value(&r).expect("serializes");
         assert_eq!(json["plats"][0]["refusal"], "dead");
         assert_eq!(json["counts"]["dead"], 1);
+
+        // The bank refusal's own wire name, which the corpus report row and
+        // the JSON record both key on.
+        let r = report_of(&bank_caller_case());
+        let json = serde_json::to_value(&r).expect("serializes");
+        assert_eq!(json["plats"][0]["refusal"], "bank_caller");
+        assert_eq!(json["counts"]["bank_caller"], 2);
     }
 }

@@ -45,9 +45,11 @@ The lift axis reads geometry the same way, over platforms rather than lines.
 Its `Lifts` section counts the platforms the recognizer resolved and the maps
 they sit in — how many are lifts, pedestals or barriers, how many are callable
 from below, carry a top trigger, hold things, or run at `blazeDWUS` speed —
-plus the eight refusal classes that gate the verdict (`dead`, shared tag,
-one-shot, mixed speed, unsupported rest, top-only, one-way barrier,
-conflicting action) and the broken lines, those naming no platform at all (tag 0, or a tag no
+plus the eight refusal classes that gate the verdict (`dead`, one-shot, mixed
+speed, unsupported rest, top-only, one-way barrier, bank caller, conflicting
+action — a shared tag is no longer refused as such; each member is judged
+alone, and only a member no adjacent line calls is refused `bank caller`) and
+the broken lines, those naming no platform at all (tag 0, or a tag no
 sector answers to). One row is neither a platform tally nor a refusal: *shared-tag groups
 that are one platform split* counts tag groups whose sectors all sit at one
 floor and are mutually adjacent — the sub-case of a shared tag a
@@ -63,7 +65,8 @@ rider loses, no activator, unsupported shape, neighbors a mover) and the
 broken lines, split into those carrying tag 0 and those naming no sector.
 Two rows are neither a shape tally nor a refusal: *shared-tag members
 accepted* counts the sectors a shared tag names that qualified on their own —
-where `lift::plat` refuses a shared tag outright, `lift::floor` takes it — and
+the same member-by-member rule `lift::plat` applies, minus its `bank caller`
+gate — and
 *remote triggers* counts, once per `(target, line)` pair, the triggers sitting
 neither on their target nor on a neighbor of it, which the corpus says is four
 floor triggers in five: a floor trigger is *placed*, not attached.
