@@ -1358,7 +1358,7 @@ mod tests {
     }
 
     #[test]
-    #[expect(
+    #[allow(
         clippy::float_cmp,
         reason = "an empty population must score exactly zero, not merely near-zero — the \
                   approximate form the sibling test uses would pass on a share this test \
@@ -1368,8 +1368,12 @@ mod tests {
         let a = aggregate(&[]);
         assert_eq!(a.maps_unique, 0);
         assert_eq!(a.all.expressible, 0.0);
-        assert!(a.line_blockers.is_empty());
-        assert!(a.greedy_line_axis.steps.is_empty());
+        assert!(a.line_blockers.is_empty(), "{:?}", a.line_blockers);
+        assert!(
+            a.greedy_line_axis.steps.is_empty(),
+            "{:?}",
+            a.greedy_line_axis.steps
+        );
     }
 
     #[test]

@@ -2385,7 +2385,7 @@ pub(crate) mod tests {
         assert_eq!(top.placement, Placement::OnPlatFront);
         // Equal floors: the crossing works from either side.
         assert_eq!(top.activators, vec![Activator::Level, Activator::Plat]);
-        assert!(top.low_sides.is_empty());
+        assert!(top.low_sides.is_empty(), "{:?}", top.low_sides);
     }
 
     #[test]

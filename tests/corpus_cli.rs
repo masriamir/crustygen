@@ -128,7 +128,7 @@ fn report_goes_to_stdout_by_default_and_to_a_file_with_the_flag() {
         .output()
         .unwrap();
     assert_eq!(out.status.code(), Some(0));
-    assert!(out.stdout.is_empty());
+    assert!(out.stdout.is_empty(), "{:?}", out.stdout);
     assert!(
         std::fs::read_to_string(&md)
             .unwrap()

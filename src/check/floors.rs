@@ -1308,7 +1308,11 @@ mod tests {
         );
         far_wall(&mut text, 3, 0, 0);
         let (scene, tables) = scene_of(&text);
-        assert!(resolve_floors(&scene, &tables).is_empty());
+        assert!(
+            resolve_floors(&scene, &tables).is_empty(),
+            "{:?}",
+            resolve_floors(&scene, &tables)
+        );
         assert_eq!(broken_floor_lines(&scene, &tables), vec![0, 1]);
     }
 
