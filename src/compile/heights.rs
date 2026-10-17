@@ -213,11 +213,7 @@ mod tests {
         let data = emit(&ir_json(24, 128, 0, 128));
         let (front, back) = boundary(&data, 1, 2);
         assert_eq!(data.sidedefs[front].lower, "WB");
-        assert!(
-            data.sidedefs[back].lower.is_empty(),
-            "{:?}",
-            data.sidedefs[back].lower
-        );
+        assert_eq!(data.sidedefs[back].lower, "");
         let (a_front, _) = boundary(&data, 0, 2);
         assert!(
             data.sidedefs[a_front].lower.is_empty(),
@@ -235,11 +231,7 @@ mod tests {
             data.sidedefs[front].upper, "WB",
             "room b has the higher ceiling, so its side carries the upper"
         );
-        assert!(
-            data.sidedefs[back].upper.is_empty(),
-            "{:?}",
-            data.sidedefs[back].upper
-        );
+        assert_eq!(data.sidedefs[back].upper, "");
         assert!(
             data.sidedefs[front].lower.is_empty(),
             "equal floors must not produce a lower"
@@ -256,16 +248,8 @@ mod tests {
         let (front, back) = boundary(&data, 0, 2);
         assert_eq!(data.sidedefs[front].lower, "WA");
         assert_eq!(data.sidedefs[front].upper, "WA");
-        assert!(
-            data.sidedefs[back].lower.is_empty(),
-            "{:?}",
-            data.sidedefs[back].lower
-        );
-        assert!(
-            data.sidedefs[back].upper.is_empty(),
-            "{:?}",
-            data.sidedefs[back].upper
-        );
+        assert_eq!(data.sidedefs[back].lower, "");
+        assert_eq!(data.sidedefs[back].upper, "");
     }
 
     #[test]
@@ -355,10 +339,6 @@ mod tests {
             data.sidedefs[0].lower.is_empty(),
             "front is never sampled by the renderer here and stays bare"
         );
-        assert!(
-            data.sidedefs[0].upper.is_empty(),
-            "{:?}",
-            data.sidedefs[0].upper
-        );
+        assert_eq!(data.sidedefs[0].upper, "");
     }
 }

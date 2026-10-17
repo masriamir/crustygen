@@ -2009,11 +2009,7 @@ mod tests {
         for &line in &f.lines {
             let (gap_side, room_side) = gap_and_room_sides(&out.data, line, f.sector);
             assert_eq!(out.data.sidedefs[gap_side].lower, "SUPPORT3");
-            assert!(
-                out.data.sidedefs[room_side].lower.is_empty(),
-                "{:?}",
-                out.data.sidedefs[room_side].lower
-            );
+            assert_eq!(out.data.sidedefs[room_side].lower, "");
         }
     }
 
