@@ -14,7 +14,7 @@ fn the_shipped_template_is_a_valid_spec_document_with_no_sacrifices() {
         &Tables::load().unwrap(),
     )
     .unwrap();
-    assert!(doc.sacrifices.is_empty());
+    assert!(doc.sacrifices.is_empty(), "{:?}", doc.sacrifices);
     assert_eq!(
         doc.spec.frontmatter.secrets.count as usize,
         doc.spec.body.secrets.len()
@@ -28,7 +28,7 @@ fn the_strict_gauntlet_fixture_parses_clean() {
         &Tables::load().unwrap(),
     )
     .unwrap();
-    assert!(doc.sacrifices.is_empty());
+    assert!(doc.sacrifices.is_empty(), "{:?}", doc.sacrifices);
     assert_eq!(
         doc.spec.frontmatter.constraints.enforcement,
         Enforcement::Strict

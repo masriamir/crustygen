@@ -1205,7 +1205,7 @@ mod tests {
         let g = graph(nodes, vec![e1, open(1, 2), open(2, 3)], 0, vec![3]);
         let f = check(&g, &LIMITS);
         assert!(!f.unfinishable);
-        assert!(f.stranded.is_empty());
+        assert!(f.stranded.is_empty(), "{:?}", f.stranded);
 
         // The same edge crossed the other way, and *only* the other way.
         // `check` expands an undirected edge as `a -> b` and `b -> a`
@@ -1380,7 +1380,7 @@ mod tests {
         let f = check(&g, &LIMITS);
         assert!(!f.unfinishable, "the exit is right there");
         assert_eq!(f.stranded, vec![(1, 0)], "but the pit is a softlock");
-        assert!(f.unreachable.is_empty());
+        assert!(f.unreachable.is_empty(), "{:?}", f.unreachable);
     }
 
     #[test]
@@ -1408,7 +1408,7 @@ mod tests {
         );
         let f = check(&g, &LIMITS);
         assert!(!f.unfinishable);
-        assert!(f.stranded.is_empty());
+        assert!(f.stranded.is_empty(), "{:?}", f.stranded);
         assert_eq!(f.unreachable, vec![2]);
     }
 
@@ -1422,8 +1422,8 @@ mod tests {
         );
         let f = check(&g, &LIMITS);
         assert!(!f.unfinishable);
-        assert!(f.stranded.is_empty());
-        assert!(f.unreachable.is_empty());
+        assert!(f.stranded.is_empty(), "{:?}", f.stranded);
+        assert!(f.unreachable.is_empty(), "{:?}", f.unreachable);
     }
 
     #[test]
@@ -1793,7 +1793,7 @@ mod tests {
             !f.unfinishable,
             "the teleport reaches the ledge despite the 200-unit rise"
         );
-        assert!(f.unreachable.is_empty());
+        assert!(f.unreachable.is_empty(), "{:?}", f.unreachable);
         // Reversed, the edge is not traversable: start on the ledge, goal below.
         let back = ReachGraph {
             start: 1,
@@ -2015,7 +2015,7 @@ mod tests {
             "{:?}",
             findings.unreachable
         );
-        assert!(findings.stranded.is_empty());
+        assert!(findings.stranded.is_empty(), "{:?}", findings.stranded);
     }
 
     #[test]

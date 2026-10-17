@@ -228,9 +228,21 @@ mod tests {
     fn a_doors_and_exit_map_with_known_things_is_expressible() {
         let v = vocab().classify(&telemetry(&[1, 11], 9, &[1, 3004]));
         assert!(v.expressible && v.vanilla_only);
-        assert!(v.unknown_line_specials.is_empty());
-        assert!(v.unknown_sector_specials.is_empty());
-        assert!(v.unknown_thing_types.is_empty());
+        assert!(
+            v.unknown_line_specials.is_empty(),
+            "{:?}",
+            v.unknown_line_specials
+        );
+        assert!(
+            v.unknown_sector_specials.is_empty(),
+            "{:?}",
+            v.unknown_sector_specials
+        );
+        assert!(
+            v.unknown_thing_types.is_empty(),
+            "{:?}",
+            v.unknown_thing_types
+        );
     }
 
     #[test]

@@ -398,8 +398,12 @@ mod tests {
         let (_, body_text) = crate::spec::split_frontmatter(text).unwrap();
         let body = parse(&body_text).unwrap();
         assert_eq!(body.secrets.len(), 3);
-        assert!(!body.overview.is_empty());
-        assert!(!body.sequence_of_events.is_empty());
+        assert!(!body.overview.is_empty(), "{:?}", body.overview);
+        assert!(
+            !body.sequence_of_events.is_empty(),
+            "{:?}",
+            body.sequence_of_events
+        );
         assert!(
             body.secrets
                 .iter()
@@ -411,8 +415,12 @@ mod tests {
     fn a_missing_optional_section_yields_empty_content() {
         let body = parse("## Overview\n\nJust a mood.\n").unwrap();
         assert_eq!(body.overview, "Just a mood.");
-        assert!(body.sequence_of_events.is_empty());
-        assert!(body.secrets.is_empty());
+        assert!(
+            body.sequence_of_events.is_empty(),
+            "{:?}",
+            body.sequence_of_events
+        );
+        assert!(body.secrets.is_empty(), "{:?}", body.secrets);
         assert_eq!(body.notes, "");
     }
 
@@ -473,7 +481,7 @@ mod tests {
     fn an_empty_body_parses_to_all_empty_sections() {
         let body = parse("").unwrap();
         assert_eq!(body.overview, "");
-        assert!(body.secrets.is_empty());
+        assert!(body.secrets.is_empty(), "{:?}", body.secrets);
     }
 
     #[test]
@@ -598,7 +606,7 @@ mod tests {
     #[test]
     fn an_empty_secrets_section_parses_to_no_secrets() {
         let body = parse("## Secrets\n\n").unwrap();
-        assert!(body.secrets.is_empty());
+        assert!(body.secrets.is_empty(), "{:?}", body.secrets);
     }
 
     #[test]

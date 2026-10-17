@@ -192,7 +192,7 @@ fn udmf_entrada_loads_directly() {
     let (wad, group) = first_group(common::udmf_entrada_wad());
     let loaded = ingest::load_map(&wad, &group).expect("udmf map loads");
     assert_eq!(loaded.origin, MapOrigin::Udmf);
-    assert!(loaded.notes.is_empty());
+    assert!(loaded.notes.is_empty(), "{:?}", loaded.notes);
 }
 
 #[test]
