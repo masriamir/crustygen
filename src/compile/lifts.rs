@@ -2017,7 +2017,7 @@ mod tests {
             vec![0],
             "the switch on the low face fires from the hall"
         );
-        assert!(l2.activators.is_empty());
+        assert!(l2.activators.is_empty(), "{:?}", l2.activators);
         assert_eq!(
             l2.callable_from,
             vec![0],

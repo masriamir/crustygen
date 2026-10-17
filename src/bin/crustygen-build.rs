@@ -237,7 +237,7 @@ mod tests {
         std::fs::create_dir(&target).expect("create blocking dir");
         std::fs::write(target.join("occupant"), b"x").expect("occupy it");
         let err = write_atomically(&target, b"PWAD").expect_err("cannot replace a directory");
-        assert!(!err.to_string().is_empty());
+        assert!(!err.to_string().is_empty(), "{err:?}");
         assert_eq!(
             entries(&dir),
             vec!["out.wad".to_owned()],
