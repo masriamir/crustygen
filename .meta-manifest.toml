@@ -84,6 +84,22 @@ dest = "AGENTS.md"
 mode = "block"
 marker = "copilot-review-loop"
 
+[[file]]
+source = "masriamir/.github"
+ref = "ac14bc6eefa079ff85f0ecab2c7c82d23ae600c5"
+path = "templates/blocks/harness-contract.md"
+dest = "AGENTS.md"
+mode = "block"
+marker = "harness-contract"
+
+[[file]]
+source = "masriamir/.github"
+ref = "ac14bc6eefa079ff85f0ecab2c7c82d23ae600c5"
+path = "templates/blocks/board-transitions.md"
+dest = "CLAUDE.md"
+mode = "block"
+marker = "board-transitions"
+
 
 # .gitignore shared blocks (crusty-meta ADR-0002 / TODO General item 1).
 [[file]]
