@@ -206,6 +206,7 @@ field stops the harness before any work starts, with the lines to add.
 gate = "just ci"
 board = 5
 screenshot = "cli-transcript"
+skills = ["rust"]
 review = "ruleset"
 coverage = "codecov"
 merge = "manual"
