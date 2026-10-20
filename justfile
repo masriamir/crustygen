@@ -44,3 +44,11 @@ meta-sync:
 # beside it under target/ (never committed).
 corpus dir:
     cargo run --release --bin crustygen-corpus -- {{dir}} --report docs/measurements/expressibility-$(date +%F).md --json target/expressibility-$(date +%F).json
+
+# Run the retail shape-count gate (tests/retail_shapes.rs) against a
+# directory holding DOOM.WAD and DOOM2.WAD. The dir must be absolute: cargo
+# runs the test binary from the package root, and the test skips a relative
+# path. Nothing is fetched and nothing is committed; without the variable the
+# test skips and passes, which is what CI does.
+test-retail dir:
+    CRUSTYGEN_IWAD_DIR="{{dir}}" cargo test --test retail_shapes -- --nocapture
