@@ -76,7 +76,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::check::plats::{Activator, ScenePlat, broken_lift_lines, resolve_plats};
+use crate::check::plats::{Activator, ScenePlat, SceneTrigger, broken_lift_lines, resolve_plats};
 use crate::check::scene::Scene;
 use crate::tables::Tables;
 
@@ -333,30 +333,7 @@ pub fn recognize(scene: &Scene, tables: &Tables) -> PlatReport {
     let split_groups = split_group_tags(scene, &resolved);
     let mut plats = Vec::with_capacity(resolved.len());
     for p in &resolved {
-        let speed = speed_of(p);
-        let callable = callable_of(p);
-        let refusal = refusal_of(p, callable, speed);
-        plats.push(Plat {
-            sector: p.sector,
-            tag: p.tag,
-            rest: p.rest,
-            travel: p.travel,
-            shape: shape_of(refusal, p),
-            speed,
-            callable,
-            triggers: p.triggers.iter().map(|t| t.linedef).collect(),
-            things: u64::try_from(
-                scene
-                    .things
-                    .iter()
-                    .filter(|t| t.sector == Some(p.sector))
-                    .count(),
-            )
-            .expect("fits u64"),
-            island: scene.sectors[p.sector].boundary.iter().all(|b| b.two_sided),
-            top_trigger: p.callable_top(),
-            refusal,
-        });
+        plats.push(plat_of(scene, &Subject::single(scene, p), p.tag));
     }
     let broken_lines = broken_lift_lines(scene, tables);
     let counts = count(
@@ -419,71 +396,172 @@ fn is_split_group(scene: &Scene, resolved: &[ScenePlat], tag: i32) -> bool {
     reached.len() == members.len()
 }
 
-/// [`Speed::Fast`] when every trigger is a `blazeDWUS` form,
-/// [`Speed::Normal`] when none is, [`Speed::Mixed`] in between.
-fn speed_of(p: &ScenePlat) -> Speed {
-    let fasts = p.triggers.iter().filter(|t| t.fast).count();
-    if fasts == 0 {
-        Speed::Normal
-    } else if fasts == p.triggers.len() {
-        Speed::Fast
-    } else {
-        Speed::Mixed
-    }
+/// What the eight refusals and the shape rule judge: one platform's facts,
+/// whether that platform is one sector or a split group read as one.
+struct Subject<'a> {
+    /// Sectors the platform comprises, ascending (one for a single platform).
+    members: Vec<usize>,
+    /// Its rest floor.
+    floor: i32,
+    /// The floor `EV_DoPlat` sends it to.
+    low: i32,
+    /// Where it rests relative to `outside`.
+    rest: Rest,
+    /// Its two-sided neighbors that are not members.
+    outside: BTreeSet<usize>,
+    /// Distinct floors `outside` sits at.
+    distinct_outside_floors: usize,
+    /// Whether the tag names sectors beyond this platform (a bank member).
+    shared: bool,
+    /// Every lift line naming the tag.
+    triggers: &'a [SceneTrigger],
+    /// Every (sector, class) pair firing some trigger, classified against this
+    /// platform.
+    activators: Vec<(usize, Activator)>,
+    /// Non-lift specials naming the tag.
+    other_actions: &'a [i32],
 }
 
-/// Which [`Activator`] classes fire some trigger of `p`.
-fn callable_of(p: &ScenePlat) -> Callable {
-    let any = |want: Activator| {
-        p.triggers
+impl<'a> Subject<'a> {
+    /// One sector's platform, exactly as the resolver read it.
+    fn single(scene: &Scene, p: &'a ScenePlat) -> Self {
+        Self {
+            members: vec![p.sector],
+            floor: scene.sectors[p.sector].floor,
+            low: p.low,
+            rest: p.rest,
+            outside: p.neighbors.clone(),
+            distinct_outside_floors: p.distinct_neighbor_floors,
+            shared: p.shared_tag >= 2,
+            triggers: &p.triggers,
+            activators: p
+                .triggers
+                .iter()
+                .flat_map(|t| t.activators.iter().copied())
+                .collect(),
+            other_actions: &p.other_actions,
+        }
+    }
+
+    /// How far the platform travels: its rest floor minus the floor
+    /// `EV_DoPlat` sends it to ([`ScenePlat::travel`]).
+    fn travel(&self) -> i32 {
+        self.floor - self.low
+    }
+
+    /// [`Speed::Fast`] when every trigger is a `blazeDWUS` form,
+    /// [`Speed::Normal`] when none is, [`Speed::Mixed`] in between.
+    fn speed(&self) -> Speed {
+        let fasts = self.triggers.iter().filter(|t| t.fast).count();
+        if fasts == 0 {
+            Speed::Normal
+        } else if fasts == self.triggers.len() {
+            Speed::Fast
+        } else {
+            Speed::Mixed
+        }
+    }
+
+    /// Which [`Activator`] classes fire some trigger of the platform.
+    fn callable(&self) -> Callable {
+        let any = |want: Activator| self.activators.iter().any(|&(_, a)| a == want);
+        Callable {
+            low: any(Activator::Low),
+            level: any(Activator::Level),
+            plat: any(Activator::Plat),
+            above: any(Activator::Above),
+        }
+    }
+
+    /// The `outside` sectors that are [`Activator::Low`] of some trigger
+    /// ([`ScenePlat::low_activator_neighbors`]).
+    fn low_activator_neighbors(&self) -> BTreeSet<usize> {
+        self.activators
             .iter()
-            .any(|t| t.activators.iter().any(|&(_, a)| a == want))
-    };
-    Callable {
-        low: p.callable_low(),
-        level: any(Activator::Level),
-        plat: any(Activator::Plat),
-        above: any(Activator::Above),
+            .filter(|&&(s, a)| a == Activator::Low && self.outside.contains(&s))
+            .map(|&(s, _)| s)
+            .collect()
+    }
+
+    /// Whether some trigger fires from the platform itself or from within a
+    /// step of it ([`ScenePlat::callable_top`]) — a rider's call, not a
+    /// caller's.
+    fn top_trigger(&self) -> bool {
+        self.activators
+            .iter()
+            .any(|&(_, a)| matches!(a, Activator::Level | Activator::Plat))
+    }
+
+    /// The first [`Refusal`] that applies to the platform, in the module
+    /// doc's order.
+    fn refusal(&self, callable: Callable, speed: Speed) -> Option<Refusal> {
+        let one_floor = self.distinct_outside_floors == 1;
+        if self.rest == Rest::Dead {
+            Some(Refusal::Dead)
+        } else if !self.triggers.iter().all(|t| t.repeatable) {
+            Some(Refusal::OneShot)
+        } else if speed == Speed::Mixed {
+            Some(Refusal::MixedSpeed)
+        } else if self.rest == Rest::Intermediate || (self.rest == Rest::AboveAll && !one_floor) {
+            Some(Refusal::UnsupportedRest)
+        } else if !callable.low {
+            Some(Refusal::TopOnly)
+        } else if self.rest == Rest::AboveAll
+            && self.outside.len() >= 2
+            && self.low_activator_neighbors().len() < self.outside.len()
+        {
+            Some(Refusal::OneWayBarrier)
+        } else if self.shared && self.low_activator_neighbors().is_empty() {
+            Some(Refusal::BankCaller)
+        } else if !self.other_actions.is_empty() {
+            Some(Refusal::ConflictingAction)
+        } else {
+            None
+        }
+    }
+
+    /// The [`Shape`] of an unrefused platform: [`Rest::Top`] is a lift, and
+    /// [`Rest::AboveAll`] — already known to have its neighbors at one floor,
+    /// or [`Refusal::UnsupportedRest`] would have caught it — is a pedestal
+    /// against one neighbor and a barrier against more.
+    fn shape(&self, refusal: Option<Refusal>) -> Option<Shape> {
+        match (refusal, self.rest, self.outside.len()) {
+            (None, Rest::Top, _) => Some(Shape::Lift),
+            (None, Rest::AboveAll, 1) => Some(Shape::Pedestal),
+            (None, Rest::AboveAll, _) => Some(Shape::Barrier),
+            _ => None,
+        }
     }
 }
 
-/// The first [`Refusal`] that applies to `p`, in the module doc's order.
-fn refusal_of(p: &ScenePlat, callable: Callable, speed: Speed) -> Option<Refusal> {
-    let one_floor = p.distinct_neighbor_floors == 1;
-    if p.rest == Rest::Dead {
-        Some(Refusal::Dead)
-    } else if !p.triggers.iter().all(|t| t.repeatable) {
-        Some(Refusal::OneShot)
-    } else if speed == Speed::Mixed {
-        Some(Refusal::MixedSpeed)
-    } else if p.rest == Rest::Intermediate || (p.rest == Rest::AboveAll && !one_floor) {
-        Some(Refusal::UnsupportedRest)
-    } else if !callable.low {
-        Some(Refusal::TopOnly)
-    } else if p.rest == Rest::AboveAll
-        && p.neighbors.len() >= 2
-        && p.low_activator_neighbors().len() < p.neighbors.len()
-    {
-        Some(Refusal::OneWayBarrier)
-    } else if p.shared_tag >= 2 && p.low_activator_neighbors().is_empty() {
-        Some(Refusal::BankCaller)
-    } else if !p.other_actions.is_empty() {
-        Some(Refusal::ConflictingAction)
-    } else {
-        None
-    }
-}
-
-/// The [`Shape`] of an unrefused platform: [`Rest::Top`] is a lift, and
-/// [`Rest::AboveAll`] — already known to have its neighbors at one floor,
-/// or [`Refusal::UnsupportedRest`] would have caught it — is a pedestal
-/// against one neighbor and a barrier against more.
-fn shape_of(refusal: Option<Refusal>, p: &ScenePlat) -> Option<Shape> {
-    match (refusal, p.rest, p.neighbors.len()) {
-        (None, Rest::Top, _) => Some(Shape::Lift),
-        (None, Rest::AboveAll, 1) => Some(Shape::Pedestal),
-        (None, Rest::AboveAll, _) => Some(Shape::Barrier),
-        _ => None,
+/// Builds the report entry for a judged subject.
+fn plat_of(scene: &Scene, subject: &Subject<'_>, tag: i32) -> Plat {
+    let speed = subject.speed();
+    let callable = subject.callable();
+    let refusal = subject.refusal(callable, speed);
+    Plat {
+        sector: subject.members[0],
+        tag,
+        rest: subject.rest,
+        travel: subject.travel(),
+        shape: subject.shape(refusal),
+        speed,
+        callable,
+        triggers: subject.triggers.iter().map(|t| t.linedef).collect(),
+        things: u64::try_from(
+            scene
+                .things
+                .iter()
+                .filter(|t| t.sector.is_some_and(|s| subject.members.contains(&s)))
+                .count(),
+        )
+        .expect("fits u64"),
+        island: subject
+            .members
+            .iter()
+            .all(|&m| scene.sectors[m].boundary.iter().all(|b| b.two_sided)),
+        top_trigger: subject.top_trigger(),
+        refusal,
     }
 }
 
