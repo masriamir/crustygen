@@ -186,8 +186,13 @@ pub struct Callable {
 /// One recognized platform.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Plat {
-    /// Declaration index of the platform sector.
+    /// Declaration index of the platform sector — the least member, for a
+    /// split group read as one platform.
     pub sector: usize,
+    /// Declaration indices of every sector the platform comprises, ascending:
+    /// `[sector]` for a single-sector platform, every member of a split group
+    /// read as one (see the module doc's "Split groups"). Never empty.
+    pub members: Vec<usize>,
     /// The tag its lift lines name it by.
     pub tag: i32,
     /// Where it rests relative to its two-sided neighbors.
@@ -242,6 +247,10 @@ pub struct PlatCounts {
     /// member by member, a split platform reads as several lifts; merging it
     /// is a follow-up.
     pub shared_split: u64,
+    /// Sectors the [`Self::shared_split`] groups comprise, so a report before
+    /// the merge reconciles with one after it:
+    /// `plats_before = plats_after + split_members - shared_split`.
+    pub split_members: u64,
     /// Platforms refused [`Refusal::OneShot`].
     pub one_shot: u64,
     /// Platforms refused [`Refusal::MixedSpeed`].
@@ -293,6 +302,7 @@ impl PlatCounts {
             dead: self.dead.saturating_add(other.dead),
             bank_caller: self.bank_caller.saturating_add(other.bank_caller),
             shared_split: self.shared_split.saturating_add(other.shared_split),
+            split_members: self.split_members.saturating_add(other.split_members),
             one_shot: self.one_shot.saturating_add(other.one_shot),
             mixed_speed: self.mixed_speed.saturating_add(other.mixed_speed),
             unsupported_rest: self.unsupported_rest.saturating_add(other.unsupported_rest),
@@ -340,6 +350,7 @@ pub fn recognize(scene: &Scene, tables: &Tables) -> PlatReport {
         &plats,
         &broken_lines,
         u64::try_from(split_groups.len()).expect("fits u64"),
+        0,
     );
     PlatReport {
         plats,
@@ -541,6 +552,7 @@ fn plat_of(scene: &Scene, subject: &Subject<'_>, tag: i32) -> Plat {
     let refusal = subject.refusal(callable, speed);
     Plat {
         sector: subject.members[0],
+        members: subject.members.clone(),
         tag,
         rest: subject.rest,
         travel: subject.travel(),
@@ -566,10 +578,17 @@ fn plat_of(scene: &Scene, subject: &Subject<'_>, tag: i32) -> Plat {
 }
 
 /// Counts `plats` one field per predicate, `shared_split` being
-/// [`split_group_tags`]'s tally.
-fn count(plats: &[Plat], broken_lines: &[usize], shared_split: u64) -> PlatCounts {
+/// [`split_group_tags`]'s tally and `split_members` the sectors those groups
+/// comprise.
+fn count(
+    plats: &[Plat],
+    broken_lines: &[usize],
+    shared_split: u64,
+    split_members: u64,
+) -> PlatCounts {
     let mut c = PlatCounts {
         shared_split,
+        split_members,
         broken_lines: u64::try_from(broken_lines.len()).expect("fits u64"),
         ..PlatCounts::default()
     };
@@ -1057,12 +1076,19 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
                 sum.lifts,
                 sum.pedestals,
                 sum.fast,
-                sum.callable_low
+                sum.callable_low,
+                sum.split_members
             ),
-            (2, 1, 1, 1, 2)
+            (2, 1, 1, 1, 2, 0)
         );
         assert_eq!(sum.refusals(), 0);
         assert_eq!(PlatCounts::default().add(&b), b);
+        let c = PlatCounts {
+            split_members: 2,
+            shared_split: 1,
+            ..PlatCounts::default()
+        };
+        assert_eq!((c.add(&c).split_members, c.add(&c).shared_split), (4, 2));
     }
 
     #[test]
@@ -1078,6 +1104,8 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
             json["plats"][0]["callable"]["low"],
             serde_json::Value::Bool(true)
         );
+        assert_eq!(json["plats"][0]["members"], serde_json::json!([1]));
+        assert_eq!(json["counts"]["split_members"], 0);
 
         let r = report_of(&chain(
             &[0, 0, 0],
