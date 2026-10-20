@@ -61,22 +61,23 @@
 //! its halves could carry different textures — and is read as one [`Plat`],
 //! listed at its least member with every member in [`Plat::members`].
 //! "Mutually adjacent" here, and wherever these docs say it, means
-//! *connected*: the walk `is_split_group` describes, over two-sided
-//! boundaries and never leaving the group, reaches every member from any one
-//! of them. A chain of three strips whose ends never touch qualifies; two
-//! pairs with an untagged room between them do not. The merged platform's
-//! outside neighbors are the union of the members'
+//! *connected*: the walk `split_group_tags` describes and `is_split_group`
+//! performs, over two-sided boundaries and never leaving the group, reaches
+//! every member from any one of them. A chain of three strips whose ends
+//! never touch qualifies; two pairs with an untagged room between them do
+//! not. The merged platform's outside neighbors are the union of the members'
 //! two-sided neighbors minus the members themselves; its `low` is the least
-//! member `low`; its triggers are the tag's lines; and an activator that is
-//! itself a member is a [`Activator::Plat`] activator — a rider's call, not
-//! a caller's. It is judged against the same eight refusals as any platform,
-//! never [`Refusal::BankCaller`]: the group is the whole tag, so there is no
-//! other member for the bank's lines to be on. This is an approximation,
-//! deliberately: `EV_DoPlat` runs one thinker per sector carrying the tag,
-//! each with its own `P_FindLowestFloorSurrounding` (`p_plats.c:164-169`,
-//! `:207-212`, as `docs/measurements/lift-variants-2026-09-11.md` §I
-//! records), so a trim piece with no lower outside neighbor does not move at
-//! all while the merged reading says the whole platform does
+//! of the members' `low`s; its triggers are the tag's lines; and an activator
+//! that is itself a member is a [`Activator::Plat`] activator — a rider's
+//! call, not a caller's. It is judged against the same eight refusals as any
+//! platform, never [`Refusal::BankCaller`]: the group is the whole tag, so
+//! there is no other member for the bank's lines to be on. This is an
+//! approximation, deliberately: `EV_DoPlat` runs one thinker per sector
+//! carrying the tag, each with its own `P_FindLowestFloorSurrounding`
+//! (`p_plats.c:164-169`, `:207-212`, as
+//! `docs/measurements/lift-variants-2026-09-11.md` §I records), so a trim
+//! piece with no lower outside neighbor does not move at all while the merged
+//! reading says the whole platform does
 //! (`KNOWN-GAPS.md`, "A split platform is read as one lift"). The compiler
 //! never emits a split platform, so the merge is a reading of other people's
 //! maps, never a round trip of its own.
@@ -504,13 +505,18 @@ impl<'a> Subject<'a> {
 
     /// A split group read as one platform (the module doc's "Split groups"
     /// approximation). `group` must be *every* [`ScenePlat`] carrying the tag
-    /// — the whole tag, not a subset: `shared: false`, reading the triggers
-    /// off `group[0]` and "never [`Refusal::BankCaller`]" all rest on there
-    /// being no other member. That is [`recognize`]'s responsibility and
-    /// cannot be checked from in here, which sees only what it is handed. The
-    /// two preconditions that can be checked are debug-asserted: at least two
-    /// members, all at one floor — along with every member carrying
-    /// `group[0]`'s tag. `step` is [`Tables::step_height`].
+    /// — the whole tag, not a subset: `shared: false` and "never
+    /// [`Refusal::BankCaller`]" both rest on there being no other member.
+    /// (Reading the triggers off `group[0]` rests instead on every member
+    /// carrying one tag — `triggers_for` filters on the tag alone — which the
+    /// one-tag assert below pins.) Assembling the whole tag is
+    /// [`recognize`]'s responsibility, and it is checkable from in here:
+    /// [`ScenePlat::shared_tag`] counts every scene sector carrying the tag
+    /// and [`resolve_plats`] resolves every sector a lift tag names, so the
+    /// group is the whole tag exactly when `group.len() == shared_tag`. All
+    /// four preconditions are debug-asserted: at least two members, all at
+    /// one floor, all carrying `group[0]`'s tag, and together the whole tag.
+    /// `step` is [`Tables::step_height`].
     fn merged(scene: &Scene, group: &[&'a ScenePlat], step: i32) -> Self {
         debug_assert!(group.len() >= 2, "a split group has at least two members");
         debug_assert!(
@@ -522,6 +528,10 @@ impl<'a> Subject<'a> {
         debug_assert!(
             group.iter().all(|p| p.tag == group[0].tag),
             "a split group's members all carry one tag"
+        );
+        debug_assert!(
+            group.iter().all(|p| p.shared_tag == group.len()),
+            "a split group is the whole tag"
         );
         let members: Vec<usize> = group
             .iter()
@@ -537,9 +547,9 @@ impl<'a> Subject<'a> {
             .collect();
         // Each member's `low` already starts at its own floor
         // (`P_FindLowestFloorSurrounding`), and a sibling member is a neighbor
-        // at that same floor, so the least member `low` is the floor the
-        // merged platform would be sent to: the lowest outside neighbor, or
-        // its own floor when none is lower.
+        // at that same floor, so the least of the members' `low`s is the floor
+        // the merged platform would be sent to: the lowest outside neighbor,
+        // or its own floor when none is lower.
         let low = group
             .iter()
             .map(|p| p.low)
@@ -1402,9 +1412,10 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
     /// Low activator (floor 0 against 128) that neighbors no member. A
     /// single-tag platform called remotely is accepted (`KNOWN-GAPS.md`, "a
     /// remote switch is not expressible", is a writing-side gap, not a
-    /// reading-side refusal), and the merged platform is single-tag: the group
-    /// is the whole tag, so there is no other member for the bank's lines to
-    /// be on and it is never `BankCaller`, however far its caller stands.
+    /// reading-side refusal), and the merged subject is `shared: false`: the
+    /// group is the whole tag, so there is no other member for the bank's
+    /// lines to be on and it is never `BankCaller`, however far its caller
+    /// stands.
     #[test]
     fn a_split_group_called_only_from_afar_is_a_lift_not_a_bank_caller() {
         let mut text = chain(
@@ -1429,9 +1440,9 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
     /// each pair's west face. The walk over two-sided boundaries from the
     /// least member reaches 2 and stops, so the tag is not a split group and
     /// every member is judged alone. This pins today's behavior — the walk
-    /// must reach every member from one seed — not a ruling: whether each
-    /// connected component should be merged on its own is an open design
-    /// question tracked outside this branch.
+    /// must reach every member from one seed — not a ruling: judging each
+    /// connected component on its own is an open design question for a
+    /// follow-up issue.
     #[test]
     fn two_split_pairs_on_one_tag_are_not_one_platform() {
         let r = report_of(&chain(
@@ -1658,13 +1669,25 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
         );
     }
 
-    /// Every shared-tag fixture this module builds, as the tests above build
-    /// them: the split pairs read as one platform, the pairs the merge
-    /// declines, the remotely called pair, the two pairs on one tag, the map
-    /// with a bank and a split group side by side, and the triangle.
+    /// Every shared-tag fixture the tests above build: the split pairs read
+    /// as one platform (the one a non-lift special conflicts with and the one
+    /// carrying things among them), the pairs the merge declines, the remotely
+    /// called pair, the two pairs on one tag, the map with a bank and a split
+    /// group side by side, the triangle, and [`bank_fixtures`]. A new split or
+    /// bank fixture belongs here too, so `every_report_keeps_the_member_invariants`
+    /// sweeps it.
     fn shared_tag_fixtures() -> Vec<String> {
         let split =
             |links: &[(i32, i32, bool)]| chain(&[0, 128, 128, 128], &[0, 7, 7, 0], links, "");
+        let mut conflicting = split(&[(62, 7, false), (0, 0, false), (0, 0, false)]);
+        far_wall(&mut conflicting, 4, 23, 7);
+        let with_things = chain(
+            &[0, 128, 128, 128],
+            &[0, 7, 7, 0],
+            &[(62, 7, false), (0, 0, false), (0, 0, false)],
+            "thing { x = 192.0; y = 64.0; angle = 0; type = 2012; single = true; }\n\
+             thing { x = 320.0; y = 64.0; angle = 0; type = 2012; single = true; }\n",
+        );
         let mut remote = chain(
             &[0, 128, 128, 128, 0, 0],
             &[0, 7, 7, 0, 0, 0],
@@ -1672,12 +1695,14 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
             "",
         );
         far_wall(&mut remote, 6, 62, 7);
-        vec![
+        let mut fixtures = vec![
             split(&[(62, 7, false), (0, 0, false), (0, 0, false)]),
             split(&[(0, 0, false), (62, 7, true), (0, 0, false)]),
             split(&[(88, 7, false), (0, 0, false), (0, 0, false)]),
             split(&[(21, 7, false), (0, 0, false), (0, 0, false)]),
             split(&[(62, 7, false), (0, 0, false), (123, 7, true)]),
+            conflicting,
+            with_things,
             chain(
                 &[0, 128, 128, 0],
                 &[0, 7, 7, 0],
@@ -1745,6 +1770,32 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
             ),
             remote,
             TRIANGLE.to_owned(),
+        ];
+        fixtures.extend(bank_fixtures());
+        fixtures
+    }
+
+    /// The shared-tag fixtures that are banks rather than split groups, as
+    /// the tests above build them: the pair with one `BankCaller` member, the
+    /// neighbor-called pair, and the remotely switched pair with a conflicting
+    /// action. They matter to [`shared_tag_fixtures`]'s sweep because the
+    /// counts identity must hold where `shared_split == 0` and
+    /// `bank_caller > 0`.
+    fn bank_fixtures() -> Vec<String> {
+        vec![
+            chain(
+                &[0, 128, 128, 128, 0],
+                &[0, 7, 0, 7, 0],
+                &[(62, 7, false), (0, 0, false), (0, 0, false), (0, 0, false)],
+                "",
+            ),
+            chain(
+                &[0, 128, 0, 128],
+                &[0, 7, 0, 7],
+                &[(62, 7, false), (0, 0, false), (62, 7, false)],
+                "",
+            ),
+            bank_caller_case(),
         ]
     }
 

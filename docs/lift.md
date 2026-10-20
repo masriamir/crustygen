@@ -60,10 +60,10 @@ gates the shape probe behind `docs/measurements/lift-shapes-2026-08-29.md`
 never applied, so these shape counts are subsets of that measurement's rather
 than the same numbers. A shared tag whose members all sit at one floor and are
 mutually adjacent is one platform split by trim, and is read as a single
-platform — union of the members' neighbors outside the group, least member
-`low`, the tag's lines as its triggers — judged once against the same refusals
-(`KNOWN-GAPS.md` records why that is an approximation of the engine's per-sector
-motion).
+platform — union of the members' neighbors outside the group, the least of the
+members' `low`s, the tag's lines as its triggers — judged once against the same
+refusals (`KNOWN-GAPS.md` records why that is an approximation of the engine's
+per-sector motion).
 
 `lift::floor` is the third, over floor actions. It reads `check::floors`'
 engine-side resolution — shared with the flood's action bits, the `V-P28`
@@ -99,8 +99,7 @@ neighbor-called (`bank_caller` otherwise), a gate a floor target has no
 equivalent of — both recognizers now judge a shared-tag member by itself
 rather than refusing the whole group (for `lift::plat`, unless the group is one
 platform split by trim, which it reads as a single platform; see above). The
-chain refusal and the
-`LedgeLower` refusal are gates the shape probe behind
+chain refusal and the `LedgeLower` refusal are gates the shape probe behind
 `docs/measurements/floor-shapes-2026-09-02.md` never applied;
 `docs/measurements/floors-2026-09-03.md` reconciles the two, map for map.
 

@@ -836,6 +836,11 @@ struct Agg {
     /// probe does not class as split that the recognizer merged anyway. One
     /// number, so a nonzero reads "the two disagree" whichever way.
     split_mismatch: u64,
+    /// Maps where the recognizer's own counts do not reconcile with the
+    /// per-sector resolution: `plats + split_members - shared_split` must be
+    /// the number of sectors some lift line names, so a stray duplicate or a
+    /// dropped entry shows here even when no group disagrees above.
+    counts_mismatch: u64,
     bank_columns: Vec<BankColumn>,
 }
 
@@ -1826,6 +1831,13 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
             .count(),
     );
     agg.recognizer_split += report.counts.shared_split;
+    // The recognizer's counts must reconcile with the per-sector resolution
+    // (`lift::plat`'s `every_report_keeps_the_member_invariants` pins the
+    // same identity over its fixtures; this is the corpus-wide check).
+    agg.counts_mismatch += u64::from(
+        report.counts.plats + report.counts.split_members - report.counts.shared_split
+            != count_len(resolved.len()),
+    );
     // A split group read as one platform has a single entry listing every
     // member, so a member resolves through `members`, not `sector`. The outer
     // `Option` is whether the recognizer has an entry at all; a sector it
@@ -1897,8 +1909,10 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
         // recognizer must hold one entry whose `members` are exactly the
         // group's sectors and whose `(shape, refusal)` is `merged_verdict`'s:
         // no entry, a merge of only part of the group, and a different verdict
-        // each count. Where the probe does not, an entry that merged anyway
-        // counts too, so the one number covers both directions.
+        // each count. Where the probe does not, an entry that merged any
+        // member anyway counts too — every member is checked, so a merge that
+        // leaves out the least member is still seen — and the one number
+        // covers both directions.
         let group_sectors: Vec<usize> = plats
             .iter()
             .map(|p| p.sector)
@@ -1909,7 +1923,9 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
             Some(v) => recognizer_plat(plats[0].sector).is_none_or(|plat| {
                 plat.members != group_sectors || (plat.shape, plat.refusal) != (v.ok(), v.err())
             }),
-            None => recognizer_plat(plats[0].sector).is_some_and(|plat| plat.members.len() > 1),
+            None => plats
+                .iter()
+                .any(|p| recognizer_plat(p.sector).is_some_and(|plat| plat.members.len() > 1)),
         });
         record_group(&g, agg);
     }
@@ -1968,6 +1984,19 @@ fn record_group(g: &Group, agg: &mut Agg) {
     agg.common_neighbor.add(g.common_neighbor());
 }
 
+/// The §I arbiters line: the recognizer's own tallies beside every count of
+/// where it and the probe's re-derivation disagree.
+fn report_arbiters(agg: &Agg) {
+    println!(
+        "- arbiters: `bank_caller` refusals (recognizer): {} · `shared_split` groups (recognizer): {} · single-tag platforms where the re-derived verdict disagrees with the recognizer: {} · groups where the recognizer and the probe disagree on the split reading or its verdict: {} · maps where the recognizer's counts do not reconcile with the per-sector resolution: {}",
+        agg.bank_caller_refusals,
+        agg.recognizer_split,
+        agg.unshared_mismatch,
+        agg.split_mismatch,
+        agg.counts_mismatch
+    );
+}
+
 fn report_banks(agg: &Agg) {
     println!("\n## I. Lift tag groups (banks)\n");
     println!(
@@ -1976,10 +2005,7 @@ fn report_banks(agg: &Agg) {
         agg.groups_size.all()
     );
     println!("- floor class: {}", agg.groups_floor_class.all());
-    println!(
-        "- arbiters: `bank_caller` refusals (recognizer): {} · `shared_split` groups (recognizer): {} · single-tag platforms where the re-derived verdict disagrees with the recognizer: {} · groups where the recognizer and the probe disagree on the split reading or its verdict: {}",
-        agg.bank_caller_refusals, agg.recognizer_split, agg.unshared_mismatch, agg.split_mismatch
-    );
+    report_arbiters(agg);
     println!(
         "\n**Members judged as if the tag were unshared** ({} members).\n",
         agg.members_n
@@ -3281,6 +3307,15 @@ mod tests {
             ),
             (0, 2, 0, 0)
         );
+        // The members do not touch, so the probe reads no split group and the
+        // recognizer must merge nothing: the `None` arm of `split_mismatch`
+        // stays 0 for a shared tag that is not split, and the recognizer's
+        // counts still reconcile where `shared_split == 0`.
+        assert_eq!(
+            (agg.split_mismatch, agg.counts_mismatch),
+            (0, 0),
+            "a disconnected pair is neither merged nor miscounted"
+        );
         let recovered: Vec<u64> = agg.bank_columns.iter().map(|c| c.recovered).collect();
         assert_eq!(recovered, vec![0, 2, 2, 2, 0]);
         let groups: Vec<u64> = agg.bank_columns.iter().map(|c| c.groups).collect();
@@ -3502,8 +3537,9 @@ mod tests {
         // all four columns keep the map.
         assert!(verdict.a && verdict.a_prime && verdict.b && verdict.split);
         assert_eq!(
-            agg.split_mismatch, 0,
-            "the recognizer's merge is the probe's merged_verdict"
+            (agg.split_mismatch, agg.counts_mismatch),
+            (0, 0),
+            "the recognizer's merge is the probe's merged_verdict, and its counts reconcile"
         );
         assert_eq!(
             agg.groups_floor_class.all(),
