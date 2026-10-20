@@ -1,3 +1,6 @@
+//! Walking a directory of archives and WADs into deduplicated
+//! [`MapRecord`]s, with every failure counted in a [`Buckets`] field.
+
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -175,7 +178,7 @@ fn archive_options() -> ParseOptions {
     }
 }
 
-/// Surveys `dir` (non-recursive). See the module docs.
+/// Surveys `dir` (non-recursive). See the [`super`] module docs.
 ///
 /// An entry the directory listing itself cannot read (a permission error
 /// mid-listing) is skipped silently — no bucket, no failure line.

@@ -4,7 +4,10 @@
 //! [`crate::lift::plat`] and [`crate::lift::floor`], whose refusals gate the
 //! verdict's fourth, fifth and sixth axes and whose counts the report rolls
 //! up.
-//! The sweep lives in `sweep`, the roll-up in `aggregate` and the rendering in `report`; every public item is re-exported here, so `lift::corpus::<name>` is the one public path.
+//!
+//! The sweep lives in `sweep`, the roll-up in `aggregate` and the rendering
+//! in `report`; every public item is re-exported here, so
+//! `lift::corpus::<name>` is the one public path.
 
 mod aggregate;
 mod report;

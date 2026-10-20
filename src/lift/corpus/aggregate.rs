@@ -1,4 +1,5 @@
-//! Rolling a sweep's unique maps up into an [`Aggregate`]: per-axis shares, ranked blockers, the two greedy curves and the three recognizer roll-ups.
+//! Rolling a sweep's unique maps up into an [`Aggregate`]: per-axis shares,
+//! ranked blockers, the two greedy curves and the three recognizer roll-ups.
 
 use std::collections::{BTreeMap, BTreeSet};
 

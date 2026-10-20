@@ -1,4 +1,5 @@
-//! The Markdown and JSON report: the sample's provenance, the buckets, the shares, the blocker tables, the recognizer sections and the greedy curves.
+//! The Markdown and JSON report: the sample's provenance, the buckets, the
+//! shares, the blocker tables, the recognizer sections and the greedy curves.
 
 use std::path::Path;
 
@@ -309,9 +310,9 @@ fn render_lifts(s: &mut String, a: &Aggregate) {
 /// sit in, for the reason [`render_lifts`] gives. Refusals are reported in
 /// the module doc's fixed precedence order (`crate::lift::floor`'s twelve
 /// [`crate::lift::floor::Refusal`]s), and broken lines get their own row
-/// split by [`crate::lift::floor::FloorCounts::tag_zero`] and [`crate::lift::floor::FloorCounts::dangling`] rather
-/// than folded into the refusal list, since a broken line names no target at
-/// all to refuse.
+/// split by [`crate::lift::floor::FloorCounts::tag_zero`] and
+/// [`crate::lift::floor::FloorCounts::dangling`] rather than folded into the
+/// refusal list, since a broken line names no target at all to refuse.
 fn render_floors(s: &mut String, a: &Aggregate) {
     use std::fmt::Write as _;
 
