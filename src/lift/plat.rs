@@ -1671,11 +1671,13 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
     }
 
     /// Every shared-tag fixture the tests above build: the split pairs read
-    /// as one platform (the one a non-lift special conflicts with and the one
-    /// carrying things among them), the pairs the merge declines (the one
-    /// resting at an intermediate floor among them), the remotely
-    /// called pair, the two pairs on one tag, the map with a bank and a split
-    /// group side by side, the triangle, and [`bank_fixtures`]. A new split or
+    /// as one platform, whether accepted or refused once merged (the one a
+    /// non-lift special conflicts with, the one carrying things, and the ones
+    /// refused on their rest among them), the two pairs the merge declines
+    /// (disconnected, and at two floors), the remotely called pair, the two
+    /// pairs on one tag, the map with a bank and a split group side by side,
+    /// the triangle, and [`bank_fixtures`]. `split` and `switched` are the
+    /// same shape spelled from its links or from its floors. A new split or
     /// bank fixture belongs here too, so `every_report_keeps_the_member_invariants`
     /// sweeps it.
     fn shared_tag_fixtures() -> Vec<String> {
