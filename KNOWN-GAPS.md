@@ -313,16 +313,31 @@ meant to board. That is the cost of A′ over the stricter own-face gate A,
 taken knowingly rather than falling back to gate B, which credits a caller
 anywhere at all.
 
-**A split platform reads as several lifts.** One platform split by trim —
-every member at one floor and mutually adjacent, the benign 3.4 % / 8.5 % /
-7.6 % minority of the multi-sector lift tag groups the probe found (29 / 47 /
-328 across the three populations, §L) — is judged member by member in v1, not
-merged into the single mover it actually is. `PlatCounts::shared_split`
-tracks it as telemetry rather than as a shape (25 idgames groups qualify,
-`docs/measurements/lift-variants-2026-09-11.md` §I), and the recognizer
-reports each member's own shape or refusal rather than the one platform the
-corpus map has. Merging a split group into a single IR lift is a follow-up,
-not built here.
+**A split platform is read as one lift, and that reading is an
+approximation.** One platform split by trim — every member at one floor and
+mutually adjacent, the benign 3.4 % / 8.5 % / 7.6 % minority of the
+multi-sector lift tag groups the probe found (29 / 47 / 328 across the three
+populations, `docs/measurements/lift-variants-2026-09-11.md` §I; 1 / 4 / 25 of
+them split) — is read by `lift::plat` as a single `Plat` since #84: the merged
+platform's neighbors are the union of the members' two-sided neighbors minus
+the members, its `low` the least member `low`, its triggers the tag's lines,
+and an activator that is itself a member counts as the platform; it is judged
+against the same eight refusals and is never `BankCaller`. The engine does not
+move it that way. `EV_DoPlat` starts one thinker per sector carrying the tag,
+each with its own `P_FindLowestFloorSurrounding` (`p_plats.c:164-169`,
+`:207-212`), so a trim piece with no lower outside neighbor stays where it is
+while the piece beside it drops. The recognizer states the platform the mapper
+drew rather than the motion the engine performs, because that is what the
+lifter would have to emit; `PlatCounts::shared_split` counts the groups so
+read and `split_members` the sectors they comprise. The probe priced the
+reading at +1 map on all axes for the sample and 28 platforms recovered in 11
+of its 25 split groups (§I, the `+split` column); the sample has not been
+re-run since the merge shipped. The merge can also refuse what the members
+passed — a platform between two low rooms called from one of them is a
+`OneWayBarrier`, where its members alone were one lift and one `BankCaller` —
+and a disconnected or multi-floor shared tag is still judged member by member.
+The compiler never emits a split platform, so nothing it builds inherits the
+approximation.
 
 **Remote callers are the deferred construct.** `Refusal::BankCaller`'s gate
 is "neighbor-called": some line on the bank's tag fires from a sector that

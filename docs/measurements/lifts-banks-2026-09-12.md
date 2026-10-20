@@ -306,11 +306,14 @@ and after" table already reports directly.
   lenient assembler would load never reach the classifier. crustygen
   [#34](https://github.com/masriamir/crustygen/issues/34) tracks it; closing it adds maps to the
   denominator, so these shares are not comparable with a post-#34 run.
-- **The split-as-one-lift reading is a separate, unshipped gate.** The probe's §I prices reading a
-  connected, one-floor split tag as a single platform at a further +1 map and +28 recovered
-  platforms in 11 of the sample's 25 split groups (`shared_split`, unchanged at 25 by this
-  construct). That reading is not part of what shipped; it is named here only so a future construct
-  does not re-measure it from zero.
+- **The split-as-one-lift reading shipped after this run, and the re-run is pending.** The probe's
+  §I priced reading a connected, one-floor split tag as a single platform at a further +1 map and
+  +28 recovered platforms in 11 of the sample's 25 split groups (`shared_split`, unchanged at 25 by
+  this construct). crustygen #84 built that reading into `lift::plat` (`KNOWN-GAPS.md`, "A split
+  platform is read as one lift"); the figures above predate it, so on the next sample run `plats`
+  falls by the absorbed trim sectors (the new `split groups read as one platform / sectors they
+  comprise` row reconciles the two) and the lift axis moves by the +1 the probe measured. That run
+  replaces this caveat with numbers.
 
 ## Method — the exact commands
 
