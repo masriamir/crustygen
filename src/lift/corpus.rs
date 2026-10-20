@@ -1028,11 +1028,11 @@ fn render_teleports(s: &mut String, a: &Aggregate) {
 ///
 /// The shape row counts *platforms* and the row under it counts the maps
 /// they sit in, because a corpus total alone cannot tell one map with a
-/// dozen lifts from a dozen maps with one each. The shared-tag row is the
-/// one count that is neither: it tallies tag *groups* that are one platform
-/// split by trim, a sub-count of the shared-tag *groups*, which are no
-/// longer refused as such, rather than of their platforms, so it gets a row of
-/// its own instead of a slot in the refusal list.
+/// dozen lifts from a dozen maps with one each. The split-group row tallies
+/// tag *groups* that are one platform split by trim, each read as one
+/// platform, and the sectors those groups comprise, so `plats` reconciles
+/// across the merge; it is neither a platform tally nor a refusal, so it
+/// keeps its own row instead of a slot in the refusal list.
 fn render_lifts(s: &mut String, a: &Aggregate) {
     use std::fmt::Write as _;
 
@@ -1076,8 +1076,8 @@ fn render_lifts(s: &mut String, a: &Aggregate) {
     );
     let _ = writeln!(
         s,
-        "| shared-tag groups that are one platform split | {} |",
-        c.shared_split
+        "| split groups read as one platform / sectors they comprise | {} / {} |",
+        c.shared_split, c.split_members
     );
     let _ = writeln!(s, "| broken lines | {} |", c.broken_lines);
     let _ = writeln!(
@@ -1649,6 +1649,31 @@ mod tests {
         assert!(md.contains("| broken lines | 1 |"), "{md}");
         assert!(
             md.contains("| callable from below | 2 (100.0 % of plats) |"),
+            "{md}"
+        );
+    }
+
+    /// The split-group row names both the groups and the sectors they
+    /// comprise, so a report before the merge reconciles with one after it.
+    #[test]
+    fn a_split_group_is_rendered_as_groups_and_sectors() {
+        let mut m = record(&[62], &[], true, true, true);
+        m.lifts = PlatCounts {
+            plats: 1,
+            lifts: 1,
+            shared_split: 1,
+            split_members: 2,
+            callable_low: 1,
+            ..PlatCounts::default()
+        };
+        let a = aggregate(&[m]);
+        let md = render_markdown(None, &Buckets::default(), &a);
+        assert!(
+            md.contains("| split groups read as one platform / sectors they comprise | 1 / 2 |"),
+            "{md}"
+        );
+        assert!(
+            !md.contains("shared-tag groups that are one platform split"),
             "{md}"
         );
     }
