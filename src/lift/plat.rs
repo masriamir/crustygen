@@ -513,10 +513,11 @@ impl<'a> Subject<'a> {
     /// [`recognize`]'s responsibility, and it is checkable from in here:
     /// [`ScenePlat::shared_tag`] counts every scene sector carrying the tag
     /// and [`resolve_plats`] resolves every sector a lift tag names, so the
-    /// group is the whole tag exactly when `group.len() == shared_tag`. All
-    /// four preconditions are debug-asserted: at least two members, all at
-    /// one floor, all carrying `group[0]`'s tag, and together the whole tag.
-    /// `step` is [`Tables::step_height`].
+    /// group is the whole tag exactly when its distinct members number
+    /// `shared_tag`. All four preconditions are debug-asserted: at least two
+    /// members, all at one floor, all carrying `group[0]`'s tag, and (once
+    /// the distinct members are collected) together the whole tag. `step` is
+    /// [`Tables::step_height`].
     fn merged(scene: &Scene, group: &[&'a ScenePlat], step: i32) -> Self {
         debug_assert!(group.len() >= 2, "a split group has at least two members");
         debug_assert!(
@@ -529,16 +530,16 @@ impl<'a> Subject<'a> {
             group.iter().all(|p| p.tag == group[0].tag),
             "a split group's members all carry one tag"
         );
-        debug_assert!(
-            group.iter().all(|p| p.shared_tag == group.len()),
-            "a split group is the whole tag"
-        );
         let members: Vec<usize> = group
             .iter()
             .map(|p| p.sector)
             .collect::<BTreeSet<usize>>()
             .into_iter()
             .collect();
+        debug_assert!(
+            group.iter().all(|p| p.shared_tag == members.len()),
+            "a split group is the whole tag"
+        );
         let floor = scene.sectors[members[0]].floor;
         let outside: BTreeSet<usize> = group
             .iter()
@@ -1671,7 +1672,8 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
 
     /// Every shared-tag fixture the tests above build: the split pairs read
     /// as one platform (the one a non-lift special conflicts with and the one
-    /// carrying things among them), the pairs the merge declines, the remotely
+    /// carrying things among them), the pairs the merge declines (the one
+    /// resting at an intermediate floor among them), the remotely
     /// called pair, the two pairs on one tag, the map with a bank and a split
     /// group side by side, the triangle, and [`bank_fixtures`]. A new split or
     /// bank fixture belongs here too, so `every_report_keeps_the_member_invariants`
@@ -1679,12 +1681,19 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
     fn shared_tag_fixtures() -> Vec<String> {
         let split =
             |links: &[(i32, i32, bool)]| chain(&[0, 128, 128, 128], &[0, 7, 7, 0], links, "");
+        // The tagged pair with one switch on its first line, over any floors.
+        let switched = |floors: &[i32], extra: &str| {
+            chain(
+                floors,
+                &[0, 7, 7, 0],
+                &[(62, 7, false), (0, 0, false), (0, 0, false)],
+                extra,
+            )
+        };
         let mut conflicting = split(&[(62, 7, false), (0, 0, false), (0, 0, false)]);
         far_wall(&mut conflicting, 4, 23, 7);
-        let with_things = chain(
+        let with_things = switched(
             &[0, 128, 128, 128],
-            &[0, 7, 7, 0],
-            &[(62, 7, false), (0, 0, false), (0, 0, false)],
             "thing { x = 192.0; y = 64.0; angle = 0; type = 2012; single = true; }\n\
              thing { x = 320.0; y = 64.0; angle = 0; type = 2012; single = true; }\n",
         );
@@ -1703,12 +1712,7 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
             split(&[(62, 7, false), (0, 0, false), (123, 7, true)]),
             conflicting,
             with_things,
-            chain(
-                &[0, 128, 128, 0],
-                &[0, 7, 7, 0],
-                &[(62, 7, false), (0, 0, false), (0, 0, false)],
-                "",
-            ),
+            switched(&[0, 128, 128, 0], ""),
             chain(
                 &[0, 128, 128, 0],
                 &[0, 7, 7, 0],
@@ -1721,6 +1725,7 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
                 &[(62, 7, false), (0, 0, false), (62, 7, true)],
                 "",
             ),
+            switched(&[0, 128, 128, 256], ""),
             chain(
                 &[128, 128, 128, 0],
                 &[0, 7, 7, 0],
@@ -1734,12 +1739,7 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
                 &[(62, 7, false), (0, 0, false)],
                 "",
             ),
-            chain(
-                &[0, 128, 96, 0],
-                &[0, 7, 7, 0],
-                &[(62, 7, false), (0, 0, false), (0, 0, false)],
-                "",
-            ),
+            switched(&[0, 128, 96, 0], ""),
             chain(
                 &[0, 128, 128, 0, 128, 128, 0],
                 &[0, 7, 7, 0, 7, 7, 0],
@@ -1779,8 +1779,8 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
     /// the tests above build them: the pair with one `BankCaller` member, the
     /// neighbor-called pair, and the remotely switched pair with a conflicting
     /// action. They matter to [`shared_tag_fixtures`]'s sweep because the
-    /// counts identity must hold where `shared_split == 0` and
-    /// `bank_caller > 0`.
+    /// counts identity must hold where `shared_split == 0`, with and without
+    /// a `bank_caller` refusal.
     fn bank_fixtures() -> Vec<String> {
         vec![
             chain(

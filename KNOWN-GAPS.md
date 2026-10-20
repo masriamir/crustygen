@@ -337,8 +337,11 @@ re-run since the merge shipped. The merge can also refuse what the members
 passed — a platform between two low rooms called from one of them is a
 `OneWayBarrier`, where its members alone were one lift and one `BankCaller` —
 and a disconnected or multi-floor shared tag is still judged member by member.
-The compiler never emits a split platform, so nothing it builds inherits the
-approximation.
+Whether each connected one-floor component of a tag should be read as its own
+platform (a tag carrying two trim-split lifts) is an open question for a
+follow-up issue; today such a tag is judged member by member, as
+`two_split_pairs_on_one_tag_are_not_one_platform` pins. The compiler never
+emits a split platform, so nothing it builds inherits the approximation.
 
 **Remote callers are the deferred construct.** `Refusal::BankCaller`'s gate
 is "neighbor-called": some line on the bank's tag fires from a sector that

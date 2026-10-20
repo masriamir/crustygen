@@ -1656,8 +1656,8 @@ fn floor_class(scene: &Scene, members: &BTreeSet<usize>) -> FloorClass {
 /// A split group read as one lift: the union of the members' outside
 /// neighbors is the merged platform's neighborhood, the members' shared line
 /// set its triggers, and an activator that is itself a member is the
-/// platform. `low` is the least member `low` (a sibling member at the same
-/// floor never lowers it), and the rest classes follow `check::plats`'
+/// platform. `low` is the least of the members' `low`s (a sibling member at
+/// the same floor never lowers it), and the rest classes follow `check::plats`'
 /// definitions. The eight refusals then run in `lift::plat`'s order.
 fn merged_verdict(scene: &Scene, plats: &[&ScenePlat], step: i32) -> Result<PlatShape, Refusal> {
     let members: BTreeSet<usize> = plats.iter().map(|p| p.sector).collect();
@@ -1985,7 +1985,10 @@ fn record_group(g: &Group, agg: &mut Agg) {
 }
 
 /// The §I arbiters line: the recognizer's own tallies beside every count of
-/// where it and the probe's re-derivation disagree.
+/// where it and the probe's re-derivation disagree. It is split out of
+/// [`report_banks`] to keep that function under clippy's `too_many_lines`
+/// limit; the extraction is kept over an `#[expect]` because the arbiters line
+/// is a self-contained unit.
 fn report_arbiters(agg: &Agg) {
     println!(
         "- arbiters: `bank_caller` refusals (recognizer): {} · `shared_split` groups (recognizer): {} · single-tag platforms where the re-derived verdict disagrees with the recognizer: {} · groups where the recognizer and the probe disagree on the split reading or its verdict: {} · maps where the recognizer's counts do not reconcile with the per-sector resolution: {}",
