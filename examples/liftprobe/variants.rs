@@ -829,8 +829,12 @@ struct Agg {
     historical_shared_members: u64,
     recognizer_split: u64,
     unshared_mismatch: u64,
-    /// Split groups where the recognizer's merged verdict differs from
-    /// `merged_verdict`.
+    /// Groups where the recognizer and the probe disagree on which groups are
+    /// split or on the verdict: split groups (by `floor_class`) where the
+    /// recognizer has no entry, did not merge the whole group, or reached a
+    /// different `(shape, refusal)` than `merged_verdict` — plus groups the
+    /// probe does not class as split that the recognizer merged anyway. One
+    /// number, so a nonzero reads "the two disagree" whichever way.
     split_mismatch: u64,
     bank_columns: Vec<BankColumn>,
 }
@@ -1714,9 +1718,10 @@ fn merged_verdict(scene: &Scene, plats: &[&ScenePlat], step: i32) -> Result<Plat
 /// split — so without that clause a column could *drop* a map the `today`
 /// column counts, and the §I yield would not be a yield. Since crustygen#84
 /// the shipped recognizer reads a split group as one platform, so `today`
-/// already includes the split reading and the `+split` column adds nothing
-/// on a re-run; it is kept so the §I table stays comparable with the
-/// 2026-09-11 run.
+/// already includes the split reading and the `+split` column adds no map
+/// over `today` on a re-run (its `groups` / `recovered` counts still report
+/// what the gate alone accepts), provided `split_mismatch` stays 0; it is
+/// kept so the §I table stays comparable with the 2026-09-11 run.
 #[derive(Clone, Copy, Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -1822,15 +1827,19 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
     );
     agg.recognizer_split += report.counts.shared_split;
     // A split group read as one platform has a single entry listing every
-    // member, so a member resolves through `members`, not `sector`.
+    // member, so a member resolves through `members`, not `sector`. The outer
+    // `Option` is whether the recognizer has an entry at all; a sector it
+    // never lists reads as *refused* everywhere below — a mismatch, not an
+    // accepted single, not an accepted member — so a dropped entry can never
+    // pass for a clean verdict.
     let recognizer_plat = |sector: usize| report.plats.iter().find(|r| r.members.contains(&sector));
-    let recognizer_refusal = |sector: usize| recognizer_plat(sector).and_then(|r| r.refusal);
+    let recognizer_refusal = |sector: usize| recognizer_plat(sector).map(|r| r.refusal);
     // The re-derivation must agree with the recognizer wherever the tag is
     // unshared; a disagreement here would mean the eight refusals drifted.
     for p in &resolved {
         if p.shared_tag == 1 {
             agg.unshared_mismatch +=
-                u64::from(unshared_verdict(p).err() != recognizer_refusal(p.sector));
+                u64::from(recognizer_refusal(p.sector) != Some(unshared_verdict(p).err()));
         }
     }
     // A group member's own refusal is the group gate's business: a member
@@ -1840,7 +1849,7 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
         && resolved
             .iter()
             .filter(|p| p.shared_tag == 1)
-            .all(|p| recognizer_refusal(p.sector).is_none());
+            .all(|p| recognizer_refusal(p.sector) == Some(None));
     let mut by_tag: BTreeMap<i32, Vec<&ScenePlat>> = BTreeMap::new();
     for p in &resolved {
         if p.shared_tag >= 2 {
@@ -1878,17 +1887,30 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
                 agg.bank_columns[i].recovered += count_len(historical_members);
             }
         }
-        let accepted_today = plats.iter().all(|p| recognizer_refusal(p.sector).is_none());
+        let accepted_today = plats
+            .iter()
+            .all(|p| recognizer_refusal(p.sector) == Some(None));
         verdict.fold_group(gates, accepted_today);
-        // The recognizer's merge must agree with `merged_verdict` on every
-        // split group; a disagreement here would mean the merge rule drifted.
-        // A group the recognizer has no entry for at all counts as one too.
-        if let Some(v) = &g.merged {
-            agg.split_mismatch += u64::from(
-                recognizer_plat(plats[0].sector)
-                    .is_none_or(|plat| (plat.shape, plat.refusal) != (v.ok(), v.err())),
-            );
-        }
+        // The recognizer and the probe must agree on which groups are split
+        // and on the merged verdict; a disagreement here would mean the merge
+        // rule drifted. Where the probe reads the group as split, the
+        // recognizer must hold one entry whose `members` are exactly the
+        // group's sectors and whose `(shape, refusal)` is `merged_verdict`'s:
+        // no entry, a merge of only part of the group, and a different verdict
+        // each count. Where the probe does not, an entry that merged anyway
+        // counts too, so the one number covers both directions.
+        let group_sectors: Vec<usize> = plats
+            .iter()
+            .map(|p| p.sector)
+            .collect::<BTreeSet<usize>>()
+            .into_iter()
+            .collect();
+        agg.split_mismatch += u64::from(match &g.merged {
+            Some(v) => recognizer_plat(plats[0].sector).is_none_or(|plat| {
+                plat.members != group_sectors || (plat.shape, plat.refusal) != (v.ok(), v.err())
+            }),
+            None => recognizer_plat(plats[0].sector).is_some_and(|plat| plat.members.len() > 1),
+        });
         record_group(&g, agg);
     }
     verdict
@@ -1955,7 +1977,7 @@ fn report_banks(agg: &Agg) {
     );
     println!("- floor class: {}", agg.groups_floor_class.all());
     println!(
-        "- arbiters: `bank_caller` refusals (recognizer): {} · `shared_split` groups (recognizer): {} · single-tag platforms where the re-derived verdict disagrees with the recognizer: {} · split groups where the merged verdict disagrees with the recognizer: {}",
+        "- arbiters: `bank_caller` refusals (recognizer): {} · `shared_split` groups (recognizer): {} · single-tag platforms where the re-derived verdict disagrees with the recognizer: {} · groups where the recognizer and the probe disagree on the split reading or its verdict: {}",
         agg.bank_caller_refusals, agg.recognizer_split, agg.unshared_mismatch, agg.split_mismatch
     );
     println!(

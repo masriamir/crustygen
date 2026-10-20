@@ -59,8 +59,13 @@
 //! and are mutually adjacent over two-sided boundaries (`is_split_group`)
 //! is one platform split by trim — the mapper drew a seam across one lift so
 //! its halves could carry different textures — and is read as one [`Plat`],
-//! listed at its least member with every member in [`Plat::members`]. The
-//! merged platform's outside neighbors are the union of the members'
+//! listed at its least member with every member in [`Plat::members`].
+//! "Mutually adjacent" here, and wherever these docs say it, means
+//! *connected*: the walk `is_split_group` describes, over two-sided
+//! boundaries and never leaving the group, reaches every member from any one
+//! of them. A chain of three strips whose ends never touch qualifies; two
+//! pairs with an untagged room between them do not. The merged platform's
+//! outside neighbors are the union of the members'
 //! two-sided neighbors minus the members themselves; its `low` is the least
 //! member `low`; its triggers are the tag's lines; and an activator that is
 //! itself a member is a [`Activator::Plat`] activator — a rider's call, not
@@ -218,7 +223,8 @@ pub struct Plat {
     pub members: Vec<usize>,
     /// The tag its lift lines name it by.
     pub tag: i32,
-    /// Where it rests relative to its two-sided neighbors.
+    /// Where it rests relative to the two-sided neighbors outside
+    /// [`Self::members`] (for a single-sector platform, all of them).
     pub rest: Rest,
     /// Its rest floor minus the floor `EV_DoPlat` sends it to.
     pub travel: i32,
@@ -231,10 +237,11 @@ pub struct Plat {
     pub callable: Callable,
     /// Declaration indices of every lift line naming its tag.
     pub triggers: Vec<usize>,
-    /// How many things stand in the platform sector.
+    /// How many things stand in any of its [`Self::members`].
     pub things: u64,
-    /// Whether every edge of the platform sector is two-sided — a
-    /// free-standing pad. Reported as a statistic, never a gate.
+    /// Whether every edge of every member is two-sided — a free-standing pad.
+    /// The seam edges between the members of a split group are two-sided, so
+    /// they never count against it. Reported as a statistic, never a gate.
     pub island: bool,
     /// Whether some trigger fires from the platform itself or from within a
     /// step of it ([`ScenePlat::callable_top`]) — a rider's call.
@@ -271,7 +278,9 @@ pub struct PlatCounts {
     pub shared_split: u64,
     /// Sectors the [`Self::shared_split`] groups comprise, so a per-sector
     /// reading reconciles with this one:
-    /// `sectors_named = plats + split_members - shared_split`.
+    /// `sectors_named = plats + split_members - shared_split`, where
+    /// `sectors_named` is the number of sectors some lift line names
+    /// ([`resolve_plats`]' length).
     pub split_members: u64,
     /// Platforms refused [`Refusal::OneShot`].
     pub one_shot: u64,
@@ -455,7 +464,9 @@ struct Subject<'a> {
     low: i32,
     /// Where it rests relative to `outside`.
     rest: Rest,
-    /// Its two-sided neighbors that are not members.
+    /// Its two-sided neighbors (for a merged group, excluding the members).
+    /// For a single platform this is [`ScenePlat::neighbors`] unfiltered, so
+    /// a self-referencing two-sided line can name the sector itself here.
     outside: BTreeSet<usize>,
     /// Distinct floors `outside` sits at.
     distinct_outside_floors: usize,
@@ -492,9 +503,14 @@ impl<'a> Subject<'a> {
     }
 
     /// A split group read as one platform (the module doc's "Split groups"
-    /// approximation). `group` is every [`ScenePlat`] carrying the tag, at
-    /// least two of them, all at one floor; `step` is
-    /// [`Tables::step_height`]. Both preconditions are debug-asserted.
+    /// approximation). `group` must be *every* [`ScenePlat`] carrying the tag
+    /// — the whole tag, not a subset: `shared: false`, reading the triggers
+    /// off `group[0]` and "never [`Refusal::BankCaller`]" all rest on there
+    /// being no other member. That is [`recognize`]'s responsibility and
+    /// cannot be checked from in here, which sees only what it is handed. The
+    /// two preconditions that can be checked are debug-asserted: at least two
+    /// members, all at one floor — along with every member carrying
+    /// `group[0]`'s tag. `step` is [`Tables::step_height`].
     fn merged(scene: &Scene, group: &[&'a ScenePlat], step: i32) -> Self {
         debug_assert!(group.len() >= 2, "a split group has at least two members");
         debug_assert!(
@@ -502,6 +518,10 @@ impl<'a> Subject<'a> {
                 .iter()
                 .all(|p| scene.sectors[p.sector].floor == scene.sectors[group[0].sector].floor),
             "a split group's members all sit at one floor"
+        );
+        debug_assert!(
+            group.iter().all(|p| p.tag == group[0].tag),
+            "a split group's members all carry one tag"
         );
         let members: Vec<usize> = group
             .iter()
@@ -678,6 +698,21 @@ impl<'a> Subject<'a> {
 
 /// Builds the report entry for a judged subject.
 fn plat_of(scene: &Scene, subject: &Subject<'_>, tag: i32) -> Plat {
+    debug_assert!(
+        !subject.members.is_empty() && subject.members.windows(2).all(|w| w[0] < w[1]),
+        "a subject's members are non-empty and strictly ascending"
+    );
+    // A single platform's `outside` is `ScenePlat::neighbors` unfiltered, which
+    // a self-referencing two-sided line can make name the sector itself; the
+    // merge is what filters, so the merge is what the invariant binds.
+    debug_assert!(
+        subject.members.len() == 1 || subject.outside.iter().all(|n| !subject.members.contains(n)),
+        "a merged subject's outside neighbors are disjoint from its members"
+    );
+    debug_assert!(
+        !(subject.shared && subject.members.len() > 1),
+        "a merged subject is the whole tag, never a bank member"
+    );
     let speed = subject.speed();
     let callable = subject.callable();
     let refusal = subject.refusal(callable, speed);
@@ -1114,12 +1149,12 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
 "#;
 
     #[test]
-    fn a_three_member_split_group_is_walked_once_per_member() {
+    fn a_mutually_adjacent_three_member_group_is_one_platform() {
         // The walk reaches `B` from both `A` and `C`, so it is stacked twice
         // and popped twice; the second pop must be dropped rather than
         // walked again. All three members still count as one split group,
-        // and none is `Dead` — each has a low room under it.
-        //
+        // and each member touches a low room, so the merged platform has
+        // somewhere to go.
         let r = report_of(TRIANGLE);
         assert_eq!(r.plats.len(), 1);
         assert_eq!(r.plats[0].members, vec![1, 2, 3]);
@@ -1201,15 +1236,17 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
     }
 
     /// The only lift line sits on the seam between the two members, fronted by
-    /// member 1. Against the merged platform a member is the platform itself,
-    /// so the call is a rider's: `Plat`, not `Level`, and nothing calls from
-    /// below.
+    /// member 2. Against member 1 alone that activator would be `Level` — a
+    /// sibling at its own floor — and member 1 is the member whose view of the
+    /// activators the merge starts from; against the merged platform a member
+    /// is the platform itself, so the call is a rider's: `Plat`, not `Level`,
+    /// and nothing calls from below.
     #[test]
     fn a_switch_on_the_seam_between_members_is_a_riders_call() {
         let r = report_of(&chain(
             &[0, 128, 128, 128],
             &[0, 7, 7, 0],
-            &[(0, 0, false), (62, 7, false), (0, 0, false)],
+            &[(0, 0, false), (62, 7, true), (0, 0, false)],
             "",
         ));
         assert_eq!(r.plats.len(), 1);
@@ -1228,7 +1265,7 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
 
     /// Two tagged rooms sealed by one-sided walls, the only lift line on their
     /// seam: no outside neighbor, so the merged `low` is the members' own
-    /// floor and the platform is `Dead` (Review Focus 1).
+    /// floor and the platform is `Dead`.
     #[test]
     fn a_split_group_with_no_outside_neighbor_is_dead() {
         let r = report_of(&chain(&[128, 128], &[7, 7], &[(62, 7, false)], ""));
@@ -1246,8 +1283,11 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
 
     /// The merged platform is refused on the tag's lines and on its rest like
     /// any platform: one-shot or two-speed lines, a non-lift special on the
-    /// tag, and an outside neighbor more than a step above it (Review Focus
-    /// 2 and 3).
+    /// tag, an outside neighbor more than a step above it, and outside
+    /// neighbors at two floors both more than a step below it — rooms 0 and 3
+    /// at 0 and 32 under a pair at 128, each calling the pair from its own
+    /// side, so the merged platform rests `AboveAll` over two distinct floors
+    /// and no shape names it.
     #[test]
     fn a_split_group_is_refused_on_its_lines_and_its_rest_like_any_platform() {
         let base = |links: &[(i32, i32, bool)], extra: &str| {
@@ -1263,15 +1303,25 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
             &[(62, 7, false), (0, 0, false), (0, 0, false)],
             "",
         );
-        for (text, expected) in [
-            (one_shot, Refusal::OneShot),
-            (mixed, Refusal::MixedSpeed),
-            (conflicting, Refusal::ConflictingAction),
-            (intermediate, Refusal::UnsupportedRest),
+        let two_floors_below = chain(
+            &[0, 128, 128, 32],
+            &[0, 7, 7, 0],
+            &[(62, 7, false), (0, 0, false), (62, 7, true)],
+            "",
+        );
+        for (text, expected, rest) in [
+            (one_shot, Refusal::OneShot, Rest::Top),
+            (mixed, Refusal::MixedSpeed, Rest::Top),
+            (conflicting, Refusal::ConflictingAction, Rest::Top),
+            (intermediate, Refusal::UnsupportedRest, Rest::Intermediate),
+            (two_floors_below, Refusal::UnsupportedRest, Rest::AboveAll),
         ] {
             let r = report_of(&text);
             assert_eq!(r.plats.len(), 1, "{expected:?}");
-            assert_eq!(r.plats[0].refusal, Some(expected));
+            assert_eq!(
+                (r.plats[0].refusal, r.plats[0].rest),
+                (Some(expected), rest)
+            );
             assert_eq!(r.plats[0].members, vec![1, 2], "{expected:?}");
         }
     }
@@ -1281,7 +1331,7 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
     /// switch on 5–6): the bank is still judged member by member and its
     /// uncalled member refused `BankCaller`; the split group is one lift; the
     /// report stays ascending by sector with the merged entry at its least
-    /// member (Review Focus 4).
+    /// member.
     #[test]
     fn a_bank_and_a_split_group_on_one_map_are_each_judged_their_own_way() {
         let r = report_of(&chain(
@@ -1321,6 +1371,118 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
                 r.counts.split_members
             ),
             (3, 2, 1, 1, 2)
+        );
+    }
+
+    /// Rooms `0 | 1 | 2 | 3` with floors `128, 128, 128, 0`, tag 7 on 1 and
+    /// 2, the riser switch on the 2–3 line fronted by room 3. The drop side
+    /// (room 3, floor 0) and the only caller touch member 2 only: member 1's
+    /// neighbors are rooms 0 and 2, both at its own floor, so its own `low`
+    /// is 128 and alone it would be `Dead`. The merged `low` is the least of
+    /// every member's, not the least member's, so the pair rests level with
+    /// room 0 and drops 128 to room 3: a lift.
+    #[test]
+    fn a_split_lift_whose_drop_touches_only_the_later_member_is_still_a_lift() {
+        let r = report_of(&chain(
+            &[128, 128, 128, 0],
+            &[0, 7, 7, 0],
+            &[(0, 0, false), (0, 0, false), (62, 7, true)],
+            "",
+        ));
+        assert_eq!(r.plats.len(), 1);
+        let p = &r.plats[0];
+        assert_eq!(
+            (p.members.clone(), p.rest, p.travel, p.shape, p.refusal),
+            (vec![1, 2], Rest::Top, 128, Some(Shape::Lift), None)
+        );
+    }
+
+    /// Rooms `0 | 1 | 2 | 3 | 4 | 5` with floors `0, 128, 128, 128, 0, 0`,
+    /// tag 7 on 1 and 2, and the only riser switch on room 5's far wall — a
+    /// Low activator (floor 0 against 128) that neighbors no member. A
+    /// single-tag platform called remotely is accepted (`KNOWN-GAPS.md`, "a
+    /// remote switch is not expressible", is a writing-side gap, not a
+    /// reading-side refusal), and the merged platform is single-tag: the group
+    /// is the whole tag, so there is no other member for the bank's lines to
+    /// be on and it is never `BankCaller`, however far its caller stands.
+    #[test]
+    fn a_split_group_called_only_from_afar_is_a_lift_not_a_bank_caller() {
+        let mut text = chain(
+            &[0, 128, 128, 128, 0, 0],
+            &[0, 7, 7, 0, 0, 0],
+            &[(0, 0, false); 5],
+            "",
+        );
+        far_wall(&mut text, 6, 62, 7);
+        let r = report_of(&text);
+        assert_eq!(r.plats.len(), 1);
+        assert!(r.plats[0].callable.low);
+        assert_eq!(
+            (r.plats[0].shape, r.plats[0].refusal, r.counts.bank_caller),
+            (Some(Shape::Lift), None, 0)
+        );
+    }
+
+    /// Two tagged pairs in a row `0 | 1 | 2 | 3 | 4 | 5 | 6` with floors
+    /// `0, 128, 128, 0, 128, 128, 0`: tag 7 on 1, 2, 4 and 5, all at one
+    /// floor, an untagged low room between the pairs, and a riser switch on
+    /// each pair's west face. The walk over two-sided boundaries from the
+    /// least member reaches 2 and stops, so the tag is not a split group and
+    /// every member is judged alone. This pins today's behavior — the walk
+    /// must reach every member from one seed — not a ruling: whether each
+    /// connected component should be merged on its own is an open design
+    /// question tracked outside this branch.
+    #[test]
+    fn two_split_pairs_on_one_tag_are_not_one_platform() {
+        let r = report_of(&chain(
+            &[0, 128, 128, 0, 128, 128, 0],
+            &[0, 7, 7, 0, 7, 7, 0],
+            &[
+                (62, 7, false),
+                (0, 0, false),
+                (0, 0, false),
+                (62, 7, false),
+                (0, 0, false),
+                (0, 0, false),
+            ],
+            "",
+        ));
+        assert_eq!(r.counts.shared_split, 0);
+        assert_eq!(r.plats.len(), 4);
+        assert!(r.plats.iter().all(|p| p.members == vec![p.sector]));
+    }
+
+    /// A(0)|T1(128)|T2(128)|B(128), tag 7 on T1 and T2, and a walkover (88,
+    /// `WR Lift`) on A|T1 in place of the riser switch. A walkover fires from
+    /// whichever side can cross the line at rest (`check::plats`'s module
+    /// doc): A cannot step 128 up onto T1, so only T1 fires it — a member,
+    /// hence `Plat` against the merged platform — and the pair is `TopOnly`
+    /// exactly as a single platform with a walkover on its low face is
+    /// (`callable_classes_and_the_top_trigger_are_reported`). The merge adds
+    /// no caller the geometry does not have.
+    #[test]
+    fn a_walkover_on_a_split_groups_low_face_fires_from_the_platform_alone() {
+        let r = report_of(&chain(
+            &[0, 128, 128, 128],
+            &[0, 7, 7, 0],
+            &[(88, 7, false), (0, 0, false), (0, 0, false)],
+            "",
+        ));
+        assert_eq!(r.plats.len(), 1);
+        assert_eq!(r.plats[0].members, vec![1, 2]);
+        assert_eq!(
+            r.plats[0].callable,
+            Callable {
+                low: false,
+                level: false,
+                plat: true,
+                above: false
+            }
+        );
+        assert!(r.plats[0].top_trigger);
+        assert_eq!(
+            (r.plats[0].shape, r.plats[0].refusal),
+            (None, Some(Refusal::TopOnly))
         );
     }
 
@@ -1495,4 +1657,144 @@ sector { texturefloor = "FLOOR4_8"; textureceiling = "CEIL3_5"; heightfloor = 0;
             (Some(1), Some(2))
         );
     }
+
+    /// Every shared-tag fixture this module builds, as the tests above build
+    /// them: the split pairs read as one platform, the pairs the merge
+    /// declines, the remotely called pair, the two pairs on one tag, the map
+    /// with a bank and a split group side by side, and the triangle.
+    fn shared_tag_fixtures() -> Vec<String> {
+        let split =
+            |links: &[(i32, i32, bool)]| chain(&[0, 128, 128, 128], &[0, 7, 7, 0], links, "");
+        let mut remote = chain(
+            &[0, 128, 128, 128, 0, 0],
+            &[0, 7, 7, 0, 0, 0],
+            &[(0, 0, false); 5],
+            "",
+        );
+        far_wall(&mut remote, 6, 62, 7);
+        vec![
+            split(&[(62, 7, false), (0, 0, false), (0, 0, false)]),
+            split(&[(0, 0, false), (62, 7, true), (0, 0, false)]),
+            split(&[(88, 7, false), (0, 0, false), (0, 0, false)]),
+            split(&[(21, 7, false), (0, 0, false), (0, 0, false)]),
+            split(&[(62, 7, false), (0, 0, false), (123, 7, true)]),
+            chain(
+                &[0, 128, 128, 0],
+                &[0, 7, 7, 0],
+                &[(62, 7, false), (0, 0, false), (0, 0, false)],
+                "",
+            ),
+            chain(
+                &[0, 128, 128, 0],
+                &[0, 7, 7, 0],
+                &[(62, 7, false), (0, 0, false), (62, 7, true)],
+                "",
+            ),
+            chain(
+                &[0, 128, 128, 32],
+                &[0, 7, 7, 0],
+                &[(62, 7, false), (0, 0, false), (62, 7, true)],
+                "",
+            ),
+            chain(
+                &[128, 128, 128, 0],
+                &[0, 7, 7, 0],
+                &[(0, 0, false), (0, 0, false), (62, 7, true)],
+                "",
+            ),
+            chain(&[128, 128], &[7, 7], &[(62, 7, false)], ""),
+            chain(
+                &[128, 0, 128],
+                &[7, 0, 7],
+                &[(62, 7, false), (0, 0, false)],
+                "",
+            ),
+            chain(
+                &[0, 128, 96, 0],
+                &[0, 7, 7, 0],
+                &[(62, 7, false), (0, 0, false), (0, 0, false)],
+                "",
+            ),
+            chain(
+                &[0, 128, 128, 0, 128, 128, 0],
+                &[0, 7, 7, 0, 7, 7, 0],
+                &[
+                    (62, 7, false),
+                    (0, 0, false),
+                    (0, 0, false),
+                    (62, 7, false),
+                    (0, 0, false),
+                    (0, 0, false),
+                ],
+                "",
+            ),
+            chain(
+                &[0, 128, 128, 128, 0, 0, 128, 128, 128],
+                &[0, 7, 0, 7, 0, 0, 9, 9, 0],
+                &[
+                    (62, 7, false),
+                    (0, 0, false),
+                    (0, 0, false),
+                    (0, 0, false),
+                    (0, 0, false),
+                    (62, 9, false),
+                    (0, 0, false),
+                    (0, 0, false),
+                ],
+                "",
+            ),
+            remote,
+            TRIANGLE.to_owned(),
+        ]
+    }
+
+    /// Over every fixture of [`shared_tag_fixtures`]: every entry's `members`
+    /// is non-empty, strictly ascending and led by `sector`; a merged entry
+    /// lists the whole tag, so its member count is the `shared_tag` of its
+    /// members in the resolver's output; and the counts reconcile with that
+    /// output — `plats + split_members - shared_split` is the number of
+    /// sectors some lift line names.
+    #[test]
+    fn every_report_keeps_the_member_invariants() {
+        for (i, text) in shared_tag_fixtures().iter().enumerate() {
+            let (scene, tables) = scene_of(text);
+            let r = recognize(&scene, &tables);
+            let resolved = resolve_plats(&scene, &tables);
+            for p in &r.plats {
+                assert!(!p.members.is_empty(), "fixture {i}: empty members");
+                assert_eq!(
+                    p.sector, p.members[0],
+                    "fixture {i}: sector is the least member"
+                );
+                assert!(
+                    p.members.windows(2).all(|w| w[0] < w[1]),
+                    "fixture {i}: members not strictly ascending: {:?}",
+                    p.members
+                );
+                if p.members.len() > 1 {
+                    let first = resolved
+                        .iter()
+                        .find(|q| q.sector == p.members[0])
+                        .expect("a member is a resolved platform");
+                    assert_eq!(
+                        p.members.len(),
+                        first.shared_tag,
+                        "fixture {i}: a split group is the whole tag"
+                    );
+                }
+            }
+            assert_eq!(
+                r.counts.plats + r.counts.split_members - r.counts.shared_split,
+                u64::try_from(resolved.len()).expect("fits u64"),
+                "fixture {i}: the counts reconcile with the per-sector resolution"
+            );
+        }
+    }
+
+    // What the split fixtures above do not cover: a group of more than three
+    // members (the triangle is the largest); `island == true` on a merged
+    // platform, which needs non-chain geometry whose every outer line is
+    // two-sided (every fixture here has one-sided outer walls); and a `fast`
+    // merged platform (speed is read per line, the same way as for a single
+    // platform, so `MixedSpeed` on a split group is the only speed cell pinned).
 }

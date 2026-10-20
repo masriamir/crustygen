@@ -97,7 +97,9 @@ alongside the refusals. Like `lift::plat`, a **shared tag is accepted** when
 every member sector qualifies on its own — and, for `lift::plat`, is
 neighbor-called (`bank_caller` otherwise), a gate a floor target has no
 equivalent of — both recognizers now judge a shared-tag member by itself
-rather than refusing the whole group. The chain refusal and the
+rather than refusing the whole group (for `lift::plat`, unless the group is one
+platform split by trim, which it reads as a single platform; see above). The
+chain refusal and the
 `LedgeLower` refusal are gates the shape probe behind
 `docs/measurements/floor-shapes-2026-09-02.md` never applied;
 `docs/measurements/floors-2026-09-03.md` reconciles the two, map for map.

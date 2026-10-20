@@ -48,7 +48,9 @@ from below, carry a top trigger, hold things, or run at `blazeDWUS` speed —
 plus the eight refusal classes that gate the verdict (`dead`, one-shot, mixed
 speed, unsupported rest, top-only, one-way barrier, bank caller, conflicting
 action — a shared tag is no longer refused as such; each member is judged
-alone, and only a member no adjacent line calls is refused `bank caller`) and
+alone, and only a member no adjacent line calls is refused `bank caller` —
+unless the group is one platform split by trim, which the recognizer reads as a
+single platform, counted by the *split groups* row described below) and
 the broken lines, those naming no platform at all (tag 0, or a tag no
 sector answers to). One row is neither a platform tally nor a refusal: *split
 groups read as one platform / sectors they comprise* counts tag groups whose
