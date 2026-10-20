@@ -60,9 +60,10 @@ gates the shape probe behind `docs/measurements/lift-shapes-2026-08-29.md`
 never applied, so these shape counts are subsets of that measurement's rather
 than the same numbers. A shared tag whose members all sit at one floor and are
 mutually adjacent is one platform split by trim, and is read as a single
-platform — union of the members' neighbors, least member `low`, the tag's
-lines as its triggers — judged once against the same refusals (`KNOWN-GAPS.md`
-records why that is an approximation of the engine's per-sector motion).
+platform — union of the members' neighbors outside the group, least member
+`low`, the tag's lines as its triggers — judged once against the same refusals
+(`KNOWN-GAPS.md` records why that is an approximation of the engine's per-sector
+motion).
 
 `lift::floor` is the third, over floor actions. It reads `check::floors`'
 engine-side resolution — shared with the flood's action bits, the `V-P28`

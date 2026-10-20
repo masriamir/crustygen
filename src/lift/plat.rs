@@ -161,7 +161,8 @@ pub enum Refusal {
     /// fires no trigger from below ([`ScenePlat::low_activator_neighbors`]):
     /// it lowers for one side only, where an IR barrier lowers for both.
     OneWayBarrier,
-    /// The tag names more than one sector ([`ScenePlat::shared_tag`]) and no
+    /// The tag names more than one sector ([`ScenePlat::shared_tag`]; never a
+    /// split group read as one platform — module doc, "Split groups") and no
     /// trigger fires from a neighbor of *this* member standing more than a
     /// step below it ([`ScenePlat::low_activator_neighbors`], an
     /// [`Activator::Low`] that is also a neighbor): the bank's lines are on
@@ -493,8 +494,15 @@ impl<'a> Subject<'a> {
     /// A split group read as one platform (the module doc's "Split groups"
     /// approximation). `group` is every [`ScenePlat`] carrying the tag, at
     /// least two of them, all at one floor; `step` is
-    /// [`Tables::step_height`].
+    /// [`Tables::step_height`]. Both preconditions are debug-asserted.
     fn merged(scene: &Scene, group: &[&'a ScenePlat], step: i32) -> Self {
+        debug_assert!(group.len() >= 2, "a split group has at least two members");
+        debug_assert!(
+            group
+                .iter()
+                .all(|p| scene.sectors[p.sector].floor == scene.sectors[group[0].sector].floor),
+            "a split group's members all sit at one floor"
+        );
         let members: Vec<usize> = group
             .iter()
             .map(|p| p.sector)
