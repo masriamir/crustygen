@@ -186,11 +186,6 @@ fn archive_options() -> ParseOptions {
 /// # Errors
 /// [`CorpusError::Io`] when `dir` cannot be listed; [`CorpusError::NoCandidates`]
 /// when it holds no `.zip`/`.wad` file.
-///
-/// # Panics
-///
-/// If the sweep collects more than `u64::MAX` unique maps, which no
-/// directory of files can hold.
 pub fn sweep_dir(dir: &Path, vocab: &Vocabulary, tables: &Tables) -> Result<Sweep, CorpusError> {
     let mut candidates: Vec<(PathBuf, String)> = std::fs::read_dir(dir)
         .map_err(|source| CorpusError::Io {
@@ -210,159 +205,201 @@ pub fn sweep_dir(dir: &Path, vocab: &Vocabulary, tables: &Tables) -> Result<Swee
             dir: dir.display().to_string(),
         });
     }
-    let mut sweep = Sweep {
-        buckets: Buckets::default(),
-        maps: Vec::new(),
-        failures: Vec::new(),
-    };
-    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut state = SweepState::new(vocab, tables);
     for (path, label) in &candidates {
         if has_ext(path, "zip") {
-            match Archive::from_path_with_options(path, archive_options()) {
-                Ok(archive) => {
-                    sweep.buckets.archives += 1;
-                    for member in archive
-                        .members()
-                        .iter()
-                        .filter(|m| has_ext(Path::new(m.path()), "wad"))
-                    {
-                        let source = format!("{label}!{}", member.path());
-                        match archive.wad(member) {
-                            Ok(wad) => {
-                                survey_wad(&wad, &source, vocab, tables, &mut sweep, &mut seen);
-                            }
-                            Err(err) => {
-                                sweep.buckets.wad_unreadable += 1;
-                                sweep.failures.push(format!("{source}: {err}"));
-                            }
+            state.sweep_zip(path, label);
+        } else {
+            state.sweep_wad_file(path, label);
+        }
+    }
+    Ok(state.finish())
+}
+
+/// The in-progress sweep: the counts, the unique-map records and the
+/// content-hash dedup set, with the vocabulary and tables every survey needs.
+struct SweepState<'a> {
+    vocab: &'a Vocabulary,
+    tables: &'a Tables,
+    sweep: Sweep,
+    seen: BTreeSet<String>,
+}
+
+impl<'a> SweepState<'a> {
+    /// An empty sweep that classifies with `vocab` and recognizes with
+    /// `tables`.
+    fn new(vocab: &'a Vocabulary, tables: &'a Tables) -> Self {
+        Self {
+            vocab,
+            tables,
+            sweep: Sweep {
+                buckets: Buckets::default(),
+                maps: Vec::new(),
+                failures: Vec::new(),
+            },
+            seen: BTreeSet::new(),
+        }
+    }
+
+    /// Opens the zip at `path` leniently (see [`archive_options`]) and
+    /// surveys every `.wad` member as `<label>!<member>`. A zip that fails to
+    /// open lands in `archive_unreadable`, a member that fails to parse in
+    /// `wad_unreadable`.
+    fn sweep_zip(&mut self, path: &Path, label: &str) {
+        match Archive::from_path_with_options(path, archive_options()) {
+            Ok(archive) => {
+                self.sweep.buckets.archives += 1;
+                for member in archive
+                    .members()
+                    .iter()
+                    .filter(|m| has_ext(Path::new(m.path()), "wad"))
+                {
+                    let source = format!("{label}!{}", member.path());
+                    match archive.wad(member) {
+                        Ok(wad) => self.survey_wad(&wad, &source),
+                        Err(err) => {
+                            self.sweep.buckets.wad_unreadable += 1;
+                            self.sweep.failures.push(format!("{source}: {err}"));
                         }
                     }
                 }
-                Err(err) => {
-                    sweep.buckets.archive_unreadable += 1;
-                    sweep.failures.push(format!("{label}: {err}"));
-                }
-            }
-        } else {
-            match Wad::from_path(path) {
-                Ok(wad) => survey_wad(&wad, label, vocab, tables, &mut sweep, &mut seen),
-                Err(err) => {
-                    sweep.buckets.wad_unreadable += 1;
-                    sweep.failures.push(format!("{label}: {err}"));
-                }
-            }
-        }
-    }
-    sweep.buckets.maps_unique = u64::try_from(sweep.maps.len()).expect("fits u64");
-    Ok(sweep)
-}
-
-fn survey_wad(
-    wad: &Wad,
-    source: &str,
-    vocab: &Vocabulary,
-    tables: &Tables,
-    sweep: &mut Sweep,
-    seen: &mut BTreeSet<String>,
-) {
-    sweep.buckets.wads += 1;
-    let groups = wad.map_groups();
-    if groups.is_empty() {
-        sweep.buckets.no_maps += 1;
-        sweep.failures.push(format!("{source}: no map groups"));
-        return;
-    }
-    for group in &groups {
-        match ingest::load_map(wad, group) {
-            Ok(loaded) => {
-                sweep.buckets.maps_raw += 1;
-                let hash = map_hash(wad, group);
-                if !seen.insert(hash.clone()) {
-                    continue;
-                }
-                let telemetry = lift::survey(&group.name, &loaded.map);
-                let mut verdict = vocab.classify(&telemetry);
-                // The histogram is already computed: a map carrying none of
-                // the four teleport specials among its linedef specials has
-                // no teleport line for the recognizer to recognize, one
-                // carrying none of the eight lift specials has no platform,
-                // and one carrying none of the 48 recognized floor specials
-                // has no floor target, so each recognizer is skipped when its
-                // specials are absent — `verdict` then stays `classify`'s own
-                // (`teleports_ok` / `lifts_ok` / `floors_ok == true`) and the
-                // counts are the all-zero default. The `Scene` is built once
-                // and shared: a map with several kinds of line pays for it
-                // once.
-                let has_teleports = tables
-                    .teleport_specials()
-                    .into_iter()
-                    .any(|s| telemetry.linedef_specials.contains_key(&i32::from(s)));
-                let has_lifts = tables
-                    .lift_specials()
-                    .into_iter()
-                    .any(|s| telemetry.linedef_specials.contains_key(&i32::from(s)));
-                let has_floors = tables
-                    .recognized_floor_specials()
-                    .iter()
-                    .any(|&(s, ..)| telemetry.linedef_specials.contains_key(&i32::from(s)));
-                let mut teleports = TeleportCounts::default();
-                let mut lifts = PlatCounts::default();
-                let mut floors = FloorCounts::default();
-                if has_teleports || has_lifts || has_floors {
-                    // `Scene::build`'s findings are discarded on purpose:
-                    // structural findings are the verifier's business, and this
-                    // sweep is not verifying anything. The recognizers read
-                    // whatever boundaries resolved and refuse what they cannot
-                    // recognize — a map the verifier would fault still yields an
-                    // honest census.
-                    let scene = Scene::build(&loaded.map, tables, &mut Vec::new());
-                    if has_teleports {
-                        let report = lift::teleport::recognize(&scene, tables);
-                        verdict = verdict.with_teleports(&report);
-                        teleports = report.counts;
-                    }
-                    if has_lifts {
-                        let report = lift::plat::recognize(&scene, tables);
-                        verdict = verdict.with_lifts(&report);
-                        lifts = report.counts;
-                    }
-                    if has_floors {
-                        let report = lift::floor::recognize(&scene, tables);
-                        verdict = verdict.with_floors(&report);
-                        floors = report.counts;
-                    }
-                }
-                sweep.maps.push(MapRecord {
-                    source: source.to_owned(),
-                    map: group.name.clone(),
-                    origin: match loaded.origin {
-                        MapOrigin::Udmf => "udmf".to_owned(),
-                        MapOrigin::AssembledFromBinary => "assembled_from_binary".to_owned(),
-                    },
-                    hash,
-                    telemetry,
-                    verdict,
-                    teleports,
-                    lifts,
-                    floors,
-                });
             }
             Err(err) => {
-                match err {
-                    IngestError::UnsupportedBinaryFormat { .. } => {
-                        sweep.buckets.unsupported_format += 1;
-                    }
-                    IngestError::Assemble(_) => sweep.buckets.assembly_refused += 1,
-                    IngestError::NonUtf8Textmap(_)
-                    | IngestError::UdmfParse(_)
-                    | IngestError::Render(_)
-                    | IngestError::Reparse(_) => sweep.buckets.textmap_unparseable += 1,
-                }
-                sweep
-                    .failures
-                    .push(format!("{source} {}: {err}", group.name));
+                self.sweep.buckets.archive_unreadable += 1;
+                self.sweep.failures.push(format!("{label}: {err}"));
             }
         }
+    }
+
+    /// Reads the bare WAD at `path` strictly (`Wad::from_path`) and surveys
+    /// it as `label`; a WAD that fails to parse lands in `wad_unreadable`.
+    fn sweep_wad_file(&mut self, path: &Path, label: &str) {
+        match Wad::from_path(path) {
+            Ok(wad) => self.survey_wad(&wad, label),
+            Err(err) => {
+                self.sweep.buckets.wad_unreadable += 1;
+                self.sweep.failures.push(format!("{label}: {err}"));
+            }
+        }
+    }
+
+    /// Surveys every map group in `wad` (named `source` in records and
+    /// failure lines): counts it, skips a content-hash duplicate, classifies
+    /// and recognizes the rest, and buckets every map that fails to ingest.
+    fn survey_wad(&mut self, wad: &Wad, source: &str) {
+        self.sweep.buckets.wads += 1;
+        let groups = wad.map_groups();
+        if groups.is_empty() {
+            self.sweep.buckets.no_maps += 1;
+            self.sweep.failures.push(format!("{source}: no map groups"));
+            return;
+        }
+        for group in &groups {
+            match ingest::load_map(wad, group) {
+                Ok(loaded) => {
+                    self.sweep.buckets.maps_raw += 1;
+                    let hash = map_hash(wad, group);
+                    if !self.seen.insert(hash.clone()) {
+                        continue;
+                    }
+                    let telemetry = lift::survey(&group.name, &loaded.map);
+                    let mut verdict = self.vocab.classify(&telemetry);
+                    // The histogram is already computed: a map carrying none of
+                    // the four teleport specials among its linedef specials has
+                    // no teleport line for the recognizer to recognize, one
+                    // carrying none of the eight lift specials has no platform,
+                    // and one carrying none of the 48 recognized floor specials
+                    // has no floor target, so each recognizer is skipped when its
+                    // specials are absent — `verdict` then stays `classify`'s own
+                    // (`teleports_ok` / `lifts_ok` / `floors_ok == true`) and the
+                    // counts are the all-zero default. The `Scene` is built once
+                    // and shared: a map with several kinds of line pays for it
+                    // once.
+                    let has_teleports = self
+                        .tables
+                        .teleport_specials()
+                        .into_iter()
+                        .any(|s| telemetry.linedef_specials.contains_key(&i32::from(s)));
+                    let has_lifts = self
+                        .tables
+                        .lift_specials()
+                        .into_iter()
+                        .any(|s| telemetry.linedef_specials.contains_key(&i32::from(s)));
+                    let has_floors = self
+                        .tables
+                        .recognized_floor_specials()
+                        .iter()
+                        .any(|&(s, ..)| telemetry.linedef_specials.contains_key(&i32::from(s)));
+                    let mut teleports = TeleportCounts::default();
+                    let mut lifts = PlatCounts::default();
+                    let mut floors = FloorCounts::default();
+                    if has_teleports || has_lifts || has_floors {
+                        // `Scene::build`'s findings are discarded on purpose:
+                        // structural findings are the verifier's business, and this
+                        // sweep is not verifying anything. The recognizers read
+                        // whatever boundaries resolved and refuse what they cannot
+                        // recognize — a map the verifier would fault still yields an
+                        // honest census.
+                        let scene = Scene::build(&loaded.map, self.tables, &mut Vec::new());
+                        if has_teleports {
+                            let report = lift::teleport::recognize(&scene, self.tables);
+                            verdict = verdict.with_teleports(&report);
+                            teleports = report.counts;
+                        }
+                        if has_lifts {
+                            let report = lift::plat::recognize(&scene, self.tables);
+                            verdict = verdict.with_lifts(&report);
+                            lifts = report.counts;
+                        }
+                        if has_floors {
+                            let report = lift::floor::recognize(&scene, self.tables);
+                            verdict = verdict.with_floors(&report);
+                            floors = report.counts;
+                        }
+                    }
+                    self.sweep.maps.push(MapRecord {
+                        source: source.to_owned(),
+                        map: group.name.clone(),
+                        origin: match loaded.origin {
+                            MapOrigin::Udmf => "udmf".to_owned(),
+                            MapOrigin::AssembledFromBinary => "assembled_from_binary".to_owned(),
+                        },
+                        hash,
+                        telemetry,
+                        verdict,
+                        teleports,
+                        lifts,
+                        floors,
+                    });
+                }
+                Err(err) => {
+                    match err {
+                        IngestError::UnsupportedBinaryFormat { .. } => {
+                            self.sweep.buckets.unsupported_format += 1;
+                        }
+                        IngestError::Assemble(_) => self.sweep.buckets.assembly_refused += 1,
+                        IngestError::NonUtf8Textmap(_)
+                        | IngestError::UdmfParse(_)
+                        | IngestError::Render(_)
+                        | IngestError::Reparse(_) => self.sweep.buckets.textmap_unparseable += 1,
+                    }
+                    self.sweep
+                        .failures
+                        .push(format!("{source} {}: {err}", group.name));
+                }
+            }
+        }
+    }
+
+    /// Sets `maps_unique` and hands back the finished sweep.
+    ///
+    /// # Panics
+    ///
+    /// If the sweep collected more than `u64::MAX` unique maps, which no
+    /// directory of files can hold.
+    fn finish(mut self) -> Sweep {
+        self.sweep.buckets.maps_unique = u64::try_from(self.sweep.maps.len()).expect("fits u64");
+        self.sweep
     }
 }
 

@@ -234,8 +234,8 @@ fn classify_and_recognize(
     let has_teleports = has(&tables.teleport_specials());
     let has_lifts = has(&tables.lift_specials());
     // No intermediate `Vec<u16>`: scan the borrowed recognized-floor-specials
-    // slice directly, the same way `lift::corpus::survey_wad`'s identical
-    // gate does.
+    // slice directly, the same way the identical gate in `lift::corpus`'s
+    // `SweepState::survey_wad` does.
     let has_floors = tables
         .recognized_floor_specials()
         .iter()
