@@ -829,6 +829,18 @@ struct Agg {
     historical_shared_members: u64,
     recognizer_split: u64,
     unshared_mismatch: u64,
+    /// Groups where the recognizer and the probe disagree on which groups are
+    /// split or on the verdict: split groups (by `floor_class`) where the
+    /// recognizer has no entry, did not merge the whole group, or reached a
+    /// different `(shape, refusal)` than `merged_verdict` — plus groups the
+    /// probe does not class as split that the recognizer merged anyway. One
+    /// number, so a nonzero reads "the two disagree" whichever way.
+    split_mismatch: u64,
+    /// Maps where the recognizer's own counts do not reconcile with the
+    /// per-sector resolution: `plats + split_members - shared_split` must be
+    /// the number of sectors some lift line names, so a stray duplicate or a
+    /// dropped entry shows here even when no group disagrees above.
+    counts_mismatch: u64,
     bank_columns: Vec<BankColumn>,
 }
 
@@ -1644,8 +1656,8 @@ fn floor_class(scene: &Scene, members: &BTreeSet<usize>) -> FloorClass {
 /// A split group read as one lift: the union of the members' outside
 /// neighbors is the merged platform's neighborhood, the members' shared line
 /// set its triggers, and an activator that is itself a member is the
-/// platform. `low` is the least member `low` (a sibling member at the same
-/// floor never lowers it), and the rest classes follow `check::plats`'
+/// platform. `low` is the least of the members' `low`s (a sibling member at
+/// the same floor never lowers it), and the rest classes follow `check::plats`'
 /// definitions. The eight refusals then run in `lift::plat`'s order.
 fn merged_verdict(scene: &Scene, plats: &[&ScenePlat], step: i32) -> Result<PlatShape, Refusal> {
     let members: BTreeSet<usize> = plats.iter().map(|p| p.sector).collect();
@@ -1709,7 +1721,12 @@ fn merged_verdict(scene: &Scene, plats: &[&ScenePlat], step: i32) -> Result<Plat
 /// on every member's own face where the recognizer needs only some adjacent
 /// Low activator, and the split reading is false for a group that is not
 /// split — so without that clause a column could *drop* a map the `today`
-/// column counts, and the §I yield would not be a yield.
+/// column counts, and the §I yield would not be a yield. Since crustygen#84
+/// the shipped recognizer reads a split group as one platform, so `today`
+/// already includes the split reading and the `+split` column adds no map
+/// over `today` on a re-run (its `groups` / `recovered` counts still report
+/// what the gate alone accepts), provided `split_mismatch` stays 0; it is
+/// kept so the §I table stays comparable with the 2026-09-11 run.
 #[derive(Clone, Copy, Default)]
 #[expect(
     clippy::struct_excessive_bools,
@@ -1814,19 +1831,27 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
             .count(),
     );
     agg.recognizer_split += report.counts.shared_split;
-    let recognizer_refusal = |sector: usize| {
-        report
-            .plats
-            .iter()
-            .find(|r| r.sector == sector)
-            .and_then(|r| r.refusal)
-    };
+    // The recognizer's counts must reconcile with the per-sector resolution
+    // (`lift::plat`'s `every_report_keeps_the_member_invariants` pins the
+    // same identity over its fixtures; this is the corpus-wide check).
+    agg.counts_mismatch += u64::from(
+        report.counts.plats + report.counts.split_members - report.counts.shared_split
+            != count_len(resolved.len()),
+    );
+    // A split group read as one platform has a single entry listing every
+    // member, so a member resolves through `members`, not `sector`. The outer
+    // `Option` is whether the recognizer has an entry at all; a sector it
+    // never lists reads as *refused* everywhere below — a mismatch, not an
+    // accepted single, not an accepted member — so a dropped entry can never
+    // pass for a clean verdict.
+    let recognizer_plat = |sector: usize| report.plats.iter().find(|r| r.members.contains(&sector));
+    let recognizer_refusal = |sector: usize| recognizer_plat(sector).map(|r| r.refusal);
     // The re-derivation must agree with the recognizer wherever the tag is
     // unshared; a disagreement here would mean the eight refusals drifted.
     for p in &resolved {
         if p.shared_tag == 1 {
             agg.unshared_mismatch +=
-                u64::from(unshared_verdict(p).err() != recognizer_refusal(p.sector));
+                u64::from(recognizer_refusal(p.sector) != Some(unshared_verdict(p).err()));
         }
     }
     // A group member's own refusal is the group gate's business: a member
@@ -1836,7 +1861,7 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
         && resolved
             .iter()
             .filter(|p| p.shared_tag == 1)
-            .all(|p| recognizer_refusal(p.sector).is_none());
+            .all(|p| recognizer_refusal(p.sector) == Some(None));
     let mut by_tag: BTreeMap<i32, Vec<&ScenePlat>> = BTreeMap::new();
     for p in &resolved {
         if p.shared_tag >= 2 {
@@ -1874,8 +1899,34 @@ fn survey_banks(v: &VarCtx<'_>, agg: &mut Agg) -> BankVerdict {
                 agg.bank_columns[i].recovered += count_len(historical_members);
             }
         }
-        let accepted_today = plats.iter().all(|p| recognizer_refusal(p.sector).is_none());
+        let accepted_today = plats
+            .iter()
+            .all(|p| recognizer_refusal(p.sector) == Some(None));
         verdict.fold_group(gates, accepted_today);
+        // The recognizer and the probe must agree on which groups are split
+        // and on the merged verdict; a disagreement here would mean the merge
+        // rule drifted. Where the probe reads the group as split, the
+        // recognizer must hold one entry whose `members` are exactly the
+        // group's sectors and whose `(shape, refusal)` is `merged_verdict`'s:
+        // no entry, a merge of only part of the group, and a different verdict
+        // each count. Where the probe does not, an entry that merged any
+        // member anyway counts too — every member is checked, so a merge that
+        // leaves out the least member is still seen — and the one number
+        // covers both directions.
+        let group_sectors: Vec<usize> = plats
+            .iter()
+            .map(|p| p.sector)
+            .collect::<BTreeSet<usize>>()
+            .into_iter()
+            .collect();
+        agg.split_mismatch += u64::from(match &g.merged {
+            Some(v) => recognizer_plat(plats[0].sector).is_none_or(|plat| {
+                plat.members != group_sectors || (plat.shape, plat.refusal) != (v.ok(), v.err())
+            }),
+            None => plats
+                .iter()
+                .any(|p| recognizer_plat(p.sector).is_some_and(|plat| plat.members.len() > 1)),
+        });
         record_group(&g, agg);
     }
     verdict
@@ -1933,6 +1984,22 @@ fn record_group(g: &Group, agg: &mut Agg) {
     agg.common_neighbor.add(g.common_neighbor());
 }
 
+/// The §I arbiters line: the recognizer's own tallies beside every count of
+/// where it and the probe's re-derivation disagree. It is split out of
+/// [`report_banks`] to keep that function under clippy's `too_many_lines`
+/// limit; the extraction is kept over an `#[expect]` because the arbiters line
+/// is a self-contained unit.
+fn report_arbiters(agg: &Agg) {
+    println!(
+        "- arbiters: `bank_caller` refusals (recognizer): {} · `shared_split` groups (recognizer): {} · single-tag platforms where the re-derived verdict disagrees with the recognizer: {} · groups where the recognizer and the probe disagree on the split reading or its verdict: {} · maps where the recognizer's counts do not reconcile with the per-sector resolution: {}",
+        agg.bank_caller_refusals,
+        agg.recognizer_split,
+        agg.unshared_mismatch,
+        agg.split_mismatch,
+        agg.counts_mismatch
+    );
+}
+
 fn report_banks(agg: &Agg) {
     println!("\n## I. Lift tag groups (banks)\n");
     println!(
@@ -1941,10 +2008,7 @@ fn report_banks(agg: &Agg) {
         agg.groups_size.all()
     );
     println!("- floor class: {}", agg.groups_floor_class.all());
-    println!(
-        "- arbiters: `bank_caller` refusals (recognizer): {} · `shared_split` groups (recognizer): {} · single-tag platforms where the re-derived verdict disagrees with the recognizer: {}",
-        agg.bank_caller_refusals, agg.recognizer_split, agg.unshared_mismatch
-    );
+    report_arbiters(agg);
     println!(
         "\n**Members judged as if the tag were unshared** ({} members).\n",
         agg.members_n
@@ -3246,6 +3310,15 @@ mod tests {
             ),
             (0, 2, 0, 0)
         );
+        // The members do not touch, so the probe reads no split group and the
+        // recognizer must merge nothing: the `None` arm of `split_mismatch`
+        // stays 0 for a shared tag that is not split, and the recognizer's
+        // counts still reconcile where `shared_split == 0`.
+        assert_eq!(
+            (agg.split_mismatch, agg.counts_mismatch),
+            (0, 0),
+            "a disconnected pair is neither merged nor miscounted"
+        );
         let recovered: Vec<u64> = agg.bank_columns.iter().map(|c| c.recovered).collect();
         assert_eq!(recovered, vec![0, 2, 2, 2, 0]);
         let groups: Vec<u64> = agg.bank_columns.iter().map(|c| c.groups).collect();
@@ -3462,7 +3535,15 @@ mod tests {
             "",
         ));
         let (verdict, agg) = banks_of(&f, &tables);
-        assert!(!verdict.a && !verdict.b && verdict.split);
+        // The shipped recognizer now reads the group as one accepted lift, and
+        // every column is a relaxation of `today` (`BankVerdict::fold_group`), so
+        // all four columns keep the map.
+        assert!(verdict.a && verdict.a_prime && verdict.b && verdict.split);
+        assert_eq!(
+            (agg.split_mismatch, agg.counts_mismatch),
+            (0, 0),
+            "the recognizer's merge is the probe's merged_verdict, and its counts reconcile"
+        );
         assert_eq!(
             agg.groups_floor_class.all(),
             "one floor, mutually adjacent (split): 1"
