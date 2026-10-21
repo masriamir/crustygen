@@ -6,9 +6,10 @@
 //! silently drifting.
 //!
 //! It is opt-in: point `CRUSTYGEN_IWAD_DIR` at a directory holding the two IWADs, or run
-//! `just test-retail <dir>`. With the variable unset, or set to anything but an absolute directory
-//! holding both IWADs, it prints a `skipping:` line and passes, so CI, which has no commercial
-//! IWADs, never runs it. A run killed before cleanup leaves
+//! `just test-retail <dir>`. With the variable unset it prints a `skipping:` line and passes, so CI,
+//! which has no commercial IWADs, never runs it; set to anything but an absolute directory holding
+//! both IWADs, it fails, because setting the variable is a request to run the gate. A run killed
+//! before cleanup leaves
 //! `<temp_dir>/crustygen-retail-<pid>-<nanos>` holding the two links (or, where linking was
 //! refused and copies were made instead, the two copies), removable by hand.
 //!
@@ -74,25 +75,26 @@ const EXPECTED: LiftAggregate = LiftAggregate {
     barrier_maps: 8,
 };
 
-/// The IWAD directory, or `None` after printing why the test skips.
+/// The IWAD directory, or `None` after printing why the test skips. Only an unset variable skips:
+/// setting it is a request to run the gate, so a value that is not an absolute directory holding
+/// both IWADs (an empty string included) panics.
 fn iwad_dir() -> Option<PathBuf> {
     let Some(raw) = std::env::var_os(VAR) else {
         eprintln!("skipping: {VAR} not set");
         return None;
     };
     let dir = PathBuf::from(raw);
-    if !dir.is_absolute() || !dir.is_dir() {
-        eprintln!(
-            "skipping: {VAR} is not an absolute path to a directory: {}",
+    assert!(
+        dir.is_absolute() && dir.is_dir(),
+        "{VAR} is not an absolute path to a directory: {}",
+        dir.display()
+    );
+    for name in IWADS {
+        assert!(
+            dir.join(name).is_file(),
+            "{name} not present in {}",
             dir.display()
         );
-        return None;
-    }
-    for name in IWADS {
-        if !dir.join(name).is_file() {
-            eprintln!("skipping: {name} not present in {}", dir.display());
-            return None;
-        }
     }
     Some(dir)
 }
