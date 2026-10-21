@@ -85,7 +85,7 @@ fn a_mixed_directory_sweeps_dedups_and_buckets() {
     assert!(stderr.contains("RES.WAD: no map groups"), "{stderr}");
     assert!(
         !stderr.contains("f.zip"),
-        "a member-less zip is not a failure: {stderr}"
+        "a zip with no .wad member is not a failure: {stderr}"
     );
     // `--json` alone routes the report to the file, leaving stdout empty.
     assert!(out.stdout.is_empty(), "{:?}", out.stdout);
@@ -114,6 +114,10 @@ fn a_mixed_directory_sweeps_dedups_and_buckets() {
     assert!(report["provenance"].is_null());
     assert_eq!(report["maps"].as_array().unwrap().len(), 2);
     assert_eq!(report["maps"][0]["origin"], "udmf");
+    assert_eq!(
+        report["maps"][1]["source"], "b.WAD",
+        "dedup keeps the first-seen record in sorted candidate order"
+    );
     // Entrada has no teleport line, so the fourth axis passes vacuously and
     // the teleport aggregate is empty.
     assert_eq!(report["aggregate"]["teleports"]["maps_with_teleports"], 0);

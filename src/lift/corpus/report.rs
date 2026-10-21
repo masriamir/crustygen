@@ -662,6 +662,23 @@ mod tests {
         );
     }
 
+    /// The baseline row carries the curve's own standing share, so the two
+    /// curves differ when a map is blocked on another axis — a swapped or
+    /// hard-coded baseline fails here.
+    #[test]
+    fn a_stepless_curve_prints_the_standing_share_as_its_baseline() {
+        let a = aggregate(&[
+            record(&[], &[], true, true, true),
+            record(&[], &[], false, true, true),
+        ]);
+        let md = render_markdown(None, &Buckets::default(), &a);
+        // The line-axis curve: nothing is blocked on lines.
+        assert!(md.contains("| 0 | 100.0 % |"), "{md}");
+        // The conjunction curve: the sector-blocked map is not expressible.
+        assert!(md.contains("| 0 | 50.0 % |"), "{md}");
+        assert_eq!(md.matches("Order chosen: (none)").count(), 2, "{md}");
+    }
+
     #[test]
     fn provenance_reads_a_sample_manifest_and_sorts_ids() {
         let dir = std::env::temp_dir().join(format!("crustygen-prov-{}", std::process::id()));

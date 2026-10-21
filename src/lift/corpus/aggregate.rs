@@ -11,6 +11,10 @@ use crate::lift::vocabulary::Verdict;
 
 /// Where the greedy curve is sampled for the report.
 pub const GREEDY_CHECKPOINTS: [usize; 5] = [1, 5, 10, 21, 51];
+const _: () = assert!(
+    !GREEDY_CHECKPOINTS.is_empty(),
+    "the report's stepless-curve guard relies on a non-empty checkpoint list"
+);
 /// How many blockers per axis the report lists.
 pub const BLOCKER_TOP: usize = 25;
 
