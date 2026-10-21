@@ -251,6 +251,11 @@ thing { x = 64; y = 64; type = 1; }
         .expect("runs");
     std::fs::remove_file(&path).ok();
     let stdout = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "a non-vanilla special is surveyed, not a load failure"
+    );
     assert!(stdout.contains("line specials unknown: 8192"), "{stdout}");
     assert!(stdout.contains("(outside vanilla)"), "{stdout}");
 }

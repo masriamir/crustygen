@@ -438,4 +438,41 @@ mod tests {
         assert_ne!(h(&a), h(&c));
         assert!(h(&a).starts_with("sha256:"));
     }
+
+    /// Two groups whose unframed `name ‖ data` streams are byte-identical hash
+    /// differently, because each name and each lump carries its own length:
+    /// a name/data shift (`"AB"`,`"C"` vs `"A"`,`"BC"`) and a lump/lump shift
+    /// (`TEXTMAP` ending in `Q` beside `"AB"` vs `TEXTMAP` beside `"QAB"`).
+    /// `ENDMAP` is a constant suffix on both sides, so only the length
+    /// framing separates each pair.
+    #[test]
+    fn map_hash_frames_lengths_so_a_shifted_boundary_changes_the_hash() {
+        let build = |lumps: &[(&str, &[u8])]| -> Wad {
+            let mut builder = WadBuilder::new(WadKind::Pwad);
+            builder.add_lump("MAP01", Vec::new());
+            for &(name, data) in lumps {
+                builder.add_lump(name, data.to_vec());
+            }
+            let bytes = builder
+                .add_lump("ENDMAP", Vec::new())
+                .build()
+                .expect("builds");
+            Wad::from_bytes(bytes).unwrap()
+        };
+        let payload: &[u8] = b"namespace = \"doom\";";
+        let name_shift_a = build(&[("TEXTMAP", payload), ("AB", b"C")]);
+        let name_shift_b = build(&[("TEXTMAP", payload), ("A", b"BC")]);
+        let lump_shift_a = build(&[("TEXTMAP", b"namespace = \"doom\";Q"), ("AB", b"")]);
+        let lump_shift_b = build(&[("TEXTMAP", payload), ("QAB", b"")]);
+        for w in [&name_shift_a, &name_shift_b, &lump_shift_a, &lump_shift_b] {
+            assert_eq!(
+                w.map_groups()[0].data_indices.len(),
+                3,
+                "TEXTMAP, the extra lump and ENDMAP all land in the UDMF group"
+            );
+        }
+        let h = |w: &Wad| map_hash(w, &w.map_groups()[0]);
+        assert_ne!(h(&name_shift_a), h(&name_shift_b));
+        assert_ne!(h(&lump_shift_a), h(&lump_shift_b));
+    }
 }

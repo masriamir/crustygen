@@ -499,6 +499,50 @@ mod tests {
         assert!((g.steps[1].cumulative_share - 0.5).abs() < 1e-9);
         assert_eq!(g.steps[2].special, 3);
         assert!((g.steps[2].cumulative_share - 1.0).abs() < 1e-9);
+        assert_eq!(
+            g.checkpoints.len(),
+            5,
+            "every checkpoint is reported, clamped to the last step"
+        );
+        assert_eq!(
+            g.checkpoints[1],
+            (5, 1.0),
+            "a checkpoint past the last step repeats its share"
+        );
+    }
+
+    /// Ranking is by map count, then by ascending value: 62 and 8192 are each
+    /// carried by one map, so 62 comes first.
+    #[test]
+    fn blockers_rank_by_map_count_then_by_ascending_value() {
+        let maps = vec![
+            record(&[1], &[], true, true, true),
+            record(&[1, 97], &[97], true, true, true),
+            record(&[97, 62], &[97, 62], true, false, true),
+            record(&[8192], &[8192], false, true, false),
+        ];
+        let a = aggregate(&maps);
+        let values: Vec<i32> = a.line_blockers.iter().map(|b| b.value).collect();
+        assert_eq!(values, vec![97, 62, 8192]);
+    }
+
+    /// 26 distinct specials carried once each plus one carried twice is 27
+    /// values; the table keeps `BLOCKER_TOP` of them, the doubled one first.
+    #[test]
+    fn blockers_are_cut_to_blocker_top() {
+        let mut maps: Vec<MapRecord> = (1000..1026)
+            .map(|s| record(&[s], &[s], true, true, true))
+            .collect();
+        maps.push(record(&[5000], &[5000], true, true, true));
+        maps.push(record(&[5000], &[5000], true, true, true));
+        let a = aggregate(&maps);
+        assert_eq!(a.line_blockers.len(), BLOCKER_TOP);
+        assert_eq!(a.line_blockers[0].value, 5000);
+        assert_eq!(a.line_blockers[0].maps, 2);
+        assert_eq!(
+            a.line_blockers[1].value, 1000,
+            "then ascending among the singletons"
+        );
     }
 
     #[test]
@@ -511,13 +555,42 @@ mod tests {
     fn aggregate_of_nothing_is_all_zero() {
         let a = aggregate(&[]);
         assert_eq!(a.maps_unique, 0);
-        assert_eq!(a.all.expressible, 0.0);
+        assert_eq!(a.vanilla_share, 0.0);
+        for share in [a.all, a.vanilla] {
+            assert_eq!(share.line_specials, 0.0);
+            assert_eq!(share.sector_specials, 0.0);
+            assert_eq!(share.thing_kinds, 0.0);
+            assert_eq!(share.teleports, 0.0);
+            assert_eq!(share.lifts, 0.0);
+            assert_eq!(share.floors, 0.0);
+            assert_eq!(share.expressible, 0.0);
+        }
         assert!(a.line_blockers.is_empty(), "{:?}", a.line_blockers);
+        assert!(a.sector_blockers.is_empty(), "{:?}", a.sector_blockers);
+        assert!(a.thing_blockers.is_empty(), "{:?}", a.thing_blockers);
         assert!(
             a.greedy_line_axis.steps.is_empty(),
             "{:?}",
             a.greedy_line_axis.steps
         );
+        assert!(
+            a.greedy_line_axis.checkpoints.is_empty(),
+            "{:?}",
+            a.greedy_line_axis.checkpoints
+        );
+        assert!(
+            a.greedy_conjunction.steps.is_empty(),
+            "{:?}",
+            a.greedy_conjunction.steps
+        );
+        assert!(
+            a.greedy_conjunction.checkpoints.is_empty(),
+            "{:?}",
+            a.greedy_conjunction.checkpoints
+        );
+        assert_eq!(a.teleports, TeleportAggregate::default());
+        assert_eq!(a.lifts, LiftAggregate::default());
+        assert_eq!(a.floors, FloorAggregate::default());
     }
 
     /// A teleport-refused map is out of the conjunction curve's population:
