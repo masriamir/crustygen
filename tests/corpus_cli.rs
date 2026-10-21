@@ -59,6 +59,10 @@ fn a_mixed_directory_sweeps_dedups_and_buckets() {
                 common::stored_zip(&[("README.TXT", b"x"), ("sub/ENTRADA.WAD", &entrada)]),
             ),
             ("d.zip", common::stored_zip(&[("RES.WAD", &resource_wad())])),
+            (
+                "f.zip",
+                common::stored_zip(&[("README.TXT", b"no wad here")]),
+            ),
             ("broken.zip", b"PK\x03\x04junk".to_vec()),
             ("e.wad", common::binary_entrada_wad_with_broken_second_map()),
             ("notes.txt", b"ignored".to_vec()),
@@ -79,6 +83,10 @@ fn a_mixed_directory_sweeps_dedups_and_buckets() {
     assert!(stderr.contains("MAP02"), "{stderr}");
     // The map-free member is named even though it does not move the exit code.
     assert!(stderr.contains("RES.WAD: no map groups"), "{stderr}");
+    assert!(
+        !stderr.contains("f.zip"),
+        "a zip with no .wad member is not a failure: {stderr}"
+    );
     // `--json` alone routes the report to the file, leaving stdout empty.
     assert!(out.stdout.is_empty(), "{:?}", out.stdout);
     let report: serde_json::Value =
@@ -86,8 +94,8 @@ fn a_mixed_directory_sweeps_dedups_and_buckets() {
     std::fs::remove_dir_all(&dir).ok();
     let b = &report["buckets"];
     assert_eq!(
-        b["archives"], 2,
-        "c.zip and d.zip open; broken.zip does not"
+        b["archives"], 3,
+        "c.zip, d.zip and f.zip open; broken.zip does not"
     );
     assert_eq!(b["archive_unreadable"], 1);
     assert_eq!(b["wads"], 5, "a, b, c!sub/ENTRADA, d!RES, e");
@@ -106,6 +114,10 @@ fn a_mixed_directory_sweeps_dedups_and_buckets() {
     assert!(report["provenance"].is_null());
     assert_eq!(report["maps"].as_array().unwrap().len(), 2);
     assert_eq!(report["maps"][0]["origin"], "udmf");
+    assert_eq!(
+        report["maps"][1]["source"], "b.WAD",
+        "dedup keeps the first-seen record in sorted candidate order"
+    );
     // Entrada has no teleport line, so the fourth axis passes vacuously and
     // the teleport aggregate is empty.
     assert_eq!(report["aggregate"]["teleports"]["maps_with_teleports"], 0);
@@ -362,4 +374,39 @@ fn a_floor_map_is_recognized_reported_and_carried_into_the_json_record() {
     assert_eq!(report["maps"][0]["floors"]["targets"], 4);
     assert_eq!(report["maps"][0]["verdict"]["floors_ok"], true);
     assert_eq!(report["aggregate"]["floors"]["maps_with_floors"], 1);
+}
+
+/// A manifest that is present but not JSON is skipped with a warning, not
+/// a failure: exit 0, no `## Sample` section, and a null `provenance`.
+#[test]
+fn a_malformed_sample_manifest_warns_and_is_skipped() {
+    let dir = corpus_dir(
+        "badmanifest",
+        &[
+            ("a.wad", common::binary_entrada_wad()),
+            ("sample-manifest.json", b"{ not json".to_vec()),
+        ],
+    );
+    let json_path = dir.join("out.json");
+    let report_out = bin().arg(&dir).output().unwrap();
+    let out = bin()
+        .args([dir.to_str().unwrap(), "--json", json_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let json_stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "{json_stderr}");
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&json_path).unwrap()).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+
+    let stderr = String::from_utf8_lossy(&report_out.stderr);
+    assert_eq!(report_out.status.code(), Some(0), "{stderr}");
+    assert!(
+        stderr.contains("sample-manifest.json is unreadable or malformed"),
+        "{stderr}"
+    );
+    let md = String::from_utf8_lossy(&report_out.stdout);
+    assert!(md.contains("# Corpus expressibility"), "{md}");
+    assert!(!md.contains("## Sample"), "{md}");
+    assert!(report["provenance"].is_null(), "{}", report["provenance"]);
 }
