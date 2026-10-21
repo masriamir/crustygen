@@ -6,12 +6,12 @@
 //! silently drifting.
 //!
 //! It is opt-in: point `CRUSTYGEN_IWAD_DIR` at a directory holding the two IWADs, or run
-//! `just test-retail <dir>`. With the variable unset it prints a `skipping:` line and passes, so CI,
-//! which has no commercial IWADs, never runs it; set to anything but an absolute directory holding
-//! both IWADs, it fails, because setting the variable is a request to run the gate. A run killed
-//! before cleanup leaves
-//! `<temp_dir>/crustygen-retail-<pid>-<nanos>` holding the two links (or, where linking was
-//! refused and copies were made instead, the two copies), removable by hand.
+//! `just test-retail <dir>`. With the variable unset it prints a `skipping:` line and passes, so
+//! CI, which has no commercial IWADs, never runs it; set to anything but an absolute directory
+//! holding both IWADs, it fails, because setting the variable is a request to run the gate. A run
+//! killed before cleanup leaves `<temp_dir>/crustygen-retail-<pid>-<nanos>` holding the two links
+//! (or, where linking was refused and copies were made instead, the two copies), removable by
+//! hand.
 //!
 //! The literal was measured on 2026-10-20 at `2a79a6e` against `DOOM.WAD` 12,408,292 bytes /
 //! md5 `c4fe9fd920207691a9f493668e0a2083` / 36 maps and `DOOM2.WAD` 14,604,584 bytes / md5
@@ -85,14 +85,19 @@ fn iwad_dir() -> Option<PathBuf> {
     };
     let dir = PathBuf::from(raw);
     assert!(
-        dir.is_absolute() && dir.is_dir(),
-        "{VAR} is not an absolute path to a directory: {}",
+        dir.is_absolute(),
+        "{VAR} is not an absolute path: \"{}\" (unset it to skip this test)",
+        dir.display()
+    );
+    assert!(
+        dir.is_dir(),
+        "{VAR} is not an existing directory: \"{}\" (unset it to skip this test)",
         dir.display()
     );
     for name in IWADS {
         assert!(
             dir.join(name).is_file(),
-            "{name} not present in {}",
+            "{name} not present in \"{}\" (unset {VAR} to skip this test)",
             dir.display()
         );
     }
