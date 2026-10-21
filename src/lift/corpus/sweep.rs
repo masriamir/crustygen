@@ -132,6 +132,12 @@ pub enum CorpusError {
 /// shows the raw 8-byte bound does not hold for the decoded name, so this
 /// leans on `u16`'s headroom instead of that assumption.
 ///
+/// The marker lump is outside the hash, so a group with no data lumps — the
+/// shape crustywad gives a Doom 64 map, whose nested WAD sits inside the
+/// marker — hashes to the empty-stream constant whatever the marker holds.
+/// The sweep never hashes one: ingest refuses that format before the hash is
+/// taken.
+///
 /// # Panics
 ///
 /// If `group` was taken from a different `Wad` than `wad`: its `data_indices`
@@ -189,6 +195,11 @@ fn archive_options() -> ParseOptions {
 /// # Errors
 /// [`CorpusError::Io`] when `dir` cannot be listed; [`CorpusError::NoCandidates`]
 /// when it holds no `.zip`/`.wad` file.
+///
+/// # Panics
+///
+/// If the sweep collects more than `u64::MAX` unique maps, which no directory
+/// of files can hold (the count is taken in `SweepState::finish`).
 pub fn sweep_dir(dir: &Path, vocab: &Vocabulary, tables: &Tables) -> Result<Sweep, CorpusError> {
     let mut candidates: Vec<(PathBuf, String)> = std::fs::read_dir(dir)
         .map_err(|source| CorpusError::Io {
@@ -402,13 +413,19 @@ impl<'a> SweepState<'a> {
         }
     }
 
-    /// Sets `maps_unique` and hands back the finished sweep.
+    /// Sets `maps_unique` and hands back the finished sweep. `maps_unique` is
+    /// 0 until this runs.
     ///
     /// # Panics
     ///
     /// If the sweep collected more than `u64::MAX` unique maps, which no
     /// directory of files can hold.
     fn finish(mut self) -> Sweep {
+        debug_assert_eq!(
+            self.seen.len(),
+            self.sweep.maps.len(),
+            "every recorded map's hash is in `seen`"
+        );
         self.sweep.buckets.maps_unique = u64::try_from(self.sweep.maps.len()).expect("fits u64");
         self.sweep
     }

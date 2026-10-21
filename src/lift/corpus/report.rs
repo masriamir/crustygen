@@ -309,9 +309,9 @@ fn render_lifts(s: &mut String, a: &Aggregate) {
 ///
 /// The shape row counts *targets* and the row under it counts the maps they
 /// sit in, for the reason [`render_lifts`] gives. Refusals are reported in
-/// the module doc's fixed precedence order (`crate::lift::floor`'s twelve
-/// [`crate::lift::floor::Refusal`]s), and broken lines get their own row
-/// split by [`crate::lift::floor::FloorCounts::tag_zero`] and
+/// the fixed precedence order of `crate::lift::floor`'s module doc (its
+/// twelve [`crate::lift::floor::Refusal`]s), and broken lines get their own
+/// row split by [`crate::lift::floor::FloorCounts::tag_zero`] and
 /// [`crate::lift::floor::FloorCounts::dangling`] rather than folded into the
 /// refusal list, since a broken line names no target at all to refuse.
 fn render_floors(s: &mut String, a: &Aggregate) {
@@ -377,7 +377,8 @@ fn render_floors(s: &mut String, a: &Aggregate) {
 /// The two greedy-curve sections. Both curves are scored against *all* unique
 /// maps, never against the population they walk — spelled out in each table's
 /// header and note, so the conjunction curve's plateau below 100 % reads as
-/// the sector- and thing-blocked remainder it is, not as a truncated curve.
+/// the remainder blocked on the other five axes it is, not as a truncated
+/// curve.
 ///
 /// The order line prints at most the first `BLOCKER_TOP` steps and, when it
 /// cuts a longer curve, says so with an ellipsis and the full step count.

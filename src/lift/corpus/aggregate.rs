@@ -15,7 +15,8 @@ const _: () = assert!(
     !GREEDY_CHECKPOINTS.is_empty(),
     "the report's stepless-curve guard relies on a non-empty checkpoint list"
 );
-/// How many blockers per axis the report lists.
+/// How many blockers per axis the report lists, and how many greedy steps its
+/// order line prints.
 pub const BLOCKER_TOP: usize = 25;
 
 /// Expressibility per axis as a fraction of a population of maps.
@@ -271,11 +272,11 @@ fn greedy(population: &[&MapRecord], total: usize) -> GreedyCurve {
                 .map(|(s, _)| s)
         };
         // Unreachable: the `while` guard keeps `remaining` non-empty, and
-        // `retain` above drops every empty set, so at least one non-empty
-        // set survives into `carried` (or `gain`) each iteration — `best`
-        // is always `Some`. Kept as a defensive exit rather than an
-        // `expect`, since a future change to either invariant should fail
-        // safely here, not panic.
+        // the initial `filter` and the `retain` below drop every empty set,
+        // so at least one non-empty set survives into `carried` (or `gain`)
+        // each iteration — `best` is always `Some`. Kept as a defensive exit
+        // rather than an `expect`, since a future change to either invariant
+        // should fail safely here, not panic.
         let Some(best) = best else { break };
         for set in &mut remaining {
             set.remove(&best);
