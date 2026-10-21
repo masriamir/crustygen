@@ -47,9 +47,10 @@ corpus dir:
 
 # Run the retail shape-count gate (tests/retail_shapes.rs) against a
 # directory holding DOOM.WAD and DOOM2.WAD. The recipe makes the dir absolute
-# and shell-quotes it, because cargo runs the test binary from the package root
-# and the test skips a relative path. Nothing is fetched and nothing is
+# (relative to the directory you ran `just` from) and shell-quotes it, because
+# cargo runs the test binary from the package root and the test skips a
+# relative path. Nothing is fetched and nothing is
 # committed; without the variable the test skips and passes, which is what CI
 # does.
 test-retail dir:
-    CRUSTYGEN_IWAD_DIR={{quote(absolute_path(dir))}} cargo test --test retail_shapes -- --nocapture
+    CRUSTYGEN_IWAD_DIR={{quote(absolute_path(join(invocation_directory(), dir)))}} cargo test --test retail_shapes -- --nocapture
