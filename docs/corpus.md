@@ -133,14 +133,14 @@ usage: crustygen-corpus <dir> [--json FILE] [--report FILE]
   renders a single baseline row at `k = 0` instead of an empty table. The
   greedy order line prints the first 25 steps; a longer curve ends the line
   with an ellipsis and `(first 25 of N steps)`. Both greedy curves report
-  cumulative share **against all unique maps**, never
-  against the population they walk: the conjunction curve's population is
-  only the maps already ok on sector specials, thing kinds, the teleport
-  axis, the lift axis **and** the floor axis, so its plateau below 100 % is
-  exactly the maps still blocked on one of those five, not a truncated
-  curve. Because each recognizer axis joined that population as it landed, a
-  conjunction checkpoint is not comparable with one from a run that predates
-  it — only the ordering within a single run is.
+  cumulative share **against all unique maps**, never against the population
+  they walk: the conjunction curve's population is only the maps already ok on
+  sector specials, thing kinds, the teleport axis, the lift axis **and** the
+  floor axis, so its plateau below 100 % is exactly the maps still blocked on
+  one of those five, not a truncated curve. Because each recognizer axis
+  joined that population as it landed, a conjunction checkpoint is not
+  comparable with one from a run that predates it — only the ordering within a
+  single run is.
 - If `<dir>/sample-manifest.json` exists (written by crustywad's
   `xtask harvest-sample`), its seed, count, frame rows, fetch-list hash, and
   sorted ids are echoed into both outputs. A manifest that is present but

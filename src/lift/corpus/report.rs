@@ -378,6 +378,7 @@ fn render_floors(s: &mut String, a: &Aggregate) {
 /// maps, never against the population they walk — spelled out in each table's
 /// header and note, so the conjunction curve's plateau below 100 % reads as
 /// the sector- and thing-blocked remainder it is, not as a truncated curve.
+///
 /// The order line prints at most the first `BLOCKER_TOP` steps and, when it
 /// cuts a longer curve, says so with an ellipsis and the full step count.
 fn render_curves(s: &mut String, a: &Aggregate) {

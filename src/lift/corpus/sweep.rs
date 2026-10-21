@@ -134,10 +134,13 @@ pub enum CorpusError {
 ///
 /// # Panics
 ///
-/// If a lump's length does not fit a `u64`, which no platform this crate
-/// builds on can produce (`usize` is at most 64 bits everywhere); or if a
-/// lump's decoded name exceeds `u16::MAX` bytes, which the bound above rules
-/// out for any real WAD.
+/// If `group` was taken from a different `Wad` than `wad`: its `data_indices`
+/// index `wad.lumps()`, so a foreign group panics with an out-of-bounds index
+/// (or silently hashes the wrong lumps when the index happens to fit). If a
+/// lump's length does not fit a `u64`, which no platform this crate builds on
+/// can produce (`usize` is at most 64 bits everywhere); or if a lump's decoded
+/// name exceeds `u16::MAX` bytes, which the bound above rules out for any real
+/// WAD.
 #[must_use]
 pub fn map_hash(wad: &Wad, group: &MapGroup) -> String {
     let lumps = wad.lumps();
@@ -178,7 +181,7 @@ fn archive_options() -> ParseOptions {
     }
 }
 
-/// Surveys `dir` (non-recursive). See the [`super`] module docs.
+/// Surveys `dir` (non-recursive). See the [module docs](super).
 ///
 /// An entry the directory listing itself cannot read (a permission error
 /// mid-listing) is skipped silently — no bucket, no failure line.
@@ -216,12 +219,18 @@ pub fn sweep_dir(dir: &Path, vocab: &Vocabulary, tables: &Tables) -> Result<Swee
     Ok(state.finish())
 }
 
-/// The in-progress sweep: the counts, the unique-map records and the
-/// content-hash dedup set, with the vocabulary and tables every survey needs.
+/// The in-progress sweep: the counts, the unique-map records, the failure
+/// lines and the content-hash dedup set, with the vocabulary and tables every
+/// survey needs.
 struct SweepState<'a> {
+    /// The vocabulary every map is classified with.
     vocab: &'a Vocabulary,
+    /// The recognizer tables every map is checked against.
     tables: &'a Tables,
+    /// The output built so far: counts, unique-map records and failure lines.
     sweep: Sweep,
+    /// Content hashes of every map already recorded, shared across the whole
+    /// sweep so a map repackaged in several zips counts once.
     seen: BTreeSet<String>,
 }
 
@@ -286,6 +295,8 @@ impl<'a> SweepState<'a> {
     /// Surveys every map group in `wad` (named `source` in records and
     /// failure lines): counts it, skips a content-hash duplicate, classifies
     /// and recognizes the rest, and buckets every map that fails to ingest.
+    /// A WAD with no map group counts in `no_maps`, gets a failure line, and
+    /// is otherwise skipped.
     fn survey_wad(&mut self, wad: &Wad, source: &str) {
         self.sweep.buckets.wads += 1;
         let groups = wad.map_groups();
