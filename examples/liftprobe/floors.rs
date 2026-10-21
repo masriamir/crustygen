@@ -562,9 +562,10 @@ fn map_verdict(
 ) -> MapVerdict {
     let telemetry = lift::survey(name, map);
     let mut verdict = vocab.classify(&telemetry);
-    // The same gating `crustygen-corpus` uses (`src/lift/corpus.rs:295-325`):
-    // each recognizer runs only when its specials are present, so a map
-    // without them keeps `classify`'s own `true`.
+    // The same gating `crustygen-corpus` uses (`SweepState::survey_wad` in
+    // `src/lift/corpus/sweep.rs`): each recognizer runs only when its
+    // specials are present, so a map without them keeps `classify`'s own
+    // `true`.
     if tables
         .teleport_specials()
         .into_iter()

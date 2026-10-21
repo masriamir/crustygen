@@ -894,7 +894,7 @@ struct MapArbiter {
 }
 
 /// Runs the six-axis verdict the way `crustygen-corpus` does
-/// (`src/lift/corpus.rs`): each recognizer only when its specials are
+/// (`src/lift/corpus/sweep.rs`): each recognizer only when its specials are
 /// present. The floor recognizer is included, which is what makes the
 /// all-axes baseline the **honest** figure rather than the floor pass's
 /// floors-ignored one.

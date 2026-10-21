@@ -5,7 +5,7 @@
 //! `P_UseSpecialLine` (`p_switch.c`), `P_CrossSpecialLine` and
 //! `P_ShootSpecialLine` (`p_spec.c`), and the `EV_DoPlat` / `EV_DoFloor` type
 //! each dispatches to. The loader shares `crustygen-corpus`'s pieces
-//! (`src/lift/corpus.rs`): the same lenient archive options, the same
+//! (`src/lift/corpus/`): the same lenient archive options, the same
 //! `ingest::load_map` gate, and `map_hash` deduplication — so the population
 //! reproduces the sweep's unique-map count — but it does not bucket failures:
 //! an unreadable archive, WAD or map group is named on stderr and skipped, and
