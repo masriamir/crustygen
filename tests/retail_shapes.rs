@@ -1,12 +1,15 @@
 //! Pins the recognizer's DOOM + DOOM2 lift counts against the real retail IWADs.
 //!
 //! The retail figures were otherwise recorded only in prose. This test sweeps exactly `DOOM.WAD`
-//! and `DOOM2.WAD` and asserts the whole roll-up, so a recognizer change that moves a count fails
-//! here instead of silently drifting.
+//! and `DOOM2.WAD` and asserts the sweep buckets, the whole lift roll-up, the E4M5 broken-line row
+//! and the MAP14 split-group row, so a recognizer change that moves a count fails here instead of
+//! silently drifting.
 //!
 //! It is opt-in: point `CRUSTYGEN_IWAD_DIR` at a directory holding the two IWADs, or run
-//! `just test-retail <dir>`. With the variable unset (or the directory unusable) it prints a
-//! `skipping:` line and passes, so CI, which has no commercial IWADs, never runs it.
+//! `just test-retail <dir>`. With the variable unset (or it is not an absolute directory holding both
+//! IWADs) it prints a `skipping:` line and passes, so CI, which has no commercial IWADs, never
+//! runs it. A run killed before cleanup leaves `<temp_dir>/crustygen-retail-<pid>-<nanos>` holding
+//! links, removable by hand.
 //!
 //! The literal was measured on 2026-10-20 at `2a79a6e` against `DOOM.WAD` 12,408,292 bytes /
 //! md5 `c4fe9fd920207691a9f493668e0a2083` / 36 maps and `DOOM2.WAD` 14,604,584 bytes / md5
@@ -93,27 +96,46 @@ fn iwad_dir() -> Option<PathBuf> {
     Some(dir)
 }
 
-/// A scratch directory holding only the two IWADs, removed on drop even when an assertion panics.
+/// A scratch directory holding links to the two IWADs (copies only where linking is refused), so
+/// the sweep sees exactly those two files under their exact names, isolated from whatever else the
+/// source directory holds. It is removed on drop even when an assertion panics; a run killed before
+/// `Drop` (SIGINT, SIGKILL, a harness timeout) leaves at most two links, never retail bytes.
 struct Scratch(PathBuf);
 
+/// Links `src` at `dest`, or `Err` where the platform refuses.
+#[cfg(unix)]
+fn link(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, dest)
+}
+
+/// Links `src` at `dest`, or `Err` where the platform refuses.
+#[cfg(windows)]
+fn link(src: &Path, dest: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(src, dest)
+}
+
 impl Scratch {
-    /// Creates `<temp_dir>/crustygen-retail-<pid>-<nanos>` and copies the two IWADs into it.
-    /// A copy failure is an environment fault, so it panics with the I/O error and the path.
-    fn copy_iwads(from: &Path) -> Self {
+    /// Creates `<temp_dir>/crustygen-retail-<pid>-<nanos>` and links the two IWADs into it,
+    /// copying only where a link is refused. A failure of both is an environment fault, so it
+    /// panics with the I/O error and the path.
+    fn link_iwads(from: &Path) -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .expect("system clock before the UNIX epoch")
             .as_nanos();
         let dir =
             std::env::temp_dir().join(format!("crustygen-retail-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir)
+        std::fs::create_dir(&dir)
             .unwrap_or_else(|e| panic!("cannot create {}: {e}", dir.display()));
-        // Constructed before the copies so a failed copy still removes the directory.
+        // Constructed before the links so a failed link or copy still removes the directory.
         let scratch = Self(dir);
         for name in IWADS {
             let dest = scratch.0.join(name);
-            std::fs::copy(from.join(name), &dest)
-                .unwrap_or_else(|e| panic!("cannot copy {name} to {}: {e}", dest.display()));
+            let src = from.join(name);
+            if link(&src, &dest).is_err() {
+                std::fs::copy(&src, &dest)
+                    .unwrap_or_else(|e| panic!("cannot copy {name} to {}: {e}", dest.display()));
+            }
         }
         scratch
     }
@@ -130,7 +152,18 @@ impl Drop for Scratch {
 #[test]
 fn the_recognizer_reproduces_the_retail_shape_counts() {
     let Some(dir) = iwad_dir() else { return };
-    let scratch = Scratch::copy_iwads(&dir);
+    let sizes = IWADS
+        .iter()
+        .map(|name| {
+            let len = std::fs::metadata(dir.join(name))
+                .unwrap_or_else(|e| panic!("cannot stat {name} in {}: {e}", dir.display()))
+                .len();
+            format!("{name} {len} bytes")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sizes = format!("swept {sizes}");
+    let scratch = Scratch::link_iwads(&dir);
     let tables = Tables::load().expect("tables");
     let vocab = Vocabulary::from_tables(&tables);
     let sweep = sweep_dir(&scratch.0, &vocab, &tables).expect("sweep");
@@ -142,12 +175,12 @@ fn the_recognizer_reproduces_the_retail_shape_counts() {
     );
     assert_eq!(
         sweep.buckets, EXPECTED_BUCKETS,
-        "the sweep is not the two measured IWADs ({PRINTS}); a different print or an extra copy, not a recognizer change"
+        "the sweep is not the two measured IWADs ({PRINTS}): most likely a different IWAD print or an extra copy; if the IWADs match the recorded identities, suspect ingest or assembly rather than the lift recognizer"
     );
     let agg = aggregate(&sweep.maps);
     assert_eq!(
         agg.lifts, EXPECTED,
-        "the retail lift aggregate moved: re-measure and add a dated row to {ADDENDUM}; never tune this literal"
+        "the retail lift aggregate moved ({sizes}; measured against {PRINTS}): if the sizes match, re-measure and add a dated row to {ADDENDUM}; never tune this literal"
     );
 
     let broken: Vec<(&str, &str, u64)> = sweep
@@ -156,7 +189,11 @@ fn the_recognizer_reproduces_the_retail_shape_counts() {
         .filter(|m| m.lifts.broken_lines > 0)
         .map(|m| (m.source.as_str(), m.map.as_str(), m.lifts.broken_lines))
         .collect();
-    assert_eq!(broken, vec![("DOOM.WAD", "E4M5", 6)]);
+    assert_eq!(
+        broken,
+        vec![("DOOM.WAD", "E4M5", 6)],
+        "the broken-line map moved; re-measure and add a dated row to {ADDENDUM}"
+    );
 
     let split: Vec<(&str, &str, u64, u64)> = sweep
         .maps
@@ -171,5 +208,9 @@ fn the_recognizer_reproduces_the_retail_shape_counts() {
             )
         })
         .collect();
-    assert_eq!(split, vec![("DOOM2.WAD", "MAP14", 1, 2)]);
+    assert_eq!(
+        split,
+        vec![("DOOM2.WAD", "MAP14", 1, 2)],
+        "the split-group map moved; re-measure and add a dated row to {ADDENDUM}"
+    );
 }
