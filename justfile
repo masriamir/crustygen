@@ -44,3 +44,13 @@ meta-sync:
 # beside it under target/ (never committed).
 corpus dir:
     cargo run --release --bin crustygen-corpus -- {{dir}} --report docs/measurements/expressibility-$(date +%F).md --json target/expressibility-$(date +%F).json
+
+# Run the retail shape-count gate (tests/retail_shapes.rs) against a
+# directory holding DOOM.WAD and DOOM2.WAD. The recipe makes the dir absolute
+# (relative to the directory you ran `just` from) and shell-quotes it, because
+# cargo runs the test binary from the package root and the test rejects a
+# relative path. Nothing is fetched and nothing is committed; without the
+# variable the test skips and passes (CI's case); with a dir that does not
+# exist, is not a directory, or lacks an IWAD it fails rather than skipping.
+test-retail dir:
+    CRUSTYGEN_IWAD_DIR={{quote(absolute_path(join(invocation_directory(), dir)))}} cargo test --test retail_shapes -- --nocapture
