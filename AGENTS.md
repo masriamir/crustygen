@@ -123,7 +123,7 @@ across the retail IWADs (see [`docs/measurements/`](docs/measurements/)), never 
   variant is not new shape coverage. Add fixtures whose *shape* is new, and state the cells a
   fixture does not cover.
 - Commercial IWADs are never committed; corpus measurements live in `docs/measurements/`. The one
-  test that reads them, `tests/retail_shapes.rs`, runs only when `CRUSTYGEN_IWAD_DIR` names an
+  test that reads the IWADs, `tests/retail_shapes.rs`, runs only when `CRUSTYGEN_IWAD_DIR` names an
   absolute directory holding `DOOM.WAD` and `DOOM2.WAD` (`just test-retail <dir>`) and skips
   otherwise, so CI never runs it.
 
