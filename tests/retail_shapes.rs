@@ -6,10 +6,11 @@
 //! silently drifting.
 //!
 //! It is opt-in: point `CRUSTYGEN_IWAD_DIR` at a directory holding the two IWADs, or run
-//! `just test-retail <dir>`. With the variable unset (or it is not an absolute directory holding both
-//! IWADs) it prints a `skipping:` line and passes, so CI, which has no commercial IWADs, never
-//! runs it. A run killed before cleanup leaves `<temp_dir>/crustygen-retail-<pid>-<nanos>` holding
-//! links, removable by hand.
+//! `just test-retail <dir>`. With the variable unset, or set to anything but an absolute directory
+//! holding both IWADs, it prints a `skipping:` line and passes, so CI, which has no commercial
+//! IWADs, never runs it. A run killed before cleanup leaves
+//! `<temp_dir>/crustygen-retail-<pid>-<nanos>` holding the two links (or, where linking was
+//! refused and copies were made instead, the two copies), removable by hand.
 //!
 //! The literal was measured on 2026-10-20 at `2a79a6e` against `DOOM.WAD` 12,408,292 bytes /
 //! md5 `c4fe9fd920207691a9f493668e0a2083` / 36 maps and `DOOM2.WAD` 14,604,584 bytes / md5
@@ -99,7 +100,9 @@ fn iwad_dir() -> Option<PathBuf> {
 /// A scratch directory holding links to the two IWADs (copies only where linking is refused), so
 /// the sweep sees exactly those two files under their exact names, isolated from whatever else the
 /// source directory holds. It is removed on drop even when an assertion panics; a run killed before
-/// `Drop` (SIGINT, SIGKILL, a harness timeout) leaves at most two links, never retail bytes.
+/// `Drop` (SIGINT, SIGKILL, a harness timeout) leaves `<temp_dir>/crustygen-retail-<pid>-<nanos>`
+/// holding the two links, or, where linking was refused and copies were made instead, the two
+/// copies, removable by hand.
 struct Scratch(PathBuf);
 
 /// Links `src` at `dest`, or `Err` where the platform refuses.
@@ -112,6 +115,12 @@ fn link(src: &Path, dest: &Path) -> std::io::Result<()> {
 #[cfg(windows)]
 fn link(src: &Path, dest: &Path) -> std::io::Result<()> {
     std::os::windows::fs::symlink_file(src, dest)
+}
+
+/// Always refuses on a platform with neither, so the copy fallback is taken.
+#[cfg(not(any(unix, windows)))]
+fn link(_src: &Path, _dest: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("no symbolic links on this platform"))
 }
 
 impl Scratch {
@@ -132,9 +141,16 @@ impl Scratch {
         for name in IWADS {
             let dest = scratch.0.join(name);
             let src = from.join(name);
-            if link(&src, &dest).is_err() {
-                std::fs::copy(&src, &dest)
-                    .unwrap_or_else(|e| panic!("cannot copy {name} to {}: {e}", dest.display()));
+            match link(&src, &dest) {
+                Ok(()) => {}
+                Err(link_err) => {
+                    std::fs::copy(&src, &dest).unwrap_or_else(|copy_err| {
+                        panic!(
+                            "cannot link ({link_err}) or copy ({copy_err}) {name} to {}",
+                            dest.display()
+                        )
+                    });
+                }
             }
         }
         scratch
@@ -175,7 +191,7 @@ fn the_recognizer_reproduces_the_retail_shape_counts() {
     );
     assert_eq!(
         sweep.buckets, EXPECTED_BUCKETS,
-        "the sweep is not the two measured IWADs ({PRINTS}): most likely a different IWAD print or an extra copy; if the IWADs match the recorded identities, suspect ingest or assembly rather than the lift recognizer"
+        "the sweep is not the two measured IWADs ({sizes}; measured against {PRINTS}): most likely a different IWAD print or an extra copy; if the IWADs match the recorded identities, suspect ingest or assembly rather than the lift recognizer"
     );
     let agg = aggregate(&sweep.maps);
     assert_eq!(
