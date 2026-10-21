@@ -164,7 +164,8 @@ pub fn render_markdown(provenance: Option<&Provenance>, b: &Buckets, a: &Aggrega
     ] {
         let _ = write!(
             s,
-            "\n## {title}\n\n| Value | Maps | Share |\n|---|---|---|\n"
+            "\n## {title}\n\nTop {BLOCKER_TOP} by maps carrying the value (ties by ascending value). \
+             Share is of all unique maps.\n\n| Value | Maps | Share of unique maps |\n|---|---|---|\n"
         );
         if list.is_empty() {
             // No out-of-set value on this axis: say so in a row, mirroring
@@ -377,6 +378,8 @@ fn render_floors(s: &mut String, a: &Aggregate) {
 /// maps, never against the population they walk — spelled out in each table's
 /// header and note, so the conjunction curve's plateau below 100 % reads as
 /// the sector- and thing-blocked remainder it is, not as a truncated curve.
+/// The order line prints at most the first `BLOCKER_TOP` steps and, when it
+/// cuts a longer curve, says so with an ellipsis and the full step count.
 fn render_curves(s: &mut String, a: &Aggregate) {
     use std::fmt::Write as _;
 
@@ -401,10 +404,11 @@ fn render_curves(s: &mut String, a: &Aggregate) {
             s,
             "\n## {title}\n\n{note}\n\n| k | Cumulative share of all unique maps |\n|---|---|\n"
         );
-        if curve.steps.is_empty() {
-            // No map in this population is blocked on the line axis (the
-            // population may itself be empty), so there is nothing to add
-            // greedily: state the standing share at k = 0 rather than
+        if curve.checkpoints.is_empty() {
+            // No checkpoint to print: no map in this population is blocked on
+            // the line axis (the population may itself be empty), so there is
+            // nothing to add greedily (`checkpoints` is empty exactly when
+            // `steps` is): state the standing share at k = 0 rather than
             // emitting a table header with no rows under it.
             let _ = writeln!(s, "| 0 | {} |", pct(baseline));
             s.push_str("\nOrder chosen: (none)\n");
@@ -419,7 +423,15 @@ fn render_curves(s: &mut String, a: &Aggregate) {
             .take(BLOCKER_TOP)
             .map(|st| st.special.to_string())
             .collect();
-        let _ = writeln!(s, "\nOrder chosen: {}", order.join(" → "));
+        let mut line = order.join(" → ");
+        if curve.steps.len() > BLOCKER_TOP {
+            let _ = write!(
+                line,
+                " → … (first {BLOCKER_TOP} of {} steps)",
+                curve.steps.len()
+            );
+        }
+        let _ = writeln!(s, "\nOrder chosen: {line}");
     }
 }
 
@@ -441,6 +453,9 @@ mod tests {
             "## Buckets",
             "## Expressibility",
             "## Line-special blockers",
+            // Each blocker table names its cut and its share's denominator.
+            "Top 25 by maps carrying the value (ties by ascending value). Share is of all unique maps.",
+            "| Value | Maps | Share of unique maps |",
             "## Teleports",
             "| teleport lines | 100.0 % | 100.0 % |",
             // A teleport-free corpus states its zeros rather than hiding the
@@ -470,6 +485,25 @@ mod tests {
         // so in a row rather than leaving a bare table header.
         assert_eq!(md.matches("| (none) | | |").count(), 2, "{md}");
         assert!(!md.contains("## Sample"));
+    }
+
+    /// 26 maps each blocked on its own special make a 26-step curve: the order
+    /// line prints the first `BLOCKER_TOP` and says how many it cut. A 25-step
+    /// sibling prints every step and no suffix.
+    #[test]
+    fn a_long_greedy_order_is_cut_at_blocker_top_and_says_so() {
+        let curve = |n: i32| {
+            let maps: Vec<_> = (1..=n)
+                .map(|s| record(&[s], &[s], true, true, true))
+                .collect();
+            render_markdown(None, &Buckets::default(), &aggregate(&maps))
+        };
+        let long = curve(26);
+        assert!(long.contains("→ 25 → … (first 25 of 26 steps)\n"), "{long}");
+        let exact = curve(25);
+        assert!(exact.contains("→ 25\n"), "{exact}");
+        assert!(!exact.contains("…"), "{exact}");
+        assert!(!exact.contains("first 25"), "{exact}");
     }
 
     /// A map whose only teleport line is refused is not expressible, and the

@@ -120,8 +120,9 @@ usage: crustygen-corpus <dir> [--json FILE] [--report FILE]
 - `--json FILE` writes `{provenance, buckets, aggregate, maps[]}` —
   `provenance` is `null` when `<dir>` carries no `sample-manifest.json`.
   `--report FILE` writes the Markdown aggregate (header caveat, sample,
-  buckets, per-axis shares over all maps and the vanilla slice, top-25
-  blockers per axis by map share, the Teleports section described above,
+  buckets, per-axis shares over all maps and the vanilla slice, the top-25
+  blockers per axis by map share (each table says so, and names its share's
+  denominator — all unique maps), the Teleports section described above,
   the Lifts and Floors sections beside it, and the greedy curve at
   k = 1, 5, 10, 21, 51 — once with the other axes held expressible, once over
   maps already ok on them). With neither flag the Markdown goes to stdout.
@@ -129,8 +130,10 @@ usage: crustygen-corpus <dir> [--json FILE] [--report FILE]
   space before the sign). An axis with no out-of-set value renders `(none)`
   in its blocker table instead of a bare header, and a greedy curve with
   nothing left to add — its population already fully unblocked, or empty —
-  renders a single baseline row at `k = 0` instead of an empty table. Both
-  greedy curves report cumulative share **against all unique maps**, never
+  renders a single baseline row at `k = 0` instead of an empty table. The
+  greedy order line prints the first 25 steps; a longer curve ends the line
+  with an ellipsis and `(first 25 of N steps)`. Both greedy curves report
+  cumulative share **against all unique maps**, never
   against the population they walk: the conjunction curve's population is
   only the maps already ok on sector specials, thing kinds, the teleport
   axis, the lift axis **and** the floor axis, so its plateau below 100 % is
